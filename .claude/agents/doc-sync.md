@@ -69,6 +69,53 @@ page you touched) for `round|earlier version|Update,|Update:|previously|
 used to` and remove or rewrite every hit that isn't the one retained case
 study.
 
+# Rule #2: `site/` never frames Verbora as a port, and never names "the reference"
+
+`site/` describes Verbora as an original, from-scratch Rust NLP toolkit.
+Internally, and in `docs/` (the internal archive — see "Two tiers" above),
+correctness was established by recording a JavaScript library's behavior and
+replaying it as golden test data; that is real, accurate engineering history
+and stays exactly as-is in `docs/`, `AGENTS.md`, and Rust doc comments. It
+must never surface on `site/` as "the reference," "port target," "ported
+from," "matches the reference's behavior," or any construction that implies
+Verbora's behavior was derived from, or is verified against, an external
+library.
+
+**Correctness claims get restated in Verbora's own absolute terms.** Don't
+say a function "matches the reference's `-1`-for-length-mismatch behavior" —
+say what the function does: "returns `-1` when the lengths differ." Don't
+say a table row is "verified against the reference" — say it's "pinned by
+Verbora's own regression suite" (the real number — 526,341 recorded cases,
+per `site/index.md` — is the fact worth citing, not what it was checked
+against). If a passage's only content is explaining that something is *not*
+a port, delete the passage rather than rewrite it: even a denial ("this is
+not a ported feature") raises the concept of porting, which is exactly what
+must not appear. State what the feature is and how its correctness is
+verified; say nothing about what it isn't.
+
+**Benchmark comparisons against that JavaScript library are not banned —
+they're reframed as an ordinary competitor.** `site/benchmarks/*.md` and the
+scattered "N× faster than the reference" lines throughout the feature pages
+may keep their real, measured numbers. Change only the framing: describe it
+the same way the Rust-crate competitors in `benchmarks/competitive.md` are
+described — a widely-used JavaScript NLP library Verbora is benchmarked
+against, full stop, with zero implication that Verbora was ported from it,
+derived from it, or verified against it as ground truth. "The reference" the
+noun phrase (implying "the thing we're measured against/derived from") does
+not appear anywhere on `site/`; a plain descriptive phrase like "a
+widely-used JavaScript NLP library" (adjust to fit the sentence) does the
+same job without the port-target connotation.
+
+**This is a hard boundary, exactly like Rule #1.** When pulling a number or
+a behavioral fact from `docs/` (where it's legitimately described in terms
+of the JS library it was recorded from) onto a `site/` page, restate it —
+never copy the `docs/`-side phrasing across.
+
+Before finishing any edit to a file under `site/`, grep the page (and any
+page you touched) for `the reference|\bport(s|ed|ing)?\b|reference
+implementation|reference behaviour|reference behavior` and rewrite or delete
+every hit per the rules above.
+
 # Scope
 
 - `site/**/*.md` — every page under `site/`: getting-started/, choosing/,
@@ -162,7 +209,8 @@ study.
    numbers from before the change.
 4. Update each affected page, keeping prose and numbers consistent with
    each other across all of them — and keeping `site/` pages in Rule #1's
-   voice regardless of how the underlying `docs/` source material is worded.
+   and Rule #2's voice regardless of how the underlying `docs/` source
+   material is worded.
 5. Run `cargo fmt --check` / `cargo clippy` if you touched any doc comments
    inside `.rs` files (doc comments are still Rust source).
 6. If you touched anything under `site/`, run `cd site && npm run build &&
