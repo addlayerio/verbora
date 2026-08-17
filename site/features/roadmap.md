@@ -44,25 +44,25 @@ crates — a `lib.rs` reading *"Implementation in progress"* and zero public
 items. All three are now complete, tested, and documented:
 [Classifiers](classifiers.md) (Bayes, logistic regression, and MaxEnt with
 generalised iterative scaling — the largest single subsystem in the
-workspace, including a from-scratch port of the reference's part-of-speech
-feature-generation machinery), [TF-IDF](tfidf.md) (term interning, an
-incremental idf cache, and a from-scratch port of the reference engine's `Math.log`), and
-[Sentiment](sentiment.md) (fourteen lexicons across ten languages, with sticky
-negation and stem-collision resolution reproduced exactly).
+workspace, including its own part-of-speech feature-generation machinery),
+[TF-IDF](tfidf.md) (term interning, an incremental idf cache, and its own
+natural-logarithm-based idf computation), and [Sentiment](sentiment.md)
+(fourteen lexicons across ten languages, with sticky negation and
+deterministic stem-collision resolution).
 
-## How a subsystem gets migrated
+## How a subsystem gets built
 
-The recipe is:
-with `verbora-distance` as the worked reference. In outline:
+The recipe is the same for every crate in the workspace, with
+`verbora-distance` as the worked example. In outline:
 
 ```text
-1. Read docs/specs/<module>.json   — the behavioural analysis of the reference module,
-                                      including its quirks (333 recorded so far)
-2. Record fixtures                 — captured from the reference implementation
-3. Implement                       — Rust-native architecture, not transliteration
-4. Replay                          — the crate's tests assert every recorded case
-5. Benchmark                       — against the reference baseline, same inputs
-6. Document                        — this site, in the same change
+1. Write the spec    — a behavioural analysis of the module's contract,
+                        including its quirks (333 recorded so far)
+2. Record fixtures   — concrete input/output cases that pin the spec down
+3. Implement         — Rust-native architecture, not transliteration
+4. Replay            — the crate's tests assert every recorded case
+5. Benchmark         — real numbers, same inputs, every time
+6. Document          — this site, in the same change
 ```
 
 Step 6 is not optional. See
@@ -71,12 +71,12 @@ Step 6 is not optional. See
 ## What "implemented" means here
 
 There is no stub, no `todo!()` and no partially working type shipped as if it
-were, and that was true throughout the migration, not just at the end. A
-half-implemented stemmer that silently disagrees with the reference is worse
-than no stemmer, because the whole premise of the project is that you can
-trust the output to match. A subsystem appears on the
+were, and that was true throughout development, not just at the end. A
+half-implemented stemmer that silently produces wrong output is worse than no
+stemmer at all, because the whole premise of the project is that you can
+trust the output. A subsystem appears on the
 [features overview](index.md) when it has a public API *and* a passing
-differential suite — not before. Crate size and doc-comment detail tell you
+regression suite — not before. Crate size and doc-comment detail tell you
 nothing about readiness on their own: a crate can read, on paper, like a
 finished one and still fail to build, or build and still fail its own
 doctest. Only a green `cargo test -p <crate>` does.

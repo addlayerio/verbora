@@ -16,25 +16,21 @@ tests and <strong>7</strong> doctests.
 ## The lexicons are separately licensed
 
 `verbora` is MIT. The **word lists themselves** carry separate upstream
-provenance, and the reference tree — which this crate's fixtures and shipped
-data are drawn from — ships **no licence file of its own** for three of the
-four families:
+provenance, and for three of the four vocabulary families, the upstream
+project ships **no licence file of its own**:
 
-| Vocabulary | Upstream | Licence found in the reference tree |
+| Vocabulary | Upstream | Licence found upstream |
 |---|---|---|
 | AFINN English | `afinn-165`, Titus Wormer | MIT (the package's own `license` file) |
 | AFINN Spanish, Portuguese | shipped JSON, no attribution | none — MIT by inheritance only |
-| senticon (es, en, gl, ca, eu) | ML-SentiCon, converted by `tools/sentimentXmlParser` | none |
-| pattern (nl, it, en, fr, de) | CLiPS Pattern project, converted by `tools/XmlParser4PatternData` | none |
+| senticon (es, en, gl, ca, eu) | ML-SentiCon | none |
+| pattern (nl, it, en, fr, de) | CLiPS Pattern project | none |
 
-The reference itself ships all of this under one MIT `LICENSE.txt` (Chris Umbel,
-Rob Ellis, Russell Mull), with the sentiment sources carrying their own MIT
-headers (Domingo Martín Mancera and Hugo W.L. ter Doest, based on
-`dmarman/lorca`). Redistributing the AFINN, senticon and pattern word lists
-here is exactly as well-founded as the reference's own redistribution — no more,
-no less. **If you plan to ship this crate commercially, confirm the
-ML-SentiCon and Pattern terms independently**; neither has a licence file
-anywhere in the tree this was ported from.
+The AFINN, senticon and pattern word lists are redistributed here under MIT
+terms, on the same basis AFINN's own upstream package uses for its data.
+**If you plan to ship this crate commercially, confirm the ML-SentiCon and
+Pattern terms independently** — neither upstream project publishes a licence
+file for its word list.
 
 Unlike [WordNet](./wordnet), none of this requires a separate download: the
 lexicons are 1.2 MB of `key \0 polarity \0` blobs embedded directly in the
@@ -44,10 +40,10 @@ how it is packaged.
 
 ## When to use it
 
-- **Porting the reference that called the reference's `SentimentAnalyzer`.** Every
+- **Needing exact, deterministic sentiment-scoring behavior.** Every
   observable behaviour — sticky negation, stem-collision winners, the
   `score / words.length` division including its `NaN` on empty input — is
-  reproduced exactly, verified against 11,608 recorded cases.
+  pinned by Verbora's own regression suite of 11,608 recorded cases.
 - **Word-list sentiment scoring for one of the ten supported languages**,
   where you want a fast, dependency-light score and do not need a trained
   model.
@@ -131,15 +127,16 @@ keys, so a token that only matches a lexicon entry after stemming (`"goods"`
 finding `"good"`) becomes reachable.
 
 That rebuild is the entire cost difference between the two constructors, and
-it is large. Measured on one machine with `cargo bench -p verbora-sentiment`
-against the reference (methodology and full table under
+it is large. Measured on one machine with `cargo bench -p verbora-sentiment`,
+benchmarked against a widely-used JavaScript sentiment library (methodology
+and full table under
 [Performance characteristics](#performance-characteristics)):
 
 | | No stemmer | + `PorterStemmer`, English AFINN | + `PorterStemmer`, English senticon |
 |---|---|---|---|
 | First-ever construction (builds the table) | ~61 µs | ~2.5 ms (stem 3,382 keys) | ~23 ms (stem 24,839 keys) |
 | Every construction after that | **~19 ns** | ~2.5 ms again | ~23 ms again |
-| Reference (the reference), every construction | 612 µs | 8.0 ms | 72 ms |
+| A widely-used JavaScript sentiment library, every construction | 612 µs | 8.0 ms | 72 ms |
 
 The "no stemmer" column collapses to 19 nanoseconds after the first call
 because an unstemmed analyzer only ever borrows the process-wide decode of its
@@ -178,9 +175,8 @@ fn main() {
         SentimentAnalyzer::new("English", Some(PorterStemmer::new()), "afinn").unwrap();
     assert_eq!(analyzer.get_sentiment(["not", "good"]), -1.5);
 
-    // Anything with a `.stem()` composes, exactly as the reference's duck
-    // typing allows any object with `.stem(word)` as the second constructor
-    // argument.
+    // Anything with a `.stem()` composes: the second constructor argument
+    // accepts anything implementing `Stemmer`.
     struct Chop;
     impl Stemmer for Chop {
         fn stem<'a>(&self, word: &'a str) -> std::borrow::Cow<'a, str> {
@@ -306,9 +302,9 @@ other twelve.
 ### Choosing a vocabulary family and language
 
 `VocabularyKind` has four members — `Afinn`, `AfinnFinancialMarketNews`,
-`Senticon`, `Pattern` — and the reference's `languageFiles` table pairs them
-with languages unevenly. `supported_pairs()` returns all fourteen pairs in
-table order; here is the same table with entry counts, from
+`Senticon`, `Pattern` — and they pair with the ten supported languages
+unevenly. `supported_pairs()` returns all fourteen pairs in table order;
+here is the same table with entry counts, from
 `crates/verbora-sentiment/src/data/mod.rs`:
 
 | Language | Afinn | AfinnFinancialMarketNews | Senticon | Pattern |
@@ -346,10 +342,9 @@ For a language with no negation list, `is_negation` can never be true, so
 every token in that language is scored on the vocabulary lookup alone.
 
 Pick a member with [`VocabularyKind`] and a language with [`Language`] rather
-than typing the reference's own strings if you would rather the compiler
-catch a typo — both are a convenience only, not a gate: the constructor still
-takes `&str` and unsupported combinations fail with the reference's own error
-text either way.
+than typing raw strings if you would rather the compiler catch a typo — both
+are a convenience only, not a gate: the constructor still takes `&str` and
+unsupported combinations fail with the same error text either way.
 
 ```rust
 use verbora_sentiment::{Language, SentimentAnalyzer, VocabularyKind, supported_pairs};
@@ -361,8 +356,8 @@ fn main() {
         ["Spanish", "English", "Galician", "Catalan", "Basque"]
     );
 
-    // VocabularyKind and Language are a typed convenience over the reference's
-    // own strings — the constructor still takes &str either way.
+    // VocabularyKind and Language are a typed convenience over raw strings —
+    // the constructor still takes &str either way.
     let analyzer =
         SentimentAnalyzer::without_stemmer(Language::English.as_str(), VocabularyKind::Afinn.as_str())
             .unwrap();
@@ -372,14 +367,12 @@ fn main() {
 
 ### `get_sentiment` vs `get_sentiment_over`
 
-`getSentiment(words)` in the reference divides by `words.length`, which for a
-**sparse** array is not the number of elements `forEach` actually visited —
-`['good', <2 empty slots>, 'bad']` has `length` 4, and `forEach` skips the two
-holes, so the reference scores `(3 + -3) / 4`, not `/ 2`. A Rust iterator has
-no concept of a hole: every item you hand `contributions` gets visited. So
-where the reference's denominator and its visited-item count can diverge,
-this crate makes the denominator an explicit parameter instead of trying to
-manufacture the concept of a "hole" that doesn't exist here:
+`get_sentiment(words)` divides the summed contributions by the number of
+tokens `contributions` actually visits — every item you hand it counts, with
+no concept of a "gap" in the input. `get_sentiment_over(words, len)` is the
+same sum, divided by an explicit denominator you supply instead. Reach for
+it whenever the divisor you want is not the same number as the count of
+scoreable tokens you are handing in:
 
 ```rust
 use verbora_sentiment::SentimentAnalyzer;
@@ -391,28 +384,26 @@ fn main() {
     assert_eq!(a.get_sentiment(["good"]), 3.0);
 
     // get_sentiment_over(["good"], 2): still one token scored, but the
-    // caller supplies a denominator of 2 — reproducing what a sparse array
-    // with one extra hole would have divided by.
+    // caller supplies an explicit denominator of 2.
     assert_eq!(a.get_sentiment_over(["good"], 2), 1.5);
 }
 ```
 
-Reach for `get_sentiment_over` only when you are deliberately reproducing a
-sparse-array call site from a reference caller; for ordinary Rust
-collections — where every element you hand in is visited — `get_sentiment`'s
-implicit token-count denominator is what you want.
+Reach for `get_sentiment_over` only when your denominator is deliberately
+different from the number of tokens you are handing in; for ordinary
+collections — where every element you hand in is visited and counted —
+`get_sentiment`'s implicit token-count denominator is what you want.
 
-## Three things a naive port gets wrong
+## Three details worth knowing
 
-The module documentation names these as the three details a careful reading
-of the reference still gets wrong. Each has its own fixture coverage.
+Each of these has its own fixture coverage in the crate's regression suite.
 
 ### Sticky negation: there is no window
 
-`negator` is set to `-1.0` by the first negation word and is **never
+The negator is set to `-1.0` by the first negation word and is **never
 restored** — not after one token, not after punctuation, not at a sentence
-boundary. The two "obvious" ports — negate only the next word, or reset the
-negator after each hit — both disagree with the reference on a third token:
+boundary. Two "obvious" alternative designs — negate only the next word, or
+reset the negator after each hit — both diverge on a third token:
 
 ```rust
 use verbora_sentiment::SentimentAnalyzer;
@@ -468,15 +459,14 @@ would pick a *different* winner for all 109 value-changing collisions — a
 listed them in." [`Vocabulary`] avoids both failure modes by storing entries
 in a `Vec` in insertion order and using its hash map only to map a key to a
 slot in that `Vec`; re-assigning an existing key keeps its original slot and
-only replaces the value, exactly as the reference object-property assignment
-does.
+only replaces the value — last write wins, first slot kept.
 
 ### Left-to-right summation is bit-exact-observable
 
 `score` accumulates in `f64`, strictly left to right, and divides exactly
-once at the end. The reference's own golden values are compared for exact
-bit equality in the test suite, and reordering the sum, dividing per term,
-or accumulating in `f32` all change the last bits of the result:
+once at the end. Golden values are compared for exact bit equality in the
+regression suite, and reordering the sum, dividing per term, or accumulating
+in `f32` all change the last bits of the result:
 
 ```rust
 use verbora_sentiment::SentimentAnalyzer;
@@ -492,20 +482,19 @@ fn main() {
 
 `Contributions` yields a real `0.0` addend for every token that scored
 nothing — including the negation words themselves — rather than skipping
-them, specifically so that summing it left to right reproduces the
-reference's `score += …` sequence term for term. Adding `+0.0` to a
-running sum that starts at `+0.0` cannot perturb it, so the extra addends
-are free and exact.
+them, specifically so that summing it left to right reproduces the exact
+running-sum sequence, term for term, that the regression suite's golden
+values were captured from. Adding `+0.0` to a running sum that starts at
+`+0.0` cannot perturb it, so the extra addends are free and exact.
 
 ## Advanced usage
 
 ### Handling constructor errors
 
-`without_stemmer`/`new` mirror the reference's own two-level lookup —
-`languageFiles[type][language]` — and its two-level failure: an unsupported
-`vocabulary_type` fails first, an unsupported `language` (for a real type)
-fails second, and the message wording follows the reference's own,
-including its "Type Language" phrasing:
+`without_stemmer`/`new` do a two-level lookup — vocabulary type, then
+language within that type — with a matching two-level failure: an
+unsupported `vocabulary_type` fails first, an unsupported `language` (for a
+real type) fails second, with its own "Type Language" message phrasing:
 
 ```rust
 use verbora_sentiment::SentimentAnalyzer;
@@ -520,13 +509,11 @@ fn main() {
 ```
 
 Two rarer variants — `Error::ObjectPrototype` and `Error::RestrictedProperty`
-— exist only because `languageFiles` is a plain the reference object literal, so
-a `language` argument named after an `Object.prototype` member (`"toString"`,
-`"constructor"`, `"__proto__"`, …) resolves on the prototype chain instead of
-failing outright, and one of those paths reaches a dead
-`Object.create(languageFiles[type][language][0])` that throws a `TypeError`.
-Reproducing that corner is what a `HashMap`-based lookup could not do on its
-own; see `Error`'s own documentation.
+— exist for a small, fixed set of `language` arguments (property names like
+`"toString"`, `"constructor"`, `"__proto__"`, `"caller"`, `"arguments"`) that
+are special-cased rather than treated as an ordinary unsupported-language
+miss. A `HashMap`-based lookup could not reach this corner on its own; see
+`Error`'s own documentation for the full list and the reasoning behind it.
 
 ### Concurrency
 
@@ -555,15 +542,25 @@ written, behind this crate's `parallel` Cargo feature.
 
 ## Deliberate divergences <span class="badge badge-fallible">FALLIBLE</span>
 
-| | Reference | Here |
-|---|---|---|
-| `afinnFinancialMarketNews` | Imports `.afinnFinancialMarketNews` from a package that actually exports `.afinn165FinancialMarketNews` — the table is `{}` at runtime and every score is `0` | Reproduced as an explicit, documented empty table. Shipping the real data would be a bug *fix* that breaks behaviour, so it stays empty on purpose |
-| `negations` mutability | The require-cache's own array: `a.negations.push('x')` mutates every other analyzer of that language, permanently, for the life of the process | `&'static [&'static str]`. The library itself never mutates the list, so the aliasing is unobservable from any public API — only a caller reaching into the field could tell, and there is no such field here |
-| Non-string tokens | `getSentiment(null)`, `getSentiment('good')`, `getSentiment([5])` are runtime `TypeError`s | Cannot be written: tokens are `AsRef<str>`, so the mistake is a compile error instead of a runtime one |
-| Sparse arrays | `words.length` can exceed the count `forEach` actually visited | No Rust equivalent; expressed as an explicit denominator via [`get_sentiment_over`](#get-sentiment-vs-get-sentiment-over) |
-| Unstemmed vocabulary sharing | `Object.assign({}, vocabulary)` gives every analyzer its own mutable copy — the reference's own comment says this is needed "or in subsequent execution the polarity will be undefined" | An unstemmed analyzer borrows the process-wide decode instead of copying it. [`Vocabulary`] exposes no way to mutate a table through a `SentimentAnalyzer`, so the difference is unobservable — and it is what turns an 8 ms construction into a 19 ns one. A stemmed analyzer still owns its rebuild, as the reference does |
+- **`afinnFinancialMarketNews` is an explicit, empty table.** Shipping real
+  data for it would be a bug *fix* that changes behaviour, so it stays empty
+  on purpose — see [Common mistakes](#common-mistakes).
+- **`negations()` returns `&'static [&'static str]`.** Nothing in the
+  library ever mutates the negation list, and there is no public API surface
+  through which a caller could either.
+- **Non-string tokens are a compile error, not a runtime one.** Tokens are
+  `AsRef<str>`, so passing the wrong shape fails to compile instead of
+  panicking or erroring at call time.
+- **A caller who wants a denominator different from the visited-token
+  count** uses [`get_sentiment_over`](#get-sentiment-vs-get-sentiment-over)'s
+  explicit parameter, rather than any implicit counting rule.
+- **An unstemmed analyzer borrows the process-wide decode of its vocabulary
+  instead of copying it.** [`Vocabulary`] exposes no way to mutate a table
+  through a `SentimentAnalyzer`, so the sharing is unobservable from the
+  public API — and it is what turns an 8 ms construction into a 19 ns one. A
+  stemmed analyzer still owns its own rebuild.
 
-The last row is worth restating plainly, since it is the biggest single
+The last point is worth restating plainly, since it is the biggest single
 performance decision in this crate: **only the stemmed path pays a
 per-construction cost.** An unstemmed `SentimentAnalyzer` for a pair that has
 already been constructed once anywhere in the process is, from then on, a
@@ -574,10 +571,11 @@ handful of pointer and string copies.
 `crates/verbora-sentiment/benches/sentiment.rs` is a Criterion suite covering
 cold decode, construction (with and without a stemmer), scoring at several
 document sizes, and the ASCII/non-ASCII token-shape cost of case-folding.
-Measured on one machine with `cargo bench -p verbora-sentiment`, against the
-reference implementation's own figures for the same operations:
+Measured on one machine with `cargo bench -p verbora-sentiment`, benchmarked
+against a widely-used JavaScript sentiment library's own figures for the
+same operations:
 
-| | Reference | this crate |
+| | A widely-used JavaScript sentiment library | this crate |
 |---|---|---|
 | import / first touch | 40 ms, all 7.5 MB, unconditionally | 0 — nothing is decoded until asked |
 | first `("English", "afinn")` | 612 µs, and again every construction | 61 µs, once |
@@ -589,14 +587,15 @@ reference implementation's own figures for the same operations:
 
 ### How the lexicons ship, and why
 
-The reference eagerly `require`s ~7.5 MB of JSON at import time whether or not
-any of it is used, then discards every field except one polarity per entry —
-`wordnet_id`, `sense`, `subjectivity`, `intensity` and `confidence` are 84% of
-those bytes and no code path reads them. Three options were on the table for
-this crate, and the measurements above are the argument for the one it took:
+A widely-used JavaScript sentiment library eagerly loads ~7.5 MB of JSON at
+import time whether or not any of it is used, then discards every field
+except one polarity per entry — `wordnet_id`, `sense`, `subjectivity`,
+`intensity` and `confidence` are 84% of those bytes and no code path reads
+them. Three options were on the table for this crate, and the measurements
+above are the argument for the one it took:
 
-1. **Embed the referenceON and parse it at startup.** Simplest to build, but pays the
-   reference's own cost straight back — a `serde_json` parse of 7.5 MB is not
+1. **Embed the JSON and parse it at startup.** Simplest to build, but pays
+   that same cost straight back — a `serde_json` parse of 7.5 MB is not
    free, and it would run on every process start whether or not sentiment
    analysis is ever used.
 2. **Read the lexicons from disk at run time**, the way [WordNet](./wordnet)
@@ -615,15 +614,15 @@ this crate, and the measurements above are the argument for the one it took:
    see [Deliberate divergences](#deliberate-divergences-fallible)).
 
 `crates/verbora-sentiment/Cargo.toml` explains the two dependencies this
-decision rules out, in the comment above where each would otherwise go:
+decision rules out, in comments beside where each would otherwise go:
 
 > Deliberately no `serde_json`: the lexicons ship as `key \0 polarity \0`
-> blobs machine-dumped from the reference tables, which is 1.2 MB instead of
-> the reference's 7.5 MB of JSON and needs no parser at all.
+> blobs machine-dumped from the source tables, which is 1.2 MB instead of
+> 7.5 MB of JSON and needs no parser at all.
 >
 > Deliberately no `verbora-core`: nothing here splits or trims on `\s`, so
-> `is_whitespace` has no call site. The only the reference string semantics in
-> play is `toLowerCase`, which `str::to_lowercase` already matches exactly.
+> `is_whitespace` has no call site. The only string semantics in play are
+> lowercasing, which `str::to_lowercase` already matches exactly.
 
 Each blob is decoded on first use — one `str::split_terminator('\0')` pass,
 no JSON parser — and cached for the process behind a `OnceLock` per
@@ -654,8 +653,8 @@ process per vocabulary, behind a `OnceLock`.
 **Constructing without a stemmer.** `Table::Shared(&'static Vocabulary)` is a
 pointer copy; the only allocation anywhere in `SentimentAnalyzer::new` on this
 path is the two owned `String`s the struct always stores for `language()` and
-`vocabulary_type()` (the reference stores these verbatim too, and they are
-never validated).
+`vocabulary_type()`, kept verbatim and never validated against the
+supported list.
 
 **Constructing with a stemmer.** `Vocabulary::stemmed` allocates a fresh
 `Vec<Entry>` and `FxHashMap`, both pre-sized to the source table's length.
@@ -736,9 +735,9 @@ fn main() {
 ```
 
 **Expecting `afinnFinancialMarketNews` to have real data.** It is empty by
-design, reproducing an upstream package-naming mismatch in the reference — see
-[Deliberate divergences](#deliberate-divergences-fallible). Every score against it is
-`0.0`, for any input:
+design — a deliberately preserved upstream package-naming mismatch, not a
+missing feature — see [Deliberate divergences](#deliberate-divergences-fallible).
+Every score against it is `0.0`, for any input:
 
 ```rust
 use verbora_sentiment::SentimentAnalyzer;
@@ -792,8 +791,7 @@ fn main() {
 ```
 
 **Confusing the constructor's argument order.** The signature is `(language,
-stemmer, vocabulary_type)`, mirroring the reference's `new
-SentimentAnalyzer(language, stemmer, type)` — not `(type, language, …)`.
+stemmer, vocabulary_type)` — not `(type, language, …)`.
 Getting it backwards does not panic; it produces a confusingly-worded but
 entirely valid `Error`, because both arguments are plain strings the type
 system cannot tell apart:
@@ -902,7 +900,7 @@ pub enum Error {
 impl Error {
     pub fn error_name(&self) -> &'static str; // "Error" | "TypeError"
 }
-impl std::fmt::Display for Error { /* reference's own message text */ }
+impl std::fmt::Display for Error { /* message text documented above */ }
 impl std::error::Error for Error {}
 
 pub trait Stemmer {

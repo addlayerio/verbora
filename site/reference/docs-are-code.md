@@ -101,7 +101,7 @@ Six CI checks, all in `.github/workflows/docs.yml`:
 | `check-facts.py` | A recorded-case count, suite count or reference version that no longer matches `fixtures/` |
 
 The last one exists because the other five can all pass while the site quietly
-lies: the fixtures are regenerated whenever the reference tree changes, and a
+lies: the fixtures are regenerated as the regression suite grows, and a
 number left behind on a page still renders, still links and still compiles.
 
 ## Why VitePress
@@ -163,7 +163,7 @@ repository are the 26 `verbora-distance` benchmarks. Everywhere else the site
 describes asymptotics and allocation behaviour read from the source, and labels
 itself "not yet benchmarked".
 
-**Reproduced bugs are documented as bugs.** Verbora preserves several reference
+**Reproduced bugs are documented as bugs.** Verbora preserves several
 behaviours that are plainly wrong, because callers depend on them. Each is named,
 explained and linked rather than quietly kept.
 

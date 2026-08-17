@@ -8,9 +8,8 @@ that question of the whole dictionary in roughly the time one query's own
 encoding takes.
 
 <div class="callout callout-note">
-<strong>Verbora-native extension — not a ported feature.</strong>
-<code>PhoneticIndex</code> has no counterpart in the reference. What follows is
-backed by this workspace's own evidence: 18 unit tests and
+<strong>Verbora-native design.</strong>
+What follows is backed by this workspace's own evidence: 18 unit tests and
 2 doctests in <code>crates/verbora-phonetics/src/index.rs</code>, and the
 Criterion benchmarks in <code>crates/verbora-phonetics/benches/phonetic_index.rs</code>.
 See <a href="phonetics">Phonetics</a> for the four tested encoders

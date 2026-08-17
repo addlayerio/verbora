@@ -81,8 +81,8 @@ with input length.
 `restricted: false` when a transposition should still cost one operation even
 with edits in between. Do not take either variant because you need a true
 metric: restricted OSA can violate the triangle inequality, and the
-unrestricted variant pins the reference's recurrence, which deliberately
-diverges from textbook Damerau–Levenshtein and is not even symmetric
+unrestricted variant follows a recurrence that deliberately diverges from
+textbook Damerau–Levenshtein and is not even symmetric
 (`"bb"→"abbb"` is 1 here where the textbook algorithm says 2). If you are
 feeding distances into something that assumes metric axioms — a BK-tree, a
 metric-space index — use plain `levenshtein`.
@@ -129,10 +129,10 @@ Identical computation; only the failure shape differs.
 | Returns | `i64` | `Option<u64>` |
 | Length mismatch | `INCOMPARABLE` (`-1`) | `None` |
 | Sorts correctly out of the box | ❌ — `-1` is below every real distance | ✅ — `None` filters out |
-| Matches the reference output | ✅ | ✅ (same values, different type) |
+| Same computed distance | ✅ | ✅ (same value, different return type) |
 
-**Use `hamming_checked` unless you are comparing output against the reference
-reference** or handing the number to something that expects the sentinel.
+**Use `hamming_checked` unless you are handing the number to something that
+expects the `-1` sentinel.**
 
 ```rust
 use verbora_distance::hamming_checked;
@@ -285,7 +285,7 @@ panic, and it gives `NaN` a defined position instead of a surprise.
 ### 2. Gate on length before paying for the matrix
 
 With unit insertion and deletion costs, the edit distance is at least the
-difference in length. `utf16_len` computes the reference's `String#length` without
+difference in length. `utf16_len` computes UTF-16 code-unit length without
 allocating, so the gate is far cheaper than the comparison it skips — and it
 cannot discard a real match.
 
@@ -432,7 +432,7 @@ inequality, and `restricted: false` pins a recurrence that is not symmetric).
 Per single call, from the source and from the measured suite. `n` and `m` are
 UTF-16 code-unit lengths.
 
-| API | Time | Allocations (ASCII) | Measured speedup vs the reference |
+| API | Time | Allocations (ASCII) | Measured speedup vs a widely-used JavaScript NLP library |
 |---|---|---|--:|
 | `hamming`, `hamming_checked` | `O(n)` | none | 1.4×–8.2× |
 | `dice_coefficient` | `O(n + m)` expected | 2 `String`, 2 `Vec<u16>`, 2 hash sets | 3.3×–7.4× |
@@ -444,7 +444,7 @@ UTF-16 code-unit lengths.
 
 Read the speedup column as a range across input sizes, not a single figure: the
 smallest numbers are at four characters, where both runtimes are dominated by
-call overhead, and the largest at 1024, where the reference's per-cell
+call overhead, and the largest at 1024, where the JavaScript library's per-cell
 allocation dominates — and, for `levenshtein` specifically, where Verbora's own
 bit-vector algorithm also does less work per comparison, not just less
 allocation. That is also why `levenshtein`'s own range is the widest in this
@@ -459,10 +459,10 @@ full 26-row table, the hardware, and the methodology are in
 
 <div class="callout callout-note">
 <strong>Note.</strong> Every one of those numbers is a
-<em>Rust vs the reference</em> comparison on the same inputs. Head-to-head
-measurements against other Rust string-distance crates exist too, but they live
-in the competitive suite and are reported separately — see
-<a href="../benchmarks/distance">Benchmarks: distance</a>.
+<em>Rust vs. a widely-used JavaScript NLP library</em> comparison on the same
+inputs. Head-to-head measurements against other Rust string-distance crates
+exist too, but they live in the competitive suite and are reported separately
+— see <a href="../benchmarks/distance">Benchmarks: distance</a>.
 </div>
 
 ## Related

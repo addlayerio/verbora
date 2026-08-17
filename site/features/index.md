@@ -20,7 +20,7 @@ Every subsystem below is implemented and covered by the workspace test suite.
 | [TF-IDF](tfidf.md) | `verbora-tfidf` | term interning, incremental idf cache, `listTerms`/`tfidf`/`tfidfs` |
 | [Sentiment](sentiment.md) | `verbora-sentiment` | 14 lexicons across 10 languages, sticky negation |
 | [Classifiers](classifiers.md) | `verbora-classifiers` | Bayes, logistic regression, MaxEnt + GIS |
-| [Core vocabulary](core.md) | `verbora-core` | 6 traits, `Token`, `StopWords`, reference string semantics |
+| [Core vocabulary](core.md) | `verbora-core` | 6 traits, `Token`, `StopWords`, whitespace helpers |
 
 <div class="callout callout-note">
 <strong>Implemented, not yet on this site.</strong> Five crates pass their
@@ -46,15 +46,15 @@ remains to be written up.
 
 ## Verbora-native extensions
 
-Not every crate here is a reference port. Some subsystems solve a problem the
-reference library never had, using the same benchmark-evidence discipline as
-the crates above.
+Some of what follows solves a problem no comparable library had to. These are
+Verbora's own designs, held to the same benchmark-evidence discipline as the
+crates above.
 
 | Extension | Crate | What it adds |
 |---|---|---|
-| [Phonetic neighbors](phonetic-index) | `verbora-phonetics` | An index over a phonetic encoder's output. `PhoneticIndex::neighbors` answers "which stored words share a code with this query?" across a whole dictionary — phonetic candidate generation, not a search engine, and not a reimplementation of anything the reference exports. |
-| [Beider-Morse](beider-morse) | `verbora-phonetics` | Cross-language surname matching across up to 18 languages at once (10 Ashkenazi, 5 Sephardic), auto-detecting which one(s) a name is plausibly spelled under. Solves what the reference's four encoders can't: the same historical family name has different "correct" spellings depending on which country transcribed it. |
-| [Language](language) | `verbora-language` | Script and (optional, feature-gated) statistical language detection, plus `recommend()` — a closed lookup from `Language` to which of `verbora-phonetics`'s four encoders actually fits. Answers "which encoder should I even use?", a question no reference API ever asked. |
+| [Phonetic neighbors](phonetic-index) | `verbora-phonetics` | An index over a phonetic encoder's output. `PhoneticIndex::neighbors` answers "which stored words share a code with this query?" across a whole dictionary — phonetic candidate generation, not a search engine. |
+| [Beider-Morse](beider-morse) | `verbora-phonetics` | Cross-language surname matching across up to 18 languages at once (10 Ashkenazi, 5 Sephardic), auto-detecting which one(s) a name is plausibly spelled under. Solves what a single-language phonetic encoder can't: the same historical family name has different "correct" spellings depending on which country transcribed it. |
+| [Language](language) | `verbora-language` | Script and (optional, feature-gated) statistical language detection, plus `recommend()` — a closed lookup from `Language` to which of `verbora-phonetics`'s four encoders actually fits. Answers "which encoder should I even use?" up front, closing a decision that would otherwise fall entirely on the caller. |
 
 ## By problem
 

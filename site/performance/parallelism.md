@@ -127,8 +127,8 @@ page</a>) and is exactly why <code>par_add_documents_batch</code>'s parallel
 phase only ever calls pure, global-state-free functions — the stateful
 global reads happen in the sequential replay phase, on one thread, same as
 the ordinary sequential loop.
-Both globals exist to reproduce the reference's process-wide behaviour. Both have an
-explicit-argument sibling, and in concurrent code you should use the sibling —
+Both globals model process-wide default configuration, set once and read from
+many call sites. Both have an explicit-argument sibling, and in concurrent code you should use the sibling —
 not because the global will crash you, but because its result would depend on
 timing you do not control.
 </div>

@@ -17,7 +17,7 @@ measurement, this page says so.
 | `tokens(text)` | **nothing** | The iterator is a small stack struct. Tokens are slices. |
 | `tokenize(text)` | one `Vec`, plus growth | No per-token allocation for `&str` tokenizers |
 | `tokenize_into(text, &mut buf)` | nothing once `buf` is warm | Appends; you call `clear()` |
-| `verbora_core::Tokenizer::tokenize` | one `Vec<String>` **plus one `String` per token** | This is the owning API; it matches the reference `string[]` |
+| `verbora_core::Tokenizer::tokenize` | one `Vec<String>` **plus one `String` per token** | This is the owning API: every token is a fully owned `String`, not a borrow |
 | `verbora_core::Tokenizer::tokenize_batch` | one `Vec<String>` per input, plus a `String` per token | Sequential `map`; no shared buffer |
 | `BorrowingTokenizer::tokenize_borrowed` | one `Vec<&str>` | The zero-copy path on the core trait |
 
@@ -26,8 +26,8 @@ measurement, this page says so.
 <code>verbora_tokenizers::Tokenize::tokenize</code> gives you
 <code>Vec&lt;&amp;str&gt;</code> — borrowed. <code>verbora_core::Tokenizer::tokenize</code>
 gives you <code>Vec&lt;String&gt;</code> — owned, one allocation per token,
-because that trait's contract is to mirror the reference
-<code>string[]</code> exactly. If both traits are in scope the call is ambiguous
+because that trait's contract is to return fully owned, independent strings
+with no borrowed lifetime back to the input. If both traits are in scope the call is ambiguous
 and the compiler will tell you; import only the one you want.
 </div>
 
@@ -41,10 +41,10 @@ then slice it — their tokens are `Cow`, borrowed when the pre-pass was a no-op
 |---|---|---|
 | `levenshtein` (plain) | two `Vec<f64>` of length `m + 1` | The 2-row working set |
 | `levenshtein` / `damerau_levenshtein` (restricted) | three `Vec<f64>` | Transposition reaches row − 2 |
-| `damerau_levenshtein` (unrestricted) | full `(n+1)×(m+1)` cost matrix **and** parent matrix | Transposition reaches an arbitrary earlier row. It shares the search path's `full_matrix`, so it allocates the parents even in distance mode, where they are never read |
+| `damerau_levenshtein` (unrestricted) | **nothing** for byte operands ≤ 8 (a fixed stack matrix); two integer rows plus a per-symbol row-snapshot arena otherwise (`u16` cells while the combined length fits, `u32` beyond) | Transposition reaches an arbitrary earlier row, so each source symbol's last row is snapshotted instead of building the matrix. Non-unit costs fall back to the full cost **and** parent matrices |
 | `levenshtein_search`, `damerau_levenshtein_search` | full cost matrix **and** a parent matrix, plus a `String` for the result substring | Backtracking needs the parents |
 | `jaro`, `jaro_winkler` | **nothing** for inputs ≤ 128 code units | Two stack `[bool; 128]` arrays; two `Vec<bool>` above that |
-| `dice_coefficient` | one `FxHashMap` of `(u16, u16)` keys | No `String` per bigram, unlike the reference |
+| `dice_coefficient` | one `FxHashMap` of `(u16, u16)` keys | No `String` per bigram, unlike a widely-used JavaScript NLP library |
 | `hamming`, `hamming_checked` | **nothing** on ASCII with `ignore_case: false` | A single scan. With `ignore_case: true`, both operands are folded via `to_lowercase()` first — two `String`s, regardless of ASCII-ness |
 
 Non-ASCII input adds **one `Vec<u16>` per operand** across this crate, from the
@@ -61,13 +61,15 @@ sliced, so there is nothing to borrow.
 
 | API | Allocates | Notes |
 |---|---|---|
-| `SoundEx::process`, `Metaphone::process`, … | at least one `String` (the key) | Plus intermediates per pipeline stage |
+| `SoundEx::process`, `Metaphone::process`, … | at least one `String` (the key) | Plus small per-encoder intermediates; `Metaphone`'s ASCII path pools its pipeline scratch per thread, so the key is its only steady-state allocation |
 | `compare(a, b)` | two keys | It does **not** short-circuit: the body is `process(a) == process(b)` |
 | `phoneticize_tokens*` | one `Vec` of whatever your closure returns | Takes `IntoIterator`, so it composes with a lazy tokenizer without an intermediate `Vec` |
 
-`Metaphone::process` runs 21 transform stages, and the individual stage methods
-(`c_transform`, `drop_h`, …) each return a `String`. `SoundEx`'s nine stage
-methods return `Cow`, so they are cheaper when a stage changes nothing.
+`Metaphone::process` fuses its 21 transform stages into one skip-gated pass
+over per-thread pooled scratch — the public stage methods (`c_transform`,
+`drop_h`, …) each return a `String` only when called individually. `SoundEx`'s
+nine stage methods return `Cow`, so they are cheaper when a stage changes
+nothing.
 
 ## Normalizers
 

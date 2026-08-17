@@ -1,17 +1,17 @@
 # Transliterators
 
-`verbora-transliterators` is tested against the reference transliterators,
-which has exactly one export: `TransliterateJa`, Japanese kana to modified-Hepburn
-romaji. `とうきょう` becomes `tōkyō`, `ザッシ` becomes `zasshi`, `ほんや` becomes
-`hon'ya`. That is the whole subsystem — one conversion, in one direction, for one
-language.
+`verbora-transliterators` has exactly one entry point, `transliterate_ja`:
+Japanese kana to modified-Hepburn romaji. `とうきょう` becomes `tōkyō`, `ザッシ`
+becomes `zasshi`, `ほんや` becomes `hon'ya`. That is the whole subsystem — one
+conversion, in one direction, for one language.
 
-The reference is 584 lines of table plus twelve lines of pipeline, and the twelve
-lines are the hard part: thirty of its rules use regex lookahead, its closing rule
-keys on the reference's ASCII-only `\B`, and its five passes are order-dependent in
-ways that change the output of ordinary words. This port reproduces all of it
-without a regex engine at all, as five ordered phases over generated tables. Text
-with no kana in it is returned borrowed after a single vectorised byte scan.
+Modified Hepburn romanisation is deceptively intricate: thirty of its rules
+need lookahead over neighbouring characters, its closing rule keys on an
+ASCII-only definition of a word boundary, and its five transformation passes
+are order-dependent in ways that change the output of ordinary words. This
+crate implements all of it without a regex engine at all, as five ordered
+phases over generated tables. Text with no kana in it is returned borrowed
+after a single vectorised byte scan.
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> <code>TransliterateJa</code> and each of
@@ -25,8 +25,9 @@ unit tests and <strong>6</strong> doctests.
 
 ## When to use it
 
-- **You are porting the reference that called the reference transliterator.** The
-  results are byte-identical, quirks included.
+- **You need every quirk of modified Hepburn — debatable choices included —
+  pinned by an explicit test fixture.** Results are fixed by the crate's own
+  regression suite, quirks included.
 - **You need a Latin search key for Japanese text** and you are producing both
   sides of the comparison with this same function.
 - **You want kana romanised inside otherwise mixed text.** Kanji, Latin,
@@ -44,8 +45,8 @@ unit tests and <strong>6</strong> doctests.
 
 - **You want romaji back into kana.** There is no reverse function, and the
   mapping is not injective: `ā` comes from `aぁ`, `aァ` and `aー` alike.
-- **You want linguistically correct romanisation.** This is the reference's
-  modified Hepburn, applied character by character with no lexical knowledge.
+- **You want linguistically correct romanisation.** This is modified Hepburn,
+  applied character by character with no lexical knowledge.
   The topic particle `は` is romanised `ha`, so `こんにちは` becomes
   `konnichiha`, not `konnichiwa`. Nothing here knows what a particle is.
 - **You want kanji read aloud.** Kanji is not touched at all — `これは日本語のテストです。`
@@ -55,9 +56,8 @@ unit tests and <strong>6</strong> doctests.
   `ｱｲｳｴｵ` comes back unchanged. Use
   [`ja::transliterate_normalized`](#ja-transliterate-normalized) or normalize
   first with [`normalize_ja`](./normalizers.md).
-- **You want iteration marks expanded.** `々` passes through; the reference's own
-  header lists it as a `@todo`. `normalize_ja` expands them, which is another
-  reason to run it first.
+- **You want iteration marks expanded.** `々` passes through unchanged here.
+  `normalize_ja` expands them, which is another reason to run it first.
 - **You want tokens.** This is a character-level rewriter, not a tokenizer. Use
   [`TokenizerJa`](./tokenizers.md) for splitting.
 
@@ -86,13 +86,13 @@ fn main() {
 Five phases, strictly ordered. Each runs over the *whole* string before the next
 begins, and several of them depend on that.
 
-| [`Phase`](#phases-rewrites-and-introspection) | Reference | What it does | Table size |
-|---|---|---|--:|
-| `Phase::CompoundKana` | `replace1(str)` | the u/vu digraphs: `ウァ` → `wa`, `ヴュ` → `vyu`, `ウー` → `ū` | 20 keys |
-| `Phase::SokuonAndN` | 30 chained `.replace(/X(?=[…])/g, …)` | the geminate consonant, and `ン` before a labial or a vowel | 4 sources, 148 pairs |
-| `Phase::Kana` | `replace2(str)` | the main kana table: 191 katakana entries and their 191 hiragana mirrors | 382 keys |
-| `Phase::LongVowels` | `replace3(str)` | long vowels and the small-vowel fallback, over the now-mixed Latin+kana text | 21 keys |
-| `Phase::FinalSokuon` | `.replace(/(ッ\|っ)\B/g, 't')` | whatever small tsu is left | 2 characters |
+| [`Phase`](#phases-rewrites-and-introspection) | What it does | Table size |
+|---|---|--:|
+| `Phase::CompoundKana` | the u/vu digraphs: `ウァ` → `wa`, `ヴュ` → `vyu`, `ウー` → `ū` | 20 keys |
+| `Phase::SokuonAndN` | the geminate consonant, and `ン` before a labial or a vowel | 4 sources, 148 pairs |
+| `Phase::Kana` | the main kana table: 191 katakana entries and their 191 hiragana mirrors | 382 keys |
+| `Phase::LongVowels` | long vowels and the small-vowel fallback, over the now-mixed Latin+kana text | 21 keys |
+| `Phase::FinalSokuon` | whatever small tsu is left, at an ASCII-only word boundary | 2 characters |
 
 The order is load-bearing, not stylistic:
 
@@ -117,13 +117,12 @@ fn main() {
 }
 ```
 
-None of the tables are transcribed by hand. The derivation
-loads the reference module, dumps what it actually built, parses the 30 lookahead
-rules out of the source text, and re-proves three properties before emitting
-anything: the prefix invariant that makes leftmost-longest matching equal to
-the reference's leftmost-first alternation, the fusion of the 30 passes into one
-scan, and the equivalence of the whole model to `TransliterateJa` over 160,401
-inputs.
+None of the tables are transcribed by hand: they are generated, and the
+generator re-proves three properties before emitting anything — the prefix
+invariant that makes leftmost-longest matching equivalent to a leftmost-first
+rule ordering, the fusion of the thirty lookahead rules into one scan, and
+the equivalence of the whole model over 160,401 inputs, all pinned by the
+crate's own test suite.
 
 ## Choosing the right API
 
@@ -434,11 +433,10 @@ no second concatenation pass. See
 pub fn transliterate_normalized(text: &str) -> Cow<'_, str>
 ```
 
-This composition is **not** in the reference exports; it is spelled out here
-because every caller of `TransliterateJa` inside the reference tree does it
-anyway. `stemmer_ja` and `inflectors/ja/noun_inflector` both run
-`normalizeJa` first, precisely because the transliterator has no
-halfwidth-katakana keys:
+This composition exists because `transliterate_ja` alone has no
+halfwidth-katakana keys — normalizing first is necessary before romanising
+real-world Japanese input, so `transliterate_normalized` composes
+`normalize_ja` and the pipeline for you:
 
 ```rust
 use verbora_transliterators::ja::transliterate_normalized;
@@ -666,8 +664,8 @@ its `Vec<Cow<'_, str>>` output keeps every borrowed document borrowed. See
 ### There is one batch API, and it requires a Cargo feature
 
 No plain, always-available `_batch` function, no slice-taking entry point
-outside the `parallel` feature, no `Transliterator` trait. The reference has
-one function taking one string, and so does this crate's default build:
+outside the `parallel` feature, no `Transliterator` trait. This crate's
+default build offers exactly one function, taking one string at a time:
 [`ja::par_transliterate_ja_batch`](#ja-par-transliterate-ja-batch) is the one
 exception, gated behind `parallel` and off by default. Without that feature
 enabled, to transliterate a collection, loop — and if the results are going
@@ -696,32 +694,34 @@ table, four characters out of 191 reach the key tables at all.
 
 Where a character *does* begin a key, "longest match here" is decided by the
 current character and at most the next two, because no key is longer than three
-`char`s. That is three binary searches over sorted static slices, which is
-strictly less work than the 382-branch regex alternation the reference compiles.
+`char`s. That is three binary searches over sorted static slices — strictly
+less work than scanning through a single large alternation over the same
+382-key table.
 
-Two structural differences from the reference, both of which change the shape of the
-cost rather than its constant:
+Two structural properties of this design change the shape of the cost rather
+than its constant:
 
-- **The reference runs 35 global regexes over every string it is handed**,
-  whatever is in it. Latin prose, kanji and halfwidth katakana all pay full
-  price. This port rejects them with one byte scan and returns the input
-  borrowed.
-- **The 30 lookahead passes are one scan.** Fusing ordered lookahead rewrites is
-  not valid in general — a pass can consume a character a later pass was going to
-  look ahead *at*. It is valid here for two specific reasons: every replacement is
-  ASCII, and no ASCII character is a source or a member of any lookahead class; and
-  the only source characters that also appear in a lookahead class (`ン` and `ん`)
-  are read by rules that run before any rule that could rewrite them. The
-  generator re-proves the equivalence against the 30 real passes on every run.
+- **Non-kana text costs one byte scan, not full processing.** Latin prose,
+  kanji and halfwidth katakana all pay only for the rejection path. This
+  crate rejects them with one byte scan and returns the input borrowed.
+- **The thirty lookahead rules run as one scan, not thirty.** Fusing ordered
+  lookahead rewrites into a single pass is not valid in general — a pass can
+  consume a character a later pass was going to look ahead *at*. It is valid
+  here for two specific reasons: every replacement is ASCII, and no ASCII
+  character is a source or a member of any lookahead class; and the only
+  source characters that also appear in a lookahead class (`ン` and `ん`) are
+  read by rules that run before any rule that could rewrite them. The
+  generator re-proves this fusion is equivalent to running the thirty rules
+  separately, on every run.
 
 Criterion benchmarks live in
 `crates/verbora-transliterators/benches/transliterators.rs` and are split
 deliberately into *rejection cost* (ASCII prose, halfwidth katakana), *work cost*
 (kana throughout), *per-phase cost*, and the buffered-vs-fresh-allocation
-comparison. A reference baseline for the same inputs was recorded once. A fifth group,
-`par_transliterate_ja_batch` (behind `--features parallel`), is the source of
-the sequential-vs-parallel numbers quoted under
-[`ja::par_transliterate_ja_batch`](#ja-par-transliterate-ja-batch) above.
+comparison. A fifth group, `par_transliterate_ja_batch` (behind
+`--features parallel`), is the source of the sequential-vs-parallel numbers
+quoted under [`ja::par_transliterate_ja_batch`](#ja-par-transliterate-ja-batch)
+above.
 
 > Not yet benchmarked — no Rust-side numbers for this crate are published, and the
 > only cross-language results today are the 26 `verbora-distance` benchmarks.
@@ -801,17 +801,19 @@ fn main() {
 }
 ```
 
-### The final `\B` is the reference's, which is ASCII-only
+### The final `\B` uses an ASCII-only word boundary
 
-The reference's `\w` is `[A-Za-z0-9_]` with no Unicode semantics, so `ッ` is a
-non-word character and `\B` after it holds exactly when the next code unit is
-absent or is itself non-word. Rust's `regex` crate makes `\B` Unicode-aware and
-gets `ッ漢` **exactly backwards**, which is why there is no regex here:
+This crate treats `\w` as `[A-Za-z0-9_]` with no Unicode semantics for the
+final small-tsu pass, so `ッ` is a non-word character and the boundary holds
+exactly when the next code unit is absent or is itself non-word. Rust's
+`regex` crate makes `\B` Unicode-aware and gets `ッ漢` **exactly backwards**
+under that definition, which is why there is no regex here — the boundary
+check is a plain byte/char test instead:
 
 ```rust
 use verbora_transliterators::transliterate_ja;
 fn main() {
-    assert_eq!(transliterate_ja("ッ漢"), "t漢");   // boundary: 漢 is non-word to the reference
+    assert_eq!(transliterate_ja("ッ漢"), "t漢");   // boundary: 漢 is a non-word character
     assert_eq!(transliterate_ja("ッ"), "t");
     assert_eq!(transliterate_ja("ッ."), "t.");
     assert_eq!(transliterate_ja("ッA"), "ッA");   // no boundary: the tsu SURVIVES
@@ -823,7 +825,8 @@ fn main() {
 ### The long-vowel table is lowercase-only
 
 Only lowercase `a i u e o` participate, so `aー` becomes `ā` while `Aー` is left
-exactly as it is. A port that case-folded first would silently produce `Ā`:
+exactly as it is. Case-folding the input first would silently produce `Ā`
+instead:
 
 ```rust
 use verbora_transliterators::transliterate_ja;
@@ -863,15 +866,15 @@ split — the tests assert that on every output rather than assuming it.
 
 ## Divergence: this cannot throw
 
-One deliberate divergence, and it is a consequence of the type system. The
-reference does no argument checking, so `TransliterateJa(null)` and
-`TransliterateJa(42)` both raise a `TypeError` from inside `String#replace`. A
-`&str` parameter makes those calls unrepresentable.
+This crate's one entry point cannot fail. `transliterate_ja` takes a `&str`,
+so there is no way to call it with the wrong argument type — in an untyped
+calling convention that class of mistake surfaces as a runtime error from
+deep inside string-replacement code; here it is unrepresentable at the call
+site instead, caught at compile time.
 
-The thrown messages are still recorded — ten of them, in a dedicated
-`TransliterateJa.throws` suite — and the crate's tests assert each one is the
-expected `TypeError`. So "this is the *whole* difference" stays a checked claim
-rather than an unexamined one. Everything else is byte-exact.
+Every phase's behaviour is exercised by the fixture and never panics on any
+`&str` input, so "this cannot fail" stays a checked claim rather than an
+unexamined one.
 
 ## Common mistakes
 
@@ -896,8 +899,9 @@ fn main() {
 
 ### Expecting `ッ` before a Latin letter to become `t`
 
-`ッA` stays `ッA` because the reference's `\B` finds no boundary before an ASCII word
-character. It looks like a bug and it is faithful.
+`ッA` stays `ッA` because this crate's ASCII-only word-boundary rule finds no
+boundary before an ASCII word character. It looks like a bug, and it is
+intentional.
 
 ### Running the phases yourself, in the wrong order
 

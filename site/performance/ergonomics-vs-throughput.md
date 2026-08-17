@@ -1,6 +1,6 @@
 # Ergonomics vs throughput
 
-Verbora offers a high-level API that mirrors the reference's call shape, and a
+Verbora offers a high-level, ergonomic API for the common case, and a
 low-level one that gives you control over memory. It is tempting to read that as
 "the good one and the slow one". It is not that.
 

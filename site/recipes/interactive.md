@@ -108,9 +108,10 @@ use verbora_phonetics::{PhoneticError, SoundEx};
 
 let soundex = SoundEx::new();
 
-// A token beginning with a regex metacharacter makes the reference throw a
-// SyntaxError. `try_process` hands you the condition instead of panicking, so
-// you can decide what an unusable query token means for your endpoint.
+// A token beginning with a regex metacharacter (`(`, `)`, `*`, `+`, `?`, `[`,
+// `\`) makes `try_process` return an error instead of a code. It hands you
+// the condition instead of panicking, so you can decide what an unusable
+// query token means for your endpoint.
 assert_eq!(
     soundex.try_process("(hello", None),
     Err(PhoneticError::InvalidInitialPattern('(')),

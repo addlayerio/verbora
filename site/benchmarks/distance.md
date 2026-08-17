@@ -1,7 +1,8 @@
 # String distance results
 
-26 benchmarks, `verbora-distance` against the reference v8.1.1 on identical inputs.
-**Median speedup 23.4×**, range **1.4×–3307.4×**.
+26 benchmarks, `verbora-distance` against a widely-used JavaScript NLP
+library (v8.1.1) on identical inputs. **Median speedup 23.4×**, range
+**1.4×–3307.4×**.
 
 <div class="callout callout-good">
 <strong>The Levenshtein-family and Jaro–Winkler rows below run on
@@ -15,17 +16,17 @@ the full cost + parent matrices. Jaro and Jaro–Winkler use bit-parallel
 match-flagging kernels. See
 <a href="competitive#levenshtein">the competitive benchmarks page</a> for
 the mechanisms and how parity against the scalar implementations was
-verified. The reference is measured as shipped, unmodified; every number
-below comes from the Rust side.
+verified. The JavaScript library is measured as shipped, unmodified; every
+number below comes from the Rust side.
 </div>
 
 The [method](index.md) matters more than the numbers: both sides read the same
-files, the reference is measured warm, and the test suite proves both compute the
-same values.
+files, the JavaScript library is measured warm, and the test suite proves both
+compute the same values.
 
 ## All 26
 
-| Benchmark | the reference | Verbora | Speedup |
+| Benchmark | JS library | Verbora | Speedup |
 |---|--:|--:|--:|
 | `levenshtein/ascii/4` | 791.0 ns | 14.7 ns | **53.8×** |
 | `levenshtein/ascii/16` | 11.07 µs | 41.8 ns | **264.8×** |
@@ -56,10 +57,10 @@ same values.
 
 ## Where the Levenshtein win comes from
 
-The reference always materialises a full `(n+1)×(m+1)` matrix of heap-allocated cell
-objects — each holding a cost and a parent coordinate — even when the caller
-wants only the final scalar. That is `O(nm)` allocations of pointer-chased
-objects.
+The JavaScript library always materialises a full `(n+1)×(m+1)` matrix of
+heap-allocated cell objects — each holding a cost and a parent coordinate —
+even when the caller wants only the final scalar. That is `O(nm)` allocations
+of pointer-chased objects.
 
 Verbora picks the smallest structure that can answer the question asked, and —
 wherever a faster *algorithm* exists — the fastest algorithm, not just the
@@ -97,21 +98,22 @@ it.
 ## Where the wins are smaller, and why
 
 **`hamming/4` (1.4×) and `jaro_winkler/4` (1.8×).** At four characters the work
-is a handful of comparisons; both runtimes are dominated by call overhead, and the reference engine
-optimises this shape very well. Small, genuine wins are the honest expectation
-here.
+is a handful of comparisons; both runtimes are dominated by call overhead, and
+the JavaScript engine optimises this shape very well. Small, genuine wins are
+the honest expectation here.
 
 **Jaro–Winkler beyond four characters (6.7×–57.5×).** Jaro and Jaro–Winkler
 run on bit-parallel match-flagging kernels (a single-word path, then a block
 extension, with a scalar loop kept for inputs of 16 units or fewer), which
 preserve the fractional transposition semantics exactly. The ratio *rises*
 with input size instead of falling: a scalar implementation would do the
-same quadratic work as the reference at 1024 units, while the bit-parallel
-kernels do not.
+same quadratic work as the JavaScript library at 1024 units, while the
+bit-parallel kernels do not.
 
 **Dice (3.2×–7.5×).** Dominated by hashing. Verbora hashes `(u16, u16)` tuples
-with `FxHashMap` instead of allocating a `String` per bigram as the reference
-does; the win grows with input size as that allocation pressure compounds.
+with `FxHashMap` instead of allocating a `String` per bigram the way the
+JavaScript library does; the win grows with input size as that allocation
+pressure compounds.
 
 **Cyrillic vs ASCII.** `levenshtein/cyrillic/256` at 3.97 µs against
 `levenshtein/ascii/256` at 2.13 µs — about 86% slower. Promoting non-ASCII
@@ -119,15 +121,15 @@ operands to `Vec<u16>` for exact UTF-16 semantics is a fixed cost, and the
 `u16` bit-vector kernel builds its pattern-preprocessing table in a hash
 map where the byte path uses a flat 256-entry array. The absolute
 difference is still under two microseconds — and the Cyrillic row still
-beats the reference by **929.5×**.
+wins by **929.5×**.
 
 ## A measured regression, and its fix
 
 The first run recorded `jaro_winkler/4` at **0.6×** — Verbora *slower* than
-the reference.
+a widely-used JavaScript NLP library.
 
 The cause was two `vec![false; len]` allocations per call, for the match flags.
-The reference engine's `new Array(4)` is nearly free; `malloc` is not.
+The JavaScript engine's `new Array(4)` is nearly free; `malloc` is not.
 
 Moving the match flags to a stack buffer for inputs up to 128 code units took
 the benchmark from **48.6 ns to 15.3 ns** — 0.6× to 1.8× — with the test

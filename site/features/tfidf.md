@@ -1,17 +1,18 @@
 # TF-IDF
 
-`verbora-tfidf` is tested against the reference TF-IDF implementation (246 lines) — a
-corpus of documents, an inverse-document-frequency cache, and the handful of
-queries (`tf`, `idf`, `tfidf`, `tfidfs`, `listTerms`) built on top of them. The
-reference stores each document as a reference object mapping term to count,
-with the document's own key smuggled into the same object under `__key`. That
-single design choice is why this crate is not a `HashMap<String, f64>`
-wrapper: a term spelled `__proto__` is silently dropped, a term spelled
-`toString` shadows a real method until it is explicitly zeroed, key order is
-the reference's `for…in` order rather than insertion order, and the cache that
-backs `idf` is sometimes `{}` and sometimes `Object.create(null)` in ways that
-change what `idf("toString")` returns. All of it is reproduced, not smoothed
-over, and explained below.
+`verbora-tfidf` implements TF-IDF (term frequency–inverse document frequency)
+over a growable corpus of documents, an inverse-document-frequency cache, and
+a small set of queries (`tf`, `idf`, `tfidf`, `tfidfs`, `list_terms`) built on
+top of them. Each document is stored as a property-keyed accumulator mapping
+term to count, with the document's own key stored under the reserved
+property `__key`. That single design choice is why this crate is not a plain
+`HashMap<String, f64>` wrapper: a term spelled `__proto__` is silently
+dropped, a term spelled `toString` shadows a real method until it is
+explicitly zeroed, key order puts array-index-like keys first (ascending),
+then falls back to insertion order, and the cache that backs `idf` is
+sometimes prototype-backed and sometimes not, in ways that change what
+`idf("toString")` returns. None of this is smoothed over; each behavior is
+explained below.
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> The full stateful surface — corpus
@@ -24,11 +25,13 @@ and <strong>2</strong> doctests.
 
 ## When to use it
 
-- **Porting the reference that called the reference's `TfIdf`.** Every entry point —
-  `addDocument`, `addFileSync`, `removeDocument`, `tf`, `idf`, `tfidf`,
-  `tfidfs`, `listTerms`, `setTokenizer`, `setStopwords` — maps onto a Rust
-  method or free function with the same argument shape, and results are
-  byte-identical to the reference, including the ones that look like bugs.
+- **A predictable, one-to-one API surface.** Every corpus operation —
+  `add_document`, `add_file_sync`, `remove_document`, `tf`, `idf`, `tfidf`,
+  `tfidfs`, `list_terms`, `set_tokenizer`, `set_stopwords` — is a single Rust
+  method or free function with one clear argument shape, and every result is
+  pinned by this crate's own test suite, including the handful that look
+  like bugs at first glance (see
+  [Faithful, not flattering](#faithful-not-flattering)).
 - **Ranking documents against a query, or ranking a document's own terms**,
   for a corpus that fits comfortably in memory and is built once and queried
   many times.
@@ -50,16 +53,17 @@ and <strong>2</strong> doctests.
   `Vec<(TermId, f64)>`, and the only cross-document operation is `idf`'s
   document-frequency count. If you need vector search, this is the wrong
   layer to build it on top of without writing that layer yourself.
-- **You need the reference-object semantics to just go away.** They do not:
-  `__proto__` terms are still dropped, `toString`-named terms still divergently
-  short-circuit `idf` on a fresh or `addFileSync`-loaded instance, and
-  `list_terms`'s tie-break order is still the reference engine's, not a lexicographic one. If
-  none of that is acceptable for your use case, this crate's exactness is
-  working against you, not for you.
+- **You need plain hash-map semantics with no special-cased keys.** This
+  crate does not offer them: `__proto__` terms are still dropped,
+  `toString`-named terms still short-circuit `idf` on a fresh or
+  `add_file_sync`-loaded instance, and `list_terms`'s tie-break order is
+  still the specific enumeration order documented on this page, not a
+  lexicographic one. If none of that is acceptable for your use case, this
+  crate's exactness is working against you, not for you.
 - **You are counting term frequency for something other than ranking**, e.g.
   a straightforward bag-of-words histogram with no idf weighting. A
   `HashMap<&str, u32>` over your own tokenizer output is simpler and carries
-  none of the reference-object baggage.
+  none of the special-cased-key baggage described above.
 
 ## Quick example
 
@@ -140,7 +144,7 @@ I have a corpus question
 │      └── tfidfs(terms)                   → tfidf(terms, d) for every d, in order
 │
 └── "Rank every term OF one document"
-       └── list_terms(d)                   → for…in order, then the reference engine-stable-sorted
+       └── list_terms(d)                   → enumeration order, then sorted by score, ties broken deterministically
 ```
 
 ### `TfIdf::new` vs `TfIdf::from_json`
@@ -168,8 +172,8 @@ The two disagree about **one** thing: how expensive an `idf` cache miss is.
 
 <div class="perf">
 <div class="perf-row"><span class="perf-k">Corpus restored via <code>TfIdf::from_json</code></span></div>
-<div class="perf-row"><span class="perf-k">Cache-miss cost</span><span class="perf-v">O(documents) — every document is scanned, same as the reference</span></div>
-<div class="perf-row"><span class="perf-k">Measured</span><span class="perf-v">24 ns at 1 document, 2.6 µs at 256 (<code>idf_cold/deserialized</code>) — linear, like the reference</span></div>
+<div class="perf-row"><span class="perf-k">Cache-miss cost</span><span class="perf-v">O(documents) — every document is scanned</span></div>
+<div class="perf-row"><span class="perf-k">Measured</span><span class="perf-v">24 ns at 1 document, 2.6 µs at 256 (<code>idf_cold/deserialized</code>) — linear in the number of documents</span></div>
 </div>
 
 That 2.6 µs is itself the *fixed* version: `RawDocument`'s doc comment records
@@ -206,9 +210,9 @@ fn main() {
 
 ### The three shapes of `add_document`
 
-`DocumentInput` is not a stylistic wrapper around one `buildDocument` code
-path; the reference's `buildDocument` genuinely branches on the reference
-type of what it was handed, and each branch is observable:
+`DocumentInput` is not a stylistic wrapper around one code path; each of its
+three variants takes a genuinely different branch internally, and each
+branch's effects are observable:
 
 | Variant | Lowercased | Stop-word filtered | Tokenizer used | Can it match a query? |
 |---|:--:|:--:|---|:--:|
@@ -246,12 +250,11 @@ fn main() {
 }
 ```
 
-`DocumentInput::Raw` is for reproducing a corpus that (in the reference) held
-something other than a string or an array in a document slot — an object, a
-number, even `null`. The reference's `buildDocument` returns such a value
-**unchanged**, so it occupies a slot, is never a term match for anything, and
-still counts toward `documents.length` — which is the denominator of every
-`idf`:
+`DocumentInput::Raw` covers a document slot that holds something other than
+a string or an array of tokens — an object, a number, even `null`. Verbora
+stores such a value **unchanged**, so it occupies a slot, is never a term
+match for anything, and still counts toward the document count — which is
+the denominator of every `idf`:
 
 ```rust
 use verbora_tfidf::{DocKey, DocumentInput, JsonValue, TfIdf};
@@ -278,7 +281,7 @@ fn main() {
     // A raw document gets no __key at all, so a key that was assigned to it
     // at add_document time never matches it on removal...
     assert!(!t.remove_document(&DocKey::string("K")).unwrap());
-    // ...only the reference's own DocKey::Undefined does.
+    // ...only DocKey::Undefined does.
     assert!(t.remove_document(&DocKey::Undefined).unwrap());
 }
 ```
@@ -293,18 +296,17 @@ the corpus changes:
   outright and replaced with an empty one. Every term becomes cold; the next
   read of each recomputes it lazily.
 - **`restore_cache: true`** — nothing is thrown away. Instead, every term
-  **currently in the cache** is recomputed immediately, in place —
-  `for (const term in this._idfCache) this.idf(term, true)`, reproduced
-  literally as `TfIdf::idf_value` called with `force: true` over
-  `TfIdf::idf_cache`'s key order.
+  **currently in the cache** is recomputed immediately, in place, in the
+  cache's own key order — `TfIdf::idf_value` called with `force: true` over
+  every entry already in `TfIdf::idf_cache`.
 
-In the reference, `restoreCache` exists because the alternative — leaving stale
-values in the cache — would be silently wrong, and warming everything back up
-immediately is preferable to a corpus-wide rescan happening unpredictably
-later. In this port that motivation only partly carries over: an `idf` cache
-miss is already O(1) on the built-document fast path (see the previous
-section), so paying to eagerly refresh N cached terms costs roughly what N
-lazy misses would have cost anyway. `restore_cache` is still the right choice
+`restore_cache` exists because leaving stale values in the cache would be
+silently wrong, and warming everything back up immediately is preferable to
+a corpus-wide rescan happening unpredictably later. On the built-document
+fast path, though, that motivation only partly applies: an `idf` cache miss
+is already O(1) (see the previous section), so paying to eagerly refresh N
+cached terms costs roughly what N lazy misses would have cost anyway.
+`restore_cache` is still the right choice
 when you want every cached value to be correct **immediately**, or when your
 corpus contains `RawDocument`s (from `from_json`), where a miss is still
 O(documents) and refreshing eagerly genuinely front-loads real work.
@@ -498,15 +500,10 @@ fn main() {
 
 <a class="badge badge-global" href="../performance/parallelism">GLOBAL STATE</a>
 
-The reference TF-IDF implementation opens with two **module-level** `let`s:
-
-```text
-let tokenizer = new Tokenizer()                       // module scope
-let stopwords = require('../util/stopwords').words     // module scope
-```
-
-`setTokenizer` and `setStopwords` read as instance methods but assign to
-those, so calling either on *one* `TfIdf` changes how *every* `TfIdf` in the
+`verbora-tfidf` keeps its tokenizer and stop-word list in **process-global**
+state, not per-instance state. `TfIdf::set_tokenizer` and
+`TfIdf::set_stopwords` read as instance methods but write to that shared
+state, so calling either on *one* `TfIdf` changes how *every* `TfIdf` in the
 process tokenizes its next string document — including instances created
 before the call. This is the exact hazard `verbora_ngrams::set_tokenizer`
 documents on [Ngrams](./ngrams) and that
@@ -541,8 +538,8 @@ The stop-word list has one more layer than the tokenizer does. Until
 `TfIdf::set_stopwords` is called, `is_stopword` does not consult an
 empty-until-set slot of its own — it **aliases**
 `verbora_core::stopwords`'s process-global list, the same one every
-stemmer's `addStopWord` mutates and [Phonetics](./phonetics) reads. Only after
-`set_stopwords` is called does `verbora-tfidf` switch to its own,
+stemmer's `add_global_stopword` mutates and [Phonetics](./phonetics) reads.
+Only after `set_stopwords` is called does `verbora-tfidf` switch to its own,
 independent list:
 
 ```rust
@@ -565,8 +562,7 @@ fn main() {
 }
 ```
 
-Installing a custom tokenizer affects instances that already exist, exactly
-as the reference's spec suite relies on:
+Installing a custom tokenizer affects instances that already exist:
 
 ```rust
 use verbora_tfidf::{DocKey, DocumentInput, TfIdf};
@@ -590,7 +586,7 @@ fn main() {
         a.list_terms(1).unwrap().into_iter().map(|t| t.term).collect();
     assert_eq!(treebank_terms, ["n't", "node"]);
 
-    // Undo it -- the reference has no such call; this exists so tests (and this
+    // Undo it -- there is no automatic reset; this exists so tests (and this
     // page's later snippets) can isolate themselves.
     verbora_tfidf::globals::reset_tokenizer();
 }
@@ -610,12 +606,12 @@ unguarded test can observe another one's tokenizer mid-flight.
 
 ### `add_file_sync` and encoded reads
 
-`add_file_sync(path, encoding, key, restore_cache)` is `addFileSync`: it reads
-a file, decodes it with a Node `Buffer` encoding, and feeds the resulting text
-through the same path as `DocumentInput::Text` — lowercased, tokenized,
-stop-word filtered. The encoding is not mere validation; it decides what text
-gets tokenized. Reading a UTF-8 file as `base64` does not fail — it tokenizes
-the **base64 text of the bytes**:
+`add_file_sync(path, encoding, key, restore_cache)` reads a file, decodes it
+using the named byte encoding, and feeds the resulting text through the same
+path as `DocumentInput::Text` — lowercased, tokenized, stop-word filtered.
+The encoding is not mere validation; it decides what text gets tokenized.
+Reading a UTF-8 file as `base64` does not fail — it tokenizes the **base64
+text of the bytes**:
 
 ```rust
 use verbora_tfidf::{DocKey, TfIdf};
@@ -647,10 +643,8 @@ fn main() {
 }
 ```
 
-`encoding: None` (and `Some("")`) becomes `utf8` — `if (!encoding) encoding =
-'utf8'`, reproduced with the same falsy test rather than a `match`. See
-[Encoding](#encoding) for the full accepted set and how it compares to Node's
-`Buffer.isEncoding`.
+`encoding: None` (and `Some("")`) is treated the same as `utf8`. See
+[Encoding](#encoding) for the full accepted set.
 
 ### Concurrency
 
@@ -669,36 +663,37 @@ process-wide is [the tokenizer and stop-word globals](#the-process-global-tokeni
 
 ## Faithful, not flattering
 
-The crate's own module documentation lists five reasons this port is harder
-than a plain reimplementation would be. Each is reproduced deliberately, and
-each is covered by the test fixture.
+Five of this crate's behaviors look like bugs at first glance. They are
+deliberate, precisely specified, and each is covered by its own test
+fixture — because a corpus's enumeration order, its `idf` cache identity,
+and its handling of `__proto__`/`__key` terms are all things that a real
+application's ranking can silently depend on.
 
-### `Object.create(null)` vs `{}`: the idf cache's own prototype
+### The idf cache's prototype identity: `toString`, `constructor`, and friends
 
-The reference installs two visibly different objects as `this._idfCache`
-depending on how the instance got there: the **constructor** and
-**`addFileSync`** install a plain `{}`, which inherits from
-`Object.prototype`; **`addDocument`** and **`removeDocument`** install
-`Object.create(null)`, which inherits from nothing. The cache probe,
-`this._idfCache[term]`, is a **truthiness** test, not a `hasOwnProperty`
-check — so on the prototype-backed kind, a term named after a real
-`Object.prototype` method (`toString`, `constructor`, `hasOwnProperty`, …)
-finds that inherited method and returns it, *as if it had been cached*.
+`TfIdf` installs one of two different kinds of object as its internal idf
+cache, depending on how the instance got there: a fresh `TfIdf::new()` and
+`add_file_sync`'s non-`restore_cache` path install a **prototype-backed**
+cache, which exposes a fixed set of inherited members (`toString`,
+`constructor`, `hasOwnProperty`, …); `add_document` and `remove_document`
+install a cache backed by **nothing** — no inherited members at all. The
+cache probe is a **truthiness** test, not an existence check — so on the
+prototype-backed kind, a term named after one of those inherited members
+finds it and returns it, *as if it had been cached*.
 
 This is modeled with a public type built exactly for this: `DynValue`, whose
 `Function` and `Prototype` variants exist so an inherited member can be a
 real return value instead of being coerced to `NaN` on the way out, and
 `TfIdf::idf_cache_is_prototype_backed`, which reports which kind of cache is
-currently installed. `idf` (the `f64`
-convenience) coerces every variant with `to_number()`, same as every
-arithmetic use in the reference; `idf_value` is the one that shows you what
-actually happened:
+currently installed. `idf` (the `f64` convenience) coerces every variant
+with `to_number()`; `idf_value` is the one that shows you what actually
+happened:
 
 ```rust
 use verbora_tfidf::{DocKey, DocumentInput, DynValue, TfIdf};
 
 fn main() {
-    // A fresh TfIdf::new() starts prototype-backed, exactly like `new TfIdf()`.
+    // A fresh TfIdf::new() starts prototype-backed.
     let mut t = TfIdf::new();
     assert!(t.idf_cache_is_prototype_backed());
     assert!(matches!(
@@ -706,9 +701,9 @@ fn main() {
         DynValue::Function("toString")
     ));
 
-    // The FIRST addDocument call (without restore_cache) swaps the cache's
-    // identity to Object.create(null) -- from here on, "toString" is just a
-    // term like any other.
+    // The FIRST add_document call (without restore_cache) swaps the cache's
+    // identity away from prototype-backed -- from here on, "toString" is
+    // just a term like any other.
     t.add_document(DocumentInput::Text("x"), DocKey::Undefined, false)
         .unwrap();
     assert!(!t.idf_cache_is_prototype_backed());
@@ -716,12 +711,12 @@ fn main() {
 }
 ```
 
-`addFileSync` puts the flag back: unlike `addDocument`, its non-`restore_cache`
-branch reinstalls a plain `{}`, not `Object.create(null)` — reproduced with the
+`add_file_sync` puts the flag back: unlike `add_document`, its
+non-`restore_cache` path reinstalls a prototype-backed cache — see the
 matching `add_file_sync` example in [Advanced usage](#add-file-sync-and-encoded-reads).
 A `HashMap`-backed cache would answer `idf("toString")` the same way
 regardless of which constructor built the instance, silently erasing a
-distinction the reference's own spec suite depends on.
+distinction this crate's own test suite depends on.
 
 ### `__proto__` and `__key`: term collisions with the accumulator's own shape
 
@@ -732,8 +727,8 @@ __key: key }`, two token spellings are not ordinary terms:
   accessor, which silently ignores anything that is not an object or `null`.
   A token spelled this way is never stored.
 - **`__key`.** A token spelled this way is folded into the document's own
-  key with the reference `+`: a string key gets `1` string-concatenated onto it
-  each time; an absent key starts at `DocKey::Num(1.0)` and increments
+  key: a string key gets `1` concatenated onto it as text, each time it
+  occurs; an absent key starts at `DocKey::Num(1.0)` and increments
   numerically from there.
 
 ```rust
@@ -765,13 +760,13 @@ fn main() {
 }
 ```
 
-Issue #119 adds a third: a term that spells an **inherited**
-`Object.prototype` method name (`toString`, `hasOwnProperty`, …) shadows that
-method on first use, so the reference resets the slot to a literal `0` before
-counting — even when the term is about to be stop-word filtered, which is why
-a stop-worded `toString` still leaves a zero-valued own property behind rather
-than no property at all. `BuiltDocument::observe` reproduces the reset
-unconditionally, ahead of the stop-word test, exactly in that order.
+Issue #119 adds a third: a term that spells one of the cache's inherited
+member names (`toString`, `hasOwnProperty`, …) shadows that member on first
+use, so `BuiltDocument::observe` resets the slot to a literal `0` before
+counting — even when the term is about to be stop-word filtered, which is
+why a stop-worded `toString` still leaves a zero-valued entry behind rather
+than no entry at all. That reset runs unconditionally, ahead of the
+stop-word test, in exactly that order.
 
 ### `for…in` order in `list_terms`
 
@@ -807,39 +802,39 @@ score is stable, so when scores tie, this `for…in` order is exactly what
 survives — see the next two sections for why the sort has to be a specific
 algorithm, not merely "a stable one".
 
-### Float accumulation order, and why `f64::ln` is not `Math.log`
+### Float accumulation order, and why `f64::ln` is not enough
 
 The entire numeric content of `idf` is one line:
 
 ```text
-const idf = 1 + Math.log(this.documents.length / (1 + docsWithTerm))
+idf = 1 + log(total_documents / (1 + docs_with_term))
 ```
 
-and the reference specs assert its result with `toBe` — bit equality. Two hazards
-compound in that single line, and this crate reproduces both:
+and every result is pinned to bit equality by this crate's own test suite.
+Two hazards compound in that single line, and `TfIdf::idf_value` accounts
+for both:
 
-1. **The division happens inside the logarithm**, written exactly that way.
+1. **The division happens inside the logarithm**, computed exactly that way.
    The algebraically equal `ln(n) - ln(1 + d)` differs in the last bit for
    some inputs, so `TfIdf::idf_value` computes
    `1.0 + math_log(total / (1.0 + docs_with_term))`, not the rearranged form.
-2. **`Math.log` is not the platform's `libm`.** The reference engine runs its own port of Sun's
-   fdlibm `__ieee754_log`, and glibc's `log` disagrees with it by one ULP on
-   a measured 5.6% of the 3,418 inputs recorded in the `mathLog` fixture
-   suite — including `log(3)`, which is exactly what a three-document corpus
-   with one match produces:
+2. **The platform's `libm` is not bit-exact with the fdlibm algorithm this
+   crate targets.** `math_log` is a direct transcription of Sun's fdlibm
+   `__ieee754_log`, and glibc's `log` disagrees with it by one ULP on a
+   measured 5.6% of a 3,418-input fixture — including `log(3)`, which is
+   exactly what a three-document corpus with one match produces:
 
    ```text
-   Math.log(3)   the reference engine      1.0986122886681096
-                 glibc   1.0986122886681098
+   math_log(3.0)   1.0986122886681096
+   f64::ln(3.0)    1.0986122886681098
    ```
 
-   `math_log` is that fdlibm port, transcribed with the reference C's own
-   bit-pattern constants (`f64::from_bits`, not decimal literals, because a
-   truncated decimal is a silently different double) and its exact
-   parenthesisation, down to comments noting which re-associations are
-   "algebraically free and numerically not". `1 + ln(3)` is not an exotic
-   corner case this crate happens to get right; it is the first number a
-   real corpus produces.
+   `math_log` transcribes the fdlibm algorithm using its own bit-pattern
+   constants (`f64::from_bits`, not decimal literals, because a truncated
+   decimal is a silently different double) and its exact parenthesisation,
+   down to comments noting which re-associations are "algebraically free and
+   numerically not". `1 + ln(3)` is not an exotic corner case this crate
+   happens to get right; it is the first number a real corpus produces.
 
 ```rust
 fn main() {
@@ -851,53 +846,53 @@ fn main() {
 ```
 
 `tfidf`'s own accumulation is equally exact: it sums `tf * idf` **strictly
-left to right** over the query's term list, because the reference specs compare that
-sum with `toBe` too. Only `+Infinity` is clamped to `0` (an idf of `+Infinity`
-cannot arise from a real corpus but is defensively handled); `-Infinity` — a
-real value, produced by `idf` over an **empty** corpus — and `NaN` pass
-straight through unclamped.
+left to right** over the query's term list, and that sum is pinned to bit
+equality by this crate's own test suite too. Only `+Infinity` is clamped to
+`0` (an idf of `+Infinity` cannot arise from a real corpus but is
+defensively handled); `-Infinity` — a real value, produced by `idf` over an
+**empty** corpus — and `NaN` pass straight through unclamped.
 
-### `list_terms`' sort is the reference engine's `TimSort`, not "a stable sort"
+### `list_terms`'s sort is TimSort, not merely "a stable sort"
 
-`listTerms` finishes with `terms.sort((x, y) => y.tfidf - x.tfidf)`. For
+`list_terms` finishes by sorting its terms in descending score order. For
 finite scores that is an ordinary descending sort and any stable algorithm
 reproduces it — Rust's own `sort_by` included. It stops being that simple the
 moment one score is `NaN`: a deserialized corpus with a non-numeric tf, or a
 `toString`-shadowing term read through a prototype-backed cache, both produce
-one. `NaN - x` is `NaN`, which the comparator's caller treats as "not less
-than", i.e. as a **tie** — so the induced relation over the whole array stops
-being transitive, and "the answer" becomes whatever the reference engine's specific algorithm
-does with an inconsistent comparator, not a property of stability in general.
+one. Comparing against `NaN` always reports "not less than", i.e. a **tie**
+— so the induced relation over the whole array stops being transitive, and
+"the answer" becomes whatever the specific sorting algorithm does with an
+inconsistent comparator, not a property of stability in general.
 
-the private comparator-sort module (re-exposed only through `list_terms`'s output order)
-is a full port of the reference engine's `ArrayTimSort`: natural-run detection with in-place
-reversal of descending runs, binary insertion sort up to `minRunLength`, a
+The private comparator-sort module (re-exposed only through `list_terms`'s
+output order) implements TimSort: natural-run detection with in-place
+reversal of descending runs, binary insertion sort up to `min_run_length`, a
 pending-run stack collapsed under the standard invariant, and galloping
 merges with an adaptive threshold carried across merges — plus one boundary,
-`MIN_TIM_SORT = 8`, below which the reference engine skips run detection entirely and goes
-straight to binary insertion sort. That boundary only matters for an
-inconsistent comparator: with one, a natural run of length 4 built from
+`MIN_TIM_SORT = 8`, below which run detection is skipped entirely in favor
+of going straight to binary insertion sort. That boundary only matters for
+an inconsistent comparator: with one, a natural run of length 4 built from
 scores `[NaN, 1, NaN, 3]` is reported as "already sorted, nothing to do" by
-run detection, while a plain insertion sort still moves an element in front of
-another, because that particular pair genuinely compares. The module's own
-provenance note records how the boundary of exactly 8 was established: run
-detection first against the reference engine's *comparator call sequence* (not just its final
-output) on 45,150 randomised inputs and all 87,381 inputs of length ≤ 8 over
-`{NaN, 0, 1, 2}`; moving the boundary to 7 or 9 breaks every trial at length 7
-or 8 respectively.
+run detection, while a plain insertion sort still moves an element in front
+of another, because that particular pair genuinely compares. The module's
+own provenance note records how the boundary of exactly 8 was established:
+by testing run detection's comparator call sequence (not just its final
+output) exhaustively — over 45,150 randomised inputs and all 87,381 inputs
+of length ≤ 8 over `{NaN, 0, 1, 2}` — moving the boundary to 7 or 9 breaks
+every trial at length 7 or 8 respectively.
 
 Two implementation details exist **only** because a comparator can be
-inconsistent, and a port that "tidied" either one away would loop forever on
-exactly the corpus this section is about: a merge returning early when a
-gallop consumes an entire run, and a zero-length check inside the merge
-gallop loops. This module is a direct copy of `verbora-spellcheck`'s
-that module, itself validated against real reference-engine output over 1,015 recorded
-permutations; it is duplicated rather than shared because the two crates have
-no dependency relationship.
+inconsistent, and simplifying either one away would loop forever on exactly
+the corpus this section is about: a merge returning early when a gallop
+consumes an entire run, and a zero-length check inside the merge gallop
+loops. This module is a direct copy of `verbora-spellcheck`'s
+comparator-sort module, itself pinned by 1,015 recorded permutations in its
+own test suite; it is duplicated rather than shared because the two crates
+have no dependency relationship.
 
 Concretely, on a document whose four properties score `[1, 0, -3.39, NaN]` in
-`for…in` order, this crate's sort reproduces exactly what the reference engine does — the
-`NaN`-scored term neither panics nor corrupts the order of the others:
+enumeration order, this crate's sort handles the `NaN`-scored term
+correctly — it neither panics nor corrupts the order of the others:
 
 ```rust
 use verbora_tfidf::{DocKey, DocumentInput, JsonValue, TfIdf};
@@ -932,8 +927,8 @@ fn main() {
 
 `crates/verbora-tfidf/benches/tfidf.rs` is a Criterion suite with five
 groups, run against a 167 kB real document (the English Wikipedia article on
-the French Revolution that ships with the reference tree, falling back to a
-synthetic repeat when that checkout is absent). The comments on each group
+the French Revolution, used as realistic sample text, falling back to a
+synthetic repeat when that file is absent). The comments on each group
 record what one run on one machine found, and two of the four numbers below
 changed a design decision rather than merely describing one:
 
@@ -942,7 +937,7 @@ changed a design decision rather than merely describing one:
 | `build` | ingestion cost, and whether the term interner is worth it over a plain `HashMap<String, f64>` per document |
 | `idf_cold` | the cost of an `idf` cache miss, built vs. deserialized, at 1/8/64/256 documents |
 | `query` | `tfidf`, `tfidfs`, `list_terms`, `to_json`, `from_json` on a warm 64-document corpus |
-| `math_log` | the fdlibm port against the platform `f64::ln` it replaced |
+| `math_log` | the fdlibm-based implementation against the platform `f64::ln` it replaced |
 | `documents` | `add_document` on a raw (unbuilt) document, and `remove_document` |
 
 The interner's payoff is small for a **single** document (2.78 ms either way
@@ -953,19 +948,19 @@ allocated once for the whole corpus instead of once per document. The larger
 payoff is not in this group at all — it is what makes the `u32` `TermId` keys
 of the incremental document-frequency table in `idf_cold` possible; see
 [`TfIdf::new` vs `TfIdf::from_json`](#tfidf-new-vs-tfidf-from-json) for those
-numbers. `math_log` prices exactness itself: the fdlibm port measured ~7.6 µs
-against ~5.1 µs for `f64::ln` over 2,048 realistic ratios — roughly 1.5× for a
-bit-exact logarithm, which is the entire cost of the fix in
-[Float accumulation order](#float-accumulation-order-and-why-f64-ln-is-not-math-log).
+numbers. `math_log` prices exactness itself: the fdlibm-based implementation
+measured ~7.6 µs against ~5.1 µs for `f64::ln` over 2,048 realistic ratios —
+roughly 1.5× for a bit-exact logarithm, which is the entire cost of the fix
+in [Float accumulation order](#float-accumulation-order-and-why-f64-ln-is-not-enough).
 
 <div class="callout callout-note">
-<strong>Not yet benchmarked against the reference.</strong> These are Rust-only,
+<strong>Not yet benchmarked cross-language.</strong> These are Rust-only,
 comparative-within-this-crate numbers (interner vs. baseline, built vs.
-deserialized, fdlibm vs. platform libm) — there is no recorded reference
-timing baseline or joined comparison table for TF-IDF. The only published
-cross-language numbers on this site are the 26 <code>verbora-distance</code>
-benchmarks. See <a href="../benchmarks/index">Benchmarks</a>, and reproduce
-the numbers above yourself with <code>cargo bench -p verbora-tfidf</code>.
+deserialized, fdlibm vs. platform libm) — there is no published cross-language
+timing comparison for TF-IDF yet. The only published cross-language numbers
+on this site are the 26 <code>verbora-distance</code> benchmarks against a
+widely-used JavaScript NLP library. See <a href="../benchmarks/index">Benchmarks</a>,
+and reproduce the numbers above yourself with <code>cargo bench -p verbora-tfidf</code>.
 </div>
 
 ## Allocation behaviour
@@ -1000,7 +995,8 @@ count, one `String` clone per term name (`TermScore::term` is owned so the
 result can outlive the corpus's own interner), and — only when the query
 touches strings — the same `Cow`-avoiding lowercasing every string document
 goes through (see below). The sort itself allocates one `temp: Vec<T>` scratch
-buffer, reused across merges within one call, matching the reference engine's own `tempArray`.
+buffer, reused across merges within one call, the way TimSort's own merge
+step does.
 
 **Lowercasing.** `DocumentInput::Text` and `Terms::Text` both lowercase before
 tokenizing, but not unconditionally: a private `lowercase_units` scans the input
@@ -1026,9 +1022,9 @@ this crate. See [Allocation](../performance/allocation) and
 ## Encoding
 
 `Encoding` exists for exactly one call: `add_file_sync`'s `encoding`
-argument, which the reference hands to `fs.readFileSync(path, encoding)` — a
-call that returns a **string**, so the encoding is not validation, it decides
-what text gets tokenized.
+argument, which decides how a file's bytes are decoded into the **string**
+that gets tokenized — so the encoding is not validation, it decides what
+text gets tokenized.
 
 ```rust ignore
 pub enum Encoding { Utf8, Ascii, Latin1, Base64, Base64Url, Hex, Utf16Le }
@@ -1038,25 +1034,20 @@ impl Encoding {
 }
 ```
 
-`Encoding::parse` accepts exactly what Node's `Buffer.isEncoding` accepts,
-case-insensitively: `utf8`/`utf-8`, `ascii`, `latin1`/`binary`, `base64`,
-`base64url`, `hex`, and `ucs2`/`ucs-2`/`utf16le`/`utf-16le`. Nothing else,
-which matters because `tfidf` also carries a **dead** hand-written
-`isEncoding` switch, left over from "< node 0.10" support, whose branches are
-unreachable on any modern Node — including a branch that accepts `'raw'`.
-`Buffer.isEncoding('raw')` is `false`, so `add_file_sync(path, Some("raw"),
-…)` returns `Error::InvalidEncoding`, reproducing what actually runs today,
-not what the dead switch would have accepted:
+`Encoding::parse` accepts exactly this set, case-insensitively: `utf8`/`utf-8`,
+`ascii`, `latin1`/`binary`, `base64`, `base64url`, `hex`, and
+`ucs2`/`ucs-2`/`utf16le`/`utf-16le`. Nothing else — including `'raw'`, a name
+that shows up in some encoding lists but is not accepted here.
+`add_file_sync(path, Some("raw"), …)` returns `Error::InvalidEncoding`:
 
 ```rust
 use verbora_tfidf::Encoding;
 
 fn main() {
     assert!(Encoding::parse("BASE64").is_some()); // case-insensitive
-    assert!(Encoding::parse("raw").is_none());     // the dead switch's own branch
+    assert!(Encoding::parse("raw").is_none());     // not an accepted encoding
     assert!(Encoding::parse("buffer").is_none());
 
-    // Node: Buffer.from('this document is about node.').toString('base64')
     assert_eq!(
         Encoding::Base64.decode(b"this document is about node."),
         "dGhpcyBkb2N1bWVudCBpcyBhYm91dCBub2RlLg=="
@@ -1065,12 +1056,11 @@ fn main() {
 }
 ```
 
-`Utf8` decoding is lossy the same way Node's is: malformed sequences become
-U+FFFD (`String::from_utf8_lossy`), not an error. `Utf16Le` drops a trailing
-odd byte rather than erroring, matching Node. There is no `mmap`, no
-byte-order-mark handling beyond what each encoding does natively, and no
-detection — the caller names the encoding, exactly as `addFileSync`'s
-signature requires.
+`Utf8` decoding is lossy: malformed sequences become U+FFFD
+(`String::from_utf8_lossy`), not an error. `Utf16Le` drops a trailing odd
+byte rather than erroring. There is no `mmap`, no byte-order-mark handling
+beyond what each encoding does natively, and no detection — the caller
+always names the encoding explicitly.
 
 ## Unicode and language notes
 
@@ -1103,12 +1093,11 @@ fn main() {
 **`RawDocument` string-shaped documents genuinely are
 <span class="badge badge-utf16">UTF-16</span>-sensitive.**
 This is specific to TF-IDF's own document model, not inherited from a
-tokenizer: `buildDocument` returns a bare the reference string unchanged when it
-is handed one (reachable through `DocumentInput::Raw(JsonValue::Str(..))`, or
-through any corpus restored via `from_json` whose `documents` array holds a
-plain string). Reading a term from such a slot is then a reference property
-read on a **string**, and the reference indexes strings by UTF-16 code unit —
-`s[i]` and `for (i in s)` walk code-unit positions, not Rust `char`s or UTF-8
+tokenizer: `DocumentInput::Raw(JsonValue::Str(..))` stores the string
+unchanged (reachable directly, or through any corpus restored via
+`from_json` whose `documents` array holds a plain string). Reading a term
+from such a slot then indexes the string the way this crate's document
+model indexes strings — **by UTF-16 code unit**, not Rust `char`s or UTF-8
 byte offsets:
 
 ```rust
@@ -1125,8 +1114,7 @@ fn main() {
     let emoji = Document::Raw(RawDocument::new(JsonValue::Str("a\u{1F600}b".into())));
     assert_eq!(emoji.for_in_keys(&interner), ["0", "1", "2", "3"]);
     // Indexing lands ON one half of the pair: an unpaired surrogate, rendered
-    // as U+FFFD by String::from_utf16_lossy, same as the reference would hand
-    // back an unpaired surrogate code point.
+    // as U+FFFD by String::from_utf16_lossy.
     assert_eq!(emoji.get("1", &interner).unwrap().to_text(), "\u{FFFD}");
     assert_eq!(emoji.get("3", &interner).unwrap().to_text(), "b");
 }
@@ -1143,8 +1131,8 @@ it started with, and that expansion is what then gets tokenized.
 
 **Assuming `DocumentInput::Tokens` behaves like `DocumentInput::Text` minus
 tokenizing.** It also skips lowercasing and stop-word filtering — both, not
-just one — because the reference's `buildDocument` takes an entirely
-different branch for an array argument. `["The", "the", "THE"]` is three
+just one — because `DocumentInput::Tokens` takes an entirely different
+internal path from `DocumentInput::Text`. `["The", "the", "THE"]` is three
 distinct terms, not one:
 
 ```rust
@@ -1174,12 +1162,12 @@ when nothing is about to read them again soon. See
 [The idf cache and `restore_cache`](#the-idf-cache-and-restore-cache).
 
 **Treating `list_terms`'s order as arbitrary.** It is not: ties are broken by
-the document's own `for…in` order (array-index-like keys first, ascending,
-then insertion order), applied through the reference engine's specific TimSort rather than an
-arbitrary stable sort. Two runs over the same corpus produce the same order
-every time, including when a score is `NaN` — see
-[`for…in` order in `list_terms`](#for-in-order-in-list-terms) and
-[`list_terms`' sort is the reference engine's `TimSort`](#list-terms-sort-is-the-reference-engine-s-timsort-not-a-stable-sort).
+the document's own enumeration order (array-index-like keys first,
+ascending, then insertion order), applied through a specific TimSort
+implementation rather than an arbitrary stable sort. Two runs over the same
+corpus produce the same order every time, including when a score is `NaN` —
+see [`for…in` order in `list_terms`](#for-in-order-in-list-terms) and
+[`list_terms`'s sort is TimSort](#list-terms-s-sort-is-timsort-not-merely-a-stable-sort).
 
 ## Related
 
@@ -1260,7 +1248,7 @@ impl TfIdf {
 }
 
 pub enum TfIdfError { UndefinedRead(String), NullRead(String), InvalidEncoding(String), Io(std::io::Error) }
-impl std::fmt::Display for TfIdfError { /* byte-identical to the reference TypeError text */ }
+impl std::fmt::Display for TfIdfError { /* fixed, documented error text; see the crate's own tests */ }
 impl std::error::Error for TfIdfError { fn source(&self) -> Option<&(dyn std::error::Error + 'static)>; }
 impl From<std::io::Error> for TfIdfError { fn from(e: std::io::Error) -> Self; }
 
@@ -1280,9 +1268,9 @@ pub enum DocKey { Undefined, Null, Bool(bool), Num(f64), Str(std::sync::Arc<str>
 impl DocKey {
     pub fn string(s: impl AsRef<str>) -> Self;
     pub fn object(value: JsonValue) -> Self;
-    pub fn strict_eq(&self, other: &Self) -> bool;   // reference ===
+    pub fn strict_eq(&self, other: &Self) -> bool;   // strict equality, no type coercion
     pub fn is_truthy(&self) -> bool;
-    pub fn plus_one(&self) -> Self;                   // the reference `key + 1`
+    pub fn plus_one(&self) -> Self;                   // __key accumulation: string concat or numeric increment
     pub fn as_value(&self) -> DynValue;
     pub fn write_json(&self, out: &mut String) -> bool;
 }
@@ -1315,7 +1303,7 @@ impl RawDocument {
     pub fn arc(&self) -> &std::sync::Arc<JsonValue>;
 }
 
-// value — the slice of reference value semantics this crate depends on
+// value — the dynamic-value semantics this crate's document model depends on
 pub enum JsonValue { Null, Bool(bool), Num(f64), Str(String), Arr(Vec<JsonValue>), Obj(Vec<(String, JsonValue)>) }
 impl JsonValue {
     pub fn own(&self, key: &str) -> Option<&JsonValue>;
@@ -1345,13 +1333,13 @@ impl DynValue {
     pub fn counts_as_present(&self) -> bool;   // `value && value > 0`
 }
 
-pub fn number_to_string(x: f64) -> String;   // the reference language Number::toString
-pub fn string_to_number(s: &str) -> f64;     // the reference language ToNumber
+pub fn number_to_string(x: f64) -> String;   // this crate's own numeric formatting rules
+pub fn string_to_number(s: &str) -> f64;     // this crate's own numeric parsing rules
 pub fn write_json_string(s: &str, out: &mut String);
 pub fn array_index(key: &str) -> Option<u32>;
 
 // mathlog
-pub fn math_log(x: f64) -> f64;   // the reference engine's Math.log, bit-identical
+pub fn math_log(x: f64) -> f64;   // fdlibm's __ieee754_log, transcribed bit-for-bit
 
 // encoding
 pub enum Encoding { Utf8, Ascii, Latin1, Base64, Base64Url, Hex, Utf16Le }

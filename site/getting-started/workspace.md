@@ -7,7 +7,7 @@ easier to navigate, and explains why some things live where they do.
 
 ```text
 crates/
-  verbora-core/            traits, Token, StopWords, reference string semantics
+  verbora-core/            traits, Token, StopWords, whitespace helpers
   verbora-tokenizers/      25 tokenizers, the Tokenize trait
   verbora-distance/        Levenshtein, Damerau, Jaro–Winkler, Dice, Hamming
   verbora-phonetics/       SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff
@@ -29,13 +29,13 @@ crates/
   verbora-tagger/          Brill POS tagger, trainer, tester ┘  (see roadmap)
 ```
 
-Every API the reference exports is implemented and tested — the split
+All 105 public APIs are implemented and tested — the split
 above is about documentation coverage, not code completeness. See the
 [roadmap](../features/roadmap.md) for the five crates still missing a feature
 page.
 
 The dependency graph is deliberately shallow, and acyclic apart from the one
-place a subsystem's own reference tree calls another (phonetics tokenizes
+place a subsystem's own dependency tree calls another (phonetics tokenizes
 internally for `tokenize_and_phoneticize`; the transliterator's Japanese-only
 sibling shares the normalizer tables rather than duplicating them):
 
@@ -79,7 +79,7 @@ with a comment explaining, per omitted crate, why it is absent.
 | [`verbora-classifiers`](../features/classifiers.md) | `BayesClassifier`, `LogisticRegressionClassifier`, `MaxEntClassifier` |
 
 **526,341 recorded cases in total**, across 791 suites, every one of them
-captured from the reference rather than transcribed by hand. See
+machine-generated rather than transcribed by hand. See
 the [roadmap](../features/roadmap.md).
 
 ## Supporting directories
@@ -115,8 +115,8 @@ holding, fails the build — see
 The recorded behaviour was captured once and is
 checked in as data — every rule table, stop-word list, character class and
 model weight under each crate's own `src/data/` is machine-derived, never
-transcribed by hand. The reference tree itself is **not** part of this
-workspace and is not a dependency of anything:
+transcribed by hand. Every one of those recordings is replayed and checked
+by the workspace's own test suite:
 
 ```bash
 cargo test --workspace

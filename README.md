@@ -147,8 +147,8 @@ for which crates, and the measured numbers.
 
 ### Competitive benchmarks
 
-Verbora is measured against the wider **Rust** ecosystem: 205 real,
-version-pinned benchmarks across 12 modules — strsim, rapidfuzz, tantivy,
+Verbora is measured against the wider **Rust** ecosystem: 290 real,
+version-pinned benchmarks across 13 modules — strsim, rapidfuzz, tantivy,
 rust-stemmers, rphonetic, symspell, harper-core, smartcore and more — plus a
 language-detection accuracy report. Every loss is published alongside every
 win, with its investigated cause. See

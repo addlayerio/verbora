@@ -93,7 +93,7 @@ tokens. Nothing is copied.
 
 <div class="perf">
 <div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager — <code>ngrams_iter(…).map(Cow::into_owned).collect()</code></span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Vec&lt;Vec&lt;T&gt;&gt;</code>, detached from the sequence — matches the reference's <code>string[][]</code></span></div>
+<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Vec&lt;Vec&lt;T&gt;&gt;</code>, detached from the sequence — a plain owned nested vector</span></div>
 <div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One outer <code>Vec</code>, one <code>Vec</code> per n-gram, one <code>T::clone</code> per element</span></div>
 <div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">No</span></div>
 <div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
@@ -244,10 +244,10 @@ fn main() {
 }
 ```
 
-The recorded reference baseline puts numbers on the shape of this, over a
-4,096-word input:
+A baseline recorded from a widely-used JavaScript NLP library puts numbers on
+the shape of this, over a 4,096-word input:
 
-| Reference operation | ns/op |
+| Operation | ns/op |
 |---|---:|
 | `tokenize` alone | 152,211 |
 | `ngrams_str` (tokenize + window) | 201,660 |
@@ -258,11 +258,11 @@ is a property of the algorithm rather than of the runtime, which is why the
 pre-tokenized API exists at all.
 
 <div class="callout callout-note">
-<strong>Note.</strong> No Rust-versus-the reference comparison has been published
+<strong>Note.</strong> No Rust-versus-JavaScript comparison has been published
 for this crate — <code>docs/PERFORMANCE.md</code> covers the 26
-<code>verbora-distance</code> benchmarks only. The table above is the recorded
-the reference baseline, quoted to show the <em>internal</em> ratio between
-tokenizing and windowing. See <a href="../benchmarks/">Benchmarks</a>.
+<code>verbora-distance</code> benchmarks only. The table above is a baseline
+recorded from that JavaScript library, quoted to show the <em>internal</em>
+ratio between tokenizing and windowing. See <a href="../benchmarks/">Benchmarks</a>.
 </div>
 
 ### If your loop is over documents
@@ -307,13 +307,13 @@ tokenizer.
 | Reads global state | ✅ | ❌ |
 | Visible in the signature | ❌ | ✅ |
 | Safe to call from a multi-threaded test suite | ⚠️ | ✅ |
-| Reproduces `NGrams.setTokenizer` semantics | ✅ | n/a |
 
-**Prefer `ngrams_str_with`.** The global exists because the reference's
-`setTokenizer` rebinds a module-level variable for the entire process, and the
-reference's own spec suite depends on that being observable. Verbora reproduces
-it rather than quietly making the tokenizer a parameter — but that is a compatibility
-obligation, not a recommendation.
+**Prefer `ngrams_str_with`.** The global exists to support callers who need a
+single, process-wide tokenizer that can be rebound at runtime — a
+`set_tokenizer` call changes what every subsequent `ngrams_str` call in the
+process sees. That is a real, deliberate capability, not an accident of the
+API, but it is there for compatibility, not as a recommendation: most callers
+should pass the tokenizer explicitly.
 
 ```rust
 use verbora_ngrams::{FnTokenizer, current_tokenizer, ngrams_str_with};
@@ -365,13 +365,13 @@ on a repeat. So if you only need the windows, do not ask for the statistics.
 Conversely, if you need counts but not the list, `ngrams_with_stats` is still
 building the full `Vec<Cow<…>>` of n-grams as a side effect. Folding
 `ngrams_iter` into your own map (shown above) skips that, at the cost of
-the reference's insertion order and the `Nr` map — which is usually the trade you
-wanted.
+the first-seen insertion order and the `Nr` count-of-counts map that
+`ngrams_with_stats` builds — which is usually the trade you wanted.
 
 ```text
 I want frequency information
 │
-├── I need the reference's exact {ngrams, frequencies, Nr, numberOfNgrams} shape
+├── I need the {ngrams, frequencies, Nr, numberOfNgrams} shape
 │      └── ngrams_with_stats() / bigrams_with_stats() / trigrams_with_stats()
 │
 ├── I need counts only, my own key format is fine
@@ -384,18 +384,17 @@ I want frequency information
 
 ## Chinese: which door
 
-`zh` splits per **UTF-16 code unit**, matching the reference's `String#split('')`,
-which is not the same as per character.
+`zh` splits per **UTF-16 code unit**, which is not the same as per character.
 
 | API | Element type | Astral input | Use when |
 |---|---|---|---|
-| `zh::ngrams_zh` | `Cow<'a, str>` | correct shape; torn surrogate halves render as `U+FFFD` | BMP text — all of CJK — and you want the reference's shape |
+| `zh::ngrams_zh` | `Cow<'a, str>` | correct shape; torn surrogate halves render as `U+FFFD` | BMP text — all of CJK — and string elements are fine |
 | `zh::ngrams_zh_utf16` | `&'a [u16]` | exact, round-trippable | the input may contain astral characters |
 | `zh::split_lossy` + `ngrams` | `Cow<'a, str>` | as `ngrams_zh` | large documents: split once, then window with borrowed tuples |
 
-For **array** input there is no choice to make: `NGramsZH.ngrams(array, …)` and
-`NGrams.ngrams(array, …)` are the same function in the reference, so use
-`ngrams`.
+For **array** input there is no choice to make: `zh` only changes how a
+*string* is split into elements before windowing; once you already have a
+slice, use `ngrams` directly.
 
 ## What this crate does not have
 
@@ -448,12 +447,12 @@ to search for them.
 | stop early, or fold windows into something else | `ngrams_iter` |
 | want indexable windows and the tokens outlive them | `ngrams` (or `bigrams` / `trigrams`) |
 | need the tuples after the tokens are gone | `ngrams_owned` |
-| need the reference's `{ngrams, frequencies, Nr, numberOfNgrams}` | `ngrams_with_stats` |
+| need the `{ngrams, frequencies, Nr, numberOfNgrams}` shape | `ngrams_with_stats` |
 | have a string and control the tokenizer | `ngrams_str_with` |
-| have a string and are porting `NGrams.setTokenizer` behaviour | `ngrams_str` |
+| have a string and want the process-global tokenizer | `ngrams_str` |
 | have Chinese BMP text | `zh::ngrams_zh` |
 | have Chinese text that may contain astral characters | `zh::code_units` + `zh::ngrams_zh_utf16` |
-| are porting `multrigrams` | `multrigrams` — an exact alias of `ngrams` |
+| prefer the `multrigrams` name | `multrigrams` — an exact alias of `ngrams` |
 
 ## Related
 

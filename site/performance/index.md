@@ -4,10 +4,11 @@ This is not a Rust tutorial. It is an account of the specific techniques Verbora
 uses, where each one appears in the API, and what it means for the code you
 write against it.
 
-The organising claim is simple: **most of Verbora's speed over the reference comes
-from not allocating**, not from clever arithmetic. The algorithms are, by
-construction, the same algorithms — the specification requires it. What differs is the data
-that flows through them.
+The organising claim is simple: **most of Verbora's speed advantage over a
+widely-used JavaScript NLP library comes from not allocating**, not from
+clever arithmetic. The algorithms themselves are the well-known, standard
+ones — Levenshtein is Levenshtein, Jaro-Winkler is Jaro-Winkler. What differs
+is the data that flows through them.
 
 ## The techniques, and where to find them
 
@@ -39,8 +40,8 @@ breaks behaviour is not an optimisation. The full test suite must still pass.
 
 **No optimisation is claimed without a measurement.** And the measurements
 include the ones that went the wrong way. `verbora-distance`'s Jaro–Winkler
-benchmark first came in at **0.6×** — Rust *slower* than the reference —
-because of two `vec![false; len]` allocations per call. Moving the match
+benchmark first came in at **0.6×** — Rust *slower* than a widely-used
+JavaScript NLP library — because of two `vec![false; len]` allocations per call. Moving the match
 flags to a stack buffer for inputs up to 128 units fixed it: the benchmark
 measures **15.3 ns**, a **1.8×** speedup, with the test suite still green.
 The story is
@@ -112,7 +113,7 @@ structurally — not a measurement. Anything presented as a number comes from
 <code>verbora-distance</code> only.
 </div>
 
-Subsystems with Criterion benchmarks in-tree but no published the reference
+Subsystems with Criterion benchmarks in-tree but no published cross-language
 comparison yet: tokenizers, phonetics, n-grams, normalizers, inflectors, trie.
 The benchmark files exist (`crates/*/benches/`) and run; the cross-language
 tables have not been generated for them. Until they are, this guide is careful to

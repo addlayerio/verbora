@@ -1,12 +1,13 @@
 # String distance and similarity
 
 `verbora-distance` answers one question in seven ways: *how far apart are these
-two strings?* It is tested against the reference distance metrics — Levenshtein and
-Damerau–Levenshtein (each in a scalar and a substring-search flavour), Jaro,
-Jaro–Winkler, the Sørensen–Dice coefficient, and Hamming — with the reference
-implementation's exact results, including the ones that are arguably wrong.
-It is the only Verbora subsystem with published, paired benchmark numbers
-against the reference.
+two strings?* It implements seven distance and similarity metrics —
+Levenshtein and Damerau–Levenshtein (each in a scalar and a substring-search
+flavour), Jaro, Jaro–Winkler, the Sørensen–Dice coefficient, and Hamming —
+with exact, test-pinned results, including a handful that are arguably wrong
+by design (see [Faithful, not flattering](#faithful-not-flattering)). It is
+the only Verbora subsystem with published, paired benchmark numbers against a
+widely-used JavaScript NLP library.
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> All <strong>7</strong> distance APIs are
@@ -26,8 +27,10 @@ and negative search offsets. <code>cargo test -p verbora-distance</code> runs
   phrase most nearly occurs (`levenshtein_search`).
 - **Fixed-width code comparison.** Counting differing positions in equal-length
   identifiers, checksums or binary strings (`hamming`).
-- **Porting a reference codebase.** Every result matches, so a migration cannot
-  silently change what your application ranks first.
+- **Deterministic, fully specified results.** Every metric's behavior —
+  including the edge cases most implementations leave undefined — is
+  documented and test-pinned, so a change of implementation cannot silently
+  change what your application ranks first.
 
 ## When not to use it
 
@@ -67,10 +70,11 @@ fn main() {
 
 ## Direction and range differ per metric
 
-This is the first thing to internalise, and the most common source of a silently
-inverted ranking. The reference is not internally consistent about direction, and
-this port does not "fix" it — doing so would change every existing caller's
-results.
+This is the first thing to internalise, and the most common source of a
+silently inverted ranking. Verbora is not internally consistent about
+direction across all seven metrics, and does not "fix" that — some are
+distances (lower is closer), some are similarities (higher is closer), and
+mixing them in one ranking silently inverts it.
 
 | Metric | Return type | Range | Direction | Identical inputs |
 |---|---|---|---|---|
@@ -175,10 +179,11 @@ rows and swaps them. That is still the working set for weighted
 (non-default) costs. With the default unit costs, `levenshtein` instead
 takes a Myers/Hyyrö bit-vector fast path at every length — one `u64` word
 for operands up to 64 units, a block extension beyond that — which is now
-the single largest source of the
-measured speedup over the reference. Either way the reference allocates a
-cell object per matrix position regardless of what the caller asked for. See
-[Measured against the reference](#measured-against-the-reference) below.
+the single largest source of the measured speedup over a widely-used
+JavaScript NLP library benchmarked alongside it, whose implementation
+allocates a cell object per matrix position regardless of what the caller
+asked for. See [Measured against a JavaScript baseline](#measured-against-a-javascript-baseline)
+below.
 
 <div class="callout callout-note">
 <strong>Note.</strong> <code>levenshtein</code> reads only three of the five
@@ -284,12 +289,12 @@ fn main() {
 }
 ```
 
-Tie-breaking is reproduced deliberately. The reference picks the cheapest
-predecessor with underscore's `_.min`, whose comparison is a strict `<`, so the
-**first** candidate wins a tie; the candidate order is insert, delete,
-substitute, unrestricted-transpose, restricted-transpose. Totals do not depend on
-that order, but the recorded parent does — and the parent chain is exactly what
-produces `offset` and `substring`.
+Tie-breaking is deterministic and specific: the cheapest predecessor wins
+using a strict `<` comparison, so the **first** candidate in a fixed order
+wins a tie; that order is insert, delete, substitute, unrestricted-transpose,
+restricted-transpose. Totals do not depend on that order, but the recorded
+parent does — and the parent chain is exactly what produces `offset` and
+`substring`.
 
 ### `jaro` and `jaro_winkler`
 
@@ -339,9 +344,11 @@ Two behaviours are worth knowing before you rely on the score:
 <div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Longer strings where shared content matters more than order</span></div>
 </div>
 
-Dice compares the *sets* of adjacent code-unit pairs. Before that it lower-cases
-each input, collapses runs of the reference `\s` whitespace to one space, and trims
-— so `"Hello  World"` and `"hello world"` score 1.0. Because the bigrams form a
+Dice compares the *sets* of adjacent code-unit pairs. Before that it
+lower-cases each input, collapses runs of whitespace to one space using this
+crate's own `is_whitespace` predicate (not Rust's `char::is_whitespace` —
+see [Unicode and language notes](#unicode-and-language-notes)), and trims —
+so `"Hello  World"` and `"hello world"` score 1.0. Because the bigrams form a
 set, repeats collapse: `"aaaa"` and `"aa"` both reduce to `{"aa"}`.
 
 ```rust
@@ -390,17 +397,17 @@ fn main() {
 }
 ```
 
-`hamming_checked` is a Verbora addition, not a reference API. It is the same
-computation with `INCOMPARABLE` mapped to `None`, so `?`, `filter_map`,
-`unwrap_or` and the rest of the `Option` vocabulary apply. **Use it by default**;
-reach for `hamming` when you are comparing output against the reference
-reference or feeding a system that expects the `-1`.
+`hamming_checked` is a Verbora addition. It is the same computation with
+`INCOMPARABLE` mapped to `None`, so `?`, `filter_map`, `unwrap_or` and the
+rest of the `Option` vocabulary apply. **Use it by default**; reach for
+`hamming` when your own code expects the `-1` sentinel, or when feeding a
+system that does.
 
-The length check runs on the *original* strings, before any case folding — which
-matters because Unicode case mapping can change length (`İ` lowercases to two
-code units; `ß` uppercases to `SS`). After folding, the comparison loop is bounded
-by the first string and reads past the end of the second as "no character", which
-never equals anything — reproducing what the reference's `undefined` does.
+The length check runs on the *original* strings, before any case folding —
+which matters because Unicode case mapping can change length (`İ` lowercases
+to two code units; `ß` uppercases to `SS`). After folding, the comparison
+loop is bounded by the first string and treats a read past the end of the
+second as "no character", which never equals anything.
 
 ### Parallel batch (`par_*_batch`, feature `parallel`)
 
@@ -482,8 +489,8 @@ All five fields, with the exact defaults from `Default::default()`:
 | `transposition_cost` | `f64` | `1.0` | Damerau variants only | cost of swapping two adjacent symbols |
 | `restricted` | `bool` | `false` | Damerau variants only | `true` selects optimal string alignment (3 rows); `false` selects unrestricted Damerau (full matrix) |
 
-The costs are `f64` rather than `usize` because the reference accepts arbitrary
-the reference numbers here — fractions and zero included — and callers do pass them.
+The costs are `f64` rather than `usize` because this crate accepts arbitrary
+numbers here — fractions and zero included — and real callers do pass them.
 Zero costs are legal and produce zero distances.
 
 ```rust
@@ -550,10 +557,10 @@ shorter string as <code>target</code> allocates less.
 | `ignore_case` | `bool` | `false` | lower-cases both inputs before comparing (after the identity short-circuit, which sees the originals) |
 | `dj` | `Option<f64>` | `None` | a precomputed Jaro similarity; supplying it skips the `O(nm)` matching pass entirely |
 
-`dj` mirrors the reference `options.dj`. It is a genuine optimisation when you
-already hold the Jaro score — for example when re-scoring the same pair under
-several prefix policies — and a footgun otherwise, because nothing checks that
-the number you supply is the Jaro similarity of these two strings.
+`dj` is a genuine optimisation when you already hold the Jaro score — for
+example when re-scoring the same pair under several prefix policies — and a
+footgun otherwise, because nothing checks that the number you supply is the
+Jaro similarity of these two strings.
 
 ```rust
 use verbora_distance::jaro_winkler::{Options, jaro, jaro_winkler};
@@ -589,11 +596,11 @@ pub struct SearchResult {
 | `distance` | the edit distance from `source` to that substring |
 | `offset` | the substring's start in the target, **in UTF-16 code units**, signed |
 
-`offset` is `isize` and is not defensive typing. When the parent backtrace exits
-through column 0, the reference implementation computes `col - 1 == -1` and
-reports it. The reference then calls `target.slice(-1, end)`, which counts from the
-*end* of the string rather than clamping, and the returned `substring` reflects
-that. Verbora reproduces both halves verbatim:
+`offset` is `isize` and is not defensive typing. When the parent backtrace
+exits through column 0, `col - 1 == -1` is a real, reachable value, and
+Verbora reports it as-is. The matching `substring` is then sliced the way a
+negative index counts from the *end* of the target string rather than being
+clamped, and `substring` reflects that:
 
 ```rust
 use verbora_distance::levenshtein::{Options, damerau_levenshtein_search};
@@ -603,7 +610,7 @@ fn main() {
     let r = damerau_levenshtein_search("ab", "ba", &opts);
 
     assert_eq!(r.offset, -1);       // genuinely negative, not clamped
-    assert_eq!(r.substring, "a");   // the reference's "ba".slice(-1, 2)
+    assert_eq!(r.substring, "a");   // "ba" sliced from index -1 (the last character)
     assert_eq!(r.distance, 1.0);
 }
 ```
@@ -616,11 +623,12 @@ return a negative offset.** The Damerau variants can: a restricted transposition
 parents to `(r-2, c-2)`, and an unrestricted one to `(lrm-1, lcm-1)`, either of
 which reaches column 0 from column 2.
 
-Two rules follow. **Prefer `substring` to re-slicing the target**: it is already
-the matched text, and it was cut with the reference's slice semantics, which your
-own indexing will not reproduce. If you must use `offset` as an index, remember
-it is a UTF-16 index — a Rust byte index only when the target is ASCII — and
-handle the negative case explicitly:
+Two rules follow. **Prefer `substring` to re-slicing the target**: it is
+already the matched text, and it was cut with the negative-index slice
+semantics described above, which ordinary Rust indexing will not reproduce.
+If you must use `offset` as an index, remember it is a UTF-16 index — a Rust
+byte index only when the target is ASCII — and handle the negative case
+explicitly:
 
 ```rust
 use verbora_distance::levenshtein::{Options, levenshtein_search};
@@ -648,9 +656,10 @@ pub trait StringMetric {
 }
 ```
 
-It deliberately does **not** normalise direction. `IS_SIMILARITY` records which
-convention a metric uses so generic code can adapt, while every metric keeps the
-output the reference produces.
+It deliberately does **not** normalise direction. `IS_SIMILARITY` records
+which convention a metric uses so generic code can adapt, while each metric
+keeps its own documented output — distance or similarity, exactly as
+described in [Direction and range differ per metric](#direction-and-range-differ-per-metric).
 
 `verbora-distance` provides five marker types implementing it:
 
@@ -728,22 +737,22 @@ over <code>StringMetric</code> must handle both, because the trait has no
 
 ## Advanced usage: the `units` module
 
-Every metric here indexes text the way the reference does, by UTF-16 code unit,
-because that choice is *observable in the results*. `verbora_distance::units` is
-the mechanism, and it is public so you can use the same fast path in your own
-code.
+Every metric here indexes text by UTF-16 code unit, because that choice is
+*observable in the results*. `verbora_distance::units` is the mechanism, and
+it is public so you can use the same fast path in your own code.
 
 ### Why UTF-16 indexing is observable
 
-The reference strings are sequences of UTF-16 code units. `s.length`, `s[i]` and
-`s.slice(i, j)` all count code units, and any character outside the Basic
-Multilingual Plane counts as **two**. Rust's `char` is a Unicode scalar value, so
-a straightforward port disagrees with the reference on astral-plane input:
+`verbora-distance` treats every string as a sequence of UTF-16 code units:
+length, indexing and slicing all count code units, and any character outside
+the Basic Multilingual Plane counts as **two**. Rust's `char` is a Unicode
+scalar value, so a straightforward char-based implementation disagrees with
+this crate on astral-plane input:
 
 ```text
-LevenshteinDistance("a😀b", "ab")
-  the reference : 2   (lengths 4 and 2; two surrogate halves deleted)
-  Rust chars : 1   (lengths 3 and 2; one character deleted)
+levenshtein("a😀b", "ab")
+  UTF-16 code units : 2   (lengths 4 and 2; two surrogate halves deleted)
+  Rust chars        : 1   (lengths 3 and 2; one character deleted)
 ```
 
 Verbora returns 2, and there are recorded fixtures asserting it:
@@ -753,10 +762,10 @@ use verbora_distance::levenshtein;
 use verbora_distance::units::utf16_len;
 
 fn main() {
-    assert_eq!(utf16_len("a😀b"), 4);        // the reference's String#length
+    assert_eq!(utf16_len("a😀b"), 4);        // UTF-16 code-unit length
     assert_eq!("a😀b".chars().count(), 3);   // Rust's idea of length
 
-    // The metric follows the reference: two surrogate halves are deleted.
+    // Two surrogate halves are deleted, not one Unicode scalar value.
     assert_eq!(levenshtein("a😀b", "ab", &Default::default()), 2.0);
     // BMP characters are one unit each, so this is the intuitive answer.
     assert_eq!(levenshtein("café", "cafe", &Default::default()), 1.0);
@@ -805,21 +814,22 @@ usize>`. `UnitMap<T>` (`get`, `set`, `clear`) is the shared interface.
 
 ### `utf16_len`
 
-`utf16_len(s)` is the reference's `String#length` for a Rust `&str`. It returns
-`s.len()` unchanged for ASCII, and otherwise counts `char::len_utf16` **without
-allocating** — so it is the cheap way to ask "how long would the reference think
-this is?", for example as a pre-filter before an expensive comparison.
+`utf16_len(s)` computes the UTF-16 code-unit length of a Rust `&str`. It
+returns `s.len()` unchanged for ASCII, and otherwise counts `char::len_utf16`
+**without allocating** — so it is the cheap way to ask "how many UTF-16 code
+units would this string take?", for example as a pre-filter before an
+expensive comparison.
 
 ## Performance characteristics
 
 ### Working set per mode
 
-The reference always materialises a full `(n+1) × (m+1)` matrix of heap-allocated
-cell objects, each holding a cost and a parent coordinate, even when only the
-final scalar is wanted. That is `O(nm)` allocations of `O(nm)` pointer-chased
-objects. This port picks the cheapest structure — and, wherever a faster
-*algorithm* exists, the fastest algorithm — that can answer the
-question asked:
+A widely-used JavaScript NLP library benchmarked alongside this crate always
+materialises a full `(n+1) × (m+1)` matrix of heap-allocated cell objects,
+each holding a cost and a parent coordinate, even when only the final scalar
+is wanted — `O(nm)` allocations of `O(nm)` pointer-chased objects. Verbora
+instead picks the cheapest structure — and, wherever a faster *algorithm*
+exists, the fastest algorithm — that can answer the question asked:
 
 | Mode | Working set | Why |
 |---|---|---|
@@ -836,14 +846,14 @@ flat `Vec<f64>`, parents in another `Vec<(u32, u32)>` — so the hot cost sweep 
 contiguous and the parents, touched only during backtracking, never pollute the
 cache line during the inner loop.
 
-### Measured against the reference
+### Measured against a JavaScript baseline
 
-26 benchmarks, **median speedup 23.4×**, range **1.4×–3307.4×**, measured on shared
-input files that both implementations read (Intel i9-14900KF, rustc 1.97.1
-`--release`, Node v25.9.0 with the JIT warmed, the reference). Full
-methodology in [Performance](../performance/index.md).
+26 benchmarks, **median speedup 23.4×**, range **1.4×–3307.4×**, measured on
+shared input files that both implementations read (Intel i9-14900KF, rustc
+1.97.1 `--release`, Node v25.9.0 with the JIT warmed). Full methodology in
+[Performance](../performance/index.md).
 
-| Benchmark | Reference | Verbora | Speedup |
+| Benchmark | JavaScript | Verbora | Speedup |
 |---|--:|--:|--:|
 | `levenshtein/ascii/4` | 791.0 ns | 14.7 ns | **53.8×** |
 | `levenshtein/ascii/1024` | 96.18 ms | 29.08 µs | **3307.4×** |
@@ -875,10 +885,11 @@ Three things in that table are worth reading carefully:
   weighted (non-default) costs; the full matrix survives only in search
   mode.
 - **The smallest wins are at four characters** (`hamming/4` 1.4×,
-  `jaro_winkler/4` 1.8×). At that size the work is a handful of comparisons, both
-  runtimes are dominated by call overhead, and the reference engine optimises the shape well. Small,
-  genuine wins are the honest expectation; a large reported gap here would be a
-  sign of a rigged benchmark.
+  `jaro_winkler/4` 1.8×). At that size the work is a handful of comparisons,
+  both runtimes are dominated by call overhead, and the JavaScript baseline's
+  JIT already optimises this shape well. Small, genuine wins are the honest
+  expectation; a large reported gap here would be a sign of a rigged
+  benchmark.
 - **The variant benchmark names are legacy.** `plain_2row` and
   `damerau_restricted_3row` both run bit-parallel kernels at their fixed
   64-character input — **1066.6×** and **1059.5×**, sitting together rather
@@ -892,8 +903,8 @@ Three things in that table are worth reading carefully:
 Both sides read their inputs from the same files in `benches/data/`, generated
 once by `tools/bench-data/generate.py`, so neither can be tuned to a friendlier
 distribution. The Rust side is `crates/verbora-distance/benches/distance.rs`
-(Criterion); the reference side was measured with its own harness, which warms the
-JIT before measuring.
+(Criterion); the JavaScript side was measured with its own harness, which
+warms the JIT before measuring.
 
 ```text
 python3 tools/bench-data/generate.py       # shared inputs (run once)
@@ -903,11 +914,12 @@ cargo bench -p verbora-distance         # Rust, via Criterion
 ### A measured regression, and its fix
 
 An early benchmark run put `jaro_winkler/4` at **0.6×** — Rust *slower* than
-the reference. The cause was two `vec![false; len]` allocations per call: the reference engine's
-`new Array(4)` is nearly free, `malloc` is not.
+the JavaScript library it was benchmarked against. The cause was two
+`vec![false; len]` allocations per call: a JavaScript engine's array
+allocation for a handful of elements is nearly free, `malloc` is not.
 
 Moving the match flags to a stack buffer for inputs up to 128 units fixed it:
-`jaro_winkler/4` measures **15.3 ns**, a **1.8×** speedup over the reference,
+`jaro_winkler/4` measures **15.3 ns**, a **1.8×** speedup over that baseline,
 with the test suite still green. Words are short by nature, so the stack path
 is the common case rather than a micro-optimisation for a rare one.
 
@@ -945,9 +957,10 @@ Three details you would only find by reading the source:
   `jaro`, once inside the shared-prefix scan — because each calls `dispatch`
   independently.
 - **`dice_coefficient` never takes the ASCII path.** Its bigram keys are
-  `(u16, u16)` pairs, so `sanitize` builds a `Vec<u16>` regardless of input. It
-  still avoids the reference's `String`-per-bigram allocation, which is where its
-  win comes from.
+  `(u16, u16)` pairs, so `sanitize` builds a `Vec<u16>` regardless of input.
+  It still avoids allocating one `String` per bigram — the more expensive
+  approach a naive implementation would take — which is where its measured
+  speedup comes from.
 
 For the general treatment see [Allocation](../performance/allocation.md).
 
@@ -956,14 +969,15 @@ For the general treatment see [Allocation](../performance/allocation.md).
 - **Lengths and indices are UTF-16 code units** everywhere in this crate: the
   distance between `"a😀b"` and `"ab"` is 2, `hamming` compares
   `utf16_len`-equal strings, `SearchResult::offset` is a UTF-16 index, and
-  Dice's bigrams are code-unit pairs. - **`substring` may contain U+FFFD.** A search slice can split a surrogate pair
-  exactly as the reference's `slice` does; lossy decoding maps the lone surrogate to
-  the replacement character, the closest well-formed Rust representation.
+  Dice's bigrams are code-unit pairs.
+- **`substring` may contain U+FFFD.** A search slice can split a surrogate
+  pair; lossy decoding maps the lone surrogate to the replacement character,
+  the closest well-formed Rust representation.
 - **Case folding is `str::to_lowercase`**, which is full Unicode lowercasing and
   can change length. `hamming` compares lengths *before* folding, and
   `jaro_winkler` short-circuits on equality *before* folding, so both orderings
   are observable.
-- **Dice's whitespace rule is the reference's `\s`**, not Rust's
+- **Dice's whitespace rule is a specific `\s`-equivalent class**, not Rust's
   `char::is_whitespace`. `verbora_core::is_whitespace` is the shared
   predicate; the two sets are not interchangeable.
 - **No normalisation is applied.** `"café"` composed (`e` + U+0301) and
@@ -972,13 +986,14 @@ For the general treatment see [Allocation](../performance/allocation.md).
 
 ## Faithful, not flattering
 
-Three results in this crate look like bugs. They are, in the reference — and
-reproducing them is the point, because a port that quietly "fixed" them would
-change what a migrated application ranks first.
+Three results in this crate look like bugs. They are deliberate, precisely
+specified, and each is pinned by this crate's own test suite — because
+quietly "fixing" any of them would silently change what an application
+ranks first.
 
-**`dice_coefficient("", "")` is `NaN`.** Two empty strings produce no bigrams, so
-the reference computes `0 / 0`. Smoothing that to `0.0` or `1.0` would be a
-silent disagreement with the reference. Guard it at your call site:
+**`dice_coefficient("", "")` is `NaN`.** Two empty strings produce no bigrams,
+so the computation is `0 / 0`. Smoothing that to `0.0` or `1.0` would be a
+silent, undocumented behavior change. Guard it at your call site:
 
 ```rust
 use verbora_distance::dice_coefficient;
@@ -990,10 +1005,10 @@ fn main() {
 }
 ```
 
-**`hamming` returns `-1` for length-mismatched input.** The reference returns `-1`
-rather than raising, so the sentinel is part of the contract — and it is *lower*
-than every real distance, so it sorts to the front of an ascending ranking.
-`hamming_checked` is the Rust-idiomatic escape hatch:
+**`hamming` returns `-1` for length-mismatched input.** It returns `-1`
+rather than raising, so the sentinel is part of the contract — and it is
+*lower* than every real distance, so it sorts to the front of an ascending
+ranking. `hamming_checked` is the Rust-idiomatic escape hatch:
 
 ```rust
 use verbora_distance::hamming_checked;
@@ -1012,14 +1027,15 @@ fn main() {
 }
 ```
 
-**`jaro_winkler("A", "a", ignore_case)` is `0.4`, not `1.0`.** The reference's
-prefix loop is `while (s1[l] === s2[l] && l < 4) l++`, which tests before it
-bounds-checks: once both strings are exhausted, `s1[l]` and `s2[l]` are both
-`undefined`, and `undefined === undefined` is `true`, so the counter climbs to 4
-even for a two-character input. That is usually invisible, because equal strings
-score Jaro 1.0 and the boost is multiplied by `1 − 1 == 0`. For single-character
-inputs the match window is `floor(1/2) − 1 == −1`, nothing can match, Jaro is 0,
-and the saturated boost is fully exposed: `0 + 4 × 0.1 × (1 − 0) = 0.4`.
+**`jaro_winkler("A", "a", ignore_case)` is `0.4`, not `1.0`.** The prefix
+loop compares characters position by position, stopping at 4, but the
+comparison does not bounds-check first: once both strings are exhausted, a
+read past the end of either string is treated as "no character", and two
+"no character" reads compare equal — so the counter climbs to 4 even for a
+two-character input. That is usually invisible, because equal strings score
+Jaro 1.0 and the boost is multiplied by `1 − 1 == 0`. For single-character
+inputs the match window is `floor(1/2) − 1 == −1`, nothing can match, Jaro is
+0, and the saturated boost is fully exposed: `0 + 4 × 0.1 × (1 − 0) = 0.4`.
 
 ```rust
 use verbora_distance::jaro_winkler::{Options, jaro_winkler};

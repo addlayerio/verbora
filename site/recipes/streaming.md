@@ -92,7 +92,7 @@ whatever your closure produced — but the tokens themselves never accumulate.
 
 <div class="callout callout-note">
 <strong>Prefer the <code>_with</code> variants in streaming code.</strong>
-<code>phoneticize_tokens</code> reads the reference's process-global stop-word list;
+<code>phoneticize_tokens</code> reads the process-global stop-word list;
 <code>phoneticize_tokens_with</code> takes an explicit <code>&amp;StopWords</code>.
 The same applies to <code>ngrams_str_with</code> against
 <code>ngrams_str</code>. Explicit state is reproducible, testable and thread-safe.

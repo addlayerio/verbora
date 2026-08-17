@@ -13,9 +13,9 @@ page collects the layout decisions Verbora makes and what each one is worth.
 
 ## 1. Pick the smallest working set that answers the question
 
-The reference's Levenshtein always materialises a full `(n+1) × (m+1)` matrix of
-heap-allocated cell objects, each holding a cost and a parent coordinate — even
-when the caller wants only the final number. That is `O(nm)` allocations of
+A widely-used JavaScript NLP library's Levenshtein always materialises a full
+`(n+1) × (m+1)` matrix of heap-allocated cell objects, each holding a cost and
+a parent coordinate — even when the caller wants only the final number. That is `O(nm)` allocations of
 `O(nm)` pointer-chased objects.
 
 Verbora picks the cheapest structure that can answer the question asked — and,
@@ -39,13 +39,13 @@ in plain arrays rather than a `HashMap`, which is why that benchmark posts
 **3307.7×**. Of the three `levenshtein_variants` benchmarks, only one still
 isolates the row-reduction effect on its own; the other two run faster
 algorithms instead of a row-reduced matrix (their benchmark names describe
-the structures being compared against on the reference side, not what
-Verbora's side runs):
+the structures being compared against on the JavaScript library's side, not
+what Verbora's side runs):
 
 | Benchmark | Speedup | What it measures now |
 |---|--:|---|
 | `levenshtein_variants/search_matrix` | 13.8× | the same full matrix on both sides — the win is layout: flat struct-of-arrays vs per-cell heap objects |
-| `levenshtein_variants/damerau_unrestricted_matrix` | 39.2× | despite the name, not a full matrix: two rows plus per-symbol snapshots against the reference's full matrix |
+| `levenshtein_variants/damerau_unrestricted_matrix` | 39.2× | despite the name, not a full matrix: two rows plus per-symbol snapshots against that library's full matrix |
 | `levenshtein_variants/damerau_restricted_3row` | 1059.5× | despite the name, not three rows: the bit-parallel OSA kernel — an algorithm win, not a layout win |
 
 The lesson generalises: *before* optimising a loop, ask whether it needs the
@@ -77,7 +77,7 @@ in exactly once, at the end, when the backtrace runs.
 indices, rather than allocating a reference-style object per node:
 
 ```text
-Reference implementation          Verbora
+Naive implementation              Verbora
 
 node ──▶ {} ──▶ {} ──▶ {}         [n0][n1][n2][n3][n4][n5]…
           │      │      │          ▲    ▲
@@ -123,9 +123,10 @@ instinct, taken further.)
 
 ## 5. Cheaper keys, not cheaper hashing alone
 
-The Dice coefficient counts shared bigrams. The reference allocates a `String`
-per bigram and hashes it. Verbora hashes a `(u16, u16)` tuple with `FxHashMap`
-instead — no allocation, a smaller key, and a faster hash:
+The Dice coefficient counts shared bigrams. A widely-used JavaScript NLP
+library allocates a `String` per bigram and hashes it. Verbora hashes a
+`(u16, u16)` tuple with `FxHashMap` instead — no allocation, a smaller key,
+and a faster hash:
 
 | Input length | Speedup |
 |--:|--:|

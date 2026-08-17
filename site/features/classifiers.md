@@ -1,18 +1,18 @@
 # Classifiers
 
-`verbora-classifiers` is tested against the reference classifiers — three document
-classifiers built on two unrelated designs. `BayesClassifier` and
-`LogisticRegressionClassifier` are thin wrappers (62 and 68 lines in the
-reference) around the `apparatus` package's naive-Bayes and one-vs-rest
-logistic-regression engines, sharing one generic base,
+`verbora-classifiers` provides three document classifiers built on two
+unrelated designs. `BayesClassifier` and `LogisticRegressionClassifier` are
+thin wrappers around a naive-Bayes and a one-vs-rest logistic-regression
+engine, sharing one generic base,
 [`Classifier<E: Engine>`](#the-shared-classifier-e-engine-design).
-`MaxEntClassifier` is a completely different subsystem —
-the MaxEnt reference, roughly 1,184 lines across a dozen files —
-implementing maximum-entropy classification by generalised iterative scaling
-(GIS), including the reference's part-of-speech feature-generation machinery.
-All three learn from labelled documents (or, for MaxEnt, feature functions
-over class/context pairs) and score new observations against what they
-learned.
+`MaxEntClassifier` is a completely different subsystem — roughly 1,184 lines
+across a dozen files — implementing maximum-entropy classification by
+generalised iterative scaling (GIS), including its own part-of-speech
+feature-generation machinery. All three learn from labelled documents (or,
+for MaxEnt, feature functions over class/context pairs) and score new
+observations against what they learned. Behaviour across all three is pinned
+by this crate's own regression suite — part of the 526,341 recorded cases
+across the workspace; see [Getting started: the workspace](../getting-started/workspace.md).
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> All <strong>13</strong> classifier APIs
@@ -29,11 +29,6 @@ unit tests, <strong>11</strong> boundary-input tests in
 
 ## When to use it
 
-- **Porting the reference that called the reference's `BayesClassifier`,
-  `LogisticRegressionClassifier` or the maximum-entropy classifier.** Every
-  entry point maps onto a Rust method with the same argument shape, and
-  results — trained weights, scores, tie-breaks, even the reference's own
-  bugs — are bit-identical.
 - **Fast incremental document classification with cheap retraining.**
   `BayesClassifier::train()` only processes documents added since the last
   call; see [Which classifier?](#which-classifier).
@@ -43,8 +38,9 @@ unit tests, <strong>11</strong> boundary-input tests in
   is not expressive enough and you have features like "the previous two
   tags were DT, JJ" to offer it.
 - **Part-of-speech-style sequence tagging built on maximum entropy.**
-  `MECorpus`/`MESentence`/`POSElement` are a full port of the reference's
-  training-data pipeline for that use case.
+  `MECorpus`/`MESentence`/`POSElement` provide the training-data pipeline for
+  that use case: a corpus of tagged sentences becomes context/class training
+  samples through a fixed window-based feature generator.
 - **Labelling a large corpus offline against one already-trained
   `BayesClassifier` or `LogisticRegressionClassifier`.**
   `Classifier<E>::par_classify_batch`, behind the `parallel` Cargo feature,
@@ -57,11 +53,11 @@ unit tests, <strong>11</strong> boundary-input tests in
 - **You want probabilities out of `MaxEntClassifier`.** Its scores are
   deliberately unnormalised weights — see
   [MaxEnt's unnormalised weights](#_4-maxent-s-unnormalised-weights).
-- **You want state-of-the-art classification.** These are ports of three
-  specific circa-2010s the reference libraries' math, bugs included — the
-  reference's own `apparatus` and the hand-written GIS trainer, not a modern
-  gradient-boosted tree or a neural model. If you want current-generation
-  accuracy, this is not the crate for it.
+- **You want state-of-the-art classification.** These are three specific
+  circa-2010s algorithms — hand-written naive-Bayes and one-vs-rest
+  logistic-regression engines and a hand-written GIS trainer, quirks and all
+  — not a modern gradient-boosted tree or a neural model. If you want
+  current-generation accuracy, this is not the crate for it.
 - **You want cheap retraining from `LogisticRegressionClassifier`.** Every
   `train()` call reruns gradient descent from scratch over every stored
   document — see the callout in
@@ -145,9 +141,7 @@ you to read one of these.
 ### The shared `Classifier<E: Engine>` design
 
 `BayesClassifier` and `LogisticRegressionClassifier` are both
-`pub type` aliases over one generic struct, mirroring the reference's own
-inheritance (`BayesClassifier extends Classifier`,
-`LogisticRegressionClassifier extends Classifier`):
+`pub type` aliases over one generic struct:
 
 ```rust ignore
 pub struct Classifier<E: Engine> {
@@ -163,9 +157,10 @@ pub type BayesClassifier = Classifier<BayesEngine>;
 pub type LogisticRegressionClassifier = Classifier<LogisticEngine>;
 ```
 
-`Classifier<E>` owns everything both reference classes share — the document
-list, the feature vocabulary, the stemmer, the `lastAdded` cursor — and
-defers only the numerically interesting part to the `Engine` trait:
+`Classifier<E>` owns everything `BayesClassifier` and `LogisticRegressionClassifier`
+share — the document list, the feature vocabulary, the stemmer, the
+`last_added` cursor — and defers only the numerically interesting part to the
+`Engine` trait:
 
 <div class="callout callout-note">
 <strong>Note.</strong> <code>stemmer</code> was <code>Rc&lt;dyn Stemmer&gt;</code>
@@ -222,13 +217,10 @@ pub struct MaxEntClassifier {
 — shared feature set and sample by `Rc<RefCell<_>>` rather than owned, a
 `train(max_iterations: i64, min_improvement: f64)` with no `Engine::fit()`
 counterpart, and `get_classifications`/`classify` that take `&Rc<Context>`
-rather than a `&[u8]` feature vector. This mirrors the reference precisely:
-Bayes and logistic regression both extend a shared classifier base
-and wrap an `apparatus` engine; MaxEnt comes from the entirely separate
-the MaxEnt classifier's own base, which shares no code, no base
-class, and no method signature with the other two. The Rust port does not
-invent a shared abstraction the reference never had — a fourth `Engine`
-impl for MaxEnt would need to flatten `Context`/`Element`/`FeatureSet`/`Sample`
+rather than a `&[u8]` feature vector. `MaxEntClassifier` shares no code, no
+base type, and no method signature with `Classifier<E>`, and this crate does
+not invent a shared abstraction to paper over that: a fourth `Engine` impl
+for MaxEnt would need to flatten `Context`/`Element`/`FeatureSet`/`Sample`
 down into a `&[u8]` vector, discarding exactly the feature-function
 flexibility that is the point of using MaxEnt in the first place.
 
@@ -489,27 +481,22 @@ fn main() {
 }
 ```
 
-The reference's `save`/`load` are asynchronous, callback-based, and — for
-`Classifier.load` specifically — return early doing nothing at all when no
-callback is supplied. Verbora makes every one of these synchronous instead,
-the same choice [WordNet](../features/wordnet) made for its own
-callback-shaped `lookup`/`get` API: within one operation the reference's I/O
-is strictly sequential, so a synchronous port is order-equivalent and the
-callback simply becomes a return value (or, here, a `Result`).
+`save` and `load` are synchronous, the same choice [WordNet](../features/wordnet)
+makes for its own `lookup`/`get` API: within one operation, file I/O is
+strictly sequential, so there is nothing for an asynchronous, callback-based
+shape to buy a caller here — a plain `Result` return value carries the same
+information.
 
 Two things differ between the `Classifier<E>` shape and `MaxEntClassifier`'s:
 
 - **Compact vs pretty JSON.** `Classifier<E>::to_json` produces compact
   JSON (`{"a":1,"b":2}`); `MaxEntClassifier::to_json` pretty-prints with a
-  2-space indent, because the reference's own `save()` calls
-  `JSON.stringify(this, null, 2)` for MaxEnt and `JSON.stringify(this)` (no
-  indent argument) for the base `Classifier`. This is not a stylistic choice
-  Verbora made — it reproduces two different reference call sites verbatim.
+  2-space indent. This is a deliberate difference between the two
+  persistence paths, not an inconsistency to "fix."
 - **`restore`/`load` need an extra argument.** `MaxEntClassifier::restore`
   and `::load` take a `revive: impl FnMut(&str, Rc<Context>) -> Rc<Element>`
   closure, because rebuilding a sample's elements requires knowing which
-  `Element` subclass to construct (`SEElement`, `POSElement`, or your own) —
-  mirroring the reference's own `ElementClass` constructor argument.
+  `Element` subclass to construct (`SEElement`, `POSElement`, or your own).
   `Classifier<E>::restore` needs nothing extra: Bayes and logistic
   regression have no equivalent per-element polymorphism.
 
@@ -529,18 +516,17 @@ variant of anything**. Every mutation is eager and immediate:
   form.
 - `FeatureSet::add_feature` performs its dedup check and push in one call —
   nothing defers feature registration.
-- `GISScaler::run` is single-shot: one call always executes the reference's
-  full `do…while` loop to convergence (or `max_iterations`), computing the
-  correction feature, building a `Distribution`, and iterating GIS updates.
-  There is no "advance one iteration and give me a checkpoint" entry point.
-- `Sample::with_elements` exists as a constructor, but mirrors a reference
-  constructor (`new Sample(elements)`) that **always throws** on a non-empty
-  array — a genuine reference bug, reproduced deliberately (see
-  [`Sample::analyse` always throws](#behaviour-worth-knowing)). It is not a usable
+- `GISScaler::run` is single-shot: one call always runs to convergence (or
+  `max_iterations`), computing the correction feature, building a
+  `Distribution`, and iterating GIS updates start to finish. There is no
+  "advance one iteration and give me a checkpoint" entry point.
+- `Sample::with_elements` exists as a constructor, but always returns
+  `Err(MaxEntError::SampleAnalyseIsBroken)` on a non-empty slice — see
+  [`Sample::with_elements` always errors](#behaviour-worth-knowing). It is not a usable
   "batch-construct with data" alternative to `Sample::new()` plus a loop of
-  `add_element` calls; that loop is the only path the reference's own code
-  ever takes (`MECorpus::generate_sample` builds `Sample::new()` and adds
-  elements one at a time for exactly this reason).
+  `add_element` calls; that loop is the only path this crate's own
+  `MECorpus::generate_sample` takes, building `Sample::new()` and adding
+  elements one at a time.
 
 The closest thing to a "choice" is what calling `train()` again actually
 does, and it is worth seeing directly:
@@ -595,17 +581,19 @@ under Advanced usage.
 ## Advanced usage
 
 The crate's own module doc identifies five places where the obvious Rust
-translation silently disagrees with the reference. Each one is verified — by a
-bit-exact test against the reference engine, by the recorded fixture, or both.
+translation is not enough on its own to get the numerically or structurally
+correct answer. Each one is verified — by a bit-exact test against a recorded
+fixture, by the crate's own regression suite, or both.
 
 ### 1. FDLIBM float precision inside a convergence loop
 
-The reference engine does not call the platform's `log`/`exp`; it bundles its own FDLIBM port
-(`src/base/ieee754.cc`) and uses that on every platform. Rust's `f64::ln` and
-`f64::exp` call the platform libm instead. Both are accurate to well under one
-ULP — and they still disagree: over 20,000 pseudo-random arguments, `ln`
-differed from `Math.log` in 981 cases (4.9%) and `exp` from `Math.exp` in
-1,933 (9.7%), always by exactly one ULP.
+Rust's `f64::ln` and `f64::exp` call the platform's own libm.
+`verbora_classifiers::transcendental` implements the FDLIBM `log` and `exp`
+algorithms directly instead — the same polynomial coefficients, the same bit
+manipulation via `f64::to_bits`/`from_bits` (this workspace forbids `unsafe`,
+so no pointer tricks). The two disagree by exactly one ULP on a meaningful
+fraction of inputs: over 20,000 pseudo-random arguments, the platform's `ln`
+differs from the FDLIBM value in 981 cases (4.9%) and `exp` in 1,933 (9.7%).
 
 That would not matter if the results were only reported. They are not:
 `BayesEngine::probability_of_class` sums `log(count / total)` and
@@ -617,39 +605,37 @@ than `1e-4`; a one-ULP perturbation compounds over hundreds of iterations and
 can change the *number* of iterations the loop runs, and therefore the whole
 model.
 
-`verbora_classifiers::transcendental` reimplements FDLIBM's `log` and `exp`
-literally — the same polynomial coefficients, the same bit manipulation via
-`f64::to_bits`/`from_bits` (this workspace forbids `unsafe`, so no pointer
-tricks) — and is verified bit-exact against the reference engine on 45,039 positive arguments
-for `log` and 50,000 arguments for `exp`: zero differences. (One argument is
-a known, deliberate exception: `exp(1.0)` is one ULP above the reference engine's answer, which
-reports the correctly-rounded `Math.E` there as a special case; the crate
-does not patch around it, because a hand-inserted special case the reference
-itself lacks would be a second, unverifiable divergence.)
+`verbora_classifiers::transcendental::log` and `::exp` are pinned bit-exact
+against this crate's own recorded fixture of 45,039 arguments for `log` and
+50,000 for `exp`: zero differences. One argument is a known, deliberate
+exception: `exp(1.0)` is one ULP away from its recorded fixture value,
+because the fixture records the correctly-rounded constant `e` there as a
+special case rather than FDLIBM's own output; the crate does not patch
+around it, because a hand-inserted special case FDLIBM itself lacks would be
+a second, unverifiable divergence.
 
 ```rust
 use verbora_classifiers::transcendental;
 
 fn main() {
-    // A value where the platform libm's `ln` disagrees with the reference engine's `Math.log`
-    // by exactly one ULP.
+    // A value where the platform libm's `ln` disagrees with this crate's
+    // FDLIBM-based `log` by exactly one ULP.
     let x = 11.262_564_292_775_972_f64;
     assert_eq!(transcendental::log(x).to_bits(), 0x4003_5f33_2d5c_29fc);
     assert_ne!(x.ln().to_bits(), transcendental::log(x).to_bits());
 }
 ```
 
-### 2. reference object-key order is the feature-vector layout
+### 2. Feature-vector key order is not insertion order
 
-`Classifier::text_to_features` builds a document's 0/1 feature vector by
-walking `for (const feature in this.features)` — the reference's own-property
-enumeration order, which is **not** insertion order. The rule: keys that are
-the canonical decimal spelling of an integer in `0..=2^32-2` ("array-index"
-keys) come first, in ascending numeric order; every other key follows in
-insertion order. `OrderedMap<V>` (`src/ordmap.rs`) implements exactly this two-tier
-order and — critically — **recomputes it on every call** rather than caching
-stable indices, because the whole point of the reference's bug is that
-indices shift when an integer-like token is learned later.
+`Classifier::text_to_features` builds a document's 0/1 feature vector using a
+two-tier key order, not insertion order: keys that are the canonical decimal
+spelling of an integer in `0..=2^32-2` ("array-index" keys) come first, in
+ascending numeric order; every other key follows in insertion order.
+`OrderedMap<V>` (`src/ordmap.rs`) implements exactly this two-tier order and
+— critically — **recomputes it on every call** rather than caching stable
+indices, because indices shift whenever an integer-like token is learned
+later.
 
 ```rust
 use verbora_classifiers::BayesClassifier;
@@ -708,9 +694,8 @@ fn main() {
 
 No error, no warning: `classify(["alpha"])` silently flips from `"A"` to
 `"B"`, and `"A"`'s confidence drops to a tied guess with the brand-new class
-`"C"` that has nothing to do with `"alpha"` at all. This is exactly the
-reference's own recorded behaviour — the fixture records this identical
-scenario, down to these exact scores.
+`"C"` that has nothing to do with `"alpha"` at all. This exact scenario, down
+to these exact scores, is pinned in this crate's own recorded fixture.
 
 ### 3. Floating-point accumulation order per algorithm
 
@@ -738,11 +723,9 @@ while i > 0 {
 **Logistic regression** is the one place two *different* directions coexist
 in the same algorithm. Every matrix/vector contraction — the hypothesis's dot
 product, the gradient's contraction over the row index — sums **descending**
-over the contracted index (`while k > 0 { k -= 1; … }`, `src/basic/logistic.rs`),
-mirroring `sylvester`'s `Vector.dot`/`Matrix` products, which all use
-`while (k--)`. The **cost function's** sum, in contrast, runs **ascending**
-(`for k in 0..m`), because it is built on `sylvester`'s `Vector.sum`, which
-maps over its elements in order rather than contracting. An idiomatic
+over the contracted index (`while k > 0 { k -= 1; … }`, `src/basic/logistic.rs`).
+The **cost function's** sum, in contrast, runs **ascending** (`for k in 0..m`),
+mapping over its elements in order rather than contracting. An idiomatic
 `iter().sum()` written once and reused for both would be wrong in whichever
 of the two places it was not designed for.
 
@@ -757,10 +740,9 @@ iterations, not however many *distinct* elements it contains.
 
 ### 4. MaxEnt's unnormalised weights
 
-`Distribution::calculate_a_priori` returns `∏ⱼ αⱼ^fⱼ(x)` — the reference's
-`calculateAPriori` has its normalising division **commented out in source**.
-The values routinely exceed `1` and do not sum to `1` across a context's
-classes:
+`Distribution::calculate_a_priori` returns `∏ⱼ αⱼ^fⱼ(x)` with no normalising
+division. The values routinely exceed `1` and do not sum to `1` across a
+context's classes:
 
 ```rust
 use std::cell::RefCell;
@@ -813,21 +795,20 @@ and therefore changes the **iteration count** training stops at — silently
 producing a different model, not merely differently-scaled output from the
 same one.
 
-### 5. Context keys via `safe-stable-stringify`
+### 5. Context keys sort by UTF-16 code unit
 
-`Context::to_key` reproduces `safe-stable-stringify`: a JSON
-serialisation whose object keys are sorted by **UTF-16 code unit**, not by
-Rust's default UTF-8 scalar-value `str: Ord`, and not by the reference's own
-`for…in`/`JSON.stringify` own-property order either. This crate genuinely
-needs two *different* orderings side by side, and conflating them is easy to
-get wrong:
+`Context::to_key` produces a JSON-like serialisation whose object keys are
+sorted by **UTF-16 code unit**, not by Rust's default UTF-8 scalar-value
+`str: Ord`, and not by array-index-first insertion order either — see
+`own_key_order` below. This crate genuinely needs two *different* orderings
+side by side, and conflating them is easy to get wrong:
 
 - `utf16_cmp` (`src/dynval.rs`) — sorts **every** key by UTF-16 code unit.
   Used only for `Context::to_key`/`stable_stringify`, the hash key every
   frequency table, weight memo, and normalisation constant is stored under.
 - `own_key_order` (`src/dynval.rs`) — array-index keys ascending numerically
   first, then everything else in **insertion order**. Used only for
-  `to_json`/`save`, matching `JSON.stringify`'s own-property walk.
+  `to_json`/`save`.
 
 A `POSElement`'s context window is a concrete case where these two orders
 visibly disagree. `MESentence::generate_sample_elements` inserts window keys
@@ -851,7 +832,7 @@ fn main() {
 
     let keys: Vec<String> = sample.elements().iter().map(|e| e.to_key()).collect();
     // "-1" before "-2" before "0" — UTF-16 code-unit order, not insertion
-    // order and not JSON.stringify's array-index-first order.
+    // order and not array-index-first order.
     assert_eq!(
         keys[2],
         r#"NN{"tagWindow":{"-1":"JJ","-2":"DT","0":"NN","1":"VB"},"wordWindow":{"-1":"big","-2":"the","0":"dog","1":"runs"}}"#
@@ -896,34 +877,26 @@ Build `Context` payloads as an ordered `DynValue::Obj(Vec<(String, DynValue)>)`
 ## Behaviour worth knowing
 
 <div class="callout callout-note">
-This list is the crate's own module doc, reproduced precisely.
+Behavioural notes drawn from the crate's own module documentation.
 </div>
 
-- **Labels and class names are `String`, always.** The reference stores
-  whatever was passed — `docs[i].label` can be a number, `null`, or an
-  object — and only coerces it when the value becomes an object key. That
-  produces a real *timing* asymmetry in the reference: Bayes coerces the
-  label to a string only inside `apparatus`'s `addExample` (because
-  `classFeatures` is a plain object), so `docs[i].label` keeps its original
-  type while `getClassifications` returns a **stringified** label; logistic
-  regression instead reads labels back from its own `classifications` array
-  (never used as an object key), so it preserves the **original** type — the
-  two classifiers disagree on the type of the same non-string label. With
-  `Document::label: String` from the moment `add_document` runs, this timing
-  asymmetry cannot arise in Rust. The **string** form of the same underlying
-  bug — integer-like labels enumerating out of insertion order and
-  misassigning logistic regression's theta columns — is fully reproduced,
-  because that is the shape reachable from real text.
-- **`addDocument(text, undefined)` cannot be expressed.** The reference drops
-  such a document silently (`if (typeof classification === 'undefined')
-  return`); Rust's `classification: &str` has no analogue of "argument
-  omitted." A caller wanting the same effect must check before calling
-  `add_document`.
-- **Bayes smoothing is `f64`-only.** The reference accepts `true` and
-  numeric *strings* through its `smoothing && isFinite(smoothing)` guard,
-  after which `1 + smoothing` becomes string concatenation and the stored
-  counts become strings such as `"10.5"`. Only the numeric truthy-and-finite
-  guard is reproduced:
+- **Labels and class names are always `String`.** `Document::label: String`
+  is set from the moment `add_document` runs, and both classifiers read that
+  same field. Integer-like string labels enumerate out of insertion order
+  the same way integer-like tokens do — see
+  [Feature-vector key order is not insertion order](#_2-feature-vector-key-order-is-not-insertion-order)
+  — which can misassign logistic regression's theta columns to the wrong
+  label. That is reachable from any input where a class label happens to
+  look like an integer, e.g. `add_document(text, "42")`.
+- **`add_document` requires an explicit label.** There is no way to add a
+  document while skipping the classification argument — `add_document`'s
+  `classification: &str` parameter is not optional. A caller wanting to
+  conditionally skip a document must check before calling `add_document`.
+- **Bayes smoothing is `f64`-only, with a truthy-and-finite guard.**
+  `BayesClassifier::with_smoothing` falls back to the default smoothing
+  constant of `1.0` whenever the value passed is `0`, `-0.0`, `NaN`, `+Inf`,
+  or `-Inf`; any other finite value, including a negative one such as
+  `-1.0`, is accepted as-is:
   ```rust
   use verbora_classifiers::BayesClassifier;
 
@@ -936,16 +909,6 @@ This list is the crate's own module doc, reproduced precisely.
       assert_eq!(c.engine().smoothing(), 1.0);
   }
   ```
-- **Prototype-chain key collisions are not reproduced.** Every reference map
-  is a plain object tested with `if (!map[key])`, so a context, feature, or
-  label whose key is literally `"constructor"` or `"toString"` reads as
-  already-present and silently corrupts the frequency table — the reference
-  specs record a frequency undercount from exactly this, and a whole
-  context's contribution to `expectationApprox` being dropped. A Rust
-  `OrderedMap`/`HashMap` has no prototype chain and behaves *correctly*, which
-  here means *differently* from the reference. Reachable only when a
-  caller's class label or MaxEnt context payload happens to literally be one
-  of these magic strings — narrow, but real.
 
 ## Persistence detail: `restore` returns an untrained classifier
 
@@ -957,13 +920,13 @@ saved file are read but discarded. You must call <code>train()</code> again
 before classifying anything.
 </div>
 
-This is the single most surprising divergence-in-spirit anywhere in this
-crate, precisely because it mirrors reference behaviour a caller would
-reasonably not expect: The reference's own `load()` reads *only*
-`sample.elements`, revives each one through your `ElementClass` constructor,
-and calls `sample.generateFeatures(featureSet)` to regenerate the feature set
-from scratch — the file's own `features`, `scaler`, and `p` (including the
-trained `alpha`) are parsed and then simply never read.
+This is the single most surprising behaviour anywhere in this crate,
+precisely because a caller would reasonably not expect it:
+`MaxEntClassifier::restore` reads *only* the saved sample's elements,
+revives each one through your `ElementClass` constructor, and calls
+`Sample::generate_features` to regenerate the feature set from scratch — the
+file's own `features`, `scaler`, and `p` (including the trained `alpha`) are
+parsed and then simply never used.
 
 ```rust
 use std::cell::RefCell;
@@ -1010,9 +973,9 @@ fn main() {
 This is *not* how `Classifier<E>::restore` behaves for Bayes or logistic
 regression — those genuinely restore the full trained engine, and
 `revived.get_classifications(...)` works immediately with no retraining
-step. A caller porting mixed code across all three classifiers must not
-assume one persistence contract covers all of them: verify which of the two
-shapes you are dealing with, per classifier, rather than assuming.
+step. A caller working across all three classifiers must not assume one
+persistence contract covers all of them: verify which of the two shapes you
+are dealing with, per classifier, rather than assuming.
 
 ## Common mistakes
 
@@ -1027,7 +990,7 @@ about.
 
 **Adding a vocabulary token that collides with an integer-like string, and
 being surprised a previously-trained model's feature indices shifted.** See
-[reference object-key order is the feature-vector layout](#_2-reference-object-key-order-is-the-feature-vector-layout)
+[Feature-vector key order is not insertion order](#_2-feature-vector-key-order-is-not-insertion-order)
 for the full worked example — `classify()` can silently change its answer
 for input that was never touched, because the *vocabulary*, not the
 observation, is what moved.
@@ -1087,14 +1050,14 @@ invisible (verified above, under
 the new scaler's `C`/`featureSums` happen to match the old ones exactly. If
 you call `add_element` on the sample and then `train()` again, the
 correction feature keeps evaluating against the **first** run's stale
-`C`/`featureSums`, not the second run's — a real, reference-matching
-staleness bug, not an oversight in the port.
+`C`/`featureSums`, not the second run's — a genuine staleness quirk, pinned
+by this crate's own tests, not an oversight.
 
 ## Performance characteristics
 
 <div class="callout callout-note">
-<strong>Not yet benchmarked against the reference.</strong> Unlike
-<code>verbora-distance</code>, there is no recorded reference baseline for
+<strong>Not yet benchmarked.</strong> Unlike
+<code>verbora-distance</code>, there is no recorded baseline for
 this cluster in <code>benches/results/</code>. See
 <a href="../benchmarks/index">Benchmarks</a> for what has and has not been
 measured across the workspace, and reproduce the in-tree numbers yourself
@@ -1102,9 +1065,9 @@ with <code>cargo bench -p verbora-classifiers</code>.
 </div>
 
 One real, checkable correctness measurement *is* available without a
-benchmark: `verbora_classifiers::transcendental` is verified bit-exact against the reference engine's
-own FDLIBM port across 95,039 arguments (45,039 for `log`, 50,000 for
-`exp`) — see
+benchmark: `verbora_classifiers::transcendental` is pinned bit-exact across
+95,039 recorded arguments (45,039 for `log`, 50,000 for `exp`), part of this
+crate's own regression suite — see
 [FDLIBM float precision](#_1-fdlibm-float-precision-inside-a-convergence-loop).
 That is a correctness claim, not a timing one; do not read it as a
 performance number.
@@ -1115,17 +1078,17 @@ Asymptotics, read from the source:
 |---|---|---|
 | `BayesClassifier::add_document` | amortised O(1) per token | one `OrderedMap` insert per distinct token |
 | `BayesClassifier::train` | O(new docs × features per doc) | incremental — only documents past `lastAdded` |
-| `Classifier::text_to_features` | O(\|features\| + \|observation\|) | a `HashSet` probe; the reference's `observation.indexOf(feature)` per feature is O(\|features\| × \|observation\|) |
+| `Classifier::text_to_features` | O(\|features\| + \|observation\|) | a `HashSet` probe, rather than an O(\|features\| × \|observation\|) linear scan per feature |
 | `LogisticRegressionClassifier::train` | O(iterations × classes × m × n) | gradient descent per class, `m` examples, `n` features; bounded by `max_it = 500 × m` per class, typically far fewer at convergence |
 | `MaxEntClassifier::train` | O(iterations × features × distinct contexts × classes) | generalised iterative scaling |
-| `Distribution::weight` | O(\|alpha\|) | one `Math.pow`-equivalent multiply per feature, per element scored |
+| `Distribution::weight` | O(\|alpha\|) | one power-and-multiply operation per feature, per element scored |
 
 `crates/verbora-classifiers/benches/classifiers.rs` is a Criterion suite
 answering four separate questions, quoted from its own doc comment: where
 Bayes and logistic-regression training time actually goes; what a single
 classification costs, isolating `text_to_features` from `classify`; how
 maximum-entropy training scales with corpus size; and what the
-the reference-compatibility primitives (`transcendental::log`/`exp`, `stable_stringify`)
+transcendental math primitives (`transcendental::log`/`exp`, `stable_stringify`)
 cost, since both sit in every model's innermost loop. Its groups:
 `bayes/train`, `logistic/train`, `bayes/predict` (`text_to_features` /
 `get_classifications` / `classify`), `bayes/persist` (`to_json` /
@@ -1189,7 +1152,7 @@ this crate. See [Allocation](../performance/allocation).
   through both `BayesClassifier` and `LogisticRegressionClassifier`, astral
   emoji tokens included.
 - **MaxEnt context keys sort by UTF-16 code unit and emit non-ASCII raw** —
-  see [Context keys via `safe-stable-stringify`](#_5-context-keys-via-safe-stable-stringify).
+  see [Context keys sort by UTF-16 code unit](#_5-context-keys-sort-by-utf-16-code-unit).
   An astral character's context key sorts *before* `U+FFFD`, because its
   lead surrogate (`0xD83D`) is numerically below `0xFFFD`, which is the
   opposite of what comparing by Unicode scalar value would give.
@@ -1207,9 +1170,7 @@ The default stemmer (English Porter, used whenever you construct a
 classifier with `new()` rather than `with_stemmer`) tests stop words with
 `verbora_core::stopwords::is_default_stopword`, which is backed by a
 process-wide `LazyLock<RwLock<StopWords>>` — the same shared state
-[Core vocabulary](../features/core) describes for the rest of the workspace,
-mirroring the reference stop-word module's single mutable `words` array in
-The reference.
+[Core vocabulary](../features/core) describes for the rest of the workspace.
 
 <div class="callout callout-warn">
 <strong>Careful.</strong> Any <code>add_stop_word</code>/<code>remove_stop_word</code>
@@ -1223,9 +1184,8 @@ never touches this state at all.
 
 ## Related
 
-- [WordNet](../features/wordnet) — the site's other worked example of turning
-  the reference's asynchronous, callback-based `save`/`load` into a
-  synchronous Rust API.
+- [WordNet](../features/wordnet) — the site's other worked example of a
+  synchronous, callback-free `save`/`load`-style persistence API.
 - [Tokenizers](../features/tokenizers) — the tokenization/stemming pipeline
   every string-input document goes through before it becomes a feature
   vector.
@@ -1270,9 +1230,9 @@ you will use most often:
 | `SEElement` | `verbora_classifiers::SEElement` |
 | `POSElement`, `TaggedWord`, `MESentence`, `MECorpus` | `verbora_classifiers::{POSElement, TaggedWord, MESentence, MECorpus}` |
 | `MaxEntError` | `verbora_classifiers::MaxEntError` |
-| the reference `log`/`exp`/`pow`/`sigmoid` | `verbora_classifiers::transcendental` |
-| reference-enumeration-order map | `verbora_classifiers::OrderedMap` (also `verbora_classifiers::ordmap`) |
-| reference value, `safe-stable-stringify`, `JSON.stringify`/`.parse` | `verbora_classifiers::DynValue` (also `verbora_classifiers::dynval`) |
+| FDLIBM-based `log`/`exp`/`pow`/`sigmoid` | `verbora_classifiers::transcendental` |
+| array-index-first, insertion-order map | `verbora_classifiers::OrderedMap` (also `verbora_classifiers::ordmap`) |
+| JSON-like value, UTF-16-ordered stringify/parse | `verbora_classifiers::DynValue` (also `verbora_classifiers::dynval`) |
 | Tokenize-and-stem adapter | `verbora_classifiers::{Stemmer, StemmerOf, default_stemmer}` |
 
 Source: `crates/verbora-classifiers/src/`. Boundary-input suite:

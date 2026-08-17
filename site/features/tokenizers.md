@@ -3,19 +3,20 @@
 `verbora-tokenizers` splits text into tokens, twenty-five ways — sixteen
 "aggressive" language splitters, four regex-driven ones, a Penn Treebank word
 tokenizer, a case-based splitter, a Japanese segmenter and a sentence splitter.
-Each reproduces its established output exactly, including the places where that
-established behaviour is wrong. Every tokenizer is built on a lazy iterator, and the convenience methods
-are defined on top of that iterator, so there is one implementation of each
+Every tokenizer's output — including the places where that output is
+linguistically wrong — is pinned by this crate's own regression suite. Every
+tokenizer is built on a lazy iterator, and the convenience methods are
+defined on top of that iterator, so there is one implementation of each
 behaviour and no second copy to drift.
 
 <div class="callout callout-note">
-<strong>25 exports, 24 Rust types.</strong> the reference's 25th export,
+<strong>25 exports, 24 Rust types.</strong> The 25th export,
 <code>SentenceTokenizerNew</code>, is the same constructor as
 <code>SentenceTokenizer</code> under a second name. Verbora keeps both names —
 <code>SentenceTokenizerNew</code> is a type alias — but there is only one
-implementation behind them. Counts on this page that total the Rust type surface
-(construction cost, trait implementors) say "24 types"; counts that total the
-The public API surface counts twenty-five.
+implementation behind them. Counts on this page that total the Rust type
+surface (construction cost, trait implementors) say "24 types"; counts that
+total the public API surface say "25."
 </div>
 
 <div class="callout callout-spec">
@@ -29,9 +30,6 @@ tests and <strong>16</strong> doctests.
 
 ## When to use it
 
-- You need the reference's exact token boundaries, because you are porting a
-  system whose downstream behaviour (n-grams, classifiers, indexes) depends on
-  them.
 - You want a fast, allocation-light word splitter for Latin-script text and
   `AggressiveTokenizer`'s character class is the one you want.
 - You need sentence segmentation with abbreviation, URI and number protection.
@@ -39,15 +37,16 @@ tests and <strong>16</strong> doctests.
 
 ## When not to use it
 
-- **You want linguistically correct tokenization for its own sake.** These are
-  faithful reproductions, not designs. `AggressiveTokenizerDe` splits `Äpfel` into `pfel`;
-  `AggressiveTokenizerId` deletes every capital letter; `CaseTokenizer` appends
-  the literal string `undefined` to some tokens. Those are the reference's
-  behaviours and this crate keeps them. If you want good German tokenization,
-  do not start here.
-- **You want Unicode-aware `\w` semantics.** The reference's `\w`, `\W`, `\b` and
-  `\d` are ASCII-only. Unless a tokenizer's language class specifically lists an
-  accented letter, that letter is a *separator*:
+- **You want linguistically correct tokenization for its own sake.** These
+  reproduce a specific, quirky character-class specification exactly, bugs
+  included: `AggressiveTokenizerDe` splits `Äpfel` into `pfel`;
+  `AggressiveTokenizerId` deletes every capital letter; `CaseTokenizer`
+  appends the literal string `undefined` to some tokens. This crate keeps
+  those outcomes deliberately. If you want good German tokenization, do not
+  start here.
+- **You want Unicode-aware `\w` semantics.** This crate's `\w`, `\W`, `\b`
+  and `\d` character classes are ASCII-only. Unless a tokenizer's language
+  class specifically lists an accented letter, that letter is a *separator*:
   `AggressiveTokenizer::tokenize("café naïve")` is `["caf", "na", "ve"]`.
 - **You want subword or BPE tokenization for a neural model.** Nothing here does
   that, and nothing is planned.
@@ -77,10 +76,9 @@ compares a `&str` — are non-`const`.
 
 ## The catalogue
 
-Twenty-five reference exports map to **twenty-four Rust types**:
-`SentenceTokenizerNew` is a `pub type` alias for `SentenceTokenizer`, because
-`SentenceTokenizer === SentenceTokenizerNew` is literally true
-in the reference.
+The crate exposes twenty-five tokenizer APIs as **twenty-four Rust types**:
+`SentenceTokenizerNew` is a `pub type` alias for `SentenceTokenizer` — the
+two names construct the identical type.
 
 Three columns need reading together. **Token type** is what one token *is*.
 **`Tokenize`** is this crate's iterator trait. **`Tokenizer`** and
@@ -91,9 +89,9 @@ are written against.
 ### Aggressive / language family (16)
 
 All sixteen emit maximal runs of a per-language character class, except where
-noted. Every class is *generated* by running the reference regex over the whole
-Basic Multilingual Plane rather than transcribed by hand, which is how the
-surprises below were found.
+noted. Every class is *generated* by running each language's defining
+regular expression over the whole Basic Multilingual Plane rather than
+transcribed by hand, which is how the surprises below were found.
 
 | Type | Splits on | Token | `Tokenize` | `Tokenizer` | `Borrowing` |
 |---|---|---|:--:|:--:|:--:|
@@ -102,14 +100,14 @@ surprises below were found.
 | `AggressiveTokenizerDe` | ASCII alphanumerics, `ß ä ö ü _ ' -` — **not** `Ä Ö Ü` | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerFr` | ASCII alphanumerics, `-`, accented Latin-1 vowels and `œ ç` in both cases | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerEs` | letters plus `U+00C1–U+00DA`, `U+00E1–U+00FA`, `Ü ü`. **No digits** | `&str` | ✅ | ✅ | ✅ |
-| `AggressiveTokenizerIt` | `A-Z a-z 0-9 _` only — the reference's ASCII `\W` | `&str` | ✅ | ✅ | ✅ |
+| `AggressiveTokenizerIt` | `A-Z a-z 0-9 _` only — ASCII `\W` | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerPt` | letters plus `U+00C0–U+00DA`, `U+00E0–U+00FA`. **No digits** | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerVi` | ASCII alphanumerics plus the Vietnamese vowel set in both cases | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerRu` | ASCII alphanumerics, `А-я`, `Ё ё`, and `U+1C80–U+1C86` | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerUk` | as Russian but **without** `Ё ё`, plus `Ґ ґ Є є І і Ї ї` | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerPl` | ASCII alphanumerics plus `ą ć ę ł ń ó ś ź ż` in both cases | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerId` | `a-z 0-9 -` — **lowercase only** | `&str` | ✅ | ✅ | ✅ |
-| `AggressiveTokenizerFa` | the reference language whitespace runs; punctuation stays inside tokens | `&str` | ✅ | ✅ | ✅ |
+| `AggressiveTokenizerFa` | whitespace runs only; punctuation stays attached to tokens | `&str` | ✅ | ✅ | ✅ |
 | `AggressiveTokenizerNo` | strips 13 diacritics (first occurrence of each only), then splits on `A-Z a-z 0-9 _ æøå ÆØÅ äÄöÖüÜ`. `-` is a separator | `Cow<'_, str>` | ✅ | ✅ | ❌ |
 | `AggressiveTokenizerSv` | strips `à á è é` and their uppercase forms (first occurrence only), then splits on `A-Z a-z 0-9 _ åÅäÄöÖüÜ -` | `Cow<'_, str>` | ✅ | ✅ | ❌ |
 | `AggressiveTokenizerHi` | deletes `। ॥ . ? ,`, then splits on whitespace and on anything outside Devanagari and ASCII | `Cow<'_, str>` | ✅ | ✅ | ❌ |
@@ -462,29 +460,16 @@ in this crate and in `verbora_core`'s two tokenizer traits appends;
 They expose the same three method names as inherent methods, wrapped in
 `Option`.
 
-The reason is in the reference:
-
-```text
-tokenize (s) {
-  if (this._gaps) {
-    return _.without(s.split(this._pattern), '', ' ')   // always an array
-  } else {
-    return s.match(this._pattern)                       // array OR null
-  }
-}
-```
-
-In matching mode (`gaps: false`) `String#match` returns `null` when the pattern
-does not match. "No match" and "no tokens" are different observable outcomes in
-the reference, and the traits have no way to express the difference — `Vec::new()`
-would silently merge them. So:
+In matching mode (`gaps: false`), "no match" and "no tokens" are two
+genuinely different outcomes that a plain `Vec` cannot represent —
+`Vec::new()` would silently merge them. So:
 
 - `tokens()` returns `Option<…>` wrapping a named iterator type
   (`WordTokens`, `OrthographyTokens`, `WordPunctTokens`, or — for
   `RegexpTokenizer` — a plain `std::vec::IntoIter`),
 - `tokenize()` returns `Option<Vec<…>>`,
-- `tokenize_into()` returns `bool` — `false` where the reference returned `null`,
-  and in that case nothing was appended.
+- `tokenize_into()` returns `bool` — `false` for "no match," and in that case
+  nothing was appended.
 
 ```rust
 use verbora_tokenizers::WordTokenizer;
@@ -498,7 +483,7 @@ fn main() {
     // Splitting mode never returns `None`.
     assert_eq!(t.tokenize(""), Some(vec![]));
 
-    // Matching mode can: `String#match` returned `null`.
+    // Matching mode can: no match at all is a real, distinct outcome.
     let m = WordTokenizer::matching();
     assert_eq!(m.tokenize("abc def"), Some(vec![" "]));
     assert_eq!(m.tokenize("abcdef"), None);
@@ -509,18 +494,18 @@ fn main() {
 }
 ```
 
-`RegexpTokenizer` adds a **second** layer of `Option`, on each token. A
-`String#split` with capture groups interleaves the groups into the result, and a
-group that did not participate becomes the reference's `undefined` — modelled as
-`None`. The full return type is therefore `Option<Vec<Option<&str>>>`: the outer
-`Option` is `null`, the inner one is `undefined`.
+`RegexpTokenizer` adds a **second** layer of `Option`, on each token: splitting
+with capture groups interleaves the groups into the result, and a group that
+did not participate is modelled as `None`. The full return type is therefore
+`Option<Vec<Option<&str>>>`: the outer `Option` is "no match at all," the
+inner one is "this capture group did not participate."
 
 ```rust
 use verbora_tokenizers::RegexpTokenizer;
 
 fn main() {
-    // `RegexpTokenizer::without_pattern()` reproduces `new RegexpTokenizer()`:
-    // `String#split(undefined)` is `[s]`.
+    // `RegexpTokenizer::without_pattern()` has no pattern to split or match
+    // on, so it yields the whole input as a single token.
     let t = RegexpTokenizer::without_pattern();
     assert_eq!(t.tokenize("a b"), Some(vec![Some("a b")]));
 
@@ -532,10 +517,11 @@ fn main() {
 ```
 
 With a real pattern you must construct a `Pattern`, which pairs a compiled
-`regex::Regex` with the `/g` flag the reference's match mode depends on. That
-requires the `regex` crate as a direct dependency of *your* package — Verbora
-does not re-export it, which is why the following block is not compiled by the
-book:
+`regex::Regex` with a `global` flag: a non-global pattern's match mode yields
+the full match plus any capture groups, while a global pattern's match mode
+yields every match's text and no groups at all. Building a `Pattern` requires
+the `regex` crate as a direct dependency of *your* package — Verbora does not
+re-export it, which is why the following block is not compiled by the book:
 
 ```rust  ignore
 use verbora_tokenizers::{Pattern, RegexpTokenizer};
@@ -546,27 +532,27 @@ let split = RegexpTokenizer::new(Pattern::new(Regex::new(r"[^A-Za-z0-9_]+").unwr
 assert_eq!(split.tokenize("hello, world"), Some(vec![Some("hello"), Some("world")]));
 
 // Capture groups are interleaved into the result, and a group that did not
-// participate is the reference's `undefined` — `None` here.
+// participate is `None` here.
 let grouped = RegexpTokenizer::new(Pattern::new(Regex::new(r"(x)|([0-9])").unwrap()));
 assert_eq!(grouped.tokenize("a1b"), Some(vec![Some("a"), None, Some("1"), Some("b")]));
 
 // `gaps: false` — match with the pattern. A global pattern that finds nothing
-// is the reference's `null`.
+// returns `None`.
 let matching = RegexpTokenizer::matching(Pattern::global(Regex::new("[a-z]+").unwrap()));
 assert_eq!(matching.tokenize("123"), None);
 ```
 
-Two constructor options exist in the reference and are deliberately **absent**
-here, because they are dead in the reference:
+Two constructor options are deliberately **absent** here, because they would
+have had no observable effect:
 
-- `discardEmpty` is computed as `options.discardEmpty || true`, so it is `true`
-  for every input. There is no way to switch it off, and this port offers none.
-- `WordTokenizer` accepts `options.pattern` and then overwrites it
-  unconditionally in its constructor, so `WordTokenizer` takes no pattern here.
+- A `discard_empty` toggle: empty tokens are always discarded, unconditionally,
+  so there is no way — or reason — to switch it off.
+- A custom pattern for `WordTokenizer`: its character class is fixed, so
+  `WordTokenizer` takes no pattern argument here.
 
-`gaps` *is* honoured, by all four — with one wrinkle. `OrthographyTokenizer`
-builds its fallback with `new WordTokenizer()`, passing no options at all, so an
-**unknown language silently discards `gaps`**:
+`gaps` *is* honoured, by all four — with one wrinkle. `OrthographyTokenizer`'s
+fallback path constructs a default `WordTokenizer` without forwarding `gaps`
+to it, so an **unknown language silently discards `gaps`**:
 
 ```rust
 use verbora_tokenizers::OrthographyTokenizer;
@@ -585,9 +571,10 @@ fn main() {
 }
 ```
 
-Only `fi` is defined in the reference's matcher table. `new OrthographyTokenizer()`
-with no language *throws* in the reference; here the constructor requires a
-`&str`, so the same mistake is a compile error.
+Only `fi` is defined in this crate's language-matcher table.
+`OrthographyTokenizer::new` requires a `&str` language argument, so
+constructing one with no language at all is a compile error, not a runtime
+failure.
 
 ## Advanced usage
 
@@ -611,10 +598,10 @@ astral character is the high surrogate alone. That is why its token type is
 
 For an astral character such as `😀`, the two halves of the surrogate pair land
 in *separate* tokens. An unpaired surrogate is not a Unicode scalar value, so it
-cannot be held by `char`, `String` or `&str`. A port yielding `String` would
-have to pick one of three wrong answers: substitute U+FFFD (wrong content),
-merge the halves (wrong token *count*), or drop them (wrong both). Verbora
-returns `Utf16Token` instead:
+cannot be held by `char`, `String` or `&str`. An implementation yielding
+`String` would have to pick one of three wrong answers: substitute U+FFFD
+(wrong content), merge the halves (wrong token *count*), or drop them (wrong
+both). Verbora returns `Utf16Token` instead:
 
 ```rust  ignore
 pub enum Utf16Token<'a> {
@@ -682,8 +669,8 @@ what the test suite compares on.
 
 ### `trim_edge_empties`
 
-The reference's `Tokenizer#trim` pops trailing empty strings and shifts leading
-ones, but leaves *interior* empties alone. That asymmetry is load-bearing —
+`trim_edge_empties` pops trailing empty strings and shifts leading ones, but
+leaves *interior* empties alone. That asymmetry is load-bearing —
 `SentenceTokenizer::tokenize("   ")` is `[""]` rather than `[]` because of it —
 so it is re-exported from this crate rather than generalised:
 
@@ -843,16 +830,17 @@ factor:
 - The character-class scanner is generic over a zero-sized `CharClass` type
   rather than taking a function pointer, so each tokenizer's predicate inlines
   into its own loop.
-- `TokenizerJa`'s weight tables are `static` data. The reference rebuilds fifty
-  hash tables on every `new TokenizerJa()`; here construction is free and 30 of
-  the 46 lookups per character are a shift, an add and a load.
+- `TokenizerJa`'s weight tables are `static` data, built once rather than
+  rebuilt per instance, so construction is free and 30 of the 46 lookups per
+  character are a shift, an add and a load.
 
 Benchmarks exist (`crates/verbora-tokenizers/benches/tokenizers.rs`,
 `cargo bench -p verbora-tokenizers`) and measure three things: scaling across
 document sizes 16→8192 words, cross-language cost on one fixed document, and the
 three API shapes on identical input. **No results have been recorded yet** —
-`benches/results/` contains the reference baselines for distance, inflectors,
-ngrams, normalizers, phonetics and trie, but not tokenizers.
+`benches/results/` contains recorded baselines, measured against a
+widely-used JavaScript NLP library, for distance, inflectors, ngrams,
+normalizers, phonetics and trie, but not tokenizers.
 
 > Not yet benchmarked — see [Benchmarks](../benchmarks/index.md).
 
@@ -880,28 +868,33 @@ ngrams, normalizers, phonetics and trie, but not tokenizers.
 
 ## Unicode and language notes
 
-### Five the reference semantics that Rust does not share
+### Five semantics this crate implements on purpose
 
-Every one of these is a place where the obvious Rust translation silently
-disagrees with the reference. They live in `verbora_tokenizers::whitespace`.
+Every one of these is a place where the obvious Rust translation, written
+naively, would silently diverge from what these tokenizers actually
+implement. They live in `verbora_tokenizers::whitespace`.
 
-| Hazard | the reference | Rust's default | Consequence |
+| Hazard | This crate's semantics | Rust's default | Consequence |
 |---|---|---|---|
 | `\w \W \b \d` | ASCII only | Unicode-aware | changes Italian tokenization and every Treebank contraction boundary |
-| `/i` | the reference language `Canonicalize` | full simple case folding | Rust folds `ſ`→`s` and `K`→`k`; the reference does not |
+| Case-insensitive matching | language-specific case rules only | full simple case folding | Rust folds `ſ`→`s` and `K`→`k`; this crate does not |
 | `\s` | includes U+FEFF, excludes U+0085 | the reverse | `SPACE_CLASS` and `is_whitespace` exist for this |
 | `.` | refuses four line terminators | refuses only `\n` | `\r`, U+2028 and U+2029 survive as gap text in `WordPunctTokenizer` |
-| `String#replace(string, …)` | replaces the **first** match | `str::replace` replaces all | changes Norwegian and Swedish on any repeated accent |
+| First-match string replacement | replaces the **first** match | `str::replace` replaces all | changes Norwegian and Swedish on any repeated accent |
 
-Character classes are therefore *generated*, by running each reference regex
-over the whole BMP (`crates/verbora-tokenizers/tools/gen_classes`), rather
-than transcribed. That is how the Russian class turned out to admit
-U+1C80–U+1C86 and the Spanish class turned out to contain `×` and `÷`.
+Character classes are therefore *generated*, by running each language's
+defining regular expression over the whole BMP
+(`crates/verbora-tokenizers/tools/gen_classes`), rather than transcribed.
+That is how the Russian class turned out to admit U+1C80–U+1C86 and the
+Spanish class turned out to contain `×` and `÷`.
 
 ### Bugs reproduced on purpose
 
-Each of these is a defect in the reference that this crate keeps, because the
-reference is the executable specification. 
+Each of these is a defect this crate keeps deliberately: reproducing it
+exactly is part of what keeps this crate's output pinned and predictable,
+verified by its own regression suite rather than treated as an oversight to
+fix.
+
 ```rust
 use verbora_tokenizers::{
     AggressiveTokenizer, AggressiveTokenizerDe, AggressiveTokenizerEs, AggressiveTokenizerFa,
@@ -910,8 +903,8 @@ use verbora_tokenizers::{
 };
 
 fn main() {
-    // German: The reference class lists only the lowercase umlauts and has no
-    // `i` flag, so `Ä`, `Ö` and `Ü` are separators.
+    // German: the character class lists only the lowercase umlauts and has
+    // no case-insensitive flag, so `Ä`, `Ö` and `Ü` are separators.
     assert_eq!(
         AggressiveTokenizerDe::new().tokenize("Äpfel Öl Über weiß"),
         ["pfel", "l", "ber", "weiß"]
@@ -947,21 +940,23 @@ fn main() {
     // French's `i` flag admits uppercase accents, which German's lacks.
     assert_eq!(AggressiveTokenizerFr::new().tokenize("ÉCOLE Œuvre"), ["ÉCOLE", "Œuvre"]);
 
-    // Italian splits on the reference's ASCII `\W+`.
+    // Italian splits on an ASCII-only `\W+` character class.
     assert_eq!(AggressiveTokenizerIt::new().tokenize("привет, мир"), Vec::<&str>::new());
 }
 ```
 
-**The `CaseTokenizer` `"undefined"` bug.** The reference loop is bounded by
-`lower.length` but indexes into `text`:
+**The `CaseTokenizer` `"undefined"` bug.** Its filtering loop runs over the
+*lowercased* string's length in UTF-16 code units, not the original text's
+length:
 
 ```text
-for (i = 0; i < lower.length; ++i) { ... result += text[i] ... }
+for i in 0..lower.len() { ... read text[i] ... }
 ```
 
 When lowercasing *lengthens* the string — `İ` (U+0130) lowercases to two code
-units — `i` runs past the end of `text`, `text[i]` evaluates to `undefined`, and
-the reference's string concatenation appends the nine characters `undefined`:
+units — `i` runs past the end of the original text, reading it there yields
+nothing, and the crate appends the literal nine-character string `undefined`
+at that position:
 
 ```rust
 use verbora_tokenizers::{CaseTokenizer, Tokenize};
@@ -984,11 +979,12 @@ fn main() {
 }
 ```
 
-**First-occurrence-only diacritic removal.** `normalizer_no.removeDiacritics` is
-twenty-six `text.replace('à', 'a')` calls, and passing a *string* as the first
-argument to `String.prototype.replace` replaces only the first occurrence.
-Rust's `str::replace` replaces all of them, which is a silent divergence on any
-text with a repeated accent:
+**First-occurrence-only diacritic removal.** The Norwegian and Swedish
+diacritic-stripping pass replaces only the *first* occurrence of each of
+twenty-six accented characters, not every occurrence — a deliberate
+replace-first behaviour. Rust's `str::replace` replaces all matches by
+default, so a naive implementation would silently diverge on any text with a
+repeated accent:
 
 ```rust
 use verbora_tokenizers::{AggressiveTokenizerNo, AggressiveTokenizerSv, Tokenize};
@@ -1003,12 +999,14 @@ fn main() {
 }
 ```
 
-**Treebank's `Whadddya` rule.** The reference's regex is
-`\b(Whad)(dd)(ya)\b`, which requires the literal `Whadddya` with three `d`s, so
-it never fires on real text. Fixing it would change `tokenize("Whaddya")` from
-one token to three, and fail its tests. Treebank's final-period rule is also
-position-dependent — `\. *(\n|$)` has no `m` flag, so the same sentence yields
-`"home."` mid-text and `"home", "."` at the end of the input:
+**Treebank's `Whadddya` rule.** Its contraction pattern is
+`\b(Whad)(dd)(ya)\b`, which requires the literal `Whadddya` with three `d`s,
+so it never fires on real text — `"Whaddya"`, with two `d`s, does not match.
+Fixing the extra `d` would change `tokenize("Whaddya")` from one token to
+three, which would break this crate's pinned regression fixture, so it stays
+as-is. Treebank's final-period rule is also position-dependent — `\. *(\n|$)`
+has no multi-line flag, so the same sentence yields `"home."` mid-text and
+`"home", "."` at the end of the input:
 
 ```rust
 use verbora_tokenizers::{Tokenize, TreebankWordTokenizer};
@@ -1055,24 +1053,23 @@ fn main() {
         ["This is a sentence.", " This is another sentence."]
     );
 
-    // The two the reference export names are one type.
+    // The two exported names are one type.
     let _: SentenceTokenizer = SentenceTokenizerNew::new();
 }
 ```
 
-`SentenceTokenizer`'s second constructor argument deserves a warning of its own:
-`index.d.ts` and the reference's spec both suggest a list of sentence
-*demarkers*, but the implementation names the parameter `trimSentences` and only
-tests it for truthiness. Passing `['.', '!', '?']` means "yes, trim". There is no
-demarker feature, so Verbora exposes `.trimming(bool)` and nothing else.
+`SentenceTokenizer`'s second constructor argument deserves a warning of its
+own: it looks like it should take a list of custom sentence *demarkers*, but
+it does not — passing any non-empty, truthy-looking value simply means "yes,
+trim." There is no demarker feature, so Verbora exposes `.trimming(bool)` and
+nothing else.
 
 ### Japanese
 
-`TokenizerJa` is TinySegmenter 0.1 with the reference's own normalisation step
-(full-width to half-width, half-width katakana to full-width) applied first. It
-is the only tokenizer in the reference that null-checks its argument, so empty
-input returns `[]` rather than throwing; Rust models "no text" as `""`. It also
-strips punctuation from *inside* tokens and drops tokens that empty as a result.
+`TokenizerJa` is TinySegmenter 0.1 with a normalisation step (full-width to
+half-width, half-width katakana to full-width) applied first. Empty input
+returns `[]`; Rust models "no text" as `""`. It also strips punctuation from
+*inside* tokens and drops tokens that empty as a result.
 
 ```rust
 use verbora_tokenizers::{Tokenize, TokenizerJa};
@@ -1119,9 +1116,9 @@ fn main() {
 **Forgetting `buf.clear()`.** `tokenize_into` appends. See the warning above.
 
 **Treating `None` as "empty".** For the four optional tokenizers, `None` means
-`String#match` returned `null`, which is not the same as returning `[]`. If your
-application does not need the distinction, collapse it explicitly with
-`.unwrap_or_default()` so the decision is visible in the code.
+"the pattern did not match at all," which is not the same as returning `[]`.
+If your application does not need the distinction, collapse it explicitly
+with `.unwrap_or_default()` so the decision is visible in the code.
 
 **Calling `tokenize_batch` for speed.** It is a sequential `map` over
 `tokenize`, allocating a fresh `Vec` per document. It is a convenience, not an
@@ -1167,10 +1164,9 @@ contains numbers, they silently disappear.
   `_into` appends and `tokens()` is the primitive.
 - [Core traits](core.md) — `verbora_core::Tokenizer`, `BorrowingTokenizer`,
   `trim_edge_empties`.
-- [n-grams](ngrams.md) — consumes a tokenizer, and carries a process-global
-  tokenizer binding that the reference also has.
+- [n-grams](ngrams.md) — consumes a tokenizer, and carries its own
+  process-global tokenizer binding.
 - [Normalizers](normalizers.md) — what to run before or after tokenizing.
-  deliberately does *not* match.
 - [Performance](../performance/index.md), and in detail:
   [Zero-copy](../performance/zero-copy.md),
   [Buffer reuse](../performance/buffer-reuse.md),
@@ -1199,7 +1195,7 @@ will use most often:
 | `Utf16Token` | `verbora_tokenizers::Utf16Token` |
 | `Pattern` | `verbora_tokenizers::Pattern` |
 | `trim_edge_empties` | `verbora_tokenizers::trim_edge_empties` |
-| the reference string semantics | `verbora_tokenizers::whitespace` |
+| Pinned string-matching semantics (regex flags, `\w`/`\s` classes, replace-first) | `verbora_tokenizers::whitespace` |
 | Generated character classes | `verbora_tokenizers::classes` |
 | The shared scanner | `verbora_tokenizers::scan` |
 | `Tokenizer`, `BorrowingTokenizer` | `verbora_core` |

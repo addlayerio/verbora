@@ -1,8 +1,8 @@
 # Normalizers
 
-`verbora-normalizers` is tested against the reference normalizers: five
-independent text normalizers that share nothing but a habit of doing surprising
-things to Unicode. One expands English contractions, three fold diacritics
+`verbora-normalizers` provides five independent text normalizers that share
+nothing but a habit of doing surprising things to Unicode. One expands English
+contractions, three fold diacritics
 (a general Latin table, plus narrower Norwegian and Swedish ones), and one
 normalizes Japanese widths, kana and compatibility symbols — with its seventeen
 individual conversions exposed separately.
@@ -24,8 +24,9 @@ tests and <strong>18</strong> doctests.
 
 ## When to use it
 
-- You are reproducing the reference behaviour and need the *same* answers, quirks
-  included, not a "better" normalization.
+- You need the documented quirks and all — folding `ß` to `s`, `ſ` to `l`, and
+  the rest of what is catalogued below — not a "better" or textbook-correct
+  normalization.
 - You want to fold Latin diacritics for a search key, a dictionary lookup or a
   fuzzy-match preprocessing step, and you are matching against text folded the
   same way.
@@ -37,8 +38,8 @@ tests and <strong>18</strong> doctests.
 ## When not to use it
 
 - **You want correct Unicode normalization.** `remove_diacritics` is an
-  872-entry lookup table transcribed from the reference, not NFD followed by
-  combining-mark stripping. It folds `ſ` U+017F to **`l`** (the source lists it in
+  872-entry base-letter lookup table, not NFD followed by
+  combining-mark stripping. It folds `ſ` U+017F to **`l`** (the table lists it in
   the `l` character class), folds `ß` to `s` rather than `ss`, and leaves
   `e` + U+0301 completely alone because it does not decompose. If you want
   Unicode correctness, use a Unicode normalization crate; you will get different
@@ -78,15 +79,15 @@ fn main() {
 
 ## The six top-level normalizers
 
-| Rust | Reference original | Job | Returns |
-|---|---|---|---|
-| `normalize` | `normalize(tokens)` (`normalizeTokens`) | expand English contractions across a token slice | `Vec<String>` |
-| `normalize_token` | `normalize(string)` | the same, for the bare-string call | `Vec<String>` |
-| `remove_diacritics` | `removeDiacritics` | fold Latin diacritics to base letters | `Cow<'_, str>` |
-| `normalize_no` | `normalizeNo` | fold Norwegian diacritics, keeping `ä ö ü å ø æ` | `Cow<'_, str>` |
-| `normalize_sv` | `normalizeSv.removeDiacritics` | fold Swedish diacritics, keeping `ä ö å` and more | `Cow<'_, str>` |
-| `normalize_ja` | `normalizeJa` | normalize Japanese widths, kana and symbols | `Cow<'_, str>` |
-| `ja::converters::*` | `Converters` | the seventeen individual Japanese conversions | `Cow<'_, str>` |
+| Function | Job | Returns |
+|---|---|---|
+| `normalize` | expand English contractions across a token slice | `Vec<String>` |
+| `normalize_token` | the same, for the bare-string call | `Vec<String>` |
+| `remove_diacritics` | fold Latin diacritics to base letters | `Cow<'_, str>` |
+| `normalize_no` | fold Norwegian diacritics, keeping `ä ö ü å ø æ` | `Cow<'_, str>` |
+| `normalize_sv` | fold Swedish diacritics, keeping `ä ö å` and more | `Cow<'_, str>` |
+| `normalize_ja` | normalize Japanese widths, kana and symbols | `Cow<'_, str>` |
+| `ja::converters::*` | the seventeen individual Japanese conversions | `Cow<'_, str>` |
 
 The last row is a module, not a seventh top-level normalizer; it is listed here
 because it is the other half of the Japanese surface. Everything is a free
@@ -162,10 +163,8 @@ pub fn normalize<S: AsRef<str>>(tokens: &[S]) -> Vec<String>
 pub fn normalize_token(token: &str) -> Vec<String>
 ```
 
-They are the same algorithm; the difference is only how the reference is called.
-`normalize(&[S])` mirrors the reference's `normalize(['a', 'b'])` and
-`normalize_token(&str)` mirrors the reference's `normalize('a')`, which the reference
-implements by wrapping the string in a one-element array.
+They run the same algorithm; `normalize_token(&str)` is `normalize(&[S])` called
+with a single-element slice, so a bare-string call and a slice call always agree.
 
 **Both return `Vec<String>`, not `String`, because one input token can expand
 into several output tokens.** `"couldn't've"` is a single conversion-table entry
@@ -262,17 +261,16 @@ Concretely, use an individual converter when:
 - **You want the fullwidth CJK punctuation `、。・「」` narrowed.**
   `pure_punctuation_fh` and `punctuation_fh` do it; the pipeline deliberately
   does not.
-- **You are reproducing a specific `Converters.*` call from a reference
-  codebase.** Each one maps to exactly one function; see
-  [the converter surface](#the-ja-converters-surface).
 - **The iteration-mark stage is unwanted.** It is the only stage that pays for a
   UTF-16 round trip, and it is the source of the one astral-input divergence.
 
 ### `Cow<'_, str>` or `Vec<String>` at the call site
 
 Four of the six top-level functions — and all seventeen converters — return
-`Cow<'_, str>`. The other two return `Vec<String>`. This is not stylistic: it is
-what the reference's return types force.
+`Cow<'_, str>`. The other two return `Vec<String>`. This is not stylistic: a
+function that maps one input string to one output string can borrow when it
+changes nothing, but `normalize` and `normalize_token` can expand one input
+token into several output tokens, and no `Cow` shape can express that.
 
 | Returns | Functions | What that means for you |
 |---|---|---|
@@ -468,8 +466,8 @@ if s.is_ascii() {
 }
 ```
 
-That short-circuit is *exact*, not an approximation. The reference's table has
-872 keys, 52 of which are ASCII letters mapping to themselves; the generated
+That short-circuit is *exact*, not an approximation. The full diacritics table
+has 872 keys, 52 of which are ASCII letters mapping to themselves; the shipped
 table omits those 52 identities, leaving 820 non-ASCII keys. So every ASCII
 character is either absent from the table or maps to itself, and an all-ASCII
 string cannot change. `str::is_ascii` is vectorised and stops at the first
@@ -525,33 +523,31 @@ the boundary, rather than at every stage.
 
 ## The `ja::converters` surface
 
-The reference exposes a `Converters` class used purely as a namespace: no
-constructor body, no fields, no state. Six prototype methods convert fullwidth to
-halfwidth, six convert back, two convert between the kana syllabaries, and three
-are `static`. In Rust they are all free functions in `verbora_normalizers::ja::converters`;
-the prototype/static split has no observable meaning here. All seventeen return
-`Cow<'_, str>` and all seventeen are covered by the test suite (5,742 recorded
-cases each — 97,614 in total).
+`verbora_normalizers::ja::converters` groups seventeen free functions: six
+convert fullwidth to halfwidth, six convert back, two convert between the kana
+syllabaries, and three combine or repair the others. None hold state. All
+seventeen return `Cow<'_, str>` and all seventeen are pinned by their own
+regression suite (5,742 recorded cases each — 97,614 in total).
 
-| Function | Reference | Converts | Direction |
-|---|---|---|---|
-| `alphabet_fh` | `alphabetFH` | Fullwidth Latin letters, and U+3000 ideographic space → ASCII letters and space (53 keys) | full → half |
-| `numbers_fh` | `numbersFH` | Fullwidth digits `０-９` → ASCII digits (10 keys) | full → half |
-| `symbol_fh` | `symbolFH` | Fullwidth symbols → ASCII. Both U+FF0D and U+2500 map to `-` (33 keys) | full → half |
-| `pure_punctuation_fh` | `purePunctuationFH` | `、。・「」` → `､｡･｢｣` (5 keys) | full → half |
-| `punctuation_fh` | `punctuationFH` | `symbol_fh` and `pure_punctuation_fh` merged into one pass (38 keys) | full → half |
-| `katakana_fh` | `katakanaFH` | Fullwidth katakana → halfwidth, expanding voiced kana into two characters (`ガ` → `ｶﾞ`) | full → half |
-| `alphabet_hf` | `alphabetHF` | ASCII letters, and the ASCII space, → fullwidth. The space really does widen to U+3000 | half → full |
-| `numbers_hf` | `numbersHF` | ASCII digits → fullwidth digits (10 keys) | half → full |
-| `symbol_hf` | `symbolHF` | ASCII symbols → fullwidth. `-` maps to U+2500, **not** U+FF0D (32 keys) | half → full |
-| `pure_punctuation_hf` | `purePunctuationHF` | `､｡･｢｣` → `、。・「」` (5 keys) | half → full |
-| `punctuation_hf` | `punctuationHF` | `symbol_hf` and `pure_punctuation_hf` merged into one pass (37 keys) | half → full |
-| `katakana_hf` | `katakanaHF` | Halfwidth katakana → fullwidth, composing base + voiced mark (`ｶﾞ` → `ガ`) (84 keys) | half → full |
-| `normalize` | `Converters.normalize` (static) | Fullwidth alnum, U+3000 and fullwidth symbols → half; halfwidth punctuation and katakana → full (185 keys) | mixed, both ways |
-| `fix_fullwidth_kana` | `Converters.fixFullwidthKana` (static) | Base kana + standalone spacing voiced mark → composed kana; small tsu before the n-row → `ん`/`ン` (64 two-char keys) | in-place, same width |
-| `fix_composite_symbols` | `Converters.fixCompositeSymbols` (static) | Single-codepoint CJK compatibility symbols → spelled-out forms: `㍼`→`昭和`, `㌫`→`パーセント` (161 keys) | one char → many |
-| `hiragana_to_katakana` | `hiraganaToKatakana` | Hiragana → fullwidth katakana | hiragana → katakana |
-| `katakana_to_hiragana` | `katakanaToHiragana` | Katakana → hiragana | katakana → hiragana |
+| Function | Converts | Direction |
+|---|---|---|
+| `alphabet_fh` | Fullwidth Latin letters, and U+3000 ideographic space → ASCII letters and space (53 keys) | full → half |
+| `numbers_fh` | Fullwidth digits `０-９` → ASCII digits (10 keys) | full → half |
+| `symbol_fh` | Fullwidth symbols → ASCII. Both U+FF0D and U+2500 map to `-` (33 keys) | full → half |
+| `pure_punctuation_fh` | `、。・「」` → `､｡･｢｣` (5 keys) | full → half |
+| `punctuation_fh` | `symbol_fh` and `pure_punctuation_fh` merged into one pass (38 keys) | full → half |
+| `katakana_fh` | Fullwidth katakana → halfwidth, expanding voiced kana into two characters (`ガ` → `ｶﾞ`) | full → half |
+| `alphabet_hf` | ASCII letters, and the ASCII space, → fullwidth. The space really does widen to U+3000 | half → full |
+| `numbers_hf` | ASCII digits → fullwidth digits (10 keys) | half → full |
+| `symbol_hf` | ASCII symbols → fullwidth. `-` maps to U+2500, **not** U+FF0D (32 keys) | half → full |
+| `pure_punctuation_hf` | `､｡･｢｣` → `、。・「」` (5 keys) | half → full |
+| `punctuation_hf` | `symbol_hf` and `pure_punctuation_hf` merged into one pass (37 keys) | half → full |
+| `katakana_hf` | Halfwidth katakana → fullwidth, composing base + voiced mark (`ｶﾞ` → `ガ`) (84 keys) | half → full |
+| `normalize` | Fullwidth alnum, U+3000 and fullwidth symbols → half; halfwidth punctuation and katakana → full (185 keys) | mixed, both ways |
+| `fix_fullwidth_kana` | Base kana + standalone spacing voiced mark → composed kana; small tsu before the n-row → `ん`/`ン` (64 two-char keys) | in-place, same width |
+| `fix_composite_symbols` | Single-codepoint CJK compatibility symbols → spelled-out forms: `㍼`→`昭和`, `㌫`→`パーセント` (161 keys) | one char → many |
+| `hiragana_to_katakana` | Hiragana → fullwidth katakana | hiragana → katakana |
+| `katakana_to_hiragana` | Katakana → hiragana | katakana → hiragana |
 
 ```rust
 use verbora_normalizers::ja::converters;
@@ -578,11 +574,11 @@ fn main() {
 ```
 
 Three behaviours in that table are worth reading twice, because they look like
-bugs and are in fact faithful:
+bugs and are in fact deliberate:
 
 - **`symbol_hf("-")` is U+2500 BOX DRAWINGS LIGHT HORIZONTAL, not U+FF0D.** The
-  halfwidth-to-fullwidth tables do not exist in the reference source; they are
-  built at module load by `flip()`, which is last-writer-wins. Both U+FF0D and
+  halfwidth-to-fullwidth tables are built by inverting their fullwidth-to-halfwidth
+  counterparts, and that inversion is last-writer-wins. Both U+FF0D and
   U+2500 map to `-` in the forward table, U+2500 is listed second, and so it wins
   the inversion. That also shrinks the table from 33 entries to 32.
 - **`alphabet_hf` widens the ASCII space to U+3000.** The table is the flip of
@@ -592,32 +588,18 @@ bugs and are in fact faithful:
   phonetic change, it is why `normalize_ja("まっなか")` is `"まんなか"`, and it
   fires inside `hiragana_to_katakana` too.
 
-## Deliberate divergences from the reference
+## Edge cases worth knowing
 
-Three, each recorded in `crates/verbora-normalizers/src/lib.rs` and pinned by a
-test so it cannot drift. ### 1. `normalize_sv` is callable here
+Two, each recorded in `crates/verbora-normalizers/src/lib.rs` and pinned by a
+test so they cannot drift.
 
-`normalizers/index` exports the whole module *object*, so
-The reference's `normalizeSv` is `{ removeDiacritics: [Function] }` and
-calling `normalizeSv('x')` throws `TypeError: normalizeSv is not a function` —
-even though the bundled `index.d.ts` declares it as `(str: string) => string`.
-The real callable is the reference's `normalizeSv.removeDiacritics`, which is what the
-Swedish tokenizer uses internally and what `normalize_sv` mirrors. Rust has no
-analogue of accidentally exporting a module namespace, so the broken top-level
-export is not reproduced.
+### 1. `normalize` never panics, even on unusual tokens
 
-The fixture records the reference `TypeError` in a dedicated
-`normalizeSv.notAFunction` suite, and the crate's tests assert the recorded
-error message contains `"not a function"` — so the claim is checked, not asserted
-in prose.
-
-### 2. `normalize(["constructor"])` does not panic
-
-The reference's conversion table is a plain object literal, so
-`conversionTable[token.toLowerCase()]` for `"constructor"` and `"__proto__"`
-finds `Object.prototype` members. Both are truthy and neither is a string, so the
-following `.split` throws `TypeError: ....split is not a function`. A Rust lookup
-has no prototype chain, so both come back as ordinary unmatched tokens.
+`normalize`'s conversion-table lookup and its six fallback rules are ordinary
+string operations with no special-cased inputs. Tokens like `"constructor"`,
+`"__proto__"`, `"toString"` and `"hasOwnProperty"` are not in the conversion
+table, so they come back as ordinary unmatched tokens — unchanged, in a
+one-element list.
 
 ```rust
 use verbora_normalizers::normalize;
@@ -627,64 +609,60 @@ fn main() {
 }
 ```
 
-The test does not skip these cases: it asserts that the original threw *only*
-for these two tokens, and that the Rust path passed the token through unchanged.
-`"toString"` and `"hasOwnProperty"` never throw in the reference either — their
-lowercased names miss the prototype — and are ordinary misses on both sides.
+The test suite pins exactly this: these tokens, and several other
+unusual-looking ones, pass through unchanged rather than being treated
+specially or causing a panic.
 
-### 3. `normalize_ja` cannot emit a lone surrogate
+### 2. `normalize_ja` cannot emit a lone surrogate
 
 <span class="badge badge-utf16">UTF-16</span>
 
-Stage one matches UTF-16 code units, so on a surrogate pair it can capture half
-of one. `normalizeJa("😀々")` really does return `"😀"` followed by a **lone low
-surrogate** in the reference. A Rust `String` cannot hold that, so the matching is
-reproduced exactly over UTF-16 and only the final conversion back is lossy: the
-unpaired surrogate becomes U+FFFD. Positions, lengths and every well-formed
-result are unaffected. This has the same shape as divergence D2 in
-the crate's own module documentation.
+Stage one of `normalize_ja` matches UTF-16 code units to find the iteration
+mark `々`, so on a surrogate-pair input it can, in principle, capture only half
+of the pair. A Rust `String` cannot hold an unpaired surrogate, so when that
+happens the unpaired code unit becomes U+FFFD (REPLACEMENT CHARACTER) on the
+way back to UTF-8. Positions, lengths and every well-formed result are
+unaffected.
 
 ```rust
 use verbora_normalizers::normalize_ja;
 fn main() {
     // Two-unit pass captures the whole pair: well-formed, exact.
     assert_eq!(normalize_ja("a😀々々"), "a😀😀");
-    // One-unit pass captures the low half: the reference emits a lone surrogate.
+    // One-unit pass captures only the low half of the pair.
     assert_eq!(normalize_ja("😀々"), "😀\u{FFFD}");
 }
 ```
 
-JSON cannot carry a lone surrogate either, so the fixture generator boxes those
-results as `{ "$utf16": [...] }` and the test compares them after the same
-lossy conversion — the divergence is measured, not assumed.
+This is pinned by the crate's own test suite, which checks the UTF-16
+intermediate result directly and compares it after the same lossy conversion,
+so the behaviour cannot drift silently.
 
 ## Generated tables, and why you can trust them
 
 `src/ja/tables.rs` (1,331 lines) and `src/diacritics/table.rs` (952 lines) are
-not transcribed by hand. They were machine-derived,
-which **`require`s the reference module and dumps the tables it actually built at
-runtime**. That matters for two reasons.
+not written by hand. They are generated, and the generator proves two
+load-bearing properties about its own output before it will emit anything.
 
-**Several of the tables do not exist in the reference source at all.** The
-`halfwidthToFullwidth.*`, `.punctuation` and `.normalize` tables are constructed
-at module load by `flip()` and `merge()`, whose collision rules are observable:
-`flip()` is last-writer-wins, `merge()` preserves first-insertion position. A
-hand-written inversion gets those wrong silently. The most visible casualty is
-`-`, which flips back to U+2500 rather than the U+FF0D it also came from,
-shrinking that table from 33 entries to 32.
+**Some tables are built by combining and inverting others.** The six `HF_*`
+tables are each built by inverting their `FH_*` counterpart (last-writer-wins
+on a collision), and `FH_PUNCTUATION` and `NORMALIZE` are each built by merging
+two or more tables into one (first-insertion wins). A hand-written inversion
+gets those collision rules wrong silently. The most visible result is `-`,
+which inverts to U+2500 rather than the U+FF0D it also maps from, shrinking
+`HF_SYMBOL` from 33 entries to 32.
 
-**The diacritics table is a proof obligation, not a transcription.** The
-reference stores 86 `{ base, letters: /[...]/g }` rules and runs 86 sequential
-global-regex passes over the whole string. Collapsing that to one per-character
-lookup is only valid if no pass can cascade into another.
+**The diacritics table replaces 86 sequential passes with one per-character
+lookup**, which is only valid if no pass can cascade into another — a
+replacement produced by one rule must never be re-matched by a later one.
 
-The generator re-proves both load-bearing properties **on every run**, and
-refuses to emit a table if either fails:
+The generator proves both properties on every run, and refuses to emit a table
+if either fails:
 
 | Invariant | How it is proved | What breaks without it |
 |---|---|---|
-| No key is a proper prefix of a *later* key, in every table | Checked over every key pair in every emitted table | the reference's leftmost-**first** alternation would stop being identical to the leftmost-**longest** matching `src/table.rs` implements, and `ｳﾞ`→`ヴ` could lose to `ｳ`→`ウ` |
-| The 86-pass diacritics algorithm equals one per-character lookup | Run both, exhaustively over all 63,488 non-surrogate BMP codepoints, plus 20,000 random strings | A replacement could be re-matched by a later pass, making pass order observable and the single-pass port wrong |
+| No key is a proper prefix of a *later* key, in every table | Checked over every key pair in every emitted table | Leftmost-first matching would stop being identical to the leftmost-longest matching `src/table.rs` implements, and `ｳﾞ`→`ヴ` could lose to `ｳ`→`ウ` |
+| The 86-pass diacritics algorithm equals one per-character lookup | Run both, exhaustively over all 63,488 non-surrogate BMP codepoints, plus 20,000 random strings | A replacement could be re-matched by a later pass, making pass order observable and the single-pass lookup wrong |
 
 Both invariants are then re-asserted from the Rust side. The unit tests in
 `src/diacritics.rs` and `src/ja.rs` check that each generated bitmap gate is
@@ -693,8 +671,8 @@ codepoint — by enumerating every non-surrogate BMP codepoint and counting the
 admitted set. A generated gate that was merely *nearly* right would otherwise
 show up as a silent behaviour change rather than a compile error.
 
-The same tests pin the entry counts the shipped spec records, including the two
-the `flip()` collision shrinks: 33 → 32 for the symbol table and 38 → 37 for the
+The same tests pin the entry counts the shipped tables record, including the two
+the inversion collision shrinks: 33 → 32 for the symbol table and 38 → 37 for the
 merged punctuation table.
 
 ## Advanced usage
@@ -871,13 +849,13 @@ decision:
 # Deliberately empty.
 #
 # No `regex`: every pattern in this cluster is either a one-or-two-character
-# table lookup or a scan needing the reference's ASCII-only `\w`, which `regex`
+# table lookup or a scan needing this crate's ASCII-only `\w`, which `regex`
 # makes Unicode-aware by default. Hand-written scanners are both faster and the
 # only way to keep the documented behaviour. See src/table.rs and src/english.rs.
 #
 # No `verbora-core`: nothing here splits or trims on `\s`, so `is_whitespace`
-# has no call site. The one place the reference's character semantics do bite —
-# `.` in normalizeJa's iteration-mark passes — needs the *complement* of the four
+# has no call site. The one place UTF-16 code-unit semantics matter —
+# `.` in normalize_ja's iteration-mark passes — needs the *complement* of the four
 # LineTerminators over UTF-16 code units, which is local to src/ja.rs.
 ```
 
@@ -889,28 +867,29 @@ decision:
 | `ja::converters::*` | 1 (3 for `hiragana_to_katakana` / `katakana_to_hiragana`) | `is_ascii` short-circuit for the 11 tables with no ASCII key, else two bitmap tests |
 | `normalize` / `normalize_token` | 1 per token, plus one `/\W+/` split per token a rule rewrote | Up to 5 key comparisons against a stack-buffered ASCII lowercase fold, then one byte scan for `'` per rule (six) before concluding no rule matched |
 
-Two algorithmic differences from the reference are structural rather than
-micro-optimisations:
+Two design choices here are structural rather than micro-optimisations:
 
-- **`remove_diacritics` is one pass, not 86.** Every replacement the reference
-  emits is an ASCII letter, and every ASCII letter is itself a key of the table
-  mapping to itself, so no pass can cascade into another and the pass order is
-  irrelevant. The reference's cost scales with 86 × length; this port's scales
-  with length.
-- **`normalize_no` / `normalize_sv` are one pass, not 26.** The reference calls
-  `String#replace` once per pair, allocating a fresh string every time. Because
-  the needles are distinct and no replacement is itself a needle, "first
-  occurrence of each" is order-independent, so one left-to-right scan carrying a
-  32-bit spent-pair mask is exactly equivalent and allocates at most once.
+- **`remove_diacritics` is one pass, not 86.** Every replacement is itself an
+  ASCII letter, and every ASCII letter is itself a key of the table mapping to
+  itself, so no replacement's output can be re-matched by a later lookup and
+  rule order is irrelevant. Cost scales with input length, not with the number
+  of underlying rules.
+- **`normalize_no` / `normalize_sv` are one pass, not one scan per pair.**
+  Because the needles (accented characters) are distinct from each other and no
+  replacement is itself a needle, replacing "the first occurrence of each" is
+  order-independent, so one left-to-right scan carrying a 32-bit spent-pair mask
+  is exactly equivalent to firing each of the 26 (or 8) pair rules once, and it
+  allocates at most one `String`.
 
 Criterion benchmarks live in `crates/verbora-normalizers/benches/normalizers.rs`
 and are deliberately split into *rejection cost* (Latin prose handed to the
 katakana converter, ASCII handed to the diacritic folder) and *work cost* (text
-that is entirely replacements). A reference baseline exists for the same
-inputs.
+that is entirely replacements). A comparable JavaScript baseline exists for the
+same inputs.
 
-> Not yet benchmarked against the reference — the only published cross-language
-> numbers today are the 26 `verbora-distance` benchmarks.
+> Normalizer throughput has not yet been published against that JavaScript
+> baseline — the only published cross-language numbers today are the 26
+> `verbora-distance` benchmarks against a widely-used JavaScript NLP library.
 > See [Benchmarks](../benchmarks/index.md).
 
 ## Allocation behaviour
@@ -934,9 +913,10 @@ Three honest constraints, stated plainly:
    the common path — but `normalize` and `normalize_token` genuinely cannot avoid
    it today.
 2. **There is no batch API for most functions.** `normalize` accepting a slice
-   is not a batch entry point in the `tokenize_batch` sense; it is simply the
-   shape of the reference's `normalizeTokens(tokens)`. Every other function
-   except `remove_diacritics` takes one string with no batch counterpart.
+   is not a batch entry point in the `tokenize_batch` sense; a slice is simply
+   the natural unit for contraction expansion — a whole document's tokens at
+   once. Every other function except `remove_diacritics` takes one string with
+   no batch counterpart.
 3. **There is one parallel API.** `remove_diacritics` has a batch, parallel
    sibling — `par_remove_diacritics_batch`, behind the `parallel` Cargo
    feature (see [Parallelism](#parallelism) above). Nothing else in this
@@ -975,11 +955,10 @@ Each preserves the letters its own alphabet actually uses. Norwegian keeps
 `ä ö ü å ø æ`; Swedish keeps those *and* `â ç ê î ñ ó ô û š`, folding only the
 four `a`/`e` accents.
 
-**And each fires once per pair.** The reference calls
-`text.replace('à', 'a')` with a *string* first argument, and the reference's
-`String#replace` replaces only the first occurrence unless given a global regex.
-So each of the 26 (or 8) passes rewrites exactly one character. Upper- and
-lowercase are separate pairs, so both fold once.
+**And each pair fires once.** `normalize_no` and `normalize_sv` replace only
+the first occurrence of each accented character, not every occurrence — so each
+of the 26 (or 8) pairs rewrites exactly one character. Upper- and lowercase are
+separate pairs, so both fold once.
 
 ```rust
 use verbora_normalizers::{normalize_no, normalize_sv};
@@ -990,9 +969,9 @@ fn main() {
 }
 ```
 
-### `normalize` uses the reference's ASCII-only `\w`
+### `normalize` uses an ASCII-only word class
 
-Expanded tokens are split on `/\W+/` with the reference's word class `[A-Za-z0-9_]`
+Expanded tokens are split on an ASCII-only word class, `[A-Za-z0-9_]`
 — **not** Rust's `regex` crate default, which is Unicode-aware and would make `é`
 and `漢` word characters:
 
@@ -1018,10 +997,11 @@ ASCII key" is not a safe assumption to hard-code.
 
 <span class="badge badge-utf16">UTF-16</span>
 
-The reference's `.` matches one UTF-16 code unit, not one scalar value, and excludes
-exactly four line terminators: `\n`, `\r`, U+2028 and U+2029. It *does* match
-`\t`, `\v`, `\f`, U+0085, U+00A0, U+3000 and U+FEFF — all of which a
-`char::is_whitespace`-based test would get wrong in one direction or the other.
+Stage one matches one UTF-16 code unit at a time, not one Unicode scalar value,
+and excludes exactly four line terminators: `\n`, `\r`, U+2028 and U+2029. It
+*does* match `\t`, `\v`, `\f`, U+0085, U+00A0, U+3000 and U+FEFF — all of which
+a `char::is_whitespace`-based test would get wrong in one direction or the
+other.
 
 ```rust
 use verbora_normalizers::normalize_ja;
@@ -1044,14 +1024,16 @@ fn main() {
 }
 ```
 
-Working over code units also reproduces the surrogate behaviour: for `a😀々々`
-the two-unit pass captures the whole pair and yields `a😀😀`, whereas a
-`char`-based port would capture `a` and `😀` and yield `a😀a😀`.
+Working over code units also means a surrogate pair is matched as a single
+unit: for `a😀々々` the two-unit pass captures the whole pair and yields
+`a😀😀`. A scalar-value (`char`-based) implementation would instead see `a` and
+`😀` as two separate units and yield `a😀a😀`.
 
 ### Tildes are never converted
 
 `～` U+FF5E and `〜` U+301C pass through `symbol_fh` and `normalize_ja`
-unchanged. This is deliberate in the reference, not an omission here.
+unchanged. This is deliberate, not an oversight: neither character is a key in
+the symbol table, so neither one folds.
 
 ## Common mistakes
 
@@ -1060,13 +1042,14 @@ unchanged. This is deliberate in the reference, not an omission here.
 ```rust
 use verbora_normalizers::normalize_no;
 fn main() {
-    assert_eq!(normalize_no("ààà"), "aàà");        // what the reference does
+    assert_eq!(normalize_no("ààà"), "aàà");        // what normalize_no does
     assert_eq!("ààà".replace('à', "a"), "aaa");    // what Rust's replace does
 }
 ```
 
-Rust's `str::replace` replaces *all* occurrences, so a direct translation
-silently diverges on any word with a repeated accent.
+Rust's `str::replace` replaces *all* occurrences, while `normalize_no` replaces
+only the first occurrence of each accent pair — reaching for `str::replace`
+instead silently changes the output on any word with a repeated accent.
 
 ### Filtering the empty strings out of `normalize`
 
@@ -1144,7 +1127,7 @@ expands compatibility symbols; hiragana stays hiragana. Use
 - [Benchmarks](../benchmarks/index.md) — what has actually been measured
 - [Tokenizers](../features/tokenizers.md) — what to run before `normalize`
 - [Inflectors](../features/inflectors.md) — the other token-rewriting cluster
-- [Core](../features/core.md) — the shared traits and the reference character semantics
+- [Core](../features/core.md) — the shared traits and this workspace's whitespace/character semantics
 - [Recipes](../recipes/index.md) — end-to-end pipelines
 - [Choosing an API](../choosing/index.md) — the cross-crate decision guide
 

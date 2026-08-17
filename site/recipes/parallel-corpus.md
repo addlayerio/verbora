@@ -227,8 +227,8 @@ all concurrent code:
 <li><code>verbora_core::stopwords</code>'s global list → use
 <code>phoneticize_tokens_with(…, &amp;stops, …)</code></li>
 </ul>
-Both globals exist to reproduce the reference's process-wide behaviour, and both are
-read by the convenience entry points.
+Both globals model process-wide default configuration, set once and read from
+many call sites, and both are read by the convenience entry points.
 </div>
 
 ## Verifying it helped

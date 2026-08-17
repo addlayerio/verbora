@@ -2,8 +2,8 @@
 
 `verbora-phonetics` maps a word to a short **key** so that words which sound
 alike collide. Four encoders are implemented — `SoundEx`, `Metaphone`,
-`DoubleMetaphone` and `SoundExDM` (Daitch–Mokotoff) — each a line-by-line
-transcription of the corresponding file in the reference phonetic encoders. They are the
+`DoubleMetaphone` and `SoundExDM` (Daitch–Mokotoff) — each one pinned by its
+own suite of recorded test cases. They are the
 building block for fuzzy name lookup, deduplication and search *blocking*: encode
 every record once, group by key, and only then run an expensive
 [string metric](../features/distance.md) inside each group.
@@ -25,9 +25,9 @@ tests and <strong>9</strong> doctests.
   only same-bucket pairs need the metric.
 - **Name search that tolerates spelling.** `Robert`/`Rupert` share `R163`;
   `phonetics`/`fonetix` share `FNTKS`.
-- **Migrating a reference service.** These functions reproduce the reference's
-  output exactly, bugs included, so an index built by the reference version
-  still matches after the port.
+- **You need every historical quirk pinned, not silently fixed.** These
+  functions' outputs — bugs included — are fixed by the crate's own
+  regression suite, so an index you built stays valid release over release.
 
 ## When not to use it
 
@@ -140,7 +140,8 @@ I need a phonetic key
 <em>several</em> codes for an ambiguous spelling. <code>SoundExDM</code> is the
 single-code variant: the genuine dual codes for <code>CK</code>, <code>RS</code>
 and <code>RZ</code> are present in the transcribed table and never read, because
-The reference always takes <code>legalState[0]</code>. If you need real D-M
+<code>SoundExDM</code> always takes the first legal state
+(<code>legalState[0]</code>). If you need real D-M
 multi-coding, this is not it — and substituting a correct implementation would
 change established output.
 </div>
@@ -170,24 +171,24 @@ despite the name it produces one code.
 <div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">None — there is no <code>_into</code> variant</span></div>
 <div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">Only via <code>par_encode_batch</code> / <code>par_encode_double_batch</code> (feature <code>parallel</code>)</span></div>
 <div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">Yes, chunked — <code>par_encode_batch</code> / <code>par_encode_double_batch</code>, feature <code>parallel</code>; see below</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Everything, unless you need a non-default length or exact the reference throw behaviour</span></div>
+<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Everything, unless you need a non-default length or the fallible <code>Err</code>-returning behaviour instead of the lenient default</span></div>
 </div>
 
 The default. All four encoders have it, with the signature
 `fn process(&self, token: &str) -> String` (`-> (String, String)` for
 `DoubleMetaphone`).
 
-Two of them are lenient where the reference throws, and that is a deliberate
-divergence:
+Two of the four are lenient by design, on the grounds that a text-processing
+library should not fail on punctuation:
 
-- **`SoundEx::process` never fails.** The reference builds
-  `new RegExp('^' + transform(token.charAt(0)))` out of the token's first
-  character, so a token starting with `(`, `)`, `*`, `+`, `?`, `[` or `\` makes
-  the constructor throw a `SyntaxError`. `process` skips the initial-sound strip
-  and returns a code instead, on the grounds that a text-processing library
-  should not fail on punctuation.
-- **`SoundExDM::process` never fails**, because the default code length of 6 is a
-  valid array length. Only a custom length can reach the throw.
+- **`SoundEx::process` never fails.** A token starting with `(`, `)`, `*`,
+  `+`, `?`, `[` or `\` — regular-expression metacharacters — would otherwise
+  make constructing an anchored pattern from the token's first character
+  fail. `process` skips the initial-sound strip for those characters and
+  returns a code anyway, instead of surfacing that as an error.
+- **`SoundExDM::process` never fails**, because the default code length of 6
+  is always a valid array length. Only a custom length can reach the
+  fallible path (see `try_process` below).
 
 ### `process_with(token, max_length)`
 
@@ -196,9 +197,9 @@ divergence:
 Available on `SoundEx`, `Metaphone` and `DoubleMetaphone`. **Not** on
 `SoundExDM`, whose length-taking entry point is `try_process` (see below).
 
-The argument is `Option<f64>`, not `Option<usize>`, because it is a reference
-number and its odd values are observable. Read the coercions from the source, not
-from intuition:
+The argument is `Option<f64>`, not `Option<usize>`, because its odd values —
+falsy zero, `NaN`, negative — are individually significant and observable in
+the output. Read the coercions from the source, not from intuition:
 
 ```rust
 use verbora_phonetics::{Metaphone, SoundEx};
@@ -207,7 +208,7 @@ fn main() {
     let soundex = SoundEx::new();
     let metaphone = Metaphone::new();
 
-    // `maxLength` is a reference number, so its odd values are observable.
+    // `max_length`'s odd values (falsy zero, NaN, negative) are individually significant.
     assert_eq!(soundex.process_with("phonetics", Some(2.0)), "P5");
     assert_eq!(soundex.process_with("phonetics", Some(1.0)), "P532"); // 1 && 0 is falsy
     assert_eq!(soundex.process_with("phonetics", Some(0.0)), "P532"); // falsy
@@ -237,7 +238,7 @@ every case.
 <div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">None</span></div>
 <div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
 <div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Reproducing a reference service's exact behaviour, including its exceptions</span></div>
+<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Getting an explicit error instead of the lenient fallback, on inputs that would otherwise need special-casing</span></div>
 </div>
 
 Only `SoundEx` and `SoundExDM` have one, and they guard different things:
@@ -248,9 +249,9 @@ Only `SoundEx` and `SoundExDM` have one, and they guard different things:
 | `SoundExDM::try_process` | `(&str, Option<f64>) -> Result<String, PhoneticError>` | `PhoneticError::InvalidArrayLength(f64)` — padding needs `new Array(n)` and `n` is not a non-negative integer below 2³² |
 
 **When you genuinely need `SoundEx::try_process`:** whenever your tokens can
-start with punctuation, and you are matching a reference service's behaviour.
-That is not hypothetical — a punctuation-preserving tokenizer emits `(` as a
-token of its own:
+start with punctuation and you want that surfaced as an error rather than
+silently handled. That is not hypothetical — a punctuation-preserving
+tokenizer emits `(` as a token of its own:
 
 ```rust
 use verbora_phonetics::{PhoneticError, SoundEx};
@@ -262,7 +263,7 @@ fn main() {
     // Lenient: no initial-sound strip, and a code comes back.
     assert_eq!(soundex.process("(abc"), "(120");
 
-    // Strict: The reference builds `new RegExp('^' + '(')`, which throws.
+    // Strict: '(' is a regex metacharacter, so this returns Err instead.
     assert_eq!(
         soundex.try_process("(abc", None),
         Err(PhoneticError::InvalidInitialPattern('('))
@@ -316,7 +317,7 @@ and succeeds.
 <div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">None</span></div>
 <div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
 <div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Byte-exact comparison with a reference index over astral-plane input</span></div>
+<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Getting the exact UTF-16 code units when the <code>String</code>-returning methods' <code>U+FFFD</code> substitution would lose information</span></div>
 </div>
 
 Two encoders can produce a key containing an **unpaired surrogate**, which a Rust
@@ -368,9 +369,10 @@ from ASCII literals only, so a `String` always represents it exactly.
   `self.process(a) == self.process(b)` — two full encodings, two `String`
   allocations, every call.
 - `DoubleMetaphone::compare` is `pa == pb || sa == sb` after encoding *both*
-  sides — four keys, four `String` allocations. It overrides the inherited
-  `Phonetic#compare`, which in the reference would compare two arrays by reference
-  and therefore always return `false`.
+  sides — four keys, four `String` allocations. It overrides
+  `verbora_core::Phonetic`'s default `compare`, which only applies to a
+  single-key `process`; a two-key encoder needs its own "match on either"
+  rule instead.
 
 The `verbora_core::Phonetic::compare` default body has the same shape, despite a
 doc comment saying it "avoids allocating the second key when the implementation
@@ -431,12 +433,10 @@ fn main() {
 
 ### `phoneticize_tokens_with` versus `phoneticize_tokens`
 
-Both encode an already-tokenized stream and drop stop words. They are the
-reusable half of the reference's `Phonetic#tokenizeAndPhoneticize(str, processor,
-keepStops)`. The reference splits the string itself, using a module-level
-`AggressiveTokenizer`; in Verbora that tokenizer lives in a different crate
-(`verbora-tokenizers`), so there is no string-input wrapper here — these take the
-tokens directly, and you choose the tokenizer.
+Both encode an already-tokenized stream and drop stop words — the reusable
+half of "tokenize, then phoneticize." Tokenizing lives in a different crate
+(`verbora-tokenizers`), so there is no string-input wrapper here — these
+take the tokens directly, and you choose the tokenizer.
 
 ```rust  ignore
 pub fn phoneticize_tokens<'a, T, O>(
@@ -457,20 +457,18 @@ where T: IntoIterator<Item = &'a str>;
 
 | | `phoneticize_tokens` | `phoneticize_tokens_with` |
 |---|---|---|
-| Stop-word source | the reference's **process-global mutable** list | A `&StopWords` you own |
+| Stop-word source | a **process-global mutable** list | A `&StopWords` you own |
 | Reproducible | ❌ — any call to `verbora_core::stopwords::add_global_stopword` anywhere in the process changes the result | ✅ |
 | Thread-safe in the "no surprises" sense | ⚠️ Safe, but the global sits behind an `RwLock` another thread can write | ✅ No shared state |
-| Matches the reference semantics | ✅ | ✅ if you pass `StopWords::english()` |
 | Badge | <span class="badge badge-global">GLOBAL STATE</span> | — |
 
 **Default to `phoneticize_tokens_with`.** `phoneticize_tokens` reads
 `verbora_core::stopwords::is_default_stopword`, which consults a
-`LazyLock<RwLock<StopWords>>` that `add_global_stopword` / `remove_global_stopword`
-(the equivalents of the reference's `stemmer.addStopWord`) can mutate from anywhere
-in the process. That is faithful to the reference, and it is exactly the property
-that makes a test suite order-dependent and a multi-threaded worker
-non-deterministic. Passing a `&StopWords` costs one line and removes the whole
-category of problem. (There *is* a fast path: while the global has never been
+`LazyLock<RwLock<StopWords>>` that `add_global_stopword` /
+`remove_global_stopword` can mutate from anywhere in the process. That
+global-mutable-state design is exactly the property that makes a test suite
+order-dependent and a multi-threaded worker non-deterministic. Passing a
+`&StopWords` costs one line and removes the whole category of problem. (There *is* a fast path: while the global has never been
 mutated, lookups are a lock-free binary search over a static sorted slice. Once
 anything mutates it, every lookup takes the read lock.)
 
@@ -522,7 +520,7 @@ original input (`Utf16Token::as_str` returns `Option<&str>` tied to the token,
 not to the text). For those, collect the tokens first and pass a slice of the
 collected `&str`s, or skip the helper and call `process` in your own loop.
 
-Two behaviours worth knowing, both inherited from the reference:
+Two behaviours worth knowing:
 
 - **Filtering is case-sensitive and tests the raw token.** `the` is dropped;
   `The` is not.
@@ -744,11 +742,11 @@ automatic detection should not be trusted blindly.
 
 ## Deliberate deviations from the published algorithms
 
-Every one of these is a bug in the reference that is *observable*, and is therefore
-reproduced here on purpose and pinned by a unit test and by
-`fixtures/phonetics.json`. Do not substitute a textbook implementation or a
-third-party crate: you would change the encoding of real words and break
-compatibility with any index built by the reference version.
+Every one of these deviations from a textbook algorithm is observable,
+deliberate, and pinned by a unit test and by `fixtures/phonetics.json`. Do
+not substitute a textbook implementation or a third-party crate: you would
+change the encoding of real words and break compatibility with any index
+already built against this crate's output.
 
 ```rust
 use verbora_phonetics::{DoubleMetaphone, Metaphone, SoundEx, SoundExDM};
@@ -790,8 +788,8 @@ fn main() {
 
 ### `SoundEx` — condensation happens before filtering
 
-The reference runs `condense(transform(rest))` *before* stripping non-digits with
-`/\D/g`. Textbook SoundEx removes `h`, `w` and vowels first and only then merges
+This crate condenses before stripping non-digit characters. Textbook SoundEx
+removes `h`, `w` and vowels first and only then merges
 adjacent equal digits; here the letters are still present when merging happens,
 so they **separate** two equal codes instead of letting them collapse.
 `Ashcraft` is `A226`, not `A261`.
@@ -808,8 +806,7 @@ yields `3 - n` zeros), so an empty token has no initial letter at all —
 
 `cTransform` turns a word-initial `ch` into `xh`. `transformX` then runs and
 rewrites a leading `x` to `s`. The result is that `chemical` encodes as `SHMKL`
-rather than `KMKL`. The reference's own spec file has that test case commented
-out.
+rather than `KMKL`.
 
 Two more orderings in the same pipeline that look like mistakes and are:
 
@@ -844,14 +841,14 @@ and a `token[pos+1] !== 'Y'` test inside a branch that has already established
 
 ### `SoundExDM` — the digit `0` collides with the legality marker
 
-The reference stores its transformation table as a nested the reference object that
-doubles as a state machine: a node's `'0'` key holds its code triple and marks
-the node *legal*; every other key is a transition. `findRules` indexes those
-nodes with characters taken straight from the input. So the input digit `0`
-selects the legality marker instead of a transition, indexing *that* yields a
-number, indexing the number yields `undefined`, and `output += undefined`
-appends the six-character string `"undefi"` after truncation to the default
-length.
+This crate's transformation table is a nested object that doubles as a
+state machine: a node's `'0'` key holds its code triple and marks the node
+*legal*; every other key is a transition. `find_rules` indexes those nodes
+with characters taken straight from the input. So the input digit `0`
+selects the legality marker instead of a transition, indexing *that* yields
+a number, indexing the number resolves to nothing — and this crate
+deliberately emits the literal text `undefined` at that point, which
+truncation to the default length then cuts down to `"undefi"`.
 
 `process("B0")` is `"undefi"`. `process("MOSKOWITZ0")` is `"6457un"`.
 `process("A0")` is `"000000"` — safe only because `A`'s start-of-word code is the
@@ -863,17 +860,17 @@ code the encoder itself never reads.
 
 ### The exposed pipeline stages
 
-`Metaphone` exposes 21 stage methods and `SoundEx` exposes 9, because the reference
-exposes them on the prototype and its own spec file exercises them. They exist
-**for compatibility**, not for composition: the test suite replays 1,634 recorded
-cases against each one.
+`Metaphone` exposes 21 stage methods and `SoundEx` exposes 9 — public,
+individually callable pipeline stages. They exist **for compatibility**, not
+for composition: the test suite replays 1,634 recorded cases against each
+one.
 
 **A normal user should ignore all of them.** `process` runs the stages in the one
 order that produces a correct key, and calling them individually is both slower
 (each builds its own buffers) and easy to get wrong (the order is load-bearing,
 and two stages actively undo each other). Reach for them only when you are
-debugging a divergence against a reference implementation and need to see where
-two pipelines part company.
+debugging a surprising result and need to see exactly which stage produced
+it.
 
 They differ in return type, and the difference is not decorative:
 
@@ -949,8 +946,8 @@ per-call constants — allocation and case folding — dominate.
 
 | Encoder | Work per token | Notes |
 |---|---|---|
-| `SoundEx` | one pass over the code units | The six class regexes of the reference are provably one per-code-unit map, so they are fused into a single table lookup. |
-| `Metaphone` | **30 rewrite passes** over 2 alternating buffers | 21 stages, several of which apply more than one rule. The reference allocates a fresh string per rewrite; the `Pipe` here allocates two buffers total, regardless of how many rules run. |
+| `SoundEx` | one pass over the code units | Six character-class rules are provably a per-code-unit map, so they are fused into a single table lookup. |
+| `Metaphone` | only the rewrite passes that fire, over 2 pooled scratch buffers | The 21 stages are fused into one skip-gated driver: a letter mask decides which rules can possibly fire on this word, and a skipped stage touches nothing. The scratch pair here is pooled per thread and reused across calls, rather than allocating a fresh string per rewrite. |
 | `DoubleMetaphone` | one left-to-right scan | Builds both keys simultaneously. |
 | `SoundExDM` | one scan, with a trie walk per position | The trie is at most 7 deep (`SCHTSCH`), and `pos` advances by at least 1 per walk, so the total is linear. The 26 first-letter entries are a direct index, not a scan. |
 
@@ -978,11 +975,10 @@ measurements behind that design.
 
 > **Not yet benchmarked.** `crates/verbora-phonetics/benches/phonetics.rs` is a
 > criterion harness with five groups (`encoders`, `ascii_vs_utf16`, `surnames`,
-> `compare`, `metaphone_stages`), and a reference baseline for the same groups
-> was recorded once. No side-by-side
-> Rust-versus-the reference comparison has been published for this crate, so no
-> ratio is quoted here. See [Benchmarks](../benchmarks/index.md);
-> `docs/PERFORMANCE.md` currently covers `verbora-distance` only.
+> `compare`, `metaphone_stages`). No side-by-side comparison against another
+> implementation has been published for this crate, so no ratio is quoted
+> here. See [Benchmarks](../benchmarks/index.md); `docs/PERFORMANCE.md`
+> currently covers `verbora-distance` only.
 
 ## Allocation behaviour
 
@@ -990,8 +986,9 @@ measurements behind that design.
 <strong>Careful.</strong> This crate has <strong>no <code>_into</code> API</strong>.
 <code>process()</code> returns a freshly allocated, owned <code>String</code>
 every single time — <code>DoubleMetaphone::process()</code> returns two. There is
-no way to encode into a caller-supplied buffer, and nothing here reuses memory
-across calls. With the <code>parallel</code> feature there is a chunked batch
+no way to encode into a caller-supplied buffer (<code>Metaphone</code> pools its
+internal pipeline scratch per thread, but the returned key is always a fresh
+allocation). With the <code>parallel</code> feature there is a chunked batch
 entry point (<code>par_encode_batch</code> / <code>par_encode_double_batch</code>,
 see "Choosing the right API" above), but it changes how the work is
 <em>scheduled</em>, not how much is allocated — it still produces one
@@ -1005,14 +1002,16 @@ Per call, reading the source:
 | Encoder | ASCII input | Non-ASCII input |
 |---|---|---|
 | `SoundEx::process` | The digit `Vec<u8>`, a `String` for the uppercased initial, and usually one growth of that `String` when the digits are appended — up to **three** small allocations | The same, plus the lowercased copy (non-ASCII always allocates one) |
-| `Metaphone::process` | Two `Vec<u8>` buffers in the `Pipe`; the final one becomes the output `String` without copying (`String::from_utf8` reuses the buffer) — **two** | Six: lowercased `String`, `Vec<u16>` promotion, two `Pipe` buffers, the uppercase `Vec<u16>`, and the output `String` |
+| `Metaphone::process` | The output `String` — **one** in steady state. The pipeline's two scratch buffers are pooled per thread and reused across calls, and ASCII input folds lowercase directly into that scratch | Six: the lowercased `String`, the `Vec<u16>` promotion (which doubles as the pipeline's first scratch), the second scratch buffer, the pipeline-result copy, the uppercase `Vec<u16>`, and the output `String` |
 | `DoubleMetaphone::process` | Two `String::with_capacity(16)` accumulators, both returned — **two** | Four: the uppercased `String`, the `Vec<u16>` promotion, and the two accumulators |
 | `SoundExDM::process` | One `String::with_capacity(8)`, padded in place — **one** | Three: the uppercased `String`, the `Vec<u16>` promotion, and the output |
 
-Add one allocation to any ASCII row when the input needs case folding: `SoundEx`
-and `Metaphone` lowercase first, `DoubleMetaphone` and `SoundExDM` uppercase
-first, and `utf16_to_lowercase` / `utf16_to_uppercase` return `Cow::Borrowed` when
-there is nothing to fold.
+Add one allocation to the `SoundEx`, `DoubleMetaphone` and `SoundExDM` ASCII
+rows when the input needs case folding (`SoundEx` lowercases first, the other
+two uppercase first, and `utf16_to_lowercase` / `utf16_to_uppercase` return
+`Cow::Borrowed` when there is nothing to fold). `Metaphone`'s ASCII path is
+exempt: it folds byte-wise straight into the pooled scratch, cased input or
+not.
 
 ### Reducing it at the call site
 
@@ -1084,15 +1083,16 @@ Further reading: [Allocation](../performance/allocation.md),
 
 ## Unicode and language notes
 
-The reference indexes strings by UTF-16 code unit, and these algorithms index, slice
-and truncate constantly. A character outside the Basic Multilingual Plane counts
-as **two**, and a rule can match one half of a surrogate pair. That is observable:
+This crate indexes strings by UTF-16 code unit, and these algorithms index,
+slice and truncate constantly. A character outside the Basic Multilingual
+Plane counts as **two**, and a rule can match one half of a surrogate pair.
+That is observable:
 
 ```text
 Metaphone.dedup("😀😀")
-  the reference : "😀😀"   the four code units are D83D DE00 D83D DE00 — no
-                        two ADJACENT ones are equal, so nothing collapses
-  Rust chars : "😀"     two identical `char`s collapse to one
+  UTF-16 code units : "😀😀"   the four code units are D83D DE00 D83D DE00 —
+                              no two ADJACENT ones are equal, so nothing collapses
+  Rust chars        : "😀"     two identical `char`s collapse to one
 ```
 
 The `units` module is how that exactness is paid for. The algorithms are written
@@ -1109,14 +1109,14 @@ For ASCII one byte *is* one UTF-16 code unit, so the fast path is the same
 computation on a narrower type — not an approximation. `str::is_ascii` is
 vectorised, so the dispatch itself is close to free.
 
-`units` is public because its the reference string primitives are the pieces you
-need to reason about the coercions: `utf16_len` (UTF-16 `String#length`),
+`units` is public because these string primitives are the pieces you need to
+reason about the coercions: `utf16_len` (UTF-16 code-unit length),
 `utf16_to_lowercase` / `utf16_to_uppercase` (`Cow`-returning), `uppercase_utf16`
 (preserves unpaired surrogates, which `String::from_utf16_lossy` would destroy),
-`trim_units` (the reference's set, which includes `U+FEFF` and excludes `U+0085` —
-Rust's `str::trim` is the other way round), `clamp_take` (`substring`/`substr`
-clamping), `clamp_slice_end` (`slice`, where a negative counts from the end) and
-`coerce_or_default` (`x || default`).
+`trim_units` (a whitespace set that includes `U+FEFF` and excludes `U+0085` —
+Rust's `str::trim` is the other way round), `clamp_take` (`substring`/`substr`-style
+clamping), `clamp_slice_end` (`slice`-style, where a negative counts from the
+end) and `coerce_or_default` (falsy-or-default coercion).
 
 **Unpaired surrogates.** Two encoders can produce one — `SoundEx` (it keeps
 `charAt(0)`) and `Metaphone` (it truncates mid-pair). Their `String`-returning
@@ -1147,9 +1147,10 @@ input it does not understand:
 uppercase *after* truncating, and case mapping can grow a string (`ß` → `SS`,
 `ﬁ` → `FI`). `Metaphone::process_with(&"ß".repeat(40), Some(3.0))` is `"SSSSSS"`.
 
-**Expecting `Some(1.0)` to give a one-character `SoundEx` code.** The reference
-computes `(maxLength && maxLength - 1) || 3`, and `1 - 1` is falsy, so `Some(1.0)`
-selects the default. Use `Some(-1.0)` to get just the initial letter.
+**Expecting `Some(1.0)` to give a one-character `SoundEx` code.**
+`process_with` computes `(max_length && max_length - 1) || 3`, and `1 - 1` is
+falsy, so `Some(1.0)` selects the default. Use `Some(-1.0)` to get just the
+initial letter.
 
 **Calling `compare` in a nested loop.** It re-encodes both sides every time, and
 allocates two (or four) `String`s per call. Precompute the keys.
@@ -1175,13 +1176,14 @@ punctuation.** It does neither: `The` survives the stop-word filter and `it's` i
 encoded with the apostrophe.
 
 **Treating `try_process` as "the safe one".** It is the *exact* one — it
-reproduces the reference's throw. `process` is the lenient divergence. Pick based on
-whether you are matching the reference behaviour, not on which name sounds safer.
+surfaces the fallible cases as `Err` instead of silently handling them.
+`process` is the lenient default. Pick based on whether you want that
+strictness, not on which name sounds safer.
 
 ## Related
 
-- [Phonetic neighbors](phonetic-index) — a Verbora-native extension (not a
-  ported feature) that indexes a whole dictionary so `neighbors()` can answer
+- [Phonetic neighbors](phonetic-index) — a Verbora-native extension that
+  indexes a whole dictionary so `neighbors()` can answer
   "which stored words sound like this one?" without re-encoding it on every
   call. Start here if you have more than a few dozen words to check against.
 - [Beider-Morse](beider-morse.md) — a third Verbora-native extension, for a

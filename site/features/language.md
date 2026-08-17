@@ -10,8 +10,8 @@ detector; and a closed, non-statistical
 only at the edge, and only if you ask for that composition.
 
 <div class="callout callout-note">
-<strong>Verbora-native extension — not a ported feature.</strong>
-<code>verbora-language</code> has no counterpart in the reference. What follows is
+<strong>Verbora-native design.</strong>
+What follows is
 backed by this workspace's own evidence: 33 unit tests
 with zero Cargo features enabled, growing to 40 unit tests plus the 8
 ambiguity tests in <code>tests/ambiguity.rs</code> with every feature

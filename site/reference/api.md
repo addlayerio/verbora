@@ -52,7 +52,7 @@ alongside this site.
 
 <a class="card" href="../api/verbora_core/">
 <span class="card-title">verbora_core →</span>
-<span class="card-desc">The six shared traits, <code>Token</code>, <code>StopWords</code>, reference string semantics.</span>
+<span class="card-desc">The six shared traits, <code>Token</code>, <code>StopWords</code>, whitespace helpers.</span>
 </a>
 
 </div>
@@ -99,9 +99,9 @@ answer is "it depends on your workload", this site has it.
 ## Conventions in the rustdoc
 
 **Module-level docs carry the behaviour notes.** Every crate's `lib.rs` opens with
-the reference behaviours a naive port gets wrong, and each is cross-referenced
-to the code that reproduces it. Those are worth reading before using a subsystem
-seriously.
+the edge cases a naive reading of the algorithm gets wrong, and each is
+cross-referenced to the code that handles it correctly. Those are worth reading
+before using a subsystem seriously.
 
 **Doc examples are tested.** `cargo test -p <crate>` runs them; the nine
 documented crates carry 81 passing doctests between them at the time of
@@ -118,5 +118,5 @@ from established behaviour, the reason is on the type or function that differs.
 | | |
 |---|---|
 | Measured performance | [`docs/PERFORMANCE.md`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md) |
-| Behavioural analysis of the reference modules | [`docs/specs/`](https://github.com/addlayerio/verbora/tree/main/docs/specs) |
+| Executable specification for each subsystem | [`docs/specs/`](https://github.com/addlayerio/verbora/tree/main/docs/specs) |
 | Runnable examples | [`crates/verbora-examples/examples/`](https://github.com/addlayerio/verbora/tree/main/crates/verbora-examples/examples) |

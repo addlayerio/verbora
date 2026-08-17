@@ -183,7 +183,7 @@ one number in this whole investigation stable enough to build a "why" on.
 | **Gap** | **~2.25× slower** at a single call (175.6 ns vs. 78.2 ns), **~2.55× slower** at 10,000 names, **~2.51× slower** at 100,000 names. Consistent across all three scales — not a size-dependent crossover like entry 4, a genuine constant-factor loss. |
 | **Likely reason** | Verbora's `Metaphone` is specified, and stays faithful to the reference, as **twenty-one ordered whole-string rewrite stages** (`crates/verbora-phonetics/src/metaphone.rs`'s `pipeline` function: `s_dedup`, `s_drop_initial_letters`, … `s_drop_vowels`, run in sequence through `Pipe`). `Pipe` (`crates/verbora-phonetics/src/pipe.rs`) holds exactly two buffers and swaps them after each rule — an encoding costs two allocations no matter how many rewrites run, which is what already makes this port ~4×–10× faster tha reference's own per-stage-allocating original (see this module's the reference comparison above) — but every one of the 21 stages still walks the whole buffer once, so the *character-touch* cost is `O(21n)` regardless of allocation count. rphonetic's `Metaphone::encode` (`rphonetic-3.0.6/src/metaphone.rs`) is the textbook single indexed forward scan: one pass over the (case-mapped, initial-letter-adjusted) string with a `skip` counter that consumes multi-character lookahead inline — `O(n)`. Twenty-one full passes over short (4–14 character) names is the direct, source-confirmed explanation for a consistent ~2.2×–2.6× gap: the two implementations are doing the same *algorithmic* job (per-word Metaphone encoding) with a structurally different amount of *scanning*, exactly the kind of difference this file exists to record rather than paper over. The `Some(32)` reconfiguration this bench applies is not the cause: `tests/phonetics_correctness.rs` confirms it genuinely changes rphonetic's observed output length (proving the crate is not silently still capped at 4), and real names in the shared dataset never approach a 32-character Metaphone code, so rphonetic's early-exit-at-`max_code_length` check essentially never fires — both sides are doing the same real work on this input, not a truncation artifact. |
 | **Profiling evidence** | Read `crates/verbora-phonetics/src/metaphone.rs` (`pipeline`, the 21 `s_*` stage calls), `crates/verbora-phonetics/src/pipe.rs` (`Pipe::apply`'s two-buffer swap), and `rphonetic-3.0.6/src/metaphone.rs` (`Encoder::encode`'s single `for (index, symb) in local.chars().enumerate()` loop with a `skip` counter) directly, plus `rphonetic-3.0.6/src/lib.rs`'s `Metaphone::new`/`Default` (`max_code_length: Some(4)` vs. this bench's `Some(32)`). Real benchmark run: `cargo bench -p competitive-rust --bench phonetics -- metaphone/` in `benchmarks/competitive/`, raw Criterion output in `benchmarks/competitive/results/raw/phonetics-metaphone-*.json`. Reconfiguration and output-shape correctness verified in `benchmarks/competitive/rust-competitors/tests/phonetics_correctness.rs` (`rphonetic_metaphone_max_code_length_is_genuinely_32_not_the_crate_default_of_4`). |
-| **Optimization opportunity** | ~~A single-pass Metaphone (index-and-lookahead over one buffer, matching rphonetic's shape) is a legitimate throughput upgrade path for `verbora-phonetics`'s `Metaphone` — but collapsing 21 independently-testable, independently-documented rewrite stages (each pinned by its own unit test and traceable to a specific line of `lib/natural/phonetics/metaphone`, per this crate's own "these are transcriptions, not implementations" module doc comment) into one fused scan is a real parity-risk rewrite, not a tuning pass: the documented `ch`→`sh` stage-ordering bug and the reference's own commented-out test case are exactly the kind of subtle cross-stage interaction a fused rewrite could silently lose. Flagged as a real, evidence-backed opportunity for a **future, separate, dedicated phase** with its own parity re-verification against `fixtures/phonetics.json` — not implemented in Fase 6, per this project's "measure first, then a focused follow-up phase" discipline (the same discipline entry 1's bit-parallel-Levenshtein opportunity follows).~~ **Implemented in the follow-up optimization round, with the parity-risk warning honored — see the update below.** |
+| **Optimization opportunity** | ~~A single-pass Metaphone (index-and-lookahead over one buffer, matching rphonetic's shape) is a legitimate throughput upgrade path for `verbora-phonetics`'s `Metaphone` — but collapsing 21 independently-testable, independently-documented rewrite stages (each pinned by its own unit test and traceable to a specific line of `lib/natural/phonetics/metaphone`, per this crate's own "these are transcriptions, not implementations" module doc comment) into one fused scan is a real parity-risk rewrite, not a tuning pass: the documented `ch`→`sh` stage-ordering bug and the reference's own commented-out test case are exactly the kind of subtle cross-stage interaction a fused rewrite could silently lose. Flagged as a real, evidence-backed opportunity for a **future, separate, dedicated phase** with its own parity re-verification against `fixtures/phonetics.json` — not implemented in Fase 6, per this project's "measure first, then a focused follow-up phase" discipline (the same discipline entry 1's bit-parallel-Levenshtein opportunity follows).~~ **Implemented in the follow-up optimization round, with the parity-risk warning honored — see the updates below (the second of which closes the entry).** |
 
 **Update, this round (2026-08) — mostly closed: the fusion happened,
 Verbora now wins the single-call case, and the batch loss narrowed to
@@ -204,6 +204,23 @@ Verbora win**, from a 2.25× loss — but batches remain narrow, real losses:
 **8.58 vs. 7.87 ms** (**1.09× slower**). The old ~2.2×–2.6×
 constant-factor loss is gone; what remains is a ~1.1× batch gap, recorded
 here as a loss, not rounded away.
+
+**Update, later pass (2026-08) — fully closed: the remaining batch losses
+flip, and Verbora now wins all three sizes.** The fused driver's residual
+per-call allocator traffic was pooled away: the pipeline's two scratch
+buffers moved to a per-thread pool (`ASCII_SCRATCH` `thread_local!` in
+`crates/verbora-phonetics/src/metaphone.rs`; `Driver` now borrows its two
+scratch `Vec`s instead of owning them), and ASCII tokens fold lowercase
+directly into pooled scratch with no intermediate `String` — cutting
+per-call allocator traffic to the one returned output `String`. Parity
+was handled the same way the fusion above handled it: byte-identical
+output, verified by the crate's full differential suite (151 tests, the
+~900K-comparison corpus against the retained 21-stage oracle, both
+feature sets). Re-measured (full-default Criterion, quiet machine,
+medians), Verbora vs. `rphonetic`: single name **51.5 vs. 73.5 ns**
+(**1.43× faster**), 10,000 names **711.91 vs. 735.77 µs** (**1.03×
+faster**), 100,000 names **6.893 vs. 7.565 ms** (**1.10× faster**). This
+entry is closed: every benchmarked size is now a Verbora win.
 
 ## 7. Language detection — Verbora (via `whatlang`) vs. `whichlang` (Rust)
 
@@ -934,6 +951,53 @@ real remaining losses at n=4 (both) and at the largest sizes (strsim
 ~1.1×, rapidfuzz ~4%), with the strsim residue explained by the structural
 finding above rather than left as an open tuning question.
 
+**Update, later pass (2026-08) — the byte path re-tiered on a measured
+decomposition; every remaining time loss but one flips, and the one left
+is quantified as a structural floor.** Profiling the snapshot kernel's
+per-cell work decomposed the residual `strsim` gap precisely: the per-row
+snapshot `memcpy` into the arena measured as effectively free (removing
+it did not move the median), while the per-cell transposition-candidate
+block — the last-occurrence table load plus the arena read sitting on the
+critical path — accounted for essentially the whole gap; and at tiny
+sizes the scratch-table zeroing cost more than the entire DP. The unit
+kernel was accordingly split into a measured three-tier dispatcher
+(`damerau_unit_dispatch` in `crates/verbora-distance/src/levenshtein.rs`):
+**`damerau_unit_small`**, a table-free fixed stack matrix for operands of
+at most 8 bytes each (the last-occurrence lookup is a plain `rposition`
+scan over the few source bytes seen so far — no tables, no heap);
+**`damerau_unit_mid`** for operands ≤ 128 bytes — the snapshot recurrence
+with row 1/column 1 peeled so the steady-state loop drops its guards, the
+column loop split into a no-candidate-possible phase and a candidate
+phase, one packed `[u32; 256]` symbol table (half the zeroing of the
+two-array form), and the `cur[c-1]` operand carried in a register; and
+**`damerau_unit_large`** beyond, identical except the
+`cur[c-1]`/`prev[c]` operands stay memory-carried — once the snapshot
+arena outgrows L1, the register chain otherwise puts the arena load's
+miss latency onto the loop-carried dependency. The UTF-16 path is
+unchanged. All three tiers evaluate the pinned recurrence exactly:
+differentially pinned against the `full_matrix` oracle, plus cross-tier
+agreement tests on the tiers' shared domains — 91 tests green. As with
+the previous update, the allocator probe was not re-run, so the (a) byte
+table above remains the record of the full-matrix era (structurally, the
+small tier now allocates nothing at all; the mid/large tiers two rows
+plus the arena). Re-measured (full-default Criterion, quiet machine,
+medians), Verbora vs. rapidfuzz / strsim: n=4 **29.5** vs. 70.6 / 55.5 ns
+(wins both, 2.39× and 1.88×); n=16 **396.6** vs. 530.7 / 441.6 ns (wins
+both); n=64 **4.65** vs. 7.51 / 6.95 µs (wins both, 1.49× over strsim);
+n=256 **116.22** vs. 133.43 / 120.04 µs (wins both); n=1024 **1.906** vs.
+2.119 ms (**1.11× faster** than rapidfuzz) / **1.866 ms** (**1.021×
+behind** strsim). The n=1024 strsim residue is a statistical tie at the
+measured structural floor, not a tuning gap: a probe evaluating nothing
+but the bare loop-carried min-chain of the pinned recurrence costs
+1.86–1.88 ms at this size on this machine, and the recurrence's measured
+divergence from textbook DL — **38.6% of random small-alphabet pairs**
+this pass (the earlier ~11% figure sampled unconstrained random pairs; a
+small alphabet provokes the divergence far more often) — is exactly what
+forbids the Zhao–Sahni candidate pruning strsim uses to get under that
+floor. Final time ledger for this entry's companion dimension: Verbora
+wins 4 of 5 sizes against strsim, 5 of 5 against rapidfuzz, and the last
+~2% n=1024 deficit is recorded as a structural loss.
+
 ## 30. Hiragana↔katakana width conversion — Verbora vs. `unicode-jp` (Rust)
 
 Found while wiring `normalize_ja`'s first two Rust competitors into
@@ -1225,6 +1289,36 @@ verified across a spread of real-corpus queries and `max_distance` values in
 | **Likely reason** | `fst::automaton::Levenshtein::new` builds a fresh DFA **per query** (confirmed by reading `fst::automaton::Levenshtein`'s constructor) — real, fixed per-call setup cost that dominates at low query volume/small corpora (explaining the large early query win for `FuzzyIndex`, which has no comparable per-query construction step, just a tree walk) but amortizes better as the automaton is reused against a larger, shared underlying `Set` structure that itself benefits from `fst`'s node-sharing as corpus size grows. Construction's crossover runs the other way because `FuzzyIndex`'s BK-tree insert cost (recursive descent keyed by exact edit distance to parent, `crates/verbora-spellcheck/src/fuzzy_index.rs`) grows less predictably with corpus size than `fst`'s streaming, sorted-input `SetBuilder`, whose asymptotic behavior is a well-understood, minimal-automaton construction. |
 | **Profiling evidence** | Read `fst`'s `automaton::Levenshtein::new` and `crates/verbora-spellcheck/src/fuzzy_index.rs`'s `FuzzyIndexBuilder`/`Neighbors` directly. Real run: `cargo bench -p competitive-rust --bench fst_fuzzy` in `benchmarks/competitive/`, raw Criterion `estimates.json` under this workspace's shared target directory's `criterion/fst_fuzzy_{construction,query}/`. Correctness: `tests/fst_fuzzy_correctness.rs`'s `fst_and_fuzzy_index_agree_on_ascii_queries` and `fst_levenshtein_automaton_size_limit_is_real`. |
 | **Optimization opportunity** | None flagged with confidence — this is a genuine shape difference (per-query automaton construction vs. per-query tree walk), not a tuning gap in either implementation, and the crossover point (~n=10,000–20,000 for query, ~n=100–1,000 for construction) is close enough to real corpus sizes that neither side is a strictly dominant choice; a caller choosing between `FuzzyIndex` and an `fst`-based approach should measure at their own corpus size and query volume rather than assume either wins by default. |
+
+## 38. Character n-gram generation, trigrams — Verbora vs. `ngrammatic` (Rust): a small but consistent loss, alongside a clear bigram win
+
+`docs/COMPETITIVE_BENCHMARKS.md` §1.2 originally recorded `NO FAIR COMPETITOR
+FOUND (Rust)` for N-Grams. Re-examined: `ngrammatic`'s `Ngram`/`NgramBuilder`
+(the character n-gram + frequency-count generator its `Corpus` fuzzy-search
+feature is itself built on, a capability with no Verbora equivalent and
+still not benchmarked) turns out to be a fair, comparable primitive against
+Verbora's generic `ngrams()` engine called with `T = char`.
+`tests/ngrams_correctness.rs` confirms byte-identical `(gram, count)` output
+across all 20,000 words in the shared word list, at both arities benchmarked
+here, before any timing number below was trusted. Three independent
+full-default-Criterion runs of `cargo bench --bench ngrams` (from
+`benchmarks/competitive/rust-competitors/`) were taken, reading the
+**median** field from Criterion's own `estimates.json` each time (not the
+mean-based confidence interval Criterion prints to the terminal by default,
+which this project's own `PRIMARY METRIC` policy does not use — see
+`site/benchmarks/competitive.md`'s methodology table). The direction was
+consistent every time in both groups.
+
+| | |
+|---|---|
+| **Capability** | Character n-grams of a word, padded with `arity - 1` spaces per side and folded into a `(gram, count)` map, over every word in the shared 20,000-word list |
+| **Competitor** | `ngrammatic` 0.7.0, `NgramBuilder::new(word).arity(n).pad_full(Pad::Auto).finish()` |
+| **Verbora result** | bigrams: **8.50–9.40 ms** median across 3 runs (8.498, 8.986, 9.397 ms). trigrams: **11.98–12.49 ms** median across 3 runs (11.976, 12.147, 12.494 ms) |
+| **Competitor result** | bigrams: **9.78–10.07 ms** median across 3 runs (9.881, 9.775, 10.071 ms). trigrams: **11.61–11.67 ms** median across 3 runs (11.662, 11.674, 11.608 ms) |
+| **Gap** | **Bigrams: Verbora wins every run**, ~1.07×–1.16× faster (1.163×, 1.088×, 1.072×). **Trigrams: Verbora loses every run**, narrowly — ngrammatic ahead by ~1.03×–1.08× (1.027×, 1.041×, 1.076×). Small margins, but the direction never reversed across all 3 independent runs in either group, so trigrams is recorded as a genuine (if marginal) loss rather than dismissed as noise, per this file's own no-cherry-picking charter. |
+| **Likely reason** | Not isolated with a profiler this pass. Both sides do the same conceptual work — pad, slide a window of size `arity`, fold into a map — over the same input, so the residual is plausibly in accumulation shape: Verbora's benchmarked path builds a `Vec<Cow<[char]>>` of grams via the generic `ngrams()` engine (`crates/verbora-ngrams/src/engine.rs`) and then folds each into a `HashMap<String, usize>` with a `String` allocation per unique gram (`gram.iter().collect()`), while `ngrammatic::NgramBuilder` accumulates directly into its own `HashMap<SmolStr, usize>`, whose small-string optimization avoids a heap allocation for any gram that fits inline (bigrams and trigrams over ASCII words both do) — a plausible, source-read explanation for why the arity-3 gap (three-character-plus-padding grams, closer to `SmolStr`'s inline capacity boundary) is smaller/reversed relative to bigrams' clear win, not a confirmed, profiled one. |
+| **Profiling evidence** | Read `ngrammatic-0.7.0/src/ngram.rs` (`NgramBuilder::finish`, the `HashMap<SmolStr, usize>` grams field) and `crates/verbora-ngrams/src/engine.rs` (`ngrams()`) directly. Real runs: `cargo bench --bench ngrams` from `benchmarks/competitive/rust-competitors/`, full Criterion defaults, 3 independent invocations, median read from each run's own `estimates.json`. Correctness: `tests/ngrams_correctness.rs`. |
+| **Optimization opportunity** | None flagged with confidence at this margin — a ~3–8% difference at this scale does not justify a targeted change without first profiling to confirm the `SmolStr`-vs-`String` accumulation theory above; flagged for a future pass if character-level n-gram generation ever becomes a dedicated, string-input-facing Verbora API (today it is only exercised by calling the generic engine directly, per `benches/ngrams.rs`'s own doc comment). |
 
 *(Additional entries are added here as the rest of Fase 6's module-by-module
 benchmarks execute — this file is not yet the complete gap inventory the

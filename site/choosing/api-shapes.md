@@ -210,9 +210,9 @@ handed to the diacritic folder. See
 
 <span class="badge badge-fallible">FALLIBLE</span>
 
-The four regex-driven tokenizers return `Option<…>`, because the reference's
-`String#match` returns `null` when nothing matches and "no match" is
-observably different from "no tokens".
+The four regex-driven tokenizers return `Option<…>`, because "no match at
+all" is observably different from "matched, but produced no tokens" — and
+`Option` is how Verbora keeps that distinction expressible.
 
 ```rust
 use verbora_tokenizers::WordTokenizer;

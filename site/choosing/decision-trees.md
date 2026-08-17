@@ -51,7 +51,7 @@ I need to tokenize text
 │
 ├── My tokenizer is RegexpTokenizer / WordTokenizer /
 │   OrthographyTokenizer / WordPunctTokenizer
-│      └── inherent methods, all returning Option — `None` is the reference `null`
+│      └── inherent methods, all returning Option — `None` means no match at all
 │
 └── I have a slice of documents and want one call
        └── verbora_core::Tokenizer::tokenize_batch
@@ -178,7 +178,7 @@ I have a slice of tokens and I want its n-grams
 ```text
 I want frequency information
 │
-├── I need the reference's exact {ngrams, frequencies, Nr, numberOfNgrams} shape
+├── I need the {ngrams, frequencies, Nr, numberOfNgrams} shape
 │      └── ngrams_with_stats() / bigrams_with_stats() / trigrams_with_stats()
 │
 ├── I need counts only, my own key format is fine

@@ -77,7 +77,7 @@ your own.
 </div>
 <div class="capmap-trunk" aria-hidden="true"></div>
 <div class="capmap-toolkit">High-performance language toolkit</div>
-<p class="capmap-base">All four families rest on <a href="features/core">verbora-core</a> — six traits, <code>Token</code>, reference string semantics — and on <code>verbora-util</code> <span class="capmap-status">no page yet</span>: stop words, abbreviations, digraphs, storage.</p>
+<p class="capmap-base">All four families rest on <a href="features/core">verbora-core</a> — six traits, <code>Token</code>, whitespace helpers — and on <code>verbora-util</code> <span class="capmap-status">no page yet</span>: stop words, abbreviations, digraphs, storage.</p>
 </div>
 
 Everything on the map is implemented and tested today; none of it is roadmap.
@@ -205,9 +205,9 @@ algorithm as written. Recording beats transcribing.
 
 ## Designed in Rust, for Rust
 
-Verbora was written in Rust from its first line. Nothing here is a port
-wearing Rust syntax: the API is the one a Rust programmer would design, and the
-type system is load-bearing rather than decorative.
+Verbora was written in Rust from its first line. The API is the one a Rust
+programmer would design from scratch, and the type system is load-bearing
+rather than decorative.
 
 - **Tokenizers are iterators first.** `tokens()` is the primitive; `tokenize()`
   and `tokenize_into()` are written on top of it, so there is one implementation
@@ -228,9 +228,10 @@ type system is load-bearing rather than decorative.
 Speed is not a side effect of the language here; it is the thing the library is
 built around. Which is why "it's Rust, so it's fast" is not accepted as an
 argument — that assumption ships regressions. This project measured a
-Jaro–Winkler benchmark running **slower** than the reference, found two per-call
-`vec![false; len]` allocations, and moved them to the stack: the benchmark
-measures **15.3 ns**, a **1.8×** speedup over the reference. That story is
+Jaro–Winkler benchmark running **slower** than a widely-used JavaScript NLP
+library, found two per-call `vec![false; len]` allocations, and moved them to
+the stack: the benchmark now measures **15.3 ns**, a **1.8×** speedup over
+that library. That story is
 [in the benchmarks](benchmarks/distance.md#a-measured-regression-and-its-fix),
 not hidden.
 

@@ -2,10 +2,10 @@
 
 `verbora-core` is the crate every other Verbora crate is written against. It
 contains no algorithm: six traits covering five operations the library performs,
-one list-trimming helper whose exact asymmetry is load-bearing for
-compatibility, a mutable work-buffer that the (not yet written) Snowball stemmers will
+one list-trimming helper whose exact asymmetry several tokenizers depend on,
+a mutable work-buffer that the (not yet written) Snowball stemmers will
 use, the stop-word list and its process-global mirror, and two functions that
-implement the reference's `\s` rather than Rust's. It depends on no other
+implement Verbora's own definition of `\s`, distinct from Rust's. It depends on no other
 `verbora-*` crate, which is what keeps the crate graph acyclic and lets a leaf
 crate like `verbora-distance` be used without pulling in data assets it does not
 need.
@@ -28,8 +28,9 @@ suites.
 - You are implementing your own tokenizer, stemmer or phonetic encoder and want
   the downstream crates to accept it.
 - You need `trim_edge_empties`, `is_whitespace` or `collapse_whitespace`
-  because you are porting a reference routine that splits or trims on `\s`.
-- You need the stop-word list, or you need to observe the reference's process-wide
+  because you are writing a routine that splits or trims on `\s` and need
+  Verbora's specific definition of whitespace, not Rust's `char::is_whitespace`.
+- You need the stop-word list, or you need to observe Verbora's process-wide
   mutable stop-word state.
 
 ## When not to use it
@@ -169,8 +170,8 @@ out
 
 The `Vec` starts at zero capacity and grows by doubling, so a document of *n*
 tokens costs O(log n) reallocations plus one `String` per token. This is the
-owning API: the returned `Vec<String>` corresponds element-for-element
-with the reference `string[]`.
+owning API: every element of the returned `Vec<String>` is an independent,
+owned `String` token.
 
 <a class="badge badge-reuse" href="../performance/buffer-reuse">BUFFER REUSE</a>
 
@@ -386,8 +387,8 @@ pub trait DoubleKeyPhonetic {
 }
 ```
 
-The default `compare` is `self.process(a) == self.process(b)`, matching
-The reference exactly. It allocates two `String`s per call.
+The default `compare` is `self.process(a) == self.process(b)`. It allocates two
+`String`s per call.
 
 <div class="callout callout-note">
 <strong>Note.</strong> The doc comment on <code>compare</code> reads as though the default
@@ -405,7 +406,7 @@ as describing what an <em>override</em> is permitted to do, not what happens tod
 |---|---|---|
 | `Metaphone` | `Phonetic` | one |
 | `SoundEx` | `Phonetic` | one |
-| `SoundExDM` (Daitch–Mokotoff) | `Phonetic` | one — the reference declares the genuine dual codes and never reads them, so the port is single-key too |
+| `SoundExDM` (Daitch–Mokotoff) | `Phonetic` | one — exposes a single key, even though Daitch–Mokotoff conceptually distinguishes primary and secondary codes |
 | `DoubleMetaphone` | `DoubleKeyPhonetic` | primary + alternate |
 
 `DoubleMetaphone` implements `DoubleKeyPhonetic` and **not** `Phonetic`: its
@@ -451,11 +452,11 @@ pub trait StringMetric {
 }
 ```
 
-The reference's metrics are plain functions with inconsistent conventions: some
-return distances (lower is closer), others similarities (higher is closer). The
-trait **deliberately does not normalise that**. Flipping a metric's sign or
-mapping it to `0..=1` would change every caller's numbers, and this project
-treats the reference's output as the specification. Instead, `IS_SIMILARITY`
+Verbora's five metric implementations use inconsistent conventions by design:
+some return distances (lower is closer), others similarities (higher is
+closer). The trait **deliberately does not normalise that**. Flipping a
+metric's sign or mapping it to `0..=1` would change every caller's numbers, and
+each metric's existing output is treated as fixed. Instead, `IS_SIMILARITY`
 *records* which convention each metric uses so generic code can adapt.
 
 Because `IS_SIMILARITY` is an associated const, it is available at compile time,
@@ -537,7 +538,7 @@ neither core trait has a way to express that, so they expose the same
 <strong>Careful — two different <code>WordTokenizer</code>s.</strong>
 <code>verbora_ngrams::WordTokenizer</code> implements <code>Tokenizer</code> and
 <code>BorrowingTokenizer</code>; <code>verbora_tokenizers::WordTokenizer</code> implements
-neither. They are different types reproducing different the reference classes.
+neither. They are different, unrelated types despite the shared name.
 Import the one you mean by its full path.
 </div>
 
@@ -569,9 +570,9 @@ fn main() {
 }
 ```
 
-**Why the asymmetry is load-bearing.** The reference's `Tokenizer#trim` pops
-trailing empties and shifts leading ones; it never touches the middle. Several
-tokenizers depend on that. The visible case is `SentenceTokenizer`, where
+**Why the asymmetry is load-bearing.** `trim_edge_empties` pops trailing
+empties and shifts leading ones; it never touches the middle, and several
+tokenizers depend on exactly that. The visible case is `SentenceTokenizer`, where
 `"   "` tokenizes to `[""]` rather than `[]` — a generalised "remove all
 empties" would delete that token and change the output length. `verbora-tokenizers`
 re-exports this function rather than defining its own, precisely so the two
@@ -579,8 +580,8 @@ cannot drift apart.
 
 ## `Token` — the stemming work-buffer
 
-`Token` is tested against the reference token buffer: the mutable word buffer
-that the Snowball-family stemmers are written against. It carries three things
+`Token` is the mutable word buffer that the Snowball-family stemmers are
+written against. It carries three things
 at once — the word being stemmed, the alphabet's vowel set, and the named
 regions (`R1`, `R2`, `RV`) that Snowball rules are scoped to.
 
@@ -606,13 +607,12 @@ pub struct Token {
 <span class="badge badge-utf16">UTF-16</span>
 
 It stores `Vec<char>` — Unicode scalar values — rather than a `String`, because
-Snowball rules index constantly and indexing a Rust `&str` by character position
-is O(n). `Vec<char>` makes it O(1), matching the reference cost model. That is
-*identical* to the reference's UTF-16 code-unit indexing for every character in the
-Basic Multilingual Plane, which covers every alphabet these stemmers target
-(Latin, Cyrillic, Greek and their accented forms). The two differ only for
-astral-plane characters, which reference counts as two code units and Rust as one; no
-stemming rule in the reference can match such a character.
+Snowball rules index by character position constantly, and indexing a Rust
+`&str` by character position is O(n) while indexing a `Vec<char>` is O(1). This
+indexing is exact for the whole Basic Multilingual Plane, which covers every
+alphabet these stemmers target (Latin, Cyrillic, Greek and their accented
+forms); it diverges only on astral-plane characters, which no Snowball
+stemming rule needs to match.
 
 `regions` is a `Vec` of pairs rather than a `HashMap`: Snowball uses at most
 three regions, and a linear scan over three short keys beats hashing on every
@@ -637,7 +637,7 @@ implements `Display`, which writes the working string.
 | `set_string` | `fn set_string(&mut self, s: &str)` | Clears `chars` and refills from `s`. Does **not** touch `original`. |
 | `mark_region` | `fn mark_region(&mut self, region: &str, index: usize) -> &mut Self` | Updates in place if the name exists, otherwise pushes. Chainable. |
 | `mark_region_with` | `fn mark_region_with<F: FnOnce(&Self) -> usize>(&mut self, region: &str, f: F) -> &mut Self` | Computes the index from `&self`, then marks. |
-| `region` | `fn region(&self, region: &str) -> usize` | Linear scan; returns **0** for an unmarked region, matching the reference `this.regions[region] \|\| 0`. |
+| `region` | `fn region(&self, region: &str) -> usize` | Linear scan; returns **0** for an unmarked region. |
 | `has_vowel_at_index` | `fn has_vowel_at_index(&self, index: usize) -> bool` | Out-of-range is `false`, matching `indexOf(undefined) === -1`. |
 | `next_vowel_index` | `fn next_vowel_index(&self, start: usize) -> usize` | First vowel at or after `start`, or `len()`. An out-of-range `start` clamps to `len()`. |
 | `next_consonant_index` | `fn next_consonant_index(&self, start: usize) -> usize` | The mirror of the above. |
@@ -648,11 +648,12 @@ implements `Display`, which writes the working string.
 
 ### The empty-suffix quirk
 
-The reference computes `this.string.slice(-suffix.length) === suffix`. For an empty
-suffix that is `slice(-0)`, and since `-0 === 0` it yields the **entire** string
-rather than an empty one — so `hasSuffix('')` is true only when the token itself
-is empty. `has_suffix` reproduces that inversion. A naive `ends_with("")` would
-return `true` unconditionally and silently change which stemming rules fire.
+`has_suffix` returns true only when the token's trailing slice of that length
+equals the given suffix. For an empty suffix, "the token's last zero
+characters" is defined as the **entire** string, not an empty slice — so
+`has_suffix("")` is true only when the token itself is empty. A naive
+`ends_with("")` implementation would return `true` unconditionally for every
+token and silently change which stemming rules fire.
 
 ### Rule ordering matters
 
@@ -719,7 +720,7 @@ pub struct StopWords { /* ordered: Vec<String>, lookup: HashSet<String> */ }
 ```
 
 An **ordered** list with O(1) membership testing. Insertion order is preserved
-so the list can be exposed the way the reference exposes its array, while lookups
+so callers can iterate the list in the order words were added, while lookups
 go through a `HashSet`. Every word is therefore stored twice — once in each
 structure. Derives `Debug`, `Clone`, `Default`, and implements
 `FromIterator<String>`.
@@ -732,7 +733,7 @@ structure. Derives `Debug`, `Clone`, `Default`, and implements
 | `contains(word)` | Hash lookup. **Case-sensitive.** | O(1) |
 | `words()` | `&[String]` in insertion order. | Free |
 | `len()` / `is_empty()` | Read from the ordered view, so duplicates count. | O(1) |
-| `add(word)` | Pushes **unconditionally**, like the reference `push`; a duplicate appears twice in `words()`. | O(1) amortised |
+| `add(word)` | Pushes **unconditionally** — no duplicate check; a duplicate appears twice in `words()`. | O(1) amortised |
 | `add_all(words)` | `add` in a loop. | — |
 | `remove(word)` | Removes the **first** occurrence only, like `indexOf` + `splice(idx, 1)`. Drops from the lookup set only once no occurrence remains. | O(n) |
 | `remove_all(words)` | `remove` in a loop, first occurrence of each. | — |
@@ -768,22 +769,21 @@ fn main() {
 pub static DEFAULT_EN: &[&str];
 ```
 
-170 entries, in reference source order — 132 words, then the 26 lowercase
-letters `a`–`z`, then `$`, the digits `1`–`9` and `0`, and `_`. Order is
-preserved because the reference exposes this array directly as its own `stopwords` array,
-so callers can observe it. It is a `&'static [&'static str]` with no runtime
+170 entries, in a fixed order — 132 words, then the 26 lowercase
+letters `a`–`z`, then `$`, the digits `1`–`9` and `0`, and `_`. The order is
+stable and observable: it is a `&'static [&'static str]` with no runtime
 setup and no duplicates.
 
 ### The process-global list
 
 <span class="badge badge-global">GLOBAL STATE</span>
 
-In the reference, the stop-word module exports a single mutable array.
-Every stemmer's `addStopWord` / `removeStopWord` mutates *that one array*, and
-both the stemmers and the phonetics module read from it — so adding a stop word
-through one stemmer changes the behaviour of every other stemmer and of
-`tokenizeAndPhoneticize`, process-wide. That is observable behaviour, so Verbora
-reproduces it rather than quietly fixing it.
+Verbora exposes a single, process-wide mutable stop-word list. Every function
+that mutates it — `add_global_stopword`, `remove_global_stopword`, and their
+plural forms — mutates *that one list*, and every other call site that reads it
+observes the change: adding a stop word through one call changes the behaviour
+of every other function that reads the global, process-wide. This is real,
+documented behaviour rather than an incidental side effect.
 
 ```rust  ignore
 pub fn is_default_stopword(word: &str) -> bool;
@@ -811,9 +811,8 @@ whether it has ever been mutated:
   only selects between two lookup strategies that are both correct; the `RwLock`
   provides the actual synchronisation.
 
-`reset_global_stopwords()` has no counterpart in the reference — there is no way to
-un-set the reference's module-level array. It exists so tests that exercise the
-global can isolate themselves from one another.
+`reset_global_stopwords()` exists so tests that exercise the global can isolate
+themselves from one another.
 
 ```rust
 use verbora_core::stopwords::{
@@ -839,24 +838,23 @@ fn main() {
 
 <div class="callout callout-warn">
 <strong>Recommendation: prefer an explicit <code>&amp;StopWords</code>.</strong> The global exists
-for compatibility, not because it is a good design. It is process-wide: a
+for API-compatibility reasons, not because it is a good design. It is process-wide: a
 library that calls <code>add_global_stopword</code> changes what every other caller in the
 binary observes, including code it has never heard of, and tests that touch it
 must serialise against each other. Every consumer in this workspace offers a
 sibling that takes a list explicitly — <code>verbora_phonetics::phoneticize_tokens</code>
 reads the global, <code>phoneticize_tokens_with</code> takes a <code>&amp;StopWords</code>. Use the
-latter unless you are deliberately reproducing the reference's shared state.
+latter unless you specifically need the shared, process-wide behaviour.
 </div>
 
 <div class="callout callout-warn">
 <strong>Careful — case sensitivity.</strong> <code>DEFAULT_EN</code> is entirely lowercase and
 both <code>StopWords::contains</code> and <code>is_default_stopword</code> compare raw strings.
-<code>"The"</code> is <strong>not</strong> a stop word; neither is <code>"THE"</code>. This is the
-reference's behaviour — <code>verbora_phonetics::phoneticize_tokens</code> filters
+<code>"The"</code> is <strong>not</strong> a stop word; neither is <code>"THE"</code>.
+<code>verbora_phonetics::phoneticize_tokens</code> filters
 case-sensitively on the raw token, so a sentence-initial <code>"The"</code> survives
 filtering while a mid-sentence <code>"the"</code> does not. Lower-case your tokens
-yourself if you want case-insensitive filtering, and be aware that doing so is a
-divergence from the reference.
+yourself if you want case-insensitive filtering.
 </div>
 
 <div class="callout callout-note">
@@ -867,10 +865,11 @@ write lock, every later call panics too. In practice the critical sections are
 worth knowing before you put the global on a request path.
 </div>
 
-## `whitespace` — reference string semantics
+## `whitespace` — Verbora's `\s` semantics
 
-Two small functions that mark a place where the obvious Rust equivalent silently
-disagrees with the reference implementation.
+Two small functions that mark a place where the obvious Rust equivalent,
+`char::is_whitespace`, silently disagrees with Verbora's own definition of
+whitespace.
 
 ```rust  ignore
 pub const fn is_whitespace(c: char) -> bool;
@@ -880,24 +879,23 @@ pub fn collapse_whitespace(s: &str) -> Cow<'_, str>;
 <a class="badge badge-alloc" href="../performance/allocation">ALLOCATION-FREE</a>
 <a class="badge badge-cow" href="../performance/zero-copy">COW</a>
 
-### Why the reference's `\s` is not `char::is_whitespace`
+### Why `is_whitespace` differs from `char::is_whitespace`
 
 The two sets are close but not equal, and **both** differences are reachable
 from ordinary text:
 
-| Character | the reference `\s` | Rust `char::is_whitespace` |
+| Character | `is_whitespace` | Rust `char::is_whitespace` |
 |---|:--:|:--:|
 | `U+0085` NEXT LINE | ❌ | ✅ |
 | `U+FEFF` ZERO WIDTH NO-BREAK SPACE (BOM) | ✅ | ❌ |
 
-The reference language defines `\s` as `WhiteSpace | LineTerminator`, where `WhiteSpace` is
-TAB, VT, FF, SP, NBSP, ZWNBSP and the `Zs` category, and `LineTerminator` is LF,
-CR, LS and PS. `U+0085` is category `Cc`, so the reference does not match it; Rust's
-`White_Space` property does. `U+FEFF` is the mirror image.
+`is_whitespace` treats `U+0085` (category `Cc`) as ordinary text, while Rust's
+`White_Space` property matches it. `U+FEFF` is the mirror image: `is_whitespace`
+treats it as whitespace, Rust does not.
 
 `U+FEFF` is the byte-order mark. It shows up at the start of files saved by a
-great deal of Windows tooling, and it is stripped by the reference's `trim` but not
-by Rust's. `U+0085` appears in text transcoded from EBCDIC and from some
+great deal of Windows tooling, and `is_whitespace` treats it as trimmable
+whitespace. `U+0085` appears in text transcoded from EBCDIC and from some
 Latin-1-adjacent encodings. Neither is exotic.
 
 The exact set `is_whitespace` matches:
@@ -915,14 +913,13 @@ The exact set `is_whitespace` matches:
 | `U+3000` | IDEOGRAPHIC SPACE |
 | `U+FEFF` | ZERO WIDTH NO-BREAK SPACE |
 
-Note that `U+200B` ZERO WIDTH SPACE is **not** in the set — it is not `\s` in
-the reference either.
+Note that `U+200B` ZERO WIDTH SPACE is **not** in the set.
 
 **This is the reason several classes of bug do not exist.** `verbora-tokenizers`
 lists it among the standing hazards its crate documentation calls out, and
-`verbora-inflectors` uses it inside its the reference number parser. Any port of a
-The reference routine that splits or trims on `\s` must use this function, or it
-will tokenize text containing either character differently.
+`verbora-inflectors` uses it inside its number parser. Any routine that splits
+or trims on `\s` should use this function instead of `char::is_whitespace`, or
+it will tokenize text containing either character differently.
 
 `is_whitespace` is a `const fn` and `#[inline]`, implemented as a single
 `matches!` over character ranges. It allocates nothing and can be evaluated in
@@ -930,12 +927,15 @@ const context.
 
 ### `collapse_whitespace`
 
-Implements the `replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '')` idiom: every run
-of reference whitespace becomes a single space, and the ends are trimmed.
+Collapses every run of `is_whitespace`-matching characters to a single ASCII
+space, and trims the result at both ends — equivalent to the
+`replace(/\s+/g, ' ').replace(/^\s+|\s+$/g, '')` idiom, but using this crate's
+own whitespace definition rather than a regex engine's.
 
-It makes one scan to decide whether the string contains **any** reference whitespace.
-If not, it returns `Cow::Borrowed` and allocates nothing. Otherwise it allocates
-one `String` with `s.len()` bytes of capacity and makes a second scan.
+It makes one scan to decide whether the string contains **any** `is_whitespace`
+character. If not, it returns `Cow::Borrowed` and allocates nothing. Otherwise
+it allocates one `String` with `s.len()` bytes of capacity and makes a second
+scan.
 
 <div class="callout callout-note">
 <strong>Note.</strong> The borrow test is "contains no whitespace at all", not
@@ -949,7 +949,7 @@ use std::borrow::Cow;
 use verbora_core::{collapse_whitespace, is_whitespace};
 
 fn main() {
-    // U+FEFF is whitespace to the reference, not to Rust.
+    // U+FEFF is whitespace here, not to Rust's char::is_whitespace.
     assert!(is_whitespace('\u{FEFF}'));
     assert!(!'\u{FEFF}'.is_whitespace());
 
@@ -1079,7 +1079,7 @@ state exactly:
 |---|---|---|
 | `trim_edge_empties` | O(trailing empties) pops + one O(n) drain | None |
 | `is_whitespace` | O(1), `const fn`, inlined | None |
-| `collapse_whitespace` | Two O(n) scans (one on the borrowed path) | None when the input has no reference whitespace; otherwise one `String` of `s.len()` capacity |
+| `collapse_whitespace` | Two O(n) scans (one on the borrowed path) | None when the input has no `is_whitespace` characters; otherwise one `String` of `s.len()` capacity |
 | `Token::new` | O(n) | Two: `Vec<char>` and `String` |
 | `Token::as_string` | O(n) | One `String`, every call |
 | `Token::region` | O(regions), ≤ 3 in practice | None |
@@ -1115,16 +1115,17 @@ Summarised across the whole crate:
 | `Phonetic::compare` | Two `String`s | Default body only |
 | `StringMetric::measure` | Whatever the metric does | The trait adds nothing |
 | `trim_edge_empties` | Nothing | In place |
-| `collapse_whitespace` | Nothing, or one `String` | Borrowed only when the input has no reference whitespace |
+| `collapse_whitespace` | Nothing, or one `String` | Borrowed only when the input has no `is_whitespace` characters |
 
 See [Allocation](../performance/allocation.md) and
 [Buffer reuse](../performance/buffer-reuse.md).
 
 ## Unicode and language notes
 
-- **`Token` indexes by Unicode scalar value, not UTF-16 code unit.** Identical
-  to the reference for the whole BMP; differs only for astral-plane characters,
-  which no reference stemming rule can match.
+- **`Token` indexes by Unicode scalar value, not UTF-16 code unit.** This gives
+  O(1) indexing for every character in the Basic Multilingual Plane; it
+  diverges only for astral-plane characters, which no Snowball stemming rule
+  needs to match.
 - **`is_whitespace` is not `char::is_whitespace`.** Two code points differ,
   in opposite directions.
 - **`Token::has_suffix` is case-sensitive and character-based**, so `"époque"`
@@ -1153,13 +1154,13 @@ generic. Use a generic parameter, or an object-safe projection like
 `verbora_ngrams::NGramTokenizer`.
 
 **Expecting `"The"` to be filtered as a stop word.** The list is lowercase and
-lookups are exact. This is the reference's behaviour and Verbora reproduces it.
+lookups are exact, so capitalized and mixed-case tokens are never matched.
 
 **Calling `add_global_stopword` from library code.** It changes behaviour for
 the whole process, including callers that never asked. Take a `&StopWords`
 parameter instead.
 
-**Using `char::is_whitespace` in a port of a reference routine.** `U+FEFF` and
+**Using `char::is_whitespace` instead of `is_whitespace`.** `U+FEFF` and
 `U+0085` will disagree, and the disagreement shows up as a tokenization
 difference on real-world input.
 

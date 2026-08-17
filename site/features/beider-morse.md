@@ -11,12 +11,11 @@ across up to 18 languages at once (or restricted to one, if you already know
 it), rather than a single language-specific key.
 
 <div class="callout callout-note">
-<strong>Verbora-native extension — not a ported feature.</strong>
-The reference has no Beider-Morse implementation, so <code>BeiderMorse</code>
-is not a port. Correctness here was instead established during development
+<strong>Verbora-native design.</strong>
+<code>BeiderMorse</code>'s correctness was established during development
 against a disposable, non-dependency build of <code>rphonetic</code> (a
-mature, independently-verified Rust port of the same underlying algorithm)
-reading the identical rule-file corpus this crate embeds. See
+mature Rust implementation of the same underlying algorithm) reading the
+identical rule-file corpus this crate embeds. See
 <a href="#correctness-and-a-known-edge-case">Correctness and a known edge
 case</a> below for what that verification covered, the two real bugs it
 caught, and the one still-open discrepancy it didn't resolve. See
@@ -109,8 +108,8 @@ fn main() {
 ### Language auto-detection
 
 `encode()` runs a full regex sweep over the word's own spelling before doing
-any rule-table work — the same heuristic layer every reference
-implementation uses, ported into this crate rather than skipped. A confident
+any rule-table work — the same heuristic layer every Beider-Morse
+implementation uses, included in this crate rather than skipped. A confident
 single-language guess (`"Renault"` → French) loads that language's own rule
 file and starts every candidate phoneme pre-filtered to it; an ambiguous
 guess falls back to the `"any"` file with the (possibly still narrowed)
@@ -131,7 +130,7 @@ wrong are handled explicitly:
   already-composed string for this case, not independent candidates — see
   the type's own doc comment.
 - **A name with more than one word** is, by default (`concat: true` — every
-  reference implementation's own real default, despite what its own doc
+  Beider-Morse implementation's own real default, despite what its own doc
   comment claims; confirmed against the constructor source), fused into one
   lookup: `"Jean Paul"` is encoded as the single string `"jean paul"`,
   producing one cross-product candidate set spanning both words. Calling

@@ -1,11 +1,11 @@
 # Competitive benchmarks
 
-[String distance results](distance.md) measures Verbora against the reference —
-the port target every crate in this workspace is verified against. This page
-measures something different: Verbora against **the wider Rust ecosystem** —
-real, actively-selected, version-pinned competing crates — on the same
-inputs, plus the reference again where a Rust competitor does not exist. It is
-the output of the project's own competitive-performance audit.
+[String distance results](distance.md) measures Verbora against a widely-used
+JavaScript NLP library (v8.1.1). This page measures something different:
+Verbora against **the wider Rust ecosystem** — real, actively-selected,
+version-pinned competing crates — on the same inputs, plus that JavaScript
+library again where a Rust competitor does not exist. It is the output of
+the project's own competitive-performance audit.
 
 <div class="callout callout-warn">
 <strong>Performance depends on workload, input distribution, hardware and
@@ -13,14 +13,14 @@ configuration.</strong> These benchmarks measure the workloads described
 below and should not be interpreted as universal performance guarantees.
 </div>
 
-**288 benchmark comparisons** across 12 modules with a real Rust competitor,
+**290 benchmark comparisons** across 13 modules with a real Rust competitor,
 plus a 4-module, 3-detector language-detection accuracy report. Every
 comparison here passed an independent fairness audit before publication —
 see [How these numbers were audited](#how-these-numbers-were-audited) — and
 every loss is shown as a loss, with a link to the investigation in
 [`docs/PERFORMANCE_GAPS.md`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md).
-Four modules (n-grams, WordNet, analyzers, sentiment) have no fair Rust
-competitor at all — see [No Rust competitor exists](#no-rust-competitor-exists-n-grams-wordnet-analyzers-sentiment)
+Three modules (WordNet, analyzers, sentiment) have no fair Rust
+competitor at all — see [No Rust competitor exists](#no-rust-competitor-exists-wordnet-analyzers-sentiment)
 — and are covered on their own pages instead of here.
 
 ## Benchmark methodology
@@ -31,7 +31,7 @@ competitor at all — see [No Rust competitor exists](#no-rust-competitor-exists
 | Memory | 125 GiB |
 | OS | Linux 7.0.11-76070011-generic |
 | rustc | 1.97.1, `--release` (`opt-level = 3`, `lto = "thin"`, `codegen-units = 16`) — identical `[profile.release]`/`[profile.bench]` to the main Verbora workspace, not a tuned profile for this audit |
-| reference | v25.9.0 (used only for the four the reference-only modules linked above, not for the tables on this page) |
+| Node.js | v25.9.0 (used only for the three JavaScript-library-only modules linked above, not for the tables on this page) |
 | Verbora commit | [`af1aee9`](https://github.com/addlayerio/verbora/commit/af1aee9d9da2b1d1b750f0761ef250d4c290b48c), crate version 0.1.0 |
 | Datasets | Shared word/name/pair lists from `benches/data/*.json` (`tools/bench-data/generate.py`, one generator read by every implementation); the 13-language, 4-tier UDHR corpus for language-detection accuracy (sourced below) |
 | Warmup | Criterion's own warmup phase before every measured sample (400 ms–1 s per group; see below) |
@@ -39,7 +39,7 @@ competitor at all — see [No Rust competitor exists](#no-rust-competitor-exists
 | Metric | **Median**, per Criterion's own robust-statistics estimate — not mean, per this project's own `PRIMARY METRIC` policy |
 | Threads | **1 (single-threaded)** for every benchmark on this page — no parallel API is exercised anywhere in this audit; see [Thread counts](#thread-counts) |
 | Source | [`benchmarks/competitive/rust-competitors/benches/*.rs`](https://github.com/addlayerio/verbora/tree/main/benchmarks/competitive/rust-competitors/benches) (one file per module), raw Criterion output under [`benchmarks/competitive/results/raw/`](https://github.com/addlayerio/verbora/tree/main/benchmarks/competitive/results/raw), joined into [`results/results.json`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/results/results.json) |
-| Date | Results captured 2026-08-15/16 (`results/metadata.json`'s timestamp: `2026-08-15T23:50:55Z`) |
+| Date | Results captured 2026-08-15/17 (`results/metadata.json`'s timestamp: `2026-08-15T23:50:55Z`; the Metaphone, unrestricted-Damerau, and N-Grams groups are the freshest, from 2026-08-17) |
 
 Every number on this page is read from that `results.json` file — none is
 retyped from memory or rounded inconsistently; the relative-speedup figures
@@ -145,8 +145,10 @@ covers 1–64 units. Bit-parallelism extends beyond plain Levenshtein too:
 restricted-Damerau/OSA kernels (Hyyrö's 2003 transposition extension of
 Myers, single-word and multi-word block, gated to unit costs), and
 Jaro/Jaro-Winkler match-flagging kernels in Verbora's own greedy
-orientation. Unrestricted Damerau has no bit-vector formulation, so it uses
-a two-rows-plus-per-symbol-snapshot arena kernel instead of the full `f64`
+orientation. Unrestricted Damerau has no bit-vector formulation, so it runs
+on scalar kernels dispatched by operand length — a table-free stack matrix
+for tiny inputs, then register- and memory-carried
+two-rows-plus-per-symbol-snapshot kernels — instead of the full `f64`
 cost+parent matrices. Every kernel is parity-verified by differential tests
 against the retained scalar implementations, plus an independent
 adversarial audit with mutation testing, before being trusted; Hamming has
@@ -157,7 +159,9 @@ no bit-parallel kernel.
 from 4 to 1024 characters</strong> (Verbora is 1.09× faster at 1024
 characters, 1.77× at 16). Restricted Damerau/OSA beats every competitor at
 every size, and Jaro/Jaro-Winkler wins every size too. Unrestricted Damerau
-stays honestly mixed — see its own section below. See
+beats <code>rapidfuzz</code> at every size and <code>strsim</code> at four
+of five, with one ~2% loss at 1024 characters — see its own section below.
+See
 <a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#26-levenshtein-distance--verbora-vs-stringmetrics-triple_accel-and-editdistancek-rust">PERFORMANCE_GAPS.md
 entry 26</a> for the mechanism and verification story these kernels build
 on.
@@ -204,37 +208,46 @@ formulation to close the gap with.
 
 | Library | Version | Language | Time (median, 1024 chars) | Throughput | Relative |
 |---|---|---|---:|---:|---:|
-| strsim | 0.11.1 | Rust | 2.03 ms | 492.6/s | **1.00×** |
-| rapidfuzz | 0.5.0 | Rust | 2.17 ms | 460.8/s | 1.07× slower |
-| Verbora | 0.1.0 | Rust | 2.25 ms | 444.4/s | 1.11× slower |
+| strsim | 0.11.1 | Rust | 1.87 ms | 535.8/s | **1.00×** |
+| Verbora | 0.1.0 | Rust | 1.91 ms | 524.6/s | 1.02× slower |
+| rapidfuzz | 0.5.0 | Rust | 2.12 ms | 472.0/s | 1.14× slower |
 
 | Input size | Verbora | rapidfuzz | strsim |
 |---:|--:|--:|--:|
-| 4 | 81.2 ns | 71.7 ns | 55.7 ns |
-| 16 | 508.2 ns | 536.4 ns | 539.4 ns |
-| 64 | 7.73 µs | 8.20 µs | 7.69 µs |
-| 256 | 135.52 µs | 135.82 µs | 126.05 µs |
-| 1024 | 2.25 ms | 2.17 ms | 2.03 ms |
+| 4 | 29.5 ns | 70.6 ns | 55.5 ns |
+| 16 | 396.6 ns | 530.7 ns | 441.6 ns |
+| 64 | 4.65 µs | 7.51 µs | 6.95 µs |
+| 256 | 116.22 µs | 133.43 µs | 120.04 µs |
+| 1024 | 1.91 ms | 2.12 ms | 1.87 ms |
 
-**Honestly mixed** — the one distance function in this group where Verbora
-does not win outright. Distance mode uses a
-two-rows-plus-per-symbol-snapshot arena kernel instead of the full `f64`
-cost+parent matrices (`u16` cells when the combined input length fits,
-`u32` beyond), evaluating the same recurrence exactly. Per size: Verbora
-**wins all three at 16 characters**, beats `rapidfuzz` at 64 and 256 (by
-hair-thin margins at 256), is **1.08×–1.11× behind `strsim`** at 256/1024
-and ~4% behind `rapidfuzz` at 1024 (within run-to-run noise on this
-machine), and is behind both at 4 characters, where its per-call arena
-setup dominates.
+Verbora **beats `rapidfuzz` at every size** (2.39× at 4 characters, 1.34×
+at 16, 1.61× at 64, 1.15× at 256, 1.11× at 1024) and **beats `strsim` at
+four of the five** (1.88× at 4, 1.11× at 16, 1.49× at 64, 1.03× at 256).
+The one remaining loss in this comparison is ~2% to `strsim` at
+1024 characters (1.91 ms vs. 1.87 ms) — shown as a loss, and a structural
+one rather than an open tuning gap: a probe evaluating nothing but the
+bare loop-carried min-chain of Verbora's pinned recurrence already costs
+1.86–1.88 ms at this size, and the recurrence's divergence from textbook
+DL (next paragraph) rules out the Zhao–Sahni candidate pruning `strsim`
+uses to get under that floor. Distance mode never builds the full `f64`
+cost+parent matrices: the byte path dispatches across three measured
+tiers — a table-free stack-matrix kernel for operands of at most 8 bytes,
+a register-carried two-rows-plus-per-symbol-snapshot kernel up to 128
+bytes, and a memory-carried variant beyond (integer cells: `u16` while
+the combined input length fits, `u32` after) — and UTF-16 input runs the
+generic snapshot kernel. Every tier evaluates the same recurrence
+exactly, differentially verified against the retained full-matrix oracle
+and against the neighbouring tiers on their shared domains.
 
 One structural caveat, documented rather than glossed over: `strsim` and
 `rapidfuzz` implement textbook (Lowrance–Wagner/Zhao–Sahni) unrestricted
 Damerau-Levenshtein, while Verbora computes its pinned reference
 recurrence, which is deliberately **not** textbook DL — it measurably
-diverges on a fraction of inputs (`"bb"` → `"abbb"` is 1 under Verbora's
-recurrence, 2 under the textbook algorithm, and the recurrence is not even
-symmetric; see `crates/verbora-distance/src/levenshtein.rs`'s own doc
-comment). That divergence is also exactly what structurally forbids Verbora
+diverges (on 38.6% of random small-alphabet pairs: `"bb"` → `"abbb"` is 1
+under Verbora's recurrence, 2 under the textbook algorithm, and the
+recurrence is not even symmetric; see
+`crates/verbora-distance/src/levenshtein.rs`'s own doc comment). That
+divergence is also exactly what structurally forbids Verbora
 from adopting the competitors' linear-space algorithm or common-affix
 trimming. Read this table as a same-shape-of-work comparison over the same
 shared ASCII corpus, not as three implementations of one identical function
@@ -322,9 +335,11 @@ fractional-transposition semantics preserved exactly. Against `rapidfuzz`:
 | 256 | 1.82 µs | 2.06 µs | 22.92 µs |
 | 1024 | 10.32 µs | 13.00 µs | 330.91 µs |
 
-Sørensen–Dice and plain Jaro-vs-the reference are **not** benchmarked here — the
-matrix records both as narrowed/no-fair-competitor per
-`docs/COMPETITIVE_BENCHMARKS.md` §1.8. See
+Sørensen–Dice against a Rust crate, and plain Jaro against a JavaScript
+library, are **not** benchmarked (plain Jaro against the Rust competitors
+above is — see the table just before this paragraph) — the matrix records
+both as narrowed/no-fair-competitor per `docs/COMPETITIVE_BENCHMARKS.md`
+§1.8. See
 [`benches/distance.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/benches/distance.rs)'s
 own module doc comment for the full accounting of every row this module
 benchmarks and every row it deliberately does not.
@@ -493,6 +508,56 @@ larger change not attempted here.
 
 ---
 
+### N-Grams
+
+Character n-gram generation with frequency counting (`docs/COMPETITIVE_BENCHMARKS.md`
+[§1.2](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#12-n-grams))
+against [ngrammatic](https://github.com/compenguy/ngrammatic) 0.7.0's
+`Ngram`/`NgramBuilder` — the character n-gram + frequency-count generator its
+headline `Corpus`/`search` fuzzy-matching feature is itself built on. Only
+that generator is benchmarked here: `Corpus`/`search` solves a different
+problem (fuzzy corpus search) with no Verbora equivalent, and is not
+compared. Both sides pad with `arity - 1` copies of the same character and
+slide an identical window over every word in the shared 20,000-word list;
+byte-identical `(gram, count)` output is proven at arity 2 and arity 3 in
+[`tests/ngrams_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/ngrams_correctness.rs)
+before any number below was trusted.
+
+<div class="callout callout-note">
+<strong>A genuine split by arity, not a clean sweep.</strong> Verbora wins
+bigram generation on every one of 3 independent runs (~1.07×–1.16× faster)
+and loses trigram generation on every one of the same 3 runs, by a smaller
+but equally consistent margin (ngrammatic ~1.03×–1.08× faster). See
+<a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#38-character-n-gram-generation-trigrams--verbora-vs-ngrammatic-rust-a-small-but-consistent-loss-alongside-a-clear-bigram-win">PERFORMANCE_GAPS.md
+entry 38</a> for the full 3-run reading and the profiling-backed theory for
+why the two arities diverge.
+</div>
+
+| Library | Version | Language | Time (median, bigrams, 20,000 words) | Throughput | Relative |
+|---|---|---|---:|---:|---:|
+| Verbora | 0.1.0 | Rust | 8.50 ms | 2.35M/s | **1.00×** |
+| ngrammatic | 0.7.0 | Rust | 9.88 ms | 2.02M/s | 1.16× slower |
+
+| Library | Version | Language | Time (median, trigrams, 20,000 words) | Throughput | Relative |
+|---|---|---|---:|---:|---:|
+| ngrammatic | 0.7.0 | Rust | 11.66 ms | 1.72M/s | **1.00×** |
+| Verbora | 0.1.0 | Rust | 11.98 ms | 1.67M/s | 1.03× slower |
+
+Both implementations do the same conceptual work — pad, slide a window,
+fold into a `(gram, count)` map — over the same input, so the residual is
+plausibly a small-string-accumulation difference rather than an algorithmic
+one: `ngrammatic` accumulates directly into a `HashMap<SmolStr, usize>`,
+whose small-string optimization skips a heap allocation for any gram that
+fits inline (every bigram and trigram over this word list does), while
+Verbora's benchmarked path builds each gram through its generic `ngrams()`
+engine and folds the result into a `HashMap<String, usize>` with one
+`String` allocation per unique gram. That difference plausibly narrows (and
+eventually reverses) as grams get longer relative to the inline-capacity
+boundary — a source-read hypothesis, not yet confirmed with a profiler; see
+PERFORMANCE_GAPS.md entry 38 above for the full accounting.
+
+---
+
 ### Stemmers
 
 Nine canonical Snowball-algorithm languages (`de es fr it nl no pt ru sv`)
@@ -523,7 +588,7 @@ every batch size measured; German is a clean win and Dutch is a genuine
 split (Verbora beats <code>rust-stemmers</code>, loses to
 <code>snowball_stemmers_rs</code>). Both competitors compile their suffix
 rules to a binary-search <code>find_among</code> via the official Snowball
-compiler; Verbora's port does a literal linear scan through the same rule
+compiler; Verbora's stemmer does a literal linear scan through the same rule
 tables, guarded by a cheap last-code-unit reject in the shared
 suffix-matching helper (<code>ends_with</code>) before it commits to a full
 comparison. See
@@ -561,12 +626,12 @@ Scaling from 4 to 1024 words per batch (Verbora ÷ rust-stemmers speedup;
 
 #### `snowball_stemmers_rs` — a second, independently-generated Snowball port
 
-Per `benchmark.md`'s "no averaging across languages" directive, this is a
-second, independent data point on the same
+Languages are never averaged together, so this is a second, independent
+data point on the same
 compiler-generated-binary-search-vs.-Verbora's-linear-scan question above,
 not a repeat of it. Agreement is even stronger than the `rust-stemmers` row
 in one case: `snowball_stemmers_rs`'s `russian.sbl` carries the same
-ё→е fold Verbora's port does, so Russian agrees 100% byte-exact *including*
+ё→е fold Verbora's stemmer does, so Russian agrees 100% byte-exact *including*
 `ёлка` — `rust-stemmers` does not. Dutch needs
 `Algorithm::DutchPorter` specifically; the crate's plainly-named
 `Algorithm::Dutch` is actually Kraaij–Pohlmann, a different, non-canonical
@@ -656,7 +721,7 @@ pipeline Verbora's purpose-built stemmer doesn't need.
 
 Verbora's `StemmerId` (Sastrawi/Nazief–Adriani) against `sastrawi`
 (iDevoid/rust-sastrawi) 0.1.1 — genuine shared lineage, not a coincidence:
-both independently port the same PHP Sastrawi reference, and both
+both implement the same published PHP Sastrawi algorithm, and both
 dictionaries hold exactly 29,932 root words, confirmed directly. Real
 correctness gaps found in `sastrawi` during verification, excluded from the
 benchmarked sample rather than hidden: no hyphenated-reduplication/
@@ -790,8 +855,8 @@ pre-sized buffer.
 ### Trie
 
 Generic prefix-search throughput (never output/ordering equivalence — no
-Rust crate replicates Verbora's UTF-16-code-unit keying or the reference `for…in`
-enumeration order) against
+Rust crate replicates Verbora's UTF-16-code-unit keying or its own
+numeric-keys-first child enumeration order) against
 [trie-rs](https://github.com/laysakura/trie-rs) 0.4.2 (highest download
 count of any competitor in the whole audit: 5.9M) and
 [qp-trie](https://github.com/sdleffler/qp-trie-rs) 0.8.2
@@ -918,7 +983,7 @@ against [rphonetic](https://github.com/Dalvany/rphonetic) 3.0.6 — the one
 actively-maintained Rust crate covering Soundex, Metaphone, Double Metaphone
 and Daitch–Mokotoff from the canonical Apache commons-codec reference in a
 single crate. Every row is throughput-only (`Partial`, never `Yes`): Verbora
-transcribes the reference's own variants (condense-before-drop Soundex, a
+implements its own documented variants (condense-before-drop Soundex, a
 documented Metaphone stage-ordering quirk, single-branch Daitch–Mokotoff),
 rphonetic the textbook originals — byte-exact output is never asserted, only
 that both sides do the same *shape* of work, verified in
@@ -931,32 +996,33 @@ rphonetic's output length, not silently still capped at 4.
 | Algorithm | 1 name | 10,000 names | 100,000 names |
 |---|--:|--:|--:|
 | Soundex | **2.79× faster** | **2.17× faster** | **2.08× faster** |
-| Metaphone | **1.24× faster** | 1.11× slower | 1.09× slower |
+| Metaphone | **1.43× faster** | **1.03× faster** | **1.10× faster** |
 | Double Metaphone | **3.27× faster** | **2.18× faster** | **4.22× faster** |
 | SoundExDM (Daitch–Mokotoff) | **7.52× faster** | **9.55× faster** | **5.12× faster** |
 
-Verbora wins 3 of 4 algorithms outright; the fourth, Metaphone, is a
-genuine split — a single-encode win and a narrow batch loss:
+Verbora wins all four algorithms at every benchmarked size. Metaphone is
+the closest of the four:
 
 | Library | Version | Language | Time (median, 100,000 names) | Throughput | Relative |
 |---|---|---|---:|---:|---:|
-| rphonetic | 3.0.6 | Rust | 7.87 ms | 127.1/s | **1.00×** |
-| Verbora | 0.1.0 | Rust | 8.58 ms | 116.6/s | 1.09× slower |
+| Verbora | 0.1.0 | Rust | 6.89 ms | 145.1/s | **1.00×** |
+| rphonetic | 3.0.6 | Rust | 7.57 ms | 132.2/s | 1.10× slower |
 
-<div class="callout callout-warn">
-<strong>Metaphone — honestly still a batch loss.</strong> Verbora's
+<div class="callout callout-good">
+<strong>Metaphone — a clean sweep at every size.</strong> Verbora's
 <code>Metaphone</code> runs as a single skip-gated driver, fused from the
-original 21 ordered whole-string rewrite stages: letter-mask gates decide
-which rules can possibly fire on a given word, and window edits plus fused
-rules replace whole-string rewrites. The original 21-stage implementation
+original 21 ordered whole-string rewrite stages, over per-thread pooled
+scratch: letter-mask gates decide which rules can possibly fire on a given
+word, window edits plus fused rules replace whole-string rewrites, and the
+pipeline's two scratch buffers are reused across calls — an ASCII token
+folds lowercase directly into pooled scratch, so a steady-state call's
+only allocation is the returned code. The original 21-stage implementation
 is retained internally as the differential-test oracle it is checked
-against, over a ~900K-comparison corpus, and the owned lowercase buffer
-doubles as the first scratch, removing one per-call entry allocation.
-rphonetic's <code>Metaphone</code> is a single indexed forward scan
-(<code>O(n)</code>). Result: Verbora <strong>wins the single-name
-case</strong> (61.4 ns vs. 75.9 ns) and loses the batches by a narrow
-margin — 1.11× at 10,000 names, 1.09× at 100,000 — a real, disclosed
-~9–11% batch loss. See
+against, over a ~900K-comparison corpus. rphonetic's <code>Metaphone</code>
+is a single indexed forward scan (<code>O(n)</code>); Verbora wins anyway:
+<strong>1.43× at a single name</strong> (51.5 ns vs. 73.5 ns), 1.03× at
+10,000 names (711.91 vs. 735.77 µs), 1.10× at 100,000 (6.89 vs. 7.57 ms).
+See
 <a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#6-metaphone-encoding--verbora-vs-rphonetic-rust">PERFORMANCE_GAPS.md
 entry 6</a> for the full mechanism.
 </div>
@@ -978,8 +1044,9 @@ Statistical language detection over free text
 its default 75) and [whichlang](https://github.com/quickwit-oss/whichlang)
 0.1.1 (13-language overlap, and — disclosed explicitly, not folded silently
 into the accuracy numbers — it cannot abstain: `detect_language` always
-returns a guess). The reference has no general statistical language-detection
-module (verified from source, not assumed), so it does not appear here.
+returns a guess). A widely-used JavaScript NLP library has no general
+statistical language-detection module (verified from source, not assumed),
+so it does not appear here.
 
 <div class="callout callout-note">
 <strong>Speed alone is not enough for this capability</strong> — this
@@ -1101,8 +1168,8 @@ Verbora's `detect_script` against
 [§1.10](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#110-script-detection))
 — a real, public, standalone function doing the same conceptual work
 (per-codepoint Unicode-range classification, majority vote), just over a
-wider set (25 scripts vs. Verbora's 10). The reference has no script-detection
-module at all (verified from source).
+wider set (25 scripts vs. Verbora's 10). A widely-used JavaScript NLP
+library has no script-detection module at all (verified from source).
 
 | Tier | Verbora | whatlang | Verbora advantage |
 |---|--:|--:|--:|
@@ -1152,8 +1219,8 @@ Japanese kana→romaji, throughput only — against
 the only Rust kana↔romaji crate with real current adoption/maintenance
 found — every alternative investigated is scope-mismatched or effectively
 abandoned. **Never an output-correctness comparison**: `wana_kana` uses a
-doubled-vowel convention (`"スーパー"` → `"suupaa"`) while Verbora/the reference
-use modified Hepburn with macrons (`"tōkyō"`) — a real, executed divergence
+doubled-vowel convention (`"スーパー"` → `"suupaa"`) while Verbora uses
+modified Hepburn with macrons (`"tōkyō"`) — a real, executed divergence
 proven in
 [`tests/transliteration_convention_diff.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/transliteration_convention_diff.rs),
 not merely asserted.
@@ -1383,7 +1450,7 @@ it buys, shown right below.</strong> See
 <a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#13-tf-idf-ingestion--verbora-vs-tfidf-afshinm-rust">PERFORMANCE_GAPS.md
 entry 13</a>: <code>tfidf</code>'s <code>add()</code> is a single space-split
 pass with zero allocation, no lowercasing, no real tokenizer, no stop-word
-filtering. Verbora's <code>add_document</code> reproduces the reference's full
+filtering. Verbora's <code>add_document</code> runs its own full
 pipeline — lowercasing, real word-boundary tokenization, stop-word
 filtering, interning — because that is what its own behaviour contract and its
 own <code>O(1)</code> query-time payoff (below) require.
@@ -1487,29 +1554,32 @@ accuracy past the smallest size.)
 
 ---
 
-## No Rust competitor exists: n-grams, WordNet, analyzers, sentiment
+## No Rust competitor exists: WordNet, analyzers, sentiment
 
-Four of the workspace's 19 audited modules have **no fair Rust competitor at
+Three of the workspace's 19 audited modules have **no fair Rust competitor at
 all** — every candidate found was investigated and rejected on maintenance,
-adoption or scope grounds (n-grams: every dedicated crate is years-stale or
-solves a different problem; WordNet: the one candidate is abandoned since
+adoption or scope grounds (WordNet: the one candidate is abandoned since
 2017; analyzers and sentiment: no Rust crate performs the specific composed
 task). Per this project's `NO FAIR COMPETITOR FOUND` policy, none is forced.
-The reference remains the required baseline for all four, and each has its own
-full comparison table already published:
+A widely-used JavaScript NLP library remains the required baseline for all
+three, and each has its own full comparison table already published:
 
-- [`docs/PERFORMANCE.md` § `verbora-ngrams`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-ngrams) — 22 benchmarks, median 2.8× over the reference
 - [`docs/PERFORMANCE.md` § `verbora-wordnet`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-wordnet)
 - [`docs/PERFORMANCE.md` § `verbora-analyzers`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-analyzers)
 - [`docs/PERFORMANCE.md` § `verbora-sentiment`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-sentiment)
+
+N-grams has a real Rust competitor for character n-gram generation — see
+[N-Grams](#n-grams) above. Its separate comparison against the JavaScript
+library (22 benchmarks, median 2.8× faster) is published at
+[`docs/PERFORMANCE.md` § `verbora-ngrams`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-ngrams).
 
 Full reasoning for every rejected candidate:
 [`docs/COMPETITIVE_BENCHMARKS.md` § 3](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#3-modules--sub-capabilities-with-no-fair-competitor-identified).
 
 **Phonetic Index / Phonetic Neighbors** (`PhoneticIndex`) has zero
-competitors of any kind, including the reference — a Verbora-native extension
-with no upstream equivalent to port from or compare against. Its own
-internal build/query benchmark suite lives on the
+competitors of any kind — a Verbora-native extension with no upstream
+equivalent to compare against. Its own internal build/query benchmark suite
+lives on the
 [Phonetic neighbors](../features/phonetic-index.md#performance-characteristics)
 feature page instead of here.
 
@@ -1551,10 +1621,10 @@ This does not claim other libraries are trying to be all-in-one — it shows
 honestly that none of them are, without implying Verbora's breadth makes it
 better at any one of these than a specialist crate necessarily is.
 
-| Capability | Verbora | the reference | Rust ecosystem |
+| Capability | Verbora | JS library | Rust ecosystem |
 |---|:--:|:--:|:--:|
 | Tokenizers | ✓ | ✓ | P |
-| N-grams | ✓ | ✓ | — |
+| N-grams | ✓ | ✓ | P |
 | Stemmers | ✓ | ✓ | P |
 | Normalizers | ✓ | ✓ | P |
 | Inflectors | ✓ | ✓ | P |
@@ -1573,7 +1643,7 @@ better at any one of these than a specialist crate necessarily is.
 | Trie | ✓ | ✓ | P |
 | Analyzers | ✓ | ✓ | — |
 
-**19 of 19 — Verbora.** **16 of 19 — the reference** (missing language
+**19 of 19 — Verbora.** **16 of 19 — the JS library** (missing language
 detection, script detection, and phonetic indexing, which it never
 implemented). **0 of 19 — any single Rust crate** at full, unqualified
 equivalence across a whole module; the Rust ecosystem's real strength shows
@@ -1591,7 +1661,8 @@ package registry page, and documentation.
 
 | Library | Language | Version | License | Repository | Package | Docs |
 |---|---|---|---|---|---|---|
-| the reference | reference | 8.1.1 | MIT | — | — | repository README |
+| JavaScript NLP library | JavaScript | 8.1.1 | MIT | — | — | repository README |
+| ngrammatic | Rust | 0.7.0 | MIT | [GitHub](https://github.com/compenguy/ngrammatic) | [crates.io](https://crates.io/crates/ngrammatic) | [docs.rs](https://docs.rs/ngrammatic/0.7.0) |
 | strsim | Rust | 0.11.1 | MIT | [GitHub](https://github.com/rapidfuzz/strsim-rs) | [crates.io](https://crates.io/crates/strsim) | [docs.rs](https://docs.rs/strsim/0.11.1) |
 | rapidfuzz | Rust | 0.5.0 | MIT | [GitHub](https://github.com/rapidfuzz/rapidfuzz-rs) | [crates.io](https://crates.io/crates/rapidfuzz) | [docs.rs](https://docs.rs/rapidfuzz/0.5.0) |
 | triple_accel | Rust | 0.4.0 | MIT | [GitHub](https://github.com/Daniel-Liu-c0deb0t/triple_accel) | [crates.io](https://crates.io/crates/triple_accel) | [docs.rs](https://docs.rs/triple_accel/0.4.0) |
@@ -1661,14 +1732,13 @@ cargo run --release --example language_accuracy
 above in one command. Full detail, including the exact `collect-results.py`
 invocation for every module, is in
 [`benchmarks/competitive/README.md`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/README.md)
-and in each module's own `## Results —` section of
-[`docs/PERFORMANCE.md`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md).
+and in each module's own dossier in
+[`docs/COMPETITIVE_BENCHMARKS.md`](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md).
 
 ## Related
 
-- [String distance results](distance.md) — Verbora vs. The reference, the
-  reference baseline this page's Distance section extends with real Rust
-  competitors.
+- [String distance results](distance.md) — the JavaScript-library baseline
+  this page's Distance section extends with real Rust competitors.
 - [Benchmark method](index.md) — warmup, sample-count and regression-tracking
   conventions this page inherits.
 - [Parallelism](../performance/parallelism.md) — Verbora's own

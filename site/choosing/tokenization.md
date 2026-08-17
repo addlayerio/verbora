@@ -162,15 +162,15 @@ rewrite passes), `TokenizerJa` (a classifier over the entire string) and
 `SentenceTokenizer` (the placeholder maps must be complete before any sentence
 can be unmasked). Their `tokens()` builds the list and hands back
 `into_iter()`. A fourth, `CaseTokenizer`, is lazy on ASCII input and eager on
-anything else, because the non-ASCII path builds the reference's intermediate
-UTF-16 buffer first. The signature stays uniform so generic code does not have
+anything else, because the non-ASCII path builds an intermediate UTF-16
+buffer first. The signature stays uniform so generic code does not have
 to special-case them, but `tokens()` will not save you an allocation there.
 
 Among the four regex-driven tokenizers, `WordTokenizer`, `OrthographyTokenizer`
 and `WordPunctTokenizer` are genuinely lazy; `RegexpTokenizer::tokens` is not —
 its body collects into a `Vec` and returns `into_iter()`, because it has to know
-whether the whole operation produced the reference's `null` before it can hand you
-anything.
+whether the whole scan found no match at all — as distinct from matching zero
+tokens — before it can hand you anything.
 
 ## Decision tree
 
@@ -200,7 +200,7 @@ I need to tokenize text
 │
 ├── My tokenizer is RegexpTokenizer / WordTokenizer /
 │   OrthographyTokenizer / WordPunctTokenizer
-│      └── inherent methods, all returning Option — `None` is the reference `null`
+│      └── inherent methods, all returning Option — `None` means no match at all
 │
 └── I have a slice of documents and want one call
        └── verbora_core::Tokenizer::tokenize_batch
@@ -426,21 +426,21 @@ fn main() {
 
 <div class="perf">
 <div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Lazy, except <code>RegexpTokenizer::tokens</code></span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Option</code> of the token sequence — <code>None</code> is the reference's <code>null</code></span></div>
+<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Option</code> of the token sequence — <code>None</code> means no match at all</span></div>
 <div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">None for <code>WordTokenizer</code> splitting mode; one <code>Vec</code> for <code>RegexpTokenizer::tokens</code></span></div>
 <div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">Yes, via their inherent <code>tokenize_into</code></span></div>
 <div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
 <div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Ports that must distinguish "no match" from "no tokens"</span></div>
+<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Callers that must distinguish "no match" from "no tokens"</span></div>
 </div>
 
 `RegexpTokenizer`, `WordTokenizer`, `OrthographyTokenizer` and
-`WordPunctTokenizer` implement neither trait. In matching mode they call
-the reference's `String#match`, which returns `null` rather than an empty array
-when nothing matches, and no trait in this workspace can express that. They keep
-the same three method names as inherent methods, wrapped in `Option`; their
-`tokenize_into` returns `bool` instead, `false` meaning "the reference said
-`null`", in which case nothing was appended.
+`WordPunctTokenizer` implement neither trait. In matching mode, "no match at
+all" is a distinct outcome from "matched, but produced zero tokens," and no
+trait in this workspace can express that distinction. They keep the same
+three method names as inherent methods, wrapped in `Option`; their
+`tokenize_into` returns `bool` instead, `false` meaning "no match at all," in
+which case nothing was appended.
 
 ```rust
 use verbora_tokenizers::WordTokenizer;
@@ -451,7 +451,7 @@ fn main() {
     assert_eq!(split.tokenize("hello, world"), Some(vec!["hello", "world"]));
     assert_eq!(split.tokenize(""), Some(vec![]));
 
-    // Matching mode can return the reference's `null`.
+    // Matching mode can return `None` when nothing matches.
     let m = WordTokenizer::matching();
     assert_eq!(m.tokenize("abc def"), Some(vec![" "]));
     assert_eq!(m.tokenize("abcdef"), None);

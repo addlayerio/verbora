@@ -82,7 +82,7 @@ assert!(!was_changed("hello"));
 
 ### Carrying the borrow through a pipeline
 
-The reference implementation allocates once per stage. Verbora's multi-stage
+A naive multi-stage pipeline allocates once per stage. Verbora's multi-stage
 normalizers thread the `Cow` through instead, so a four-stage pipeline over
 unchanged text still allocates nothing. The technique is worth copying when you
 build your own pipelines:
@@ -109,10 +109,10 @@ function. That is one allocation for the pipeline, not one per stage.
 
 ## 3. Exact fast paths
 
-The subtlest form of not-copying: the reference indexes strings by UTF-16 code
-unit, and that is observable in the results — `levenshtein("a😀b", "ab")` is
-**2** in the reference and 1 under a naive `char`-based port. Getting that right
-could mean converting every input to `Vec<u16>` on every call.
+The subtlest form of not-copying: Verbora indexes strings by UTF-16 code
+unit, and that is observable in the results — `levenshtein("a😀b", "ab")`
+returns **2**, not 1 as a naive `char`-based implementation would give.
+Getting that right could mean converting every input to `Vec<u16>` on every call.
 
 Verbora does not, because for ASCII **one byte is one code unit**:
 
@@ -155,7 +155,7 @@ the gap tracks allocation pressure almost exactly:
 
 | Benchmark | Speedup | Why |
 |---|--:|---|
-| `levenshtein/ascii/1024` | 3307.7× | reference's ~1M heap-allocated cells; Verbora's bit-vector algorithm needs one `u64` word per 64 units of input, not rows |
+| `levenshtein/ascii/1024` | 3307.7× | a widely-used JavaScript NLP library's ~1M heap-allocated cells; Verbora's bit-vector algorithm needs one `u64` word per 64 units of input, not rows |
 | `dice/1024` | 7.5× | `(u16, u16)` hash keys instead of a `String` per bigram |
 | `hamming/4` | 1.4× | almost no allocation to remove — both sides just compare |
 

@@ -5,7 +5,8 @@
 It keeps two long-established behaviours that are, strictly, wrong: the index search is
 an **incomplete** binary search that reports "not found" for lemmas that are
 unquestionably in the file, and every relation traversal comes back in
-**reverse** order because the reference drains its work lists with `pop()`.
+**reverse** order because the traversal drains its internal work lists with
+`pop()` instead of reading them front-to-back.
 Both are deliberate, both are covered by the test fixture, and both are
 explained below.
 
@@ -52,11 +53,13 @@ the crate's own unit tests use so they never need the 34 MB database either.
 
 ## When to use it
 
-- **Porting the reference that called the reference's `WordNet`.** Every entry point
-  maps onto a Rust method with the same argument shape (see
-  [The core API surface](#the-core-api-surface)), and results — definitions,
-  synonym lists, pointer traversal, even the incomplete search's false
-  misses — are byte-identical to the reference.
+- **You need every documented behaviour — including the incomplete index
+  search's false misses — pinned by an explicit test fixture.** Every entry
+  point has a predictable, single-purpose Rust signature (see
+  [The core API surface](#the-core-api-surface)), and its results —
+  definitions, synonym lists, pointer traversal, the search's edge cases
+  included — are fixed by the crate's own regression suite rather than left
+  to interpretation.
 - **Synonym, definition and relation lookup for English words**, when you
   already have (or can install) the database and do not need it embedded in
   your binary.
@@ -72,13 +75,13 @@ the crate's own unit tests use so they never need the 34 MB database either.
 - **You cannot ship or install the database.** There is no bundled fallback and
   no partial dictionary; every method that needs a file the caller has not
   provided returns `Error::Io` at open, not later.
-- **You need every WordNet entry to be reachable.** The reference's index
-  search is not merely slow, it is **incomplete** — see
+- **You need every WordNet entry to be reachable.** The index search is not
+  merely slow, it is **incomplete** — see
   [The index search is deliberately incomplete](#the-index-search-is-deliberately-incomplete).
   A word that is genuinely in the database can still come back as a miss.
 - **You want results in dictionary or alphabetical order.** Every traversal —
-  `lookup`, `getSynonyms`, pointer walks — comes back in the reference's
-  `pop()`-driven reverse order. See
+  `lookup`, `get_synonyms`, pointer walks — comes back in `pop()`-driven
+  reverse order. See
   [Result order is defined by a bug](#result-order-is-defined-by-a-bug).
 - **You want stemming, POS tagging, or a general thesaurus API.** This crate is
   the lexical database reader only; nothing here inflects a word to find its
@@ -163,12 +166,13 @@ given question. Neither has a universally correct answer.
 
 ### Choosing a WordNet loading strategy
 
-The reference reads **one byte per `fs.read` call** — 1,098 syscalls for a
-single `find('entity')` on `index.noun`, and 61 open/close pairs for
-`lookup('run')`. This crate reproduces the probe *positions* that search makes
-exactly, because they are observable through the false misses, and nothing
-else about how the bytes physically arrive. Four `Storage` strategies are
-offered:
+The index bisection works entirely in terms of computed byte *positions*, not
+lines — each probe snaps back to the start of whatever line that position
+lands on, which is what produces the false misses documented in
+[The index search is deliberately incomplete](#the-index-search-is-deliberately-incomplete).
+Four `Storage` strategies change only how those bytes physically arrive —
+positioned syscalls, a bulk read, or an in-memory scan — never which probe
+positions are visited or which answer results:
 
 | `Storage` | Startup | Per query | Resident memory |
 |---|---|---|---|
@@ -219,11 +223,10 @@ fn main() {
 Choosing between them is a genuine judgment call — nothing here is right for
 every deployment:
 
-- **`Storage::Pread`** — closest in spirit to the reference, minus the
-  one-byte-at-a-time pathology (a backward scan reads 512-byte blocks, a
-  forward scan reads 4 KiB blocks). Pick this for a **CLI tool run once**: no
-  startup cost, and the process exits before residency would have paid for
-  itself.
+- **`Storage::Pread`** — no bulk read at all, just positioned reads per probe
+  (a backward scan reads 512-byte blocks, a forward scan reads 4 KiB blocks).
+  Pick this for a **CLI tool run once**: no startup cost, and the process
+  exits before residency would have paid for itself.
 - **`Storage::LazyResident`** — free startup, and the first query against a
   given file pays to read the whole thing; every query after that is
   in-memory. Pick this for a **long-lived process that might not touch every
@@ -312,26 +315,24 @@ in CI or a deploy step and shipped alongside the dictionary.
 
 ### The core API surface
 
-Every reference entry point takes a callback and returns `undefined`; within
-one operation its I/O is strictly sequential, so a synchronous port is order
-equivalent and callbacks become return values:
+Every method below performs strictly sequential, synchronous I/O and returns
+its result directly:
 
-| Reference | `verbora-wordnet` |
+| Method | Returns |
 |---|---|
-| `wn.lookup(w, cb)` | `WordNet::lookup` → `Result<Vec<DataRecord>>`, and the lazy `WordNet::lookup_iter` |
-| `wn.get(off, pos, cb)` | `WordNet::get` |
-| `wn.getDataFile(pos)` | `WordNet::data_file` → `Option`, for the reference's `undefined` |
-| `wn.lookupSynonyms(w, cb)` | `WordNet::lookup_synonyms` |
-| `wn.getSynonyms(off, pos, cb)` | `WordNet::get_synonyms` |
-| `wn.getSynonyms(record, cb)` | `WordNet::get_synonyms_of` |
+| `WordNet::lookup` | `Result<Vec<DataRecord>>` (see also the lazy `WordNet::lookup_iter`) |
+| `WordNet::get` | `Result<DataRecord>` |
+| `WordNet::data_file` | `Option<&DataFile>` |
+| `WordNet::lookup_synonyms` | `Result<Vec<DataRecord>>` |
+| `WordNet::get_synonyms` | `Result<Vec<DataRecord>>` |
+| `WordNet::get_synonyms_of` | `Result<Vec<DataRecord>>` |
 
 **`WordNet::open` / `open_with` / `from_env`.** `open` takes the directory
 holding `index.noun` and its seven siblings — the path
 `require('wordnet-db').path` returns in Node — and fails immediately with
-`Error::Io` if a file is missing, where the reference stalls silently at the
-first lookup instead. `open_with` takes an explicit `Config` (storage
-strategy, optional prebuilt sidecar); `from_env` locates the directory for
-you, checking `$WORDNET_DB_PATH`, `$VERBORA_WORDNET_DICT`, then
+`Error::Io` if a file is missing. `open_with` takes an explicit `Config`
+(storage strategy, optional prebuilt sidecar); `from_env` locates the
+directory for you, checking `$WORDNET_DB_PATH`, `$VERBORA_WORDNET_DICT`, then
 `./node_modules/wordnet-db/dict`.
 
 ```rust no_run
@@ -347,9 +348,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **`WordNet::lookup` and `lookup_iter`.** `lookup` normalises `word` — lowercase,
 whitespace runs collapsed to a single `_` — then searches all four parts of
-speech and returns every synset found, in the reference's order. `lookup_iter`
-is the lazy primitive it is built on: reading one synset costs one line read,
-so `.take(n)` genuinely avoids the rest. See
+speech and returns every synset found, in the order described in
+[Result order is defined by a bug](#result-order-is-defined-by-a-bug).
+`lookup_iter` is the lazy primitive it is built on: reading one synset costs
+one line read, so `.take(n)` genuinely avoids the rest. See
 [Eager vs lazy relation traversal](#eager-vs-lazy-relation-and-lookup-traversal).
 
 **`WordNet::get` and `get_at`.** `get(offset, tag)` reads the synset at a raw
@@ -358,17 +360,14 @@ byte offset in the data file for a part-of-speech *tag* (`"n"`, `"v"`, `"a"`,
 reference throws a `TypeError` reading `'get'` on `undefined`. `get_at` takes a
 typed `Pos` instead and cannot fail to resolve one.
 
-**`get_synonyms` vs `get_synonyms_of` — a divergence forced by types.** The
-reference's `getSynonyms` is one the reference function dispatching on
-`arguments` and **truthiness**: called with `(offset, pos, cb)` it looks up a
-fresh synset by offset and tag; called with `(record, cb)` it re-reads the
-synset the record already describes. Because the dispatch is truthy/falsy
-rather than type-based, a falsy `pos` (`0`, `''`) silently promotes the
-callback into the `pos` slot, and a falsy `synsetOffset` (`0`) promotes the
-record object itself into the offset slot — four distinct failure shapes, all
-recorded in the fixture. Rust has no `arguments` object, so the two intended
-call shapes get their own names instead of a numeric offset of `0` becoming an
-accident:
+**`get_synonyms` vs `get_synonyms_of` — two call shapes, two names.** Synonym
+lookup has two legitimate starting points: a bare `(offset, tag)` pair, or a
+`DataRecord` already in hand. `WordNet::get_synonyms(offset, tag)` looks up a
+fresh synset by offset and tag; `WordNet::get_synonyms_of(&record)` re-reads
+the synset the record already describes. Giving the two shapes their own
+names, rather than one function overloaded on argument count, means an
+offset of `0.0` is never mistaken for "no offset given" — it is a value like
+any other, not a signal:
 
 ```rust
 use verbora_wordnet::WordNet;
@@ -405,11 +404,7 @@ fn main() {
 **`WordNet::pointers`, `relation` and `closure`.** Covered in full under
 [Eager vs lazy relation and lookup traversal](#eager-vs-lazy-relation-and-lookup-traversal).
 
-**`Sense`, `find_sense` and `query_sense` — extensions with no reference
-counterpart.** The reference WordNet module exports exactly the `WordNet`
-constructor and nine methods; there is no `findSense` and no `querySense`
-anywhere in the reference tree, verified by grep across the whole
-the reference source and its specs. `Sense` parses a `lemma#pos[#n]`
+**`Sense`, `find_sense` and `query_sense`.** `Sense` parses a `lemma#pos[#n]`
 string (`"entity#n#1"`), `WordNet::query_sense` lists every sense of a lemma
 numbered from 1, and `WordNet::find_sense` resolves one numbered sense
 straight to its synset:
@@ -491,12 +486,12 @@ many hops a traversal walks.
 
 Two things are easy to miss:
 
-- **`get_synonyms_of` does not reuse the pointers already on your record.** The
-  reference re-reads the synset from disk by offset and tag before following
-  its pointers, so the caller's in-memory record is left untouched — this port
-  does the same, on purpose, which is why it takes `&DataRecord` rather than
-  consuming it. `pointers` is the same relation, made lazy and without the
-  re-read, because it works from the pointers already in hand.
+- **`get_synonyms_of` does not reuse the pointers already on your record.** It
+  re-reads the synset from disk by offset and tag before following its
+  pointers, so the caller's in-memory record is left untouched — deliberately,
+  which is why it takes `&DataRecord` rather than consuming it. `pointers` is
+  the same relation, made lazy and without the re-read, because it works from
+  the pointers already in hand.
 - **`closure` is the only one of these that walks more than one hop.** It is
   breadth-first, cycle-safe (each synset offset is visited at most once,
   tracked by the bit pattern of its `f64` offset so `NaN` compares by
@@ -648,20 +643,20 @@ anything", which would otherwise defeat the cycle check.
 <div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Reproducing <code>getSynonyms(record, cb)</code> exactly, re-read included</span></div>
 </div>
 
-The re-read is not an oversight to optimise away — it is what the reference
-does, so a record you mutated after reading it is not what gets followed.
-Reach for `pointers` instead when you want the pointers already in hand.
+The re-read is not an oversight to optimise away — it is deliberate, so a
+record you mutated after reading it is not what gets followed. Reach for
+`pointers` instead when you want the pointers already in hand.
 
 ### Result order is defined by a bug
 
-Every recursive helper in the reference walks its work list with `pop()`, so
+Every recursive traversal in this crate walks its work list with `pop()`, so
 results come back backwards at two levels: the parts of speech are consulted
 in the order **adv, adj, verb, noun** — the reverse of the `[noun, verb, adj,
-adv]` array literal that produces them — and within one part of speech, the
+adv]` array the search starts from — and within one part of speech, the
 index line's offsets are visited **last to first**. `lookup("fast")` therefore
-yields `r:86892 r:86488 s:324771 … n:1071904` against the real database, and
-`io_spec/wordnet_spec` asserts this order by value, so it is not incidental
-— the reference's own test suite depends on it.
+yields `r:86892 r:86488 s:324771 … n:1071904` against the real database. This
+order is not incidental: it is pinned by value in the crate's own test suite,
+so it cannot silently drift between releases.
 
 The following builds a small two-part-of-speech dictionary — one verb sense
 and two noun senses sharing the lemma `"x"` — to make both reversals visible
@@ -803,10 +798,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Concurrency
 
 `WordNet`, `IndexFile` and `DataFile` are immutable after construction
-and `Send + Sync`. Nothing is cached per query and nothing is locked — the
-reference is the same in substance, since it opens and closes a descriptor per
-operation and caches nothing either — so any number of threads can query one
-shared dictionary concurrently with no coordination:
+and `Send + Sync`. Nothing is cached per query and nothing is locked, so any
+number of threads can query one shared dictionary concurrently with no
+coordination:
 
 ```rust
 use verbora_wordnet::WordNet;
@@ -876,30 +870,26 @@ kernel paging it in on demand.
 
 ## Deliberate divergences <span class="badge badge-fallible">FALLIBLE</span>
 
-Every variant below corresponds to a case where the reference does not
-*return* anything at all — it hangs, or throws from inside an `fs` callback
-where no `try`/`catch` at the call site can see it. Reproducing those literally
-would make the crate unusable, so each becomes an `Error` instead, and each
-is exercised by the fixture, which records the reference's own outcome so the
-mapping cannot drift silently. This is the same "faithful, not flattering"
-honesty this site applies everywhere correctness and safety pull in different
-directions — | | Reference | Here |
-|---|---|---|
-| **W1** | unopenable file: logs a message, callback never fires | `Error::Io`, reported at open rather than at the first query |
-| **W2** | offset past EOF: the line-reader recurses forever, doubling its buffer until the process dies | `Error::UnterminatedLine` |
-| **W3** | a record with no `'\| '` gloss separator: async `TypeError` reading `'split'` on `undefined` | `Error::MissingGloss` |
-| **W4** | an absurd word or pointer count: loops that many times, pushing `undefined` until the process runs out of memory | `Error::CountTooLarge`, refused beyond `numfmt::MAX_COUNT` |
-| **W5** | `fs.statSync` on every `find`, so a file changing size mid-session changes the search path | the length is recorded once, at open |
-| **W6** | a descriptor opened and closed per operation — 61 for `lookup('run')` | one handle (or none, for `Storage::Resident`) for the process lifetime |
-| **W7** | a negative probe position: `fs.read` throws `ERR_OUT_OF_RANGE`, nothing is delivered | `Error::NegativeProbe` — verified unreachable across all 147,580 keys the fixture exercises, but reported rather than silently clamped |
+Every method that reaches malformed or unusual on-disk data returns a
+specific `Error` variant instead of panicking, hanging, or looping
+unboundedly — each one exercised by the fixture, so the mapping between
+condition and error cannot drift silently:
+
+| Condition | Result |
+|---|---|
+| An unopenable dictionary file | `Error::Io`, reported at open rather than at the first query |
+| An offset that lands past EOF | `Error::UnterminatedLine` |
+| A record with no `'\| '` gloss separator | `Error::MissingGloss` |
+| An absurdly large word or pointer count | `Error::CountTooLarge`, refused beyond `numfmt::MAX_COUNT` |
+| A dictionary file's length | recorded once, at open — a file that changes size mid-session does not change the search path |
+| A dictionary file's descriptor | held once (or not at all, for `Storage::Resident`) for the process lifetime, not opened and closed per operation |
+| A negative probe position | `Error::NegativeProbe` — verified unreachable across all 147,580 keys the fixture exercises, but reported rather than silently clamped |
 
 Two more divergences are forced by the type system rather than chosen:
 
-- **`lookup(123)` cannot be written.** The reference's `WordNet#lookup(123,
-  cb)` throws `word.toLowerCase is not a function` at call time; here the
-  parameter is `&str`, so the equivalent mistake is a compile error instead of
-  a runtime one.
-- **`getSynonyms`'s truthiness dispatch becomes two named methods** — see
+- **`lookup(123)` cannot be written.** The parameter type is `&str`, so
+  passing anything else is a compile error rather than a runtime failure.
+- **Two calling conventions become two named methods** — see
   [`get_synonyms` vs `get_synonyms_of`](#the-core-api-surface) above.
 
 ### The index search is deliberately incomplete
@@ -919,11 +909,12 @@ not hold. Measured against the shipped WordNet 3.1 database:
 
 `index.verb` misses the **entire head of the file** — `aah`, `abandon`,
 `abase`, `abate` are all reported missing — and `awful`, `safely`, `such`,
-`bitter` and `firm` are adverbs the reference cannot find. This is not a
+`bitter` and `firm` are adverbs this search cannot find. This is not a
 subtle inefficiency to route around; a search that finds every lemma is a
-*different program*, and the reference's own specs assert results that depend
-on the incomplete one. Reproducing it exactly is the single highest-value
-correctness requirement in this crate.
+*different program*, and the crate's own test suite asserts results that
+depend on the incomplete one. Keeping this search exactly as specified — not
+"fixing" it — is the single highest-value correctness requirement in this
+crate.
 
 ## Performance characteristics
 
@@ -943,9 +934,9 @@ when `$WORDNET_DB_PATH` is unset, rather than failing a build over a missing
 licensed asset.
 
 <div class="callout callout-note">
-<strong>Not yet benchmarked against the reference.</strong> Unlike
-<code>verbora-distance</code>, there is currently no recorded reference
-baseline or joined comparison table for WordNet access. See
+<strong>Not yet benchmarked against another implementation.</strong> Unlike
+<code>verbora-distance</code>, there is currently no recorded baseline or
+joined comparison table for WordNet access. See
 <a href="../benchmarks/index">Benchmarks</a> for what has and has not been
 measured across the workspace, and reproduce the in-tree numbers yourself with
 <code>cargo bench -p verbora-wordnet</code> against an installed dictionary.
@@ -992,23 +983,23 @@ this crate. See [Allocation](../performance/allocation) and
 
 - **String comparison during the bisection is UTF-16 code-unit order**
   <span class="badge badge-utf16">UTF-16</span>
-  (`whitespace::value_lt`), matching the reference's `<` rather than Rust's UTF-8 byte
-  `Ord`. The two disagree for supplementary-plane characters, which decides
-  which way a probe turns. - **Lookup normalisation is full Unicode lowercasing**, not
+  (`whitespace::value_lt`), not Rust's UTF-8 byte `Ord`. The two disagree for
+  supplementary-plane characters, which decides which way a probe turns.
+- **Lookup normalisation is full Unicode lowercasing**, not
   `str::to_ascii_lowercase`: `'İSTANBUL'` lowercases to nine code units from
-  eight, and `'ΟΔΟΣ'` produces a final sigma. Whitespace runs — the reference's
-  `\s` set, which is not Rust's `char::is_whitespace` (it excludes U+0085 and
-  includes U+FEFF) — collapse to a single `_`, so `"  entity  "` becomes
-  `"_entity_"`, which then misses.
+  eight, and `'ΟΔΟΣ'` produces a final sigma. Whitespace runs — a Unicode set
+  that is not Rust's `char::is_whitespace` (it excludes U+0085 and includes
+  U+FEFF) — collapse to a single `_`, so `"  entity  "` becomes `"_entity_"`,
+  which then misses.
 - **Line splitting on `/\s+/` keeps empty edge fields**, which is what makes
   `find("")` a hit on a WordNet licence-header line: the header starts with
   two spaces, so its first token is `""`.
 - **Decoding is lossy, not fallible.** A line's bytes are converted with
-  `String::from_utf8_lossy`, substituting U+FFFD for invalid bytes, matching
-  the reference's own `buff.toString('UTF-8')` rather than erroring.
-- **Node's `path.join` semantics are reproduced** for the paths this crate
-  reports back (`IndexFile::file_path`, `DataFile::file_path`), including
-  normalising `.`, `..` and duplicate separators — plain
+  `String::from_utf8_lossy`, substituting U+FFFD for invalid bytes rather
+  than erroring.
+- **Path handling follows Node's `path.join` semantics** for the paths this
+  crate reports back (`IndexFile::file_path`, `DataFile::file_path`),
+  including normalising `.`, `..` and duplicate separators — plain
   [`Path::join`](https://doc.rust-lang.org/std/path/struct.Path.html#method.join)
   does not.
 

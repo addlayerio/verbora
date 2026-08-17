@@ -81,10 +81,9 @@ assert!(suggest(&index, "", 10).is_empty());
 <div class="callout callout-warn">
 <strong><code>keys_with_prefix</code> never folds case — even on a
 case-insensitive trie.</strong> Every <em>other</em> method does. This is a
-The reference bug reproduced deliberately: The reference tests a property
-<code>this.caseSensitive</code> that its constructor never sets (it stores
-<code>this.cs</code>). It is load-bearing for anyone relying on recorded
-behaviour, so it is preserved and documented rather than fixed.
+bug preserved deliberately, not an oversight: it is load-bearing for anyone
+relying on recorded behaviour, so it is preserved and documented rather than
+fixed.
 </div>
 
 ```rust
@@ -107,7 +106,7 @@ display form.
 
 ## Result ordering
 
-Keys come back in the reference's `for…in` child order, which is **not** insertion
+Keys come back in `Trie`'s own child order, which is **not** insertion
 order: keys that look like array indices come first in ascending numeric order,
 then everything else in insertion order.
 

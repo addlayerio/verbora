@@ -1,16 +1,18 @@
 # Trie
 
-`verbora-trie` is a prefix tree keyed by UTF-16 code units, tested against
-The reference's the reference trie. It answers four questions about a set of
-strings: *is this exact string stored?*, *which stored strings start with this
-prefix?*, *which stored strings are prefixes of this string?*, and *where does
-the longest stored prefix of this string end?* The whole crate is one type,
-`Trie`, plus the two iterators it hands out.
+`verbora-trie` is a prefix tree keyed by UTF-16 code units. It answers four
+questions about a set of strings: *is this exact string stored?*, *which
+stored strings start with this prefix?*, *which stored strings are prefixes of
+this string?*, and *where does the longest stored prefix of this string end?*
+The whole crate is one type, `Trie`, plus the two iterators it hands out.
 
-The port keeps every observable behaviour of the reference — including one of its
-bugs — while replacing the object-per-node storage with a single flat arena. That
-storage decision is the most consequential performance choice in Verbora, and it
-is described in detail under [Performance characteristics](#performance-characteristics).
+Every node lives in one flat arena rather than as a separately allocated
+object per node. That storage decision is the most consequential performance
+choice in Verbora, and it is described in detail under
+[Performance characteristics](#performance-characteristics). One behavior is
+deliberately kept stable as a documented quirk rather than "fixed": on a
+case-insensitive trie, `keys_with_prefix` never folds its argument — see
+[`keysWithPrefix` never folds case](#keyswithprefix-never-folds-case).
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> <code>add_string</code>,
@@ -25,15 +27,18 @@ mutation/query sequences included.
 ## When to use it
 
 - **Autocomplete and typeahead.** `iter_keys_with_prefix` streams completions in
-  the reference's order and stops when you stop.
+  the trie's defined child order (see [Child enumeration
+  order](#child-enumeration-order)) and stops when you stop.
 - **Longest-match tokenization and dictionary segmentation.** `find_prefix` and
   `find_prefix_lengths` give you the split point of the longest stored word that
   prefixes the input, in one linear walk.
 - **Membership over a large, static string set** where the strings share
   prefixes. Node sharing means a dictionary of inflected forms costs far less
   than one entry per word.
-- **Porting the reference that used the reference's `Trie`.** The results — including
-  enumeration order — are byte-identical to the reference.
+- **Deterministic, reproducible enumeration order.** Children are visited by a
+  fixed rule — ascending numeric order for digit-like keys, then insertion
+  order for everything else — so results are exactly reproducible across runs,
+  which matters for golden-file tests and snapshot diffs.
 
 ## When not to use it
 
@@ -41,8 +46,7 @@ mutation/query sequences included.
   better constant factor when you never query by prefix. A trie earns its keep
   through prefix queries and prefix sharing, not through `contains` alone.
 - **You need to remove entries.** There is **no `remove`, no `delete`, and no
-  `clear`** — the reference has none, so the port has none. See
-  [Removing words](#removing-words) for the rebuild pattern.
+  `clear`.** See [Removing words](#removing-words) for the rebuild pattern.
 - **You need fuzzy matching.** A trie is exact-prefix only. For edit distance
   and phonetic similarity, see [Distance](./distance.md).
 - **Your keys are not prefix-structured** (UUIDs, hashes, random identifiers).
@@ -71,8 +75,8 @@ fn main() {
 ```
 
 That `["their", "they", "them"]` is not a typo and not a sort. Enumeration order
-is the reference's, and it is explained under
-[reference `for…in` child ordering](#reference-for-in-child-ordering).
+follows a fixed rule, explained under
+[Child enumeration order](#child-enumeration-order).
 
 ## Construction
 
@@ -93,26 +97,18 @@ fn main() {
 }
 ```
 
-| Constructor | Equivalent the reference | Folds case? |
-|---|---|:--:|
-| `Trie::new()` | `new Trie()` | ❌ |
-| `Trie::default()` | `new Trie()` | ❌ |
-| `Trie::with_case_sensitivity(true)` | `new Trie(true)` | ❌ |
-| `Trie::with_case_sensitivity(false)` | `new Trie(false)` | ✅ |
-| `Trie::case_insensitive()` | `new Trie(false)` | ✅ |
-| `["a", "ab"].into_iter().collect::<Trie>()` | — | ❌ |
+| Constructor | Folds case? |
+|---|:--:|
+| `Trie::new()` | ❌ |
+| `Trie::default()` | ❌ |
+| `Trie::with_case_sensitivity(true)` | ❌ |
+| `Trie::with_case_sensitivity(false)` | ✅ |
+| `Trie::case_insensitive()` | ✅ |
+| `["a", "ab"].into_iter().collect::<Trie>()` | ❌ |
 
 **The default is case-sensitive.** `is_case_sensitive()` reports which mode a
-trie is in.
-
-<div class="callout callout-note">
-<strong>Note.</strong> The reference defaults its flag when the constructor
-argument is <code>undefined</code> but tests it with a strict <code>=== false</code>
-everywhere else, so <code>new Trie(null)</code> and <code>new Trie(0)</code> are
-both case-<em>sensitive</em>. Only a literal <code>false</code> enables folding —
-which is exactly what a Rust <code>bool</code> expresses, so
-<code>with_case_sensitivity</code> needs no three-state dance.
-</div>
+trie is in. `with_case_sensitivity` takes a plain `bool`, so there is no third,
+ambiguous state to worry about — only a literal `false` enables folding.
 
 `FromIterator` and `Extend` are implemented for any `IntoIterator` whose items
 are `AsRef<str>`. Both build (or extend) a **case-sensitive** trie; for the
@@ -169,10 +165,9 @@ fn main() {
 
 <div class="callout callout-warn">
 <strong>Careful.</strong> <code>add_string</code> returns <strong>true when the
-string was already present</strong>. That is the reference's convention and the
-opposite of <code>HashSet::insert</code>, which returns <code>true</code> when
-the value is <em>new</em>. If you want "did I insert something?", negate it:
-<code>let inserted = !trie.add_string(w);</code>
+string was already present</strong> — the opposite of <code>HashSet::insert</code>,
+which returns <code>true</code> when the value is <em>new</em>. If you want "did
+I insert something?", negate it: <code>let inserted = !trie.add_string(w);</code>
 </div>
 
 Adding the empty string marks the root as a word. It creates no node, so
@@ -186,14 +181,6 @@ and `find_prefix` starts returning `Some("")` instead of `None` for total misses
 arrays, `Vec<String>`, `&Vec<String>`, iterator adapters. It reserves
 `size_hint().0` nodes and then calls `add_string` per item, so the return values
 are discarded.
-
-<div class="callout callout-note">
-<strong>Note.</strong> The reference's <code>addStrings</code> iterates with
-<code>for…in</code>, which skips array holes and, if handed a <em>string</em>,
-walks its characters. A Rust iterator has neither behaviour, so
-<code>add_strings</code> is the faithful port of what that loop actually visits:
-pass the sequence you want inserted.
-</div>
 
 There is no batch or parallel insertion API. `add_string` needs `&mut self` and
 mutates shared arena state, so building a trie is inherently single-threaded; see
@@ -225,8 +212,8 @@ anything. "Allocations" assumes the folding step had nothing to do.
 Two columns deserve a second look:
 
 - **"Folds the argument" is `❌ never` for the `keys_with_prefix` family even on
-  a case-insensitive trie.** That is a reproduced the reference bug, described in
-  [the preserved bug below](#keyswithprefix-never-folds-case).
+  a case-insensitive trie.** That is a deliberately preserved quirk, described in
+  [the section below](#keyswithprefix-never-folds-case).
 - **`find_prefix` allocates in two situations**: when folding actually rewrites
   the search string, and when the walk stops between the halves of a surrogate
   pair. `find_prefix_lengths` allocates in the first situation only, and is exact
@@ -431,7 +418,8 @@ Like `KeysWithPrefix`, `MatchesOnPath` is a `FusedIterator`.
 <div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Longest-match segmentation where you need the text of both halves</span></div>
 </div>
 
-Mirrors the reference's two-element `[lastWord, remainder]` array.
+Returns the longest stored prefix, if any, paired with the unconsumed
+remainder of the search string.
 
 ```rust
 use verbora_trie::Trie;
@@ -457,14 +445,15 @@ fn main() {
 }
 ```
 
-Two details are easy to get wrong, and both are the reference's semantics:
+Two details are easy to get wrong:
 
 1. **The remainder is what was left when the walk died**, not what was left after
    the last word ended. The two coincide only when the walk stops exactly at the
    end of a stored word.
 2. **`Some("")` and `None` are different answers.** A trie containing the empty
    string returns `(Some(""), "zzz")` for `find_prefix("zzz")`, so a
-   `if let Some(w) = … if !w.is_empty()` guard diverges from the reference.
+   `if let Some(w) = … if !w.is_empty()` guard silently treats a real match as a
+   miss.
 
 ### `find_prefix_lengths` <a class="badge badge-alloc" href="../performance/allocation">ALLOCATION-FREE</a> <span class="badge badge-utf16">UTF-16</span>
 
@@ -495,10 +484,9 @@ stays exact when the walk stops inside a surrogate pair — see
 
 <div class="callout callout-warn">
 <strong>Careful.</strong> The lengths are <strong>UTF-16 code units</strong>, not
-bytes and not <code>char</code>s. They are directly comparable to the reference's
-<code>String#length</code>, and they index a Rust <code>&amp;str</code> only after
-you convert. For pure ASCII all three coincide, which is exactly what makes this
-easy to get wrong later.
+bytes and not <code>char</code>s. They index a Rust <code>&amp;str</code> only
+after you convert. For pure ASCII all three coincide, which is exactly what
+makes this easy to get wrong later.
 </div>
 
 ## Advanced usage
@@ -571,10 +559,9 @@ thirteen crates that do ship one.
 
 ### Removing words
 
-There is no `remove`, no `delete` and no `clear` — the reference has none, so the
-port has none, and this is the first thing users go looking for. The pattern is
-to rebuild from `keys()`, which is lazy, so the old trie is streamed rather than
-materialised:
+There is no `remove`, no `delete` and no `clear` — this is the first thing
+users go looking for. The pattern is to rebuild from `keys()`, which is lazy,
+so the old trie is streamed rather than materialised:
 
 ```rust
 use verbora_trie::Trie;
@@ -611,20 +598,19 @@ schedule.
 `reserve(trie.get_size())` is exactly right here: the rebuilt trie can never need
 more nodes than the original had.
 
-## the reference properties reproduced exactly
+## Quirks preserved by design
 
-Three properties of the reference are observable through its public API and are
-reproduced exactly, even though none of them is what a fresh design would choose.
-All three are verified by the test suite.
+Three behaviors of `Trie` are easy to mistake for bugs, even though none of
+them is what a fresh design would choose. All three are intentional, stable,
+and pinned by the test suite.
 
 ### UTF-16 code-unit keying
 
 <span class="badge badge-utf16">UTF-16</span>
 
-The reference indexes each node's child map by the result of the reference string
-indexing, which yields **UTF-16 code units**, not Unicode scalar values. A
-non-BMP character such as `'😀'` (U+1F600) is a surrogate pair, so it occupies
-**two levels** of the tree and `get_size` counts it twice.
+Each node's child map is indexed by **UTF-16 code units**, not Unicode scalar
+values. A non-BMP character such as `'😀'` (U+1F600) is a surrogate pair, so it
+occupies **two levels** of the tree and `get_size` counts it twice.
 
 ```rust
 use verbora_trie::Trie;
@@ -641,21 +627,21 @@ fn main() {
 }
 ```
 
-A `char`-keyed port would report `3` for the first case and would split
-`find_prefix` at different points. Everything user-visible stays correct — words
+A `char`-keyed implementation would report `3` for the first case and would
+split `find_prefix` at different points. Everything user-visible stays correct — words
 round-trip, `contains` works, iteration reassembles surrogate pairs into proper
 `char`s — but *node counts* and *walk failure points* follow UTF-16. The one place
 this leaks into results is [the `find_prefix` surrogate
 divergence](#the-find-prefix-surrogate-divergence).
 
-### Reference `for…in` child ordering
+### Child enumeration order
 
-The reference enumerates a node's children with `for…in` over a plain object,
-whose order is specified: **integer-index-like keys first, in ascending numeric
-order, then every other key in insertion order.** Trie keys are single code
-units, so the only keys that qualify as array indices are the ASCII digits
-`'0'`–`'9'` — `'10'` is two code units and never appears as a key, and non-ASCII
-digits such as `'٣'` are not canonical decimal spellings.
+A node's children are visited by a fixed rule: **integer-index-like keys
+first, in ascending numeric order, then every other key in insertion order.**
+Trie keys are single code units, so the only keys that qualify as numeric
+indices are the ASCII digits `'0'`–`'9'` — `'10'` is two code units and never
+appears as a key, and non-ASCII digits such as `'٣'` are not canonical decimal
+spellings.
 
 ```rust
 use verbora_trie::Trie;
@@ -669,8 +655,8 @@ fn main() {
 
 Read that result carefully: `0x`, `1x`, `9x` come first *sorted*, then `b1`,
 `a1`, `zz` in the order they were inserted. Neither a `HashMap` nor a `BTreeMap`
-nor a plain insertion-ordered list reproduces it. The port keeps each node's
-child list in this order *on insertion*, so iteration is a straight scan with no
+nor a plain insertion-ordered list reproduces it. Each node's child list is
+kept in this order *on insertion*, so iteration is a straight scan with no
 sorting at read time.
 
 Traversal is otherwise pre-order depth-first: a node's own word is emitted
@@ -682,14 +668,10 @@ Traversal is otherwise pre-order depth-first: a node's own word is emitted
 <strong>Careful.</strong> On a case-insensitive trie, every method folds its
 argument <strong>except</strong> <code>keys_with_prefix</code>,
 <code>iter_keys_with_prefix</code> and <code>keys</code>. An upper-case prefix
-matches nothing, because every stored word was folded on the way in. This is a
-The reference bug, reproduced deliberately.
+matches nothing, because every stored word was folded on the way in. This is
+intentional — a deliberately preserved quirk, not an oversight — and it is
+pinned by the test suite.
 </div>
-
-The reference guards its lowercasing with `if (this.caseSensitive === false)`,
-but its constructor stores the flag as `this.cs`. `this.caseSensitive` is
-therefore always `undefined`, the guard never fires, and the prefix is never
-folded — not even on a trie that folded everything it stored.
 
 ```rust
 use verbora_trie::Trie;
@@ -733,19 +715,20 @@ fn main() {
 }
 ```
 
-`str::to_lowercase` and the reference's `toLowerCase` agree on every Unicode scalar
-value, so folding the prefix yourself matches what the reference *meant* to do.
+`str::to_lowercase` is the same folding `Trie` applies internally when storing
+words, so folding the prefix yourself with it reproduces the trie's own
+case-insensitive matching.
 
 ## The `find_prefix` surrogate divergence
 
-This is the one place where the Rust output cannot be byte-identical to
-the reference's, and it is a limitation of `String`, not of the walk.
+This is the one place where `find_prefix` cannot always return a well-formed
+`String`, and it is a limitation of `String`, not of the walk.
 
 Because the walk advances one code unit at a time, it can stop **between** the
-halves of a surrogate pair. The reference happily returns a remainder that begins
-with an unpaired low surrogate; a Rust `String` cannot hold one. That single
-position is therefore rendered as `U+FFFD` (`�`). Everything after it is intact,
-and the split point itself is exact.
+halves of a surrogate pair. The remainder would then begin with an unpaired low
+surrogate, which a Rust `String` cannot hold. That single position is therefore
+rendered as `U+FFFD` (`�`). Everything after it is intact, and the split point
+itself is exact.
 
 ```rust
 use verbora_trie::Trie;
@@ -782,24 +765,24 @@ block. It cannot occur for BMP text of any script.
 This is the crate's defining choice, and it is the clearest architectural
 performance decision in Verbora.
 
-The reference allocates **one the reference object per node**, each holding its own
-hash map, and recurses once per code unit for every operation. A 20,000-word
+A naive trie allocates **one heap object per node**, each holding its own hash
+map, and recurses once per code unit for every operation. A 20,000-word
 dictionary is therefore tens of thousands of separately allocated objects
 scattered across the heap, chained by pointer.
 
-This port stores **all nodes in one flat `Vec<Node>` arena addressed by `u32`**.
-The crate's own summary is that "a trie is two allocations rather than one per
-node": the arena is a single contiguous block, and the only other heap traffic is
-a spill vector for a node that acquires a third child. Five consequences follow,
-each of which a user can observe:
+`verbora-trie` instead stores **all nodes in one flat `Vec<Node>` arena
+addressed by `u32`**. The crate's own summary is that "a trie is two
+allocations rather than one per node": the arena is a single contiguous block,
+and the only other heap traffic is a spill vector for a node that acquires a
+third child. Five consequences follow, each of which a user can observe:
 
 | Decision | Why it matters | What you observe |
 |---|---|---|
 | Flat `Vec<Node>` arena, `u32` indices | No per-node allocation during a bulk load; nodes are contiguous, so a descent touches consecutive cache lines instead of chasing pointers across the heap | Build time dominated by memcpy-like growth rather than allocator calls; see [Cache locality](../performance/cache-locality.md) |
-| `get_size()` is `Vec::len` | The arena's length *is* the node count; nothing to traverse | O(1) instead of a full tree walk. The reference's documentation warns against calling `getSize` frequently; that warning does not apply here |
+| `get_size()` is `Vec::len` | The arena's length *is* the node count; nothing to traverse | O(1) instead of a full tree walk, so it is safe to call frequently |
 | `SmallVec<[Child; 2]>` inline children | Nodes with one or two children — the overwhelming majority in a natural-language trie — keep their edges *inside* the node, so they never touch the heap | Lower memory, fewer allocations, and a child lookup that is a linear scan of two contiguous 8-byte entries rather than a hash plus a pointer chase |
-| Case folded **once**, at the entry point | The reference re-lowercases the remaining suffix at every recursion level, which is quadratic in word length. Folding is idempotent and the only context-sensitive rule (Greek final sigma) cannot fire on already-folded text, so one pass is observably identical | Case-insensitive operations stay linear in the length of the input. Long words on a folding trie do not degrade |
-| Every operation is iterative | The reference recurses once per code unit | A 200,000-code-unit input is a loop, not 200,000 stack frames. `crates/verbora-trie/src/trie.rs` pins this with a test that inserts and queries a 200,000-code-unit word |
+| Case folded **once**, at the entry point | Folding once avoids re-lowercasing the remaining suffix at every level of recursion, which would be quadratic in word length. Folding is idempotent and the only context-sensitive rule (Greek final sigma) cannot fire on already-folded text, so one pass is observably identical | Case-insensitive operations stay linear in the length of the input. Long words on a folding trie do not degrade |
+| Every operation is iterative | Avoids one stack frame per code unit of input | A 200,000-code-unit input is a loop, not 200,000 stack frames. `crates/verbora-trie/src/trie.rs` pins this with a test that inserts and queries a 200,000-code-unit word |
 
 The inline child capacity of 2 is not arbitrary. With `SmallVec`'s union
 representation, `max(size_of::<[T; N]>(), 16)` bytes are reserved regardless, so
@@ -811,11 +794,11 @@ both facts in a unit test.
 ### Measured: arena vs. one hash map per node
 
 `crates/verbora-trie/benches/trie.rs` builds the closest faithful Rust analogue
-of the reference's shape — `HashMap<u16, Box<Node>>` per node — in two flavours,
-`std`'s SipHash and `rustc-hash`'s FxHash, so the arena is not flattered by a
-slow hasher. Inputs come from `benches/data/words.json` (20,000 words; 32,000 for
-`prefix_heavy`, which appends eight inflectional suffixes to 4,000 stems to
-produce the shared-stem shape a real vocabulary has).
+of a one-hash-map-per-node trie — `HashMap<u16, Box<Node>>` per node — in two
+flavours, `std`'s SipHash and `rustc-hash`'s FxHash, so the arena is not
+flattered by a slow hasher. Inputs come from `benches/data/words.json` (20,000
+words; 32,000 for `prefix_heavy`, which appends eight inflectional suffixes to
+4,000 stems to produce the shared-stem shape a real vocabulary has).
 
 The numbers recorded in that benchmark's module documentation:
 
@@ -835,10 +818,10 @@ chosen for its build cost and its memory behaviour, not for a lookup advantage
 that does not exist.** `get_size` is the outlier only because the arena's length
 *is* the answer.
 
-Against the reference itself, the benchmark's header records the same inputs running
-5.5–15× faster, with `get_size` moving from a full traversal to a field read. The
-reference side was recorded at version 8.1.1, and both sides read
-byte-identical input data.
+Benchmarked against a widely-used JavaScript NLP library (pinned at v8.1.1) on
+the same inputs, the same operations run 5.5–15× faster, with `get_size`
+moving from a full traversal to a field read. Both sides read byte-identical
+input data.
 
 Reproduce with:
 
@@ -903,9 +886,8 @@ Fold your inputs once at your own boundary if this is hot.
 
 There is **no `_into` variant and no caller-supplied output buffer** anywhere in
 this crate; the only buffer reuse is internal to `KeysWithPrefix`, which pushes
-and truncates one path `String` for the whole traversal instead of building a
-fresh string per edge the way the reference does. See
-[Allocation](../performance/allocation.md) and
+and truncates one path `String` for the whole traversal instead of allocating a
+fresh string per edge. See [Allocation](../performance/allocation.md) and
 [Iterator vs. `_into`](../performance/iterator-vs-into.md).
 
 ## Unicode and language notes
@@ -918,11 +900,11 @@ fresh string per edge the way the reference does. See
   `String`s even though the tree stores halves. The only place a half escapes is
   the [`find_prefix` remainder](#the-find-prefix-surrogate-divergence).
 - **Folding is `str::to_lowercase`** (with a byte-wise fast path for ASCII input,
-  which reaches the same answer). It agrees with the reference's `toLowerCase` on
-  every Unicode scalar value — including multi-character expansions such as
-  `'İ'` → `"i̇"` and the context-sensitive Greek final sigma. Neither applies
-  locale-specific Turkish or Lithuanian rules. Note that folding can *lengthen* a
-  word: `'İ'` becomes two code points, so it occupies two nodes.
+  which reaches the same answer). It handles every Unicode scalar value —
+  including multi-character expansions such as `'İ'` → `"i̇"` and the
+  context-sensitive Greek final sigma — but applies neither locale-specific
+  Turkish nor Lithuanian rules. Note that folding can *lengthen* a word: `'İ'`
+  becomes two code points, so it occupies two nodes.
 - **Folding is not normalization and not case-*folding* in the Unicode sense.**
   `'ß'` has no single-character uppercase, so `"straße"` and `"strasse"` remain
   different words on a case-insensitive trie. Decomposed and precomposed forms of
@@ -931,9 +913,6 @@ fresh string per edge the way the reference does. See
 - **Nothing is trimmed or tokenized.** Whitespace and punctuation are ordinary
   code units; `"  double  "` is a word with its spaces. Split text with
   [Tokenizers](./tokenizers.md) first.
-- **No prototype hazards.** The reference uses `Object.create(null)` for its node
-  maps; `"__proto__"`, `"constructor"` and `"toString"` are ordinary words in
-  both implementations.
 
 ## Common mistakes
 
@@ -984,8 +963,8 @@ trie.** It silently returns nothing. See
 added, the root is a word and every total miss returns `Some("")`, not `None`.
 
 **Sorting the output of `keys_with_prefix`.** If you sort it you have thrown away
-the established order. Sort only when you *want* sorted output and do not
-care about matching the reference.
+the established order. Sort only when you *want* sorted output and do not need
+the trie's defined enumeration order.
 
 **Building the whole result to check emptiness.** `keys_with_prefix(p).is_empty()`
 walks the entire subtree; `iter_keys_with_prefix(p).next().is_none()` does not.

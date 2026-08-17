@@ -2,18 +2,18 @@
 
 `verbora-ngrams` turns a sequence into its sliding windows: bigrams, trigrams,
 arbitrary `n`, optionally padded with start and end symbols, optionally with a
-frequency table attached. It covers both `NGrams` (token input) and `NGramsZH`
-(Chinese, split per UTF-16 code unit). One generic engine backs every entry
-point, so the token path (`&str`), the numeric path (`i64`) and the Chinese
-code-unit path (`&[u16]`) cannot drift apart.
+frequency table attached. It covers both a generic token-input engine and a
+Chinese-specific `zh` module that splits per UTF-16 code unit. One generic
+engine backs every entry point, so the token path (`&str`), the numeric path
+(`i64`) and the Chinese code-unit path (`&[u16]`) cannot drift apart.
 
 This is also the crate with the widest spread between the cheapest and the most
-expensive way to ask the same question. The reference materialises a
-`string[][]` — one fresh array per window — unconditionally. Verbora's primitive
-is a lazy iterator that yields `Cow`, borrowing every unpadded window and
-allocating only for the `2(n-1)` tuples that genuinely mix pad symbols with
-sequence elements. Everything else in the crate is a wrapper that gives some of
-that back in exchange for a more convenient shape.
+expensive way to ask the same question. A straightforward implementation
+materialises a fresh nested array — one allocation per window — unconditionally.
+Verbora's primitive is a lazy iterator that yields `Cow`, borrowing every
+unpadded window and allocating only for the `2(n-1)` tuples that genuinely mix
+pad symbols with sequence elements. Everything else in the crate is a wrapper
+that gives some of that back in exchange for a more convenient shape.
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> Both n-gram APIs are documented and
@@ -27,13 +27,14 @@ and <strong>13</strong> doctests.
 ## When to use it
 
 - You need bigrams, trigrams or arbitrary `n`-grams over tokens you already have.
-- You are porting the reference that calls `NGrams.ngrams` / `NGrams.bigrams` /
-  `NGrams.trigrams` / `NGrams.multrigrams` and need byte-identical output,
-  including the padding quirks below.
+- You need precise, well-defined padding at the boundaries — including edge
+  cases such as `n` longer than the sequence, or padded tuples that come out
+  shorter than `n` (see [Padding semantics](#padding-semantics)).
 - You want a frequency table and a Good–Turing count-of-counts (`Nr`) in one
   pass.
-- You are windowing Chinese text and need the reference's `NGramsZH` boundaries,
-  which are UTF-16 code units rather than characters.
+- You are windowing Chinese (or other per-character) text and need UTF-16
+  code-unit boundaries rather than Unicode scalar values — see
+  [Chinese: `zh`](#chinese-zh).
 - You want to stream windows over a large corpus without allocating per window.
 
 ## When not to use it
@@ -42,11 +43,10 @@ and <strong>13</strong> doctests.
   no smoothing, no probability estimation, no perplexity — `nr` is the raw
   count-of-counts a Good–Turing estimator would consume, and the estimator is
   yours to write.
-- **You want linguistic tokenization.** The default tokenizer here is a
-  deliberately tiny reproduction of the reference's `WordTokenizer`, whose character
-  class is `[A-Za-zА-Яа-я0-9_]` and nothing else. `café` becomes `caf`. If you
-  want a real tokenizer, pick one from
-  [Tokenizers](./tokenizers.md) and pass it to `ngrams_str_with`.
+- **You want linguistic tokenization.** The default tokenizer, `WordTokenizer`,
+  is deliberately tiny — its character class is `[A-Za-zА-Яа-я0-9_]` and
+  nothing else. `café` becomes `caf`. If you want a real tokenizer, pick one
+  from [Tokenizers](./tokenizers.md) and pass it to `ngrams_str_with`.
 - **You want parallel or batched generation.** There is none — see
   [Performance characteristics](#performance-characteristics).
 - **You want to reuse an output buffer.** There is no `_into` variant in this
@@ -113,7 +113,7 @@ I need n-grams
 ├── My input is a Chinese (or otherwise per-character) string
 │      ├── Input may contain astral characters and must round-trip
 │      │      └── zh::code_units() then zh::ngrams_zh_utf16()
-│      ├── BMP only, want the reference's shape
+│      ├── BMP only, want ergonomic `Cow<str>` elements
 │      │      └── zh::ngrams_zh() / bigrams_zh() / trigrams_zh()
 │      └── Streaming a large document
 │             └── zh::split_lossy() then ngrams_iter()
@@ -121,7 +121,7 @@ I need n-grams
 ├── My input is a string of words
 │      ├── I control the tokenizer
 │      │      └── ngrams_str_with(&tokenizer, …)
-│      ├── I want the reference's process-global tokenizer
+│      ├── I want the crate's default process-global tokenizer
 │      │      └── ngrams_str()
 │      └── I will window the same tokens more than once
 │             └── tokenize() once, then the &[T] branch below
@@ -212,7 +212,7 @@ pre-tokenized input: the result is random-access, and the windows still cost
 nothing beyond the outer `Vec` because they point back into `sequence`. The
 returned value borrows `sequence`, so it cannot outlive it.
 
-### `ngrams_owned` — the reference's shape <a class="badge badge-owned" href="../performance/allocation">OWNED</a>
+### `ngrams_owned` — fully owned windows <a class="badge badge-owned" href="../performance/allocation">OWNED</a>
 
 <div class="perf">
 <div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager</span></div>
@@ -221,7 +221,7 @@ returned value borrows `sequence`, so it cannot outlive it.
 <div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">No</span></div>
 <div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
 <div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Tuples that must outlive the sequence; matching the reference <code>string[][]</code> exactly</span></div>
+<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Tuples that must outlive the sequence, fully detached and independently owned</span></div>
 </div>
 
 ```rust  ignore
@@ -260,10 +260,9 @@ pub fn multrigrams<T: Clone>(
 ```
 
 `bigrams` and `trigrams` are `ngrams` with `n` fixed at 2 and 3.
-**`multrigrams` is an exact alias of `ngrams`** — the reference's body is
-literally `return ngrams(sequence, n, startSymbol, endSymbol, stats)`. It exists
-so that ported the reference keeps compiling under its original name; there is no
-behavioural difference to look for.
+**`multrigrams` is an exact alias of `ngrams`.** It exists as a distinct name
+for callers who prefer to spell out arbitrary-`n` windowing explicitly; there
+is no behavioural difference to look for.
 
 ### The string family
 
@@ -405,13 +404,11 @@ Covered in [Chinese: `zh`](#chinese-zh) below.
 
 ## Padding semantics
 
-This is the part a naive port gets wrong, and Verbora reproduces the reference's
-behaviour on purpose.
+This is the part a naive implementation gets wrong, and it deserves explicit
+documentation rather than a guess.
 
-**Padding is driven by `Option`, not by emptiness.** The reference gates on
-`typeof x !== 'undefined' && x !== null`, so `null` and `undefined` both disable
-padding while `''` pads with empty strings. `None` maps to the first,
-`Some("")` to the second:
+**Padding is driven by `Option`, not by emptiness.** `None` disables padding
+entirely; `Some("")` pads with empty strings — the two are different answers:
 
 ```rust
 use verbora_ngrams::ngrams_owned;
@@ -435,9 +432,9 @@ fn main() {
 
 **Padded tuples are not always `n` elements long.** Both padding loops clamp
 their sequence half independently, and the right-hand loop slices with an index
-that can go *negative* — where the reference's `Array#slice` re-anchors to
-`length + start` rather than clamping to zero. A port that reaches for
-`len.saturating_sub(p)` silently produces longer tuples. The canonical case:
+that can go *negative*, re-anchoring to `length + start` rather than clamping
+to zero. Reaching for `len.saturating_sub(p)` instead silently produces longer
+tuples than the algorithm intends. The canonical case:
 
 ```rust
 use verbora_ngrams::ngrams;
@@ -519,18 +516,18 @@ pub struct NGramStats<'a, T: Clone> {
 }
 ```
 
-This is the object the reference returns for a truthy fifth argument:
-`{ngrams, frequencies, Nr, numberOfNgrams}`. Two of those properties have an
-**observable iteration order**, and it is not the same order, which is why they
-are different containers here:
+`NGramStats` bundles the windows with a frequency table and a Good–Turing
+count-of-counts. Two of its fields have an **observable iteration order**, and
+it is not the same order for both, which is why they are different container
+types here:
 
 - **`frequencies`** is keyed by `ngram_key`, which always begins with `(` or is
-  `)`. Those keys are not integer-like, so the reference engine enumerates them in *insertion*
-  order — first-seen order. A `HashMap` would lose that and a `BTreeMap` would
-  replace it with lexicographic order, so this is a `Vec<(String, u64)>`.
-- **`nr`** is keyed by a frequency *count*, so its keys are integer-like, and
-  the reference hoists those to the front in ascending numeric order regardless of
-  insertion order. `BTreeMap<u64, u64>` reproduces that exactly.
+  `)`. Those keys are not integer-like, so they are kept in *insertion* order —
+  first-seen order. A `HashMap` would lose that and a `BTreeMap` would replace
+  it with lexicographic order, so this is a `Vec<(String, u64)>`.
+- **`nr`** is keyed by a frequency *count*, so its keys are integer-like and are
+  kept in ascending numeric order regardless of insertion order.
+  `BTreeMap<u64, u64>` expresses that directly.
 
 `number_of_ngrams` counts padded tuples too, so it equals `ngrams.len()`, not
 the number of windows.
@@ -563,7 +560,7 @@ pub fn frequency(&self, key: &str) -> u64
 ```
 
 A **linear scan** over `frequencies`, returning `0` for a key that never
-occurred. That is deliberate: the type exists to preserve the reference's order,
+occurred. That is deliberate: the type exists to preserve first-seen order,
 not to serve lookups. If you need many lookups, build an index once.
 
 ```rust
@@ -621,17 +618,13 @@ fn main() {
 pub fn ngram_key<T: fmt::Display>(ngram: &[T]) -> String
 ```
 
-Renders an n-gram the way the reference's private `arrayToKey` does: `["a","b"]`
-becomes `"(a, b)"`. Two things about it are surprising and both are faithful:
+Renders an n-gram as a parenthesized, comma-separated key: `["a","b"]` becomes
+`"(a, b)"`. Two things about it are surprising:
 
-**The empty n-gram keys as `")"`, not `"()"`.** `arrayToKey` builds
-`"(" + "a, " + "b, "` and then chops the trailing `", "` with
-`result.substr(0, result.length - 2)`. For an empty n-gram the buffer is just
-`"("`, so `substr(0, -1)` is called, and `String#substr` *clamps* a negative
-length to zero where `String#slice` would have counted from the end. The result
-is the empty string, and the closing paren is appended to nothing. This is
-reachable whenever `n == 0`. A port that writes `&s[..len - 2]` panics on that
-input instead.
+**The empty n-gram keys as `")"`, not `"()"`.** For every non-empty n-gram the
+key is built as `"("`, the elements joined by `", "`, then `")"`. The empty
+n-gram is a special case that returns the bare string `")"` directly rather
+than the seemingly natural `"()"`. This is reachable whenever `n == 0`.
 
 **Keys are not injective.** Elements are concatenated raw, so a separator inside
 a token is not escaped: `["a, b"]` and `["a", "b"]` produce the same key.
@@ -664,19 +657,12 @@ allocation rather than reallocating.
 
 <span class="badge badge-global">GLOBAL STATE</span>
 
-The reference n-gram module opens with a **module-level mutable variable**:
-
-```text
-let tokenizer = new Tokenizer()          // WordTokenizer
-exports.setTokenizer = function (t) { … tokenizer = t }
-```
-
-`setTokenizer` rebinds it for the whole process, for every caller, permanently.
-The reference's own spec suite depends on that: `ngram_spec.ts` installs
-`AggressiveTokenizerFr` in one test and `AggressiveTokenizer` in the next, and
-the second test's result depends on the first having run. Making the tokenizer a
-per-call parameter would be tidier and would *not* reproduce that, so Verbora
-keeps a real process-global binding.
+Rather than threading a tokenizer through every call, `verbora-ngrams` keeps a
+real **module-level mutable variable** holding the default tokenizer.
+`set_tokenizer` rebinds it for the whole process, for every caller,
+permanently, until `reset_tokenizer` clears it back to the default
+`WordTokenizer`. A caller who would rather not touch process-wide state should
+reach for `ngrams_str_with` instead, which takes the tokenizer explicitly.
 
 ```rust  ignore
 pub fn set_tokenizer<T: NGramTokenizer + 'static>(tokenizer: T)
@@ -729,8 +715,8 @@ better, do not call it at all and use <code>ngrams_str_with</code>.
 Every function that reads the global has a sibling that takes a tokenizer
 explicitly. `ngrams_str_with(&tokenizer, …)` produces identical output, reads no
 global, writes no global, and makes the tokenizer visible at the call site. Use
-`set_tokenizer` only when you are reproducing the reference that relies on the
-rebinding being observable elsewhere.
+`set_tokenizer` only when your own code genuinely depends on that rebinding
+being observable elsewhere; most callers should prefer the explicit form.
 
 ```rust
 use verbora_ngrams::{
@@ -749,8 +735,8 @@ fn main() {
     // "a b" is now a single token, so there is no bigram at all.
     assert!(ngrams_str("a b", 2, None, None).is_empty());
 
-    // `reset_tokenizer` has no counterpart in the reference; it exists so tests can
-    // isolate themselves.
+    // `reset_tokenizer` exists so tests can isolate themselves from each
+    // other's global tokenizer state.
     reset_tokenizer();
     assert!(current_tokenizer().is_none());
     assert_eq!(ngrams_str("a b", 2, None, None), vec![vec!["a", "b"]]);
@@ -774,16 +760,15 @@ be installed with `set_tokenizer` or passed to `ngrams_str_with` without
 implementing anything extra — including everything in
 [Tokenizers](./tokenizers.md).
 
-`WordTokenizer` is the default: a self-contained reproduction of the reference's
-`WordTokenizer`, whose gaps pattern is `/[^A-Za-zА-Яа-я0-9_]+/`. It implements
-both `Tokenizer` and `verbora_core::BorrowingTokenizer`, so it can produce
-borrowed tokens — the zero-copy path into `ngrams`. See
+`WordTokenizer` is the default: a small, self-contained tokenizer whose gaps
+pattern is `/[^A-Za-zА-Яа-я0-9_]+/`. It implements both `Tokenizer` and
+`verbora_core::BorrowingTokenizer`, so it can produce borrowed tokens — the
+zero-copy path into `ngrams`. See
 [Unicode and language notes](#unicode-and-language-notes) for what that
 character class costs you.
 
 `FnTokenizer<F>(pub F)` adapts a closure `Fn(&str) -> Vec<String>` into a
-`Tokenizer`, mirroring the reference idiom
-`NGrams.setTokenizer({ tokenize: s => s.split(' ') })`.
+`Tokenizer`, for installing an ad hoc tokenizer without writing a named type.
 
 ```rust
 use verbora_core::{BorrowingTokenizer, Tokenizer};
@@ -807,27 +792,29 @@ fn main() {
 
 <span class="badge badge-utf16">UTF-16</span>
 
-`NGramsZH` is `ngrams` with two changes: no statistics code, and string input
-goes through `sequence.split('')` instead of a tokenizer. It exposes only
-`ngrams`, `bigrams` and `trigrams` — no `setTokenizer`, no `multrigrams`, no
-`stats` argument, no module-level state — and Verbora adds none of those.
+The `zh` module is the engine behind `ngrams` with two changes: no statistics
+support, and string input is split per UTF-16 code unit instead of going
+through a tokenizer. It exposes only `ngrams_zh`, `bigrams_zh` and
+`trigrams_zh` — no tokenizer override, no `multrigrams_zh`, no statistics
+variant, no module-level state.
 
-**Array input needs nothing from this module.** `NGramsZH.ngrams(array, …)` and
-`NGrams.ngrams(array, …)` are the same function, so use `ngrams` for it.
+**Array input needs nothing from this module.** Windowing an already-split
+slice is exactly what `ngrams` does, so use `ngrams` directly for that case.
 
-### `split('')` splits UTF-16 code units, not characters
+### `zh` splits UTF-16 code units, not characters
 
-This is the one real difference, and it is observable:
+This is the module's one real per-character semantic choice, and it is
+observable:
 
 ```text
-NGramsZH.ngrams('a👍b', 2)
-  the reference : [['a','\ud83d'], ['\ud83d','\udc4d'], ['\udc4d','b']]   (3 bigrams)
-  Rust chars : [['a','👍'], ['👍','b']]                                (2 bigrams)
+ngrams_zh("a👍b", 2)
+  UTF-16 code units : [['a','\ud83d'], ['\ud83d','\udc4d'], ['\udc4d','b']]   (3 bigrams)
+  Unicode scalar values (char) : [['a','👍'], ['👍','b']]                    (2 bigrams)
 ```
 
-`'👍'.length === 2`, so the emoji is torn into its surrogate halves and each
-half becomes its own element. Combining marks separate too: `"éx"` in NFD yields
-`['e','◌́']`, `['◌́','x']`.
+A single emoji such as `'👍'` is two UTF-16 code units, so it is torn into its
+surrogate halves and each half becomes its own element. Combining marks
+separate too: `"éx"` in NFD yields `['e','◌́']`, `['◌́','x']`.
 
 Rust's `String` cannot hold an unpaired surrogate, so the module offers two
 entry points:
@@ -841,8 +828,8 @@ entry points:
 Plane — which includes every CJK character this module exists to serve. Reach
 for `ngrams_zh_utf16` when the input may contain astral characters and the
 elements must round-trip. The test suite runs the **whole** ZH fixture through
-`ngrams_zh_utf16`, because that is the only representation that can hold what
-`split('')` produces.
+`ngrams_zh_utf16`, because that is the only representation that can hold every
+UTF-16 code unit, paired or not.
 
 ### The surface
 
@@ -888,10 +875,9 @@ pub fn trigrams_zh_utf16<'a>(
 Only `ngrams_zh`, `bigrams_zh` and `trigrams_zh` are re-exported at the crate
 root. Everything else is `verbora_ngrams::zh::…`.
 
-- **`code_units`** is `text.encode_utf16().collect()` — the reference's
-  `String#split('')` before it wraps each unit back into a string. Use it to
-  prepare input for the `_utf16` family, and `str::encode_utf16` for the pad
-  symbols.
+- **`code_units`** is `text.encode_utf16().collect()` — the UTF-16 code units
+  that back this module's per-character splitting. Use it to prepare input
+  for the `_utf16` family, and `str::encode_utf16` for the pad symbols.
 - **`split_lossy`** produces one element per UTF-16 code unit, rendering each
   half of a torn surrogate pair as `U+FFFD`. Every element is `Cow::Borrowed` —
   BMP characters borrow from `text`, the replacement characters borrow a
@@ -1027,8 +1013,8 @@ fn main() {
 }
 ```
 
-You lose the reference's insertion order and the `Nr` map, which is exactly the
-trade you wanted to make.
+You lose the first-seen insertion order and the `Nr` count-of-counts map that
+`ngrams_with_stats` provides, which is exactly the trade you wanted to make.
 
 ## Performance characteristics
 
@@ -1074,12 +1060,13 @@ See [Parallelism](../performance/parallelism.md).
 `crates/verbora-ngrams/benches/ngrams.rs` is a Criterion suite covering
 sequence length (16 / 256 / 4,096 / 20,000), borrowed versus materialised
 collection, `n` and padding, statistics, string input, and the ZH paths. A
-The reference baseline for the same shapes was recorded once.
+baseline for the same shapes, measured against a widely-used JavaScript NLP
+library, was recorded once.
 
-Two figures from that recorded the reference baseline are worth quoting because
-they justify an API recommendation directly. Over the same 4,096-word input:
+Two figures from that baseline are worth quoting because they justify an API
+recommendation directly. Over the same 4,096-word input:
 
-| Reference operation | ns/op |
+| Operation (JavaScript NLP library) | ns/op |
 |---|---:|
 | `tokenize` alone | 152,211 |
 | `ngrams_str` (tokenize + window) | 201,660 |
@@ -1090,11 +1077,11 @@ That is a property of the algorithm, not of the runtime, and it is why a caller
 who already has tokens should never route through `ngrams_str`.
 
 <div class="callout callout-note">
-<strong>Note.</strong> No side-by-side Rust-versus-the reference comparison has been
-published for this crate. <code>docs/PERFORMANCE.md</code> currently covers the
-26 <code>verbora-distance</code> benchmarks only. Everything else on this page is
-asymptotics and allocation behaviour read from the source. See
-<a href="../benchmarks/">Benchmarks</a>.
+<strong>Note.</strong> No side-by-side comparison of Verbora against that
+library has been published for this crate. <code>docs/PERFORMANCE.md</code>
+currently covers the 26 <code>verbora-distance</code> benchmarks only.
+Everything else on this page is asymptotics and allocation behaviour read
+from the source. See <a href="../benchmarks/">Benchmarks</a>.
 </div>
 
 ## Allocation behaviour
@@ -1127,8 +1114,8 @@ Two details worth knowing:
 ## Unicode and language notes
 
 **The default tokenizer's character class is `[A-Za-zА-Яа-я0-9_]`, literally.**
-Not "alphanumeric". Two consequences that a Unicode-aware port gets wrong, both
-recorded in the fixtures:
+Not "alphanumeric". Two consequences that are easy to assume away if you expect
+Unicode-aware behavior, both recorded in the fixtures:
 
 - Accented Latin letters are **separators**: `café` tokenizes as `caf`, `naïve`
   as `na` + `ve`, `Ångström` as `ngstr` + `m`.
@@ -1151,9 +1138,8 @@ element's contents, only its position, so elements can be any `Clone` type.
 tuples out.
 
 **Using `Some("")` when you meant "no padding".** `None` disables padding;
-`Some("")` pads with empty strings. This is the reference's behaviour and it
-bites at the ported-the reference boundary, where `''` is often used as a "nothing"
-sentinel.
+`Some("")` pads with empty strings. This distinction bites callers coming from
+contexts where an empty string is often used as a "nothing" sentinel.
 
 **Calling `ngrams_str` in a loop over a corpus you already tokenized.** Each
 call runs a full tokenization and then copies every element of every tuple.
@@ -1236,7 +1222,7 @@ All re-exported at the crate root **except `ngrams_of_tokens`**.
 | `WordTokenizer` | `struct WordTokenizer;` — implements `Tokenizer` and `BorrowingTokenizer`; derives `Debug`, `Default`, `Clone`, `Copy`, `PartialEq`, `Eq` |
 | `FnTokenizer` | `struct FnTokenizer<F>(pub F);` — implements `Tokenizer` for `F: Fn(&str) -> Vec<String>`; derives `Debug`, `Clone`, `Copy` |
 | `set_tokenizer` | `fn set_tokenizer<T: NGramTokenizer + 'static>(tokenizer: T)` — process-wide |
-| `reset_tokenizer` | `fn reset_tokenizer()` — no reference counterpart |
+| `reset_tokenizer` | `fn reset_tokenizer()` — clears the override, restoring the default `WordTokenizer` |
 | `current_tokenizer` | `fn current_tokenizer() -> Option<Arc<dyn NGramTokenizer>>` — `None` while the default is in force |
 | `tokenize` | `fn tokenize(text: &str) -> Vec<String>` — uses the global binding |
 
@@ -1259,10 +1245,11 @@ root.
 ### Not present in this crate
 
 No `Result` anywhere — nothing in this crate is fallible, and every `n`,
-sequence length and pad symbol is a defined input (`ngram_key` handles the empty
-n-gram that a naive port panics on). The one reachable panic is lock poisoning
-in `set_tokenizer` / `reset_tokenizer` / `current_tokenizer`, described under
+sequence length and pad symbol is a defined input; `ngram_key` returns `")"`
+for the empty n-gram rather than panicking (see above). The one reachable
+panic is lock poisoning in `set_tokenizer` / `reset_tokenizer` /
+`current_tokenizer`, described under
 [The process-global tokenizer](#the-process-global-tokenizer).
 
 No `_into` variant; no batch entry point; no parallel entry point; no
-`setTokenizer` equivalent for `zh`, matching the reference.
+tokenizer-override function for `zh`.
