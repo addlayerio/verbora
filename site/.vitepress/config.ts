@@ -88,7 +88,6 @@ export default defineConfig({
       { text: 'Features', link: '/features/' },
       { text: 'Performance', link: '/performance/' },
       { text: 'Recipes', link: '/recipes/' },
-      { text: 'Benchmarks', link: '/benchmarks/' },
       {
         text: 'More',
         items: [
@@ -103,8 +102,8 @@ export default defineConfig({
       '/choosing/': sidebarChoosing(),
       '/features/': sidebarFeatures(),
       '/performance/': sidebarPerformance(),
+      '/benchmarks/': sidebarPerformance(),
       '/recipes/': sidebarRecipes(),
-      '/benchmarks/': sidebarBenchmarks(),
       '/reference/': sidebarReference(),
     },
 
@@ -192,7 +191,7 @@ function sidebarFeatures() {
 function sidebarPerformance() {
   return [
     {
-      text: 'Performance guide',
+      text: 'How it\'s built',
       items: [
         { text: 'How Verbora uses Rust', link: '/performance/' },
         { text: 'Ergonomics vs throughput', link: '/performance/ergonomics-vs-throughput' },
@@ -203,6 +202,15 @@ function sidebarPerformance() {
         { text: 'Batch vs streaming', link: '/performance/batch-vs-streaming' },
         { text: 'Parallelism', link: '/performance/parallelism' },
         { text: 'Cache locality and data layout', link: '/performance/cache-locality' },
+      ],
+    },
+    {
+      text: 'Results',
+      items: [
+        { text: 'Method', link: '/benchmarks/' },
+        { text: 'String distance results', link: '/benchmarks/distance' },
+        { text: 'Competitive benchmarks', link: '/benchmarks/competitive' },
+        { text: 'Reproducing them', link: '/benchmarks/reproducing' },
       ],
     },
   ];
@@ -220,20 +228,6 @@ function sidebarRecipes() {
         { text: 'Massive parallel corpora', link: '/recipes/parallel-corpus' },
         { text: 'Fuzzy name matching', link: '/recipes/fuzzy-matching' },
         { text: 'Prefix autocomplete', link: '/recipes/autocomplete' },
-      ],
-    },
-  ];
-}
-
-function sidebarBenchmarks() {
-  return [
-    {
-      text: 'Benchmarks',
-      items: [
-        { text: 'Method', link: '/benchmarks/' },
-        { text: 'String distance results', link: '/benchmarks/distance' },
-        { text: 'Competitive benchmarks', link: '/benchmarks/competitive' },
-        { text: 'Reproducing them', link: '/benchmarks/reproducing' },
       ],
     },
   ];

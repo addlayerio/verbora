@@ -7,8 +7,6 @@ sentiment analysis, and Bayes/logistic-regression/MaxEnt classifiers — each
 designed for Rust from the start.
 
 > **Status: 105 public APIs, specified and test-pinned.**
-> See [`docs/FEATURE_MATRIX.md`](docs/FEATURE_MATRIX.md) for the
-> per-API record.
 
 ## Documentation
 
@@ -25,13 +23,11 @@ whether it is lazy, whether it reuses memory, and which one you should call.
 | [Getting started](https://addlayerio.github.io/verbora/getting-started/installation) | Install, first program, workspace map |
 | [Choosing the Right API](https://addlayerio.github.io/verbora/choosing/) | Comparison tables, decision trees, trade-offs |
 | [Features](https://addlayerio.github.io/verbora/features/) | Every implemented subsystem |
-| [Performance guide](https://addlayerio.github.io/verbora/performance/) | Borrowing, laziness, `Cow`, buffer reuse, batching, parallelism |
+| [Performance](https://addlayerio.github.io/verbora/performance/) | Borrowing, laziness, `Cow`, buffer reuse, batching, parallelism — and the measured results against competing libraries |
 | [Recipes](https://addlayerio.github.io/verbora/recipes/) | Organised by workload, not by function name |
-| [Benchmarks](https://addlayerio.github.io/verbora/benchmarks/) | Measured, method included |
 
 Source in [`site/`](site/), built with [VitePress](https://vitepress.dev)
-and published from `main` by
-[`.github/workflows/docs.yml`](.github/workflows/docs.yml). Building it locally:
+and published from `main`. Building it locally:
 
 ```bash
 cd site
@@ -82,11 +78,8 @@ crates/
   verbora-language/        script and language detection, phonetic strategy
   verbora-util/            stop words, abbreviations, graph utilities
   verbora-examples/        the code the documentation site publishes (dev-only)
-site/                 the documentation site (VitePress)
-docs/
-  FEATURE_MATRIX.md     per-API status, generated from the live export map
-  PERFORMANCE_MATRIX.md per-crate allocation/data-structure/Rayon audit
-  PERFORMANCE.md        measured results and the method behind them
+site/                 the documentation site (VitePress) — see "Documentation" above
+docs/                 internal engineering/research archive, not user docs — see docs/README.md
 tools/
   bench-data/           shared benchmark inputs
 benches/data/         inputs shared across benchmarks
@@ -105,7 +98,8 @@ cargo bench -p verbora-distance        # benchmarks
 is correctness → specified behaviour → performance-aware architecture → memory
 → API quality → maintainability → hot-path tuning. No optimisation lands
 without the test suite re-run, and none is claimed without a benchmark. A
-measured regression is documented in [`PERFORMANCE.md`](docs/PERFORMANCE.md)
+measured regression is documented in
+[the benchmarks page](https://addlayerio.github.io/verbora/benchmarks/distance#a-measured-regression-and-its-fix)
 precisely because "it's Rust, so it's fast" would have shipped it.
 
 **Several API levels, sharing one primitive.** A high-level, ergonomic API; a
@@ -136,7 +130,7 @@ it, not an accident smoothed over in prose.
 ## Measured performance
 
 `verbora-distance` across its own API levels and input sizes — full table and
-method in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+method in [the benchmarks page](https://addlayerio.github.io/verbora/benchmarks/distance).
 
 | Benchmark | Verbora |
 |---|--:|

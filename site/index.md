@@ -172,18 +172,13 @@ entire section of this site.
 </a>
 
 <a class="card" href="performance/">
-<span class="card-title">Performance guide →</span>
-<span class="card-desc">Borrowing, laziness, <code>Cow</code>, buffer reuse, batching, parallelism — taught through Verbora's own APIs rather than in the abstract.</span>
+<span class="card-title">Performance →</span>
+<span class="card-desc">Borrowing, laziness, <code>Cow</code>, buffer reuse, batching, parallelism — and the measured results against competing libraries, with the hardware, method and commands to reproduce them.</span>
 </a>
 
 <a class="card" href="recipes/">
 <span class="card-title">Recipes by workload →</span>
 <span class="card-desc">Start from your problem — request/response, streaming, batch, huge corpora — instead of from a function name.</span>
-</a>
-
-<a class="card" href="benchmarks/">
-<span class="card-title">Benchmarks →</span>
-<span class="card-desc">Measured against competing libraries on identical inputs, with the hardware, method and commands to reproduce them.</span>
 </a>
 
 </div>
@@ -285,9 +280,8 @@ Full instructions, including using the crates from a git checkout, are in
 | Get something running in five minutes | [Getting started](getting-started/installation.md) |
 | Decide *which* of several similar functions to call | [Choosing the right API](choosing/index.md) |
 | Learn what a subsystem can do | [Features](features/index.md) |
-| Understand allocations, laziness, batching, parallelism | [Performance guide](performance/index.md) |
+| Understand allocations, laziness, batching, parallelism, and see the measured numbers | [Performance](performance/index.md) |
 | Solve a concrete problem end to end | [Recipes](recipes/index.md) |
-| See numbers, and reproduce them | [Benchmarks](benchmarks/index.md) |
 | Know exactly how correctness is verified | Correctness |
 | Read the type signatures | [Rust API reference](reference/api.md) |
 

@@ -12,7 +12,7 @@
 //! `docs/COMPETITIVE_BENCHMARKS.md` §1.18 for why `trie-rs`, `qp-trie` and
 //! `fast_radix_trie` were selected, and `../../README.md` for why this crate
 //! lives outside the main workspace. `fst` was added later, per
-//! `benchmark.md`'s `FST — SPECIALIZED FROZEN COMPETITOR` directive, as a
+//! `docs/research/fase6-benchmark-brief.md`'s `FST — SPECIALIZED FROZEN COMPETITOR` directive, as a
 //! specialized *frozen*-representation competitor for `Trie::contains` and
 //! prefix enumeration — see the `fst` section below for its own
 //! EXACT/NARROWED_EXACT/PARTIAL/TECHNIQUE/UNFAIR classification per
@@ -78,7 +78,7 @@
 //! or `fast_radix_trie`'s incrementally-mutable trees.
 //!
 //! Per-operation classification (EXACT/NARROWED_EXACT/PARTIAL/TECHNIQUE/
-//! UNFAIR, `benchmark.md`'s own five-way bar):
+//! UNFAIR, `docs/research/fase6-benchmark-brief.md`'s own five-way bar):
 //!
 //! - **`build`/`contains_hit`/`contains_miss`** — **NARROWED_EXACT**.
 //!   `Set::contains` and `Trie::contains` answer the identical yes/no
@@ -105,7 +105,7 @@
 //!   full reasoning (same shape of exclusion as `qp-trie`'s).
 //! - **Fuzzy/Levenshtein-automaton lookup** (the operation that would
 //!   compare against `verbora_spellcheck::FuzzyIndex::neighbors`, per
-//!   `benchmark.md`'s own directive to evaluate `fst` for this) — **not
+//!   `docs/research/fase6-benchmark-brief.md`'s own directive to evaluate `fst` for this) — **not
 //!   benchmarked in this file** (it is not a trie operation; there is
 //!   nothing here to compare it against). This workspace's `Cargo.toml`
 //!   now enables `fst`'s own `levenshtein` Cargo feature (`default = []` in
