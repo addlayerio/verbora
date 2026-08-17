@@ -24,7 +24,7 @@
 //! for (const token in this.vocabulary) vocaStemmed[stemmer.stem(token)] = this.vocabulary[token]
 //! ```
 //!
-//! Colliding stems therefore resolve **last-wins in the referenceON-file order**. For
+//! Colliding stems therefore resolve **last-wins in the JSON-file order**. For
 //! English AFINN with the Porter stemmer that is 3382 keys collapsing to 1967,
 //! with 1415 collisions of which 109 change the stored polarity — `affect`(-1)
 //! loses to `affection`(3), `arrested`(-3) loses to `arrests`(-2). A `HashMap`

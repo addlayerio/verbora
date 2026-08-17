@@ -101,7 +101,7 @@ pub enum StorageError {
     Unsupported(StorageType),
     /// The underlying store failed.
     Io(std::io::Error),
-    /// The stored bytes were not the referenceON they claimed to be.
+    /// The stored bytes were not the JSON they claimed to be.
     Json(serde_json::Error),
 }
 

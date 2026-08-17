@@ -4,7 +4,7 @@
 //! module reads *in place*: no parsing, no allocation, and no `OnceLock`
 //! initialisation of a 92,662-entry hash map. Startup cost is the cost of
 //! slicing a byte array — see [`crate::lexicon`] for the measured comparison
-//! against parsing the referenceON.
+//! against parsing the JSON.
 //!
 //! # Layout
 //!

@@ -15,7 +15,7 @@ use serde::Deserialize;
 /// One language's four-tier test items, as read from
 /// `datasets/language-accuracy/dataset.json`. See that directory's own
 /// `README.md` for full sourcing, license, and extraction-methodology
-/// documentation — this struct only describes the referenceON shape.
+/// documentation — this struct only describes the JSON shape.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LanguageItems {
     pub short_word: String,

@@ -32,7 +32,7 @@
 //!    `HashMap<String, f64>` reproduces none of that.
 //! 2. **Key order is `for…in` order.** Array-index-like keys are hoisted to the
 //!    front in ascending numeric order; everything else keeps insertion order.
-//!    `list_terms` and the referenceON serialization both expose it, and since the
+//!    `list_terms` and the JSON serialization both expose it, and since the
 //!    default tokenizer keeps digit runs, real corpora hit it constantly.
 //! 3. **The idf cache probe is a truthiness test on a prototype-backed map.**
 //!    The constructor and `addFileSync` install `{}`, while `addDocument` and

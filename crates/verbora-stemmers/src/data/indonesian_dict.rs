@@ -1,7 +1,7 @@
 //! The Indonesian root-word dictionary, from
 //! The reference `kata-dasar.json`.
 //!
-//! Generated data. The referenceON array holds 29933 elements; the last is the empty
+//! Generated data. The JSON array holds 29933 elements; the last is the empty
 //! string, which `.filter(Boolean)` drops, leaving 29932 distinct roots.
 //! The reference builds this Set TWICE (once in `stemmer_id`, once in
 //! `prefix_rules`); one shared static is enough.

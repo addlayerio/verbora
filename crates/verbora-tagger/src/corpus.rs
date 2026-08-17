@@ -37,7 +37,7 @@ impl<'a> Corpus<'a> {
         Self::default()
     }
 
-    /// Builds a corpus from already-parsed sentences, the referenceON path.
+    /// Builds a corpus from already-parsed sentences, the JSON path.
     ///
     /// The reference stores the caller's `taggedWords` arrays **by reference**, so
     /// training mutates the parsed JSON in place. Rust's ownership rules make

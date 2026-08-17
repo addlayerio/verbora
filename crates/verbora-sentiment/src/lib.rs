@@ -63,7 +63,7 @@
 //!
 //! # How the lexicons ship, and why
 //!
-//! Three options were on the table: embed the referenceON and parse it, read it from
+//! Three options were on the table: embed the JSON and parse it, read it from
 //! disk at run time, or embed a prebuilt index. The third won, and the
 //! measurements are the argument.
 //!

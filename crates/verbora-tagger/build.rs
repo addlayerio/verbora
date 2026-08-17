@@ -7,16 +7,16 @@
 //!
 //! | Strategy | Binary size | Startup | Notes |
 //! |---|---|---|---|
-//! | `include_str!` the referenceON, parse at first use | +4.6 MB | ~55 ms | also needs an order-preserving map |
-//! | Load the referenceON from disk at runtime | +0 | ~55 ms + I/O | needs the files installed beside the binary |
+//! | `include_str!` the JSON, parse at first use | +4.6 MB | ~55 ms | also needs an order-preserving map |
+//! | Load the JSON from disk at runtime | +0 | ~55 ms + I/O | needs the files installed beside the binary |
 //! | **Pack at build time, `include_bytes!` the index** | **+2.4 MB** | **~0** | chosen |
 //!
 //! The packed form is a sorted string arena plus offset tables, so a lookup is a
 //! binary search directly over the bytes embedded in the executable: nothing is
 //! parsed, allocated, or copied at startup, and the process pays only for the
-//! entries it actually touches. It is also *smaller* tha referenceON, because tags
+//! entries it actually touches. It is also *smaller* than JSON, because tags
 //! are interned (122 distinct tags cover all 112,502 English tag references) and
-//! The referenceON's punctuation and whitespace disappear.
+//! The JSON's punctuation and whitespace disappear.
 //!
 //! # Key order is part of the format
 //!
