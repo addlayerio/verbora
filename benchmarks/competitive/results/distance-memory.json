@@ -1,0 +1,1402 @@
+[
+  {
+    "group": "levenshtein",
+    "size": 4,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 80,
+    "deallocations": 2,
+    "bytes_deallocated": 80,
+    "rss_kb_after": 2168
+  },
+  {
+    "group": "levenshtein",
+    "size": 4,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 32,
+    "deallocations": 1,
+    "bytes_deallocated": 32,
+    "rss_kb_after": 2168
+  },
+  {
+    "group": "levenshtein",
+    "size": 4,
+    "implementation": "rapidfuzz",
+    "allocations": 1,
+    "bytes_allocated": 40,
+    "deallocations": 1,
+    "bytes_deallocated": 40,
+    "rss_kb_after": 2172
+  },
+  {
+    "group": "levenshtein",
+    "size": 4,
+    "implementation": "stringmetrics",
+    "allocations": 1,
+    "bytes_allocated": 16,
+    "deallocations": 1,
+    "bytes_deallocated": 16,
+    "rss_kb_after": 2172
+  },
+  {
+    "group": "levenshtein",
+    "size": 4,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2288
+  },
+  {
+    "group": "levenshtein",
+    "size": 4,
+    "implementation": "editdistancek",
+    "allocations": 2,
+    "bytes_allocated": 176,
+    "deallocations": 2,
+    "bytes_deallocated": 176,
+    "rss_kb_after": 2288
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 4,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 400,
+    "deallocations": 2,
+    "bytes_deallocated": 400,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 4,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 144,
+    "deallocations": 3,
+    "bytes_deallocated": 144,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 4,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 144,
+    "deallocations": 3,
+    "bytes_deallocated": 144,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 4,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 120,
+    "deallocations": 3,
+    "bytes_deallocated": 120,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 4,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 120,
+    "deallocations": 3,
+    "bytes_deallocated": 120,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 4,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 4,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "jaro",
+    "size": 4,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "jaro",
+    "size": 4,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 8,
+    "deallocations": 1,
+    "bytes_deallocated": 8,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "jaro",
+    "size": 4,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "jaro",
+    "size": 4,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 4,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2292
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 4,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 8,
+    "deallocations": 1,
+    "bytes_deallocated": 8,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 4,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 4,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "hamming",
+    "size": 4,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "hamming",
+    "size": 4,
+    "implementation": "strsim",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "hamming",
+    "size": 4,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "hamming",
+    "size": 4,
+    "implementation": "stringmetrics",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "hamming",
+    "size": 4,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 4,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 400,
+    "deallocations": 2,
+    "bytes_deallocated": 400,
+    "rss_kb_after": 2296
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 4,
+    "implementation": "triple_accel",
+    "allocations": 2,
+    "bytes_allocated": 64,
+    "deallocations": 2,
+    "bytes_deallocated": 64,
+    "rss_kb_after": 2560
+  },
+  {
+    "group": "levenshtein",
+    "size": 16,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 272,
+    "deallocations": 2,
+    "bytes_deallocated": 272,
+    "rss_kb_after": 2560
+  },
+  {
+    "group": "levenshtein",
+    "size": 16,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 128,
+    "deallocations": 1,
+    "bytes_deallocated": 128,
+    "rss_kb_after": 2560
+  },
+  {
+    "group": "levenshtein",
+    "size": 16,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2560
+  },
+  {
+    "group": "levenshtein",
+    "size": 16,
+    "implementation": "stringmetrics",
+    "allocations": 1,
+    "bytes_allocated": 64,
+    "deallocations": 1,
+    "bytes_deallocated": 64,
+    "rss_kb_after": 2560
+  },
+  {
+    "group": "levenshtein",
+    "size": 16,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2560
+  },
+  {
+    "group": "levenshtein",
+    "size": 16,
+    "implementation": "editdistancek",
+    "allocations": 2,
+    "bytes_allocated": 560,
+    "deallocations": 2,
+    "bytes_deallocated": 560,
+    "rss_kb_after": 2564
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 16,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 4624,
+    "deallocations": 2,
+    "bytes_deallocated": 4624,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 16,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 432,
+    "deallocations": 3,
+    "bytes_deallocated": 432,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 16,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 432,
+    "deallocations": 3,
+    "bytes_deallocated": 432,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 16,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 408,
+    "deallocations": 3,
+    "bytes_deallocated": 408,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 16,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 408,
+    "deallocations": 3,
+    "bytes_deallocated": 408,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 16,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 16,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro",
+    "size": 16,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro",
+    "size": 16,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 32,
+    "deallocations": 1,
+    "bytes_deallocated": 32,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro",
+    "size": 16,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro",
+    "size": 16,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 16,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 16,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 32,
+    "deallocations": 1,
+    "bytes_deallocated": 32,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 16,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 16,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "hamming",
+    "size": 16,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "hamming",
+    "size": 16,
+    "implementation": "strsim",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "hamming",
+    "size": 16,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "hamming",
+    "size": 16,
+    "implementation": "stringmetrics",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "hamming",
+    "size": 16,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 16,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 4628,
+    "deallocations": 3,
+    "bytes_deallocated": 4628,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 16,
+    "implementation": "triple_accel",
+    "allocations": 2,
+    "bytes_allocated": 64,
+    "deallocations": 2,
+    "bytes_deallocated": 64,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "levenshtein",
+    "size": 64,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 1040,
+    "deallocations": 2,
+    "bytes_deallocated": 1040,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "levenshtein",
+    "size": 64,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 512,
+    "deallocations": 1,
+    "bytes_deallocated": 512,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "levenshtein",
+    "size": 64,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "levenshtein",
+    "size": 64,
+    "implementation": "stringmetrics",
+    "allocations": 1,
+    "bytes_allocated": 256,
+    "deallocations": 1,
+    "bytes_deallocated": 256,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "levenshtein",
+    "size": 64,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "levenshtein",
+    "size": 64,
+    "implementation": "editdistancek",
+    "allocations": 2,
+    "bytes_allocated": 2096,
+    "deallocations": 2,
+    "bytes_deallocated": 2096,
+    "rss_kb_after": 2568
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 64,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 67600,
+    "deallocations": 2,
+    "bytes_deallocated": 67600,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 64,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 1584,
+    "deallocations": 3,
+    "bytes_deallocated": 1584,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 64,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 1584,
+    "deallocations": 3,
+    "bytes_deallocated": 1584,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 64,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 1560,
+    "deallocations": 3,
+    "bytes_deallocated": 1560,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 64,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 1560,
+    "deallocations": 3,
+    "bytes_deallocated": 1560,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 64,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 64,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro",
+    "size": 64,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro",
+    "size": 64,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 128,
+    "deallocations": 1,
+    "bytes_deallocated": 128,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro",
+    "size": 64,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro",
+    "size": 64,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 64,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 64,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 128,
+    "deallocations": 1,
+    "bytes_deallocated": 128,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 64,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 64,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "hamming",
+    "size": 64,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "hamming",
+    "size": 64,
+    "implementation": "strsim",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "hamming",
+    "size": 64,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "hamming",
+    "size": 64,
+    "implementation": "stringmetrics",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "hamming",
+    "size": 64,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2632
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 64,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 67638,
+    "deallocations": 3,
+    "bytes_deallocated": 67638,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 64,
+    "implementation": "triple_accel",
+    "allocations": 2,
+    "bytes_allocated": 64,
+    "deallocations": 2,
+    "bytes_deallocated": 64,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "levenshtein",
+    "size": 256,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 4112,
+    "deallocations": 2,
+    "bytes_deallocated": 4112,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "levenshtein",
+    "size": 256,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 2048,
+    "deallocations": 1,
+    "bytes_deallocated": 2048,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "levenshtein",
+    "size": 256,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 8288,
+    "deallocations": 3,
+    "bytes_deallocated": 8288,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "levenshtein",
+    "size": 256,
+    "implementation": "stringmetrics",
+    "allocations": 1,
+    "bytes_allocated": 1024,
+    "deallocations": 1,
+    "bytes_deallocated": 1024,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "levenshtein",
+    "size": 256,
+    "implementation": "triple_accel",
+    "allocations": 21,
+    "bytes_allocated": 11424,
+    "deallocations": 21,
+    "bytes_deallocated": 11424,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "levenshtein",
+    "size": 256,
+    "implementation": "editdistancek",
+    "allocations": 2,
+    "bytes_allocated": 8240,
+    "deallocations": 2,
+    "bytes_deallocated": 8240,
+    "rss_kb_after": 2644
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 256,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 1056784,
+    "deallocations": 2,
+    "bytes_deallocated": 1056784,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 256,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 6192,
+    "deallocations": 3,
+    "bytes_deallocated": 6192,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 256,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 6192,
+    "deallocations": 3,
+    "bytes_deallocated": 6192,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 256,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 6168,
+    "deallocations": 3,
+    "bytes_deallocated": 6168,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 256,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 6168,
+    "deallocations": 3,
+    "bytes_deallocated": 6168,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 256,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 8512,
+    "deallocations": 3,
+    "bytes_deallocated": 8512,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 256,
+    "implementation": "triple_accel",
+    "allocations": 21,
+    "bytes_allocated": 11424,
+    "deallocations": 21,
+    "bytes_deallocated": 11424,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro",
+    "size": 256,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 512,
+    "deallocations": 2,
+    "bytes_deallocated": 512,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro",
+    "size": 256,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 512,
+    "deallocations": 1,
+    "bytes_deallocated": 512,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro",
+    "size": 256,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 8256,
+    "deallocations": 3,
+    "bytes_deallocated": 8256,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro",
+    "size": 256,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 256,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 512,
+    "deallocations": 2,
+    "bytes_deallocated": 512,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 256,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 512,
+    "deallocations": 1,
+    "bytes_deallocated": 512,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 256,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 8256,
+    "deallocations": 3,
+    "bytes_deallocated": 8256,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 256,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "hamming",
+    "size": 256,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "hamming",
+    "size": 256,
+    "implementation": "strsim",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "hamming",
+    "size": 256,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "hamming",
+    "size": 256,
+    "implementation": "stringmetrics",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "hamming",
+    "size": 256,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2716
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 256,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 1056920,
+    "deallocations": 3,
+    "bytes_deallocated": 1056920,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 256,
+    "implementation": "triple_accel",
+    "allocations": 31,
+    "bytes_allocated": 14912,
+    "deallocations": 31,
+    "bytes_deallocated": 14912,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "levenshtein",
+    "size": 1024,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 16400,
+    "deallocations": 2,
+    "bytes_deallocated": 16400,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "levenshtein",
+    "size": 1024,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 8192,
+    "deallocations": 1,
+    "bytes_deallocated": 8192,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "levenshtein",
+    "size": 1024,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 33152,
+    "deallocations": 3,
+    "bytes_deallocated": 33152,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "levenshtein",
+    "size": 1024,
+    "implementation": "stringmetrics",
+    "allocations": 1,
+    "bytes_allocated": 4096,
+    "deallocations": 1,
+    "bytes_deallocated": 4096,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "levenshtein",
+    "size": 1024,
+    "implementation": "triple_accel",
+    "allocations": 21,
+    "bytes_allocated": 43680,
+    "deallocations": 21,
+    "bytes_deallocated": 43680,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "levenshtein",
+    "size": 1024,
+    "implementation": "editdistancek",
+    "allocations": 2,
+    "bytes_allocated": 32816,
+    "deallocations": 2,
+    "bytes_deallocated": 32816,
+    "rss_kb_after": 2720
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 1024,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 16810000,
+    "deallocations": 2,
+    "bytes_deallocated": 16810000,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 1024,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 24624,
+    "deallocations": 3,
+    "bytes_deallocated": 24624,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "damerau_levenshtein_unrestricted",
+    "size": 1024,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 24624,
+    "deallocations": 3,
+    "bytes_deallocated": 24624,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 1024,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 24600,
+    "deallocations": 3,
+    "bytes_deallocated": 24600,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 1024,
+    "implementation": "strsim",
+    "allocations": 3,
+    "bytes_allocated": 24600,
+    "deallocations": 3,
+    "bytes_deallocated": 24600,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 1024,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 33856,
+    "deallocations": 3,
+    "bytes_deallocated": 33856,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "damerau_levenshtein_restricted_osa",
+    "size": 1024,
+    "implementation": "triple_accel",
+    "allocations": 21,
+    "bytes_allocated": 43680,
+    "deallocations": 21,
+    "bytes_deallocated": 43680,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro",
+    "size": 1024,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 2048,
+    "deallocations": 2,
+    "bytes_deallocated": 2048,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro",
+    "size": 1024,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 2048,
+    "deallocations": 1,
+    "bytes_deallocated": 2048,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro",
+    "size": 1024,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 33024,
+    "deallocations": 3,
+    "bytes_deallocated": 33024,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro",
+    "size": 1024,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 1024,
+    "implementation": "verbora",
+    "allocations": 2,
+    "bytes_allocated": 2048,
+    "deallocations": 2,
+    "bytes_deallocated": 2048,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 1024,
+    "implementation": "strsim",
+    "allocations": 1,
+    "bytes_allocated": 2048,
+    "deallocations": 1,
+    "bytes_deallocated": 2048,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 1024,
+    "implementation": "rapidfuzz",
+    "allocations": 3,
+    "bytes_allocated": 33024,
+    "deallocations": 3,
+    "bytes_deallocated": 33024,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "jaro_winkler",
+    "size": 1024,
+    "implementation": "eddie",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "hamming",
+    "size": 1024,
+    "implementation": "verbora",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "hamming",
+    "size": 1024,
+    "implementation": "strsim",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "hamming",
+    "size": 1024,
+    "implementation": "rapidfuzz",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "hamming",
+    "size": 1024,
+    "implementation": "stringmetrics",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "hamming",
+    "size": 1024,
+    "implementation": "triple_accel",
+    "allocations": 0,
+    "bytes_allocated": 0,
+    "deallocations": 0,
+    "bytes_deallocated": 0,
+    "rss_kb_after": 2736
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 1024,
+    "implementation": "verbora",
+    "allocations": 3,
+    "bytes_allocated": 16810581,
+    "deallocations": 3,
+    "bytes_deallocated": 16810581,
+    "rss_kb_after": 2768
+  },
+  {
+    "group": "fuzzy_substring_search",
+    "size": 1024,
+    "implementation": "triple_accel",
+    "allocations": 31,
+    "bytes_allocated": 59456,
+    "deallocations": 31,
+    "bytes_deallocated": 59456,
+    "rss_kb_after": 2768
+  }
+]

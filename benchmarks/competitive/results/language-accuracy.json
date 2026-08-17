@@ -1,0 +1,1262 @@
+{
+  "lingua": {
+    "by_tier": {
+      "paragraph": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "sentence": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "short_phrase": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "short_word": {
+        "total": 13,
+        "correct": 12,
+        "abstained": 0,
+        "accuracy": 0.9230769230769231,
+        "coverage": 1.0,
+        "macro_precision": 0.8846153846153846,
+        "macro_recall": 0.9230769230769231,
+        "macro_f1": 0.9034369885433716
+      }
+    },
+    "overall": {
+      "total": 52,
+      "correct": 51,
+      "abstained": 0,
+      "accuracy": 0.9807692307692307,
+      "coverage": 1.0,
+      "macro_precision": 0.9846153846153847,
+      "macro_recall": 0.9807692307692307,
+      "macro_f1": 0.9826885443323798
+    },
+    "predictions": [
+      {
+        "iso639_1": "en",
+        "tier": "short_word",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "short_word",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "short_word",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "short_word",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "short_word",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "short_word",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "short_word",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "short_word",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "short_word",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "short_word",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "short_word",
+        "expected": "ja",
+        "predicted": "zh",
+        "correct": false
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "short_word",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "short_word",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "short_phrase",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "short_phrase",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "short_phrase",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "short_phrase",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "short_phrase",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "short_phrase",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "short_phrase",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "short_phrase",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "short_phrase",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "short_phrase",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "short_phrase",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "short_phrase",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "short_phrase",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "sentence",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "sentence",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "sentence",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "sentence",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "sentence",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "sentence",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "sentence",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "sentence",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "sentence",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "sentence",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "sentence",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "sentence",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "sentence",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "paragraph",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "paragraph",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "paragraph",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "paragraph",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "paragraph",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "paragraph",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "paragraph",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "paragraph",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "paragraph",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "paragraph",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "paragraph",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "paragraph",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "paragraph",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      }
+    ]
+  },
+  "verbora": {
+    "by_tier": {
+      "paragraph": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "sentence": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "short_phrase": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "short_word": {
+        "total": 13,
+        "correct": 10,
+        "abstained": 1,
+        "accuracy": 0.7692307692307693,
+        "coverage": 0.9230769230769231,
+        "macro_precision": 0.6923076923076923,
+        "macro_recall": 0.7692307692307693,
+        "macro_f1": 0.728744939271255
+      }
+    },
+    "overall": {
+      "total": 52,
+      "correct": 49,
+      "abstained": 1,
+      "accuracy": 0.9423076923076923,
+      "coverage": 0.9807692307692307,
+      "macro_precision": 0.9692307692307693,
+      "macro_recall": 0.9423076923076923,
+      "macro_f1": 0.9555796316359697
+    },
+    "predictions": [
+      {
+        "iso639_1": "en",
+        "tier": "short_word",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "short_word",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "short_word",
+        "expected": "fr",
+        "predicted": "it",
+        "correct": false
+      },
+      {
+        "iso639_1": "de",
+        "tier": "short_word",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "short_word",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "short_word",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "short_word",
+        "expected": "nl",
+        "predicted": null,
+        "correct": false
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "short_word",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "short_word",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "short_word",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "short_word",
+        "expected": "ja",
+        "predicted": "zh",
+        "correct": false
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "short_word",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "short_word",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "short_phrase",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "short_phrase",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "short_phrase",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "short_phrase",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "short_phrase",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "short_phrase",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "short_phrase",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "short_phrase",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "short_phrase",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "short_phrase",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "short_phrase",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "short_phrase",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "short_phrase",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "sentence",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "sentence",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "sentence",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "sentence",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "sentence",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "sentence",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "sentence",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "sentence",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "sentence",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "sentence",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "sentence",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "sentence",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "sentence",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "paragraph",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "paragraph",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "paragraph",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "paragraph",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "paragraph",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "paragraph",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "paragraph",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "paragraph",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "paragraph",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "paragraph",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "paragraph",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "paragraph",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "paragraph",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      }
+    ]
+  },
+  "whichlang": {
+    "by_tier": {
+      "paragraph": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "sentence": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "short_phrase": {
+        "total": 13,
+        "correct": 13,
+        "abstained": 0,
+        "accuracy": 1.0,
+        "coverage": 1.0,
+        "macro_precision": 1.0,
+        "macro_recall": 1.0,
+        "macro_f1": 1.0
+      },
+      "short_word": {
+        "total": 13,
+        "correct": 9,
+        "abstained": 0,
+        "accuracy": 0.6923076923076923,
+        "coverage": 1.0,
+        "macro_precision": 0.5641025641025641,
+        "macro_recall": 0.6923076923076923,
+        "macro_f1": 0.6216640502354788
+      }
+    },
+    "overall": {
+      "total": 52,
+      "correct": 48,
+      "abstained": 0,
+      "accuracy": 0.9230769230769231,
+      "coverage": 1.0,
+      "macro_precision": 0.9435897435897437,
+      "macro_recall": 0.9230769230769231,
+      "macro_f1": 0.933220625528318
+    },
+    "predictions": [
+      {
+        "iso639_1": "en",
+        "tier": "short_word",
+        "expected": "en",
+        "predicted": "fr",
+        "correct": false
+      },
+      {
+        "iso639_1": "es",
+        "tier": "short_word",
+        "expected": "es",
+        "predicted": "pt",
+        "correct": false
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "short_word",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "short_word",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "short_word",
+        "expected": "it",
+        "predicted": "fr",
+        "correct": false
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "short_word",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "short_word",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "short_word",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "short_word",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "short_word",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "short_word",
+        "expected": "ja",
+        "predicted": "zh",
+        "correct": false
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "short_word",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "short_word",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "short_phrase",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "short_phrase",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "short_phrase",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "short_phrase",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "short_phrase",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "short_phrase",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "short_phrase",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "short_phrase",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "short_phrase",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "short_phrase",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "short_phrase",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "short_phrase",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "short_phrase",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "sentence",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "sentence",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "sentence",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "sentence",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "sentence",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "sentence",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "sentence",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "sentence",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "sentence",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "sentence",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "sentence",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "sentence",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "sentence",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      },
+      {
+        "iso639_1": "en",
+        "tier": "paragraph",
+        "expected": "en",
+        "predicted": "en",
+        "correct": true
+      },
+      {
+        "iso639_1": "es",
+        "tier": "paragraph",
+        "expected": "es",
+        "predicted": "es",
+        "correct": true
+      },
+      {
+        "iso639_1": "fr",
+        "tier": "paragraph",
+        "expected": "fr",
+        "predicted": "fr",
+        "correct": true
+      },
+      {
+        "iso639_1": "de",
+        "tier": "paragraph",
+        "expected": "de",
+        "predicted": "de",
+        "correct": true
+      },
+      {
+        "iso639_1": "it",
+        "tier": "paragraph",
+        "expected": "it",
+        "predicted": "it",
+        "correct": true
+      },
+      {
+        "iso639_1": "pt",
+        "tier": "paragraph",
+        "expected": "pt",
+        "predicted": "pt",
+        "correct": true
+      },
+      {
+        "iso639_1": "nl",
+        "tier": "paragraph",
+        "expected": "nl",
+        "predicted": "nl",
+        "correct": true
+      },
+      {
+        "iso639_1": "ru",
+        "tier": "paragraph",
+        "expected": "ru",
+        "predicted": "ru",
+        "correct": true
+      },
+      {
+        "iso639_1": "hi",
+        "tier": "paragraph",
+        "expected": "hi",
+        "predicted": "hi",
+        "correct": true
+      },
+      {
+        "iso639_1": "vi",
+        "tier": "paragraph",
+        "expected": "vi",
+        "predicted": "vi",
+        "correct": true
+      },
+      {
+        "iso639_1": "ja",
+        "tier": "paragraph",
+        "expected": "ja",
+        "predicted": "ja",
+        "correct": true
+      },
+      {
+        "iso639_1": "zh",
+        "tier": "paragraph",
+        "expected": "zh",
+        "predicted": "zh",
+        "correct": true
+      },
+      {
+        "iso639_1": "sv",
+        "tier": "paragraph",
+        "expected": "sv",
+        "predicted": "sv",
+        "correct": true
+      }
+    ]
+  }
+}

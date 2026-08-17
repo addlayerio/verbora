@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["rust-competitors"]
+
+# Deliberately NOT part of the root Cargo.toml's [workspace] members. Every
+# real third-party competitor crate this audit benchmarks against (strsim,
+# rphonetic, rust-stemmers, whatlang, ...) is a dependency of THIS workspace
+# only — the published verbora-* crates' own Cargo.toml files must never grow
+# a dev-dependency on a rival implementation just because a benchmark exists
+# for it. See benchmarks/competitive/README.md.
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+panic = "unwind"
+
+# Same shape as the root workspace's [profile.bench] (debug symbols so
+# perf/samply can resolve frames) — kept identical deliberately, per the
+# spec's "COMPILER OPTIMIZATIONS" section: Verbora and every Rust competitor
+# in this workspace build under the exact same profile, not a tuned one.
+[profile.bench]
+inherits = "release"
+debug = true

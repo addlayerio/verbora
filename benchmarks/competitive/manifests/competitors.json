@@ -1,0 +1,500 @@
+{
+  "$comment": "Machine-readable mirror of docs/COMPETITIVE_BENCHMARKS.md's matrix, for whichever competitors have an actual pinned dependency in rust-competitors/Cargo.toml. This file only records competitors that are ACTUALLY benchmarked, not every candidate the research phase considered -- see docs/COMPETITIVE_BENCHMARKS.md for the full candidate list including rejected ones. Extend this file every time a new [[bench]] / competitor dependency is added, in the same commit.",
+  "competitors": [
+    {
+      "name": "strsim",
+      "language": "Rust",
+      "version": "0.11.1",
+      "repository": "https://github.com/rapidfuzz/strsim-rs",
+      "license": "MIT",
+      "modules": [
+        "distance"
+      ],
+      "notes": "Char-indexed (BMP-equivalent to Verbora's UTF-16-unit indexing). Sorensen-Dice deliberately not benchmarked: documented different variant (multiset, case-sensitive, no whitespace-collapse)."
+    },
+    {
+      "name": "rapidfuzz",
+      "language": "Rust",
+      "version": "0.5.0",
+      "repository": "https://github.com/rapidfuzz/rapidfuzz-rs",
+      "license": "MIT",
+      "modules": [
+        "distance"
+      ],
+      "notes": "Explicitly separates unrestricted damerau_levenshtein from restricted osa, matching Verbora's Options.restricted split. Does not implement Dice at all."
+    },
+    {
+      "name": "stringmetrics",
+      "language": "Rust",
+      "version": "2.2.2",
+      "repository": "https://github.com/pluots/stringmetrics",
+      "license": "Apache-2.0",
+      "modules": [
+        "distance"
+      ],
+      "notes": "Levenshtein and Hamming only (both matrix Yes). Its damerau_levenshtein is deliberately NOT benchmarked: read directly from stringmetrics-2.2.2/src/algorithms.rs and algorithms/damerau_impl.rs -- the `mod damerau;`/`pub use self::damerau::damerau_levenshtein;` lines are commented out (the whole module is excluded from compilation, not merely an internal stub reachable through the public API), and the file that would back it (damerau_impl.rs) is a two-line function that always `return 0`. Confirmed by reading the vendored source, not assumed from the matrix's own warning."
+    },
+    {
+      "name": "eddie",
+      "language": "Rust",
+      "version": "0.4.2",
+      "repository": "https://github.com/thaumant/eddie",
+      "license": "MIT",
+      "modules": [
+        "distance"
+      ],
+      "notes": "Jaro and Jaro-Winkler only (both matrix Yes). Struct-based API (Jaro::new()/JaroWinkler::new(), reused across calls exactly like strsim's/rapidfuzz's option structs) with internal reusable match-flag buffers. Crate abandoned since 2020 -- re-verified against Verbora on the shared ASCII pairs plus edge cases in tests/distance_correctness.rs per the matrix's own 're-verify against fresh vectors' flag. Two real divergences found and documented there, neither reachable by benches/distance.rs's own corpus (shortest pair is 4 characters, never empty, never length-1): (1) eddie's Jaro of two EMPTY strings is 1.0 (its own equality() test asserts this), Verbora's is 0.0 for either operand empty (crates/verbora-distance/src/jaro_winkler.rs's `if len1 == 0 || len2 == 0 { return 0.0; }`); (2) eddie's Jaro of two IDENTICAL single characters is 1.0 (textbook), Verbora's is 0.0 -- a documented, the reference-verified quirk of Verbora's own match_window formula (`max(len1,len2)/2 - 1 == -1` for length-1 input, closing the match window entirely; see jaro_winkler.rs's own single_char_ignore_case_exposes_the_prefix_quirk test), not a bug found in this pass, but newly connected to eddie's differing behavior here. THIRD, sharper finding this round: eddie's internal buffer code violates a `slice::get_unchecked_mut` safety precondition on ordinary input -- `eddie::Jaro::new().similarity(\"martha\", \"marhta\")`, the textbook example, not an edge case, ABORTS any debug-profile build on this workspace's pinned toolchain (rustc 1.97.1), whose standard library now runs these checks by default in debug mode (a capability added years after eddie's last 2020 publish). Does NOT reproduce in --release (checks compiled out, values numerically correct once past them) -- real, technically-out-of-spec unsafe usage, not an output-correctness bug. Independently reproduced in a standalone scratch crate. See docs/PERFORMANCE_GAPS.md entry 36, item 3, for the full writeup including why `cargo test --no-fail-fast` does not rescue other tests in the same binary (this is a process abort, not an ordinary failure)."
+    },
+    {
+      "name": "triple_accel",
+      "language": "Rust",
+      "version": "0.4.0",
+      "repository": "https://github.com/Daniel-Liu-c0deb0t/triple_accel",
+      "license": "MIT",
+      "modules": [
+        "distance"
+      ],
+      "notes": "Levenshtein, restricted-only Damerau (rdamerau -- matrix explicitly scopes this to the restricted_osa group, never unrestricted), Hamming, and fuzzy substring search (levenshtein_search), all matrix Selected cases/Partial. Byte-level (raw &[u8], not chars/UTF-16 units) SIMD-accelerated -- fair only on the shared ASCII-only pairs benches/distance.rs already restricts every byte-indexed row to. levenshtein_search returns a bounded-k (default ceil(needle.len()/2)) iterator of ALL matches, a different problem shape from Verbora's single best-match-plus-backtrace SearchResult -- a genuine structural difference documented in benches/distance.rs's own doc comment, not hidden."
+    },
+    {
+      "name": "editdistancek",
+      "language": "Rust",
+      "version": "1.0.2",
+      "repository": "https://github.com/nkkarpov/editdistancek",
+      "license": "MIT",
+      "modules": [
+        "distance"
+      ],
+      "notes": "Levenshtein only (matrix Selected cases): byte-level (&[u8]), fixed unit costs only, no Damerau variant -- same ASCII-only restriction as triple_accel above. edit_distance(s, t) wraps edit_distance_bounded(s, t, max(s.len(), t.len())), a Myers-style banded/diagonal algorithm."
+    },
+    {
+      "name": "rphonetic",
+      "language": "Rust",
+      "version": "3.0.6",
+      "repository": "https://github.com/Dalvany/rphonetic",
+      "license": "Apache-2.0",
+      "modules": [
+        "phonetics"
+      ],
+      "notes": "Only actively-maintained Rust crate covering Soundex, Metaphone, Double Metaphone and Daitch-Mokotoff Soundex from the canonical Apache commons-codec reference. Metaphone/DoubleMetaphone reconfigured to Some(32) (crate default is Some(4)) to match Verbora's real default. DaitchMokotoffSoundex benchmarked via Encoder::encode() (single-branch), never .soundex() (multi-branch, up to 8 codes) -- only encode() matches Verbora's single-String output shape. Throughput-only: every row is Partial, not Yes -- textbook/commons-codec algorithms vs. the reference's documented variants, byte-exact output never asserted."
+    },
+    {
+      "name": "trie-rs",
+      "language": "Rust",
+      "version": "0.4.2",
+      "repository": "https://github.com/laysakura/trie-rs",
+      "license": "MIT OR Apache-2.0",
+      "modules": [
+        "trie"
+      ],
+      "notes": "LOUDS-based, byte-keyed/byte-ordered (vs. Verbora's UTF-16-code-unit-keyed, reference for...in-ordered Trie). Highest download count of any candidate in the whole research pass. Benchmarked for generic insert/contains/prefix-enumeration throughput only -- exact_match maps to contains, predictive_search to keys_with_prefix, common_prefix_search to find_matches_on_path -- output/ordering equivalence never asserted; only set-equivalence, checked once in tests/trie_correctness.rs."
+    },
+    {
+      "name": "qp-trie",
+      "language": "Rust",
+      "version": "0.8.2",
+      "repository": "https://github.com/sdleffler/qp-trie-rs",
+      "license": "MPL-2.0",
+      "modules": [
+        "trie"
+      ],
+      "notes": "General ordered radix map (nybble-branching), weaker fit than trie-rs -- not purpose-built for text completion. Benchmarked for build/contains/predictive-enumeration only: it has no native operation answering 'which stored words are prefixes of this query', so it is excluded from the common_prefix_search group rather than approximated with bespoke glue code."
+    },
+    {
+      "name": "fast_radix_trie",
+      "language": "Rust",
+      "version": "1.2.0",
+      "repository": "https://github.com/bluecatengineering/fast_radix_trie",
+      "license": "MIT",
+      "modules": [
+        "trie"
+      ],
+      "notes": "Path-compressed radix map (GenericRadixMap), created 2025-10-30 and actively updated. Uses unsafe internally: dynamically-sized nodes packed into one raw-pointer-addressed allocation sized exactly for their child count, tested with miri per its own docs -- this benchmarking workspace is not bound by the main workspace's unsafe_code = 'deny' policy, but verbora-trie has zero unsafe anywhere, a real architectural difference behind any timing gap. Benchmarked and verified (tests/trie_correctness.rs, order-blind BTreeSet equality): a genuine split, not a one-sided result -- Verbora wins build (1.35x-1.54x) and contains (1.07x-1.18x), Verbora loses predictive_search (1.64x-2.19x, the operation path compression specifically targets, by reducing node-hop count during prefix enumeration). Distinct crate from the previously-investigated-and-rejected `radix_trie` (michaelsproul, different publisher/codebase, dismissed for likely-transitive download traffic) -- not a naming collision. See docs/PERFORMANCE_GAPS.md entry 32 and docs/COMPETITIVE_BENCHMARKS.md §1.18's 'Architectural decision' note (a compressed frozen query representation for verbora-trie is plausible future work, not adopted this round)."
+    },
+    {
+      "name": "fst",
+      "language": "Rust",
+      "version": "0.4.7",
+      "repository": "https://github.com/BurntSushi/fst",
+      "license": "MIT OR Unlicense",
+      "modules": [
+        "trie",
+        "spellcheck"
+      ],
+      "notes": "Andrew Gallant's finite-state-transducer crate, added per benchmark.md's 'FST -- SPECIALIZED FROZEN COMPETITOR' directive. Architecturally not a trie or a BK-tree: built once from lexicographically sorted input via a streaming SetBuilder, queried through a Streamer API, never mutated again. Two distinct, unrelated comparisons: (1) vs. verbora-trie for build/contains/predictive_search -- Verbora wins every operation measured (build 2.09x-4.49x, contains 1.50x-1.63x, predictive_search 1.21x-1.61x; build's sort+dedup requirement is included inside the timed closure, a real disclosed asymmetry -- see docs/PERFORMANCE_GAPS.md entry 33); (2) vs. verbora-spellcheck::FuzzyIndex for Levenshtein-automaton fuzzy candidate lookup, via the `levenshtein` Cargo feature (off by default upstream; harper-core below composes plain fst with the SEPARATE levenshtein_automata crate instead, not this feature) -- a genuine double crossover, FuzzyIndex winning small/mid-size corpora and query volumes, fst overtaking at scale on both construction (from n=1,000) and query (from n=20,000) -- see docs/PERFORMANCE_GAPS.md entry 37. Correctness for both: tests/trie_correctness.rs and tests/fst_fuzzy_correctness.rs (BTreeSet-equality, NARROWED_EXACT on ASCII/BMP input). Found two independently-confirmed real defects while re-verifying: fst's Levenshtein automaton silently returns incomplete results for same-byte-length multi-byte UTF-8 substitutions (matches the still-open upstream https://github.com/BurntSushi/fst/issues/38, opened 2017); Levenshtein::new errors past a default 10,000-DFA-state budget, a real hard failure mode FuzzyIndex has no equivalent of. See docs/PERFORMANCE_GAPS.md entry 36 item 2."
+    },
+    {
+      "name": "tantivy",
+      "language": "Rust",
+      "version": "0.26.1",
+      "repository": "https://github.com/quickwit-oss/tantivy",
+      "license": "MIT",
+      "modules": [
+        "tokenizers"
+      ],
+      "notes": "Tokenization-layer overlap only, per the spec's TANTIVY POLICY (built with default-features=false, no indexing/query machinery). WhitespaceTokenizer benchmarked against Verbora's RegexpTokenizer(\\s+) (whitespace_tokenization group); SimpleTokenizer against WordTokenizer (word_tokenization group). Both are Partial, not Yes: WhitespaceTokenizer scans is_ascii_whitespace() (narrower than the matrix's original char::is_whitespace() note -- corrected after reading tantivy-0.26.1/src/tokenizer/whitespace_tokenizer.rs directly), SimpleTokenizer's is_alphanumeric() is a wider Unicode class than Verbora's ASCII+Cyrillic WordClass. Input narrowed to punctuation-free, single-ASCII-space-joined lowercase words (benches/data/words.json) -- the domain where all divergences are unreachable, proven by tests/tokenizers_correctness.rs before any timing was trusted."
+    },
+    {
+      "name": "tokenizers",
+      "language": "Rust",
+      "version": "0.23.1",
+      "repository": "https://github.com/huggingface/tokenizers",
+      "license": "Apache-2.0",
+      "modules": [
+        "tokenizers"
+      ],
+      "notes": "Only the standalone WhitespaceSplit/Whitespace pre-tokenizer components, called via PreTokenizer::pre_tokenize on a fresh PreTokenizedString -- never Tokenizer::encode's full BPE/WordPiece pipeline (categorically more work: model lookup, merges, vocabulary). Built with default-features=false, features=['onig'] (one of onig/fancy-regex is a hard compile-time requirement for the model-layer regex splitter neither pre-tokenizer used here touches). WhitespaceSplit (char::is_whitespace) benchmarked against whitespace_tokenization; Whitespace (pattern \\w+|[^\\w\\s]+) against word_tokenization. Same narrowed punctuation-free ASCII-word input domain as tantivy, same tests/tokenizers_correctness.rs proof. Slower than Verbora on both rows at every size measured -- see docs/PERFORMANCE.md's Tokenizers section, not a loss for Verbora."
+    },
+    {
+      "name": "unicode-segmentation",
+      "language": "Rust",
+      "version": "1.13.3",
+      "repository": "https://github.com/unicode-rs/unicode-segmentation",
+      "license": "MIT OR Apache-2.0",
+      "modules": [
+        "tokenizers"
+      ],
+      "notes": "Wired in this audit round (was selected in docs/COMPETITIVE_BENCHMARKS.md's original matrix but never added to Cargo.toml/benchmarked). UAX#29-conformant word/sentence boundary algorithm, a genuinely different definition than Verbora's fixed regex/scanner classes -- three matrix rows, all Partial: (1) unicode_words()/split_word_bounds() vs. WordTokenizer (word_tokenization_unicode_segmentation group) -- split_word_bounds() yields every run including whitespace, filtered to non-whitespace spans for a fair word-count comparison; (2) unicode_words() vs. AggressiveTokenizer's English variant only (aggressive_tokenization_en group); (3) unicode_sentences()/split_sentence_bounds() vs. SentenceTokenizer (sentence_tokenization group) -- 'Yes' on the matrix, the strongest-equivalence row of the three. All three benchmarked on narrowed input domains (punctuation-free ASCII words for the word-boundary rows, plain declarative sentences for the sentence row) where tests/tokenizers_correctness.rs proves exact agreement (sentence row: after trimming unicode-segmentation's trailing-whitespace-attached spans, a documented formatting convention, not a boundary disagreement) before any timing was trusted. Verbora wins at 4 and 32 sentences (1.24x-1.31x) and loses, by a widening margin, at 256 and 2048 sentences (1.15x-3.40x slower) -- crossover between 32 and 256 sentences -- see docs/PERFORMANCE_GAPS.md entry 23."
+    },
+    {
+      "name": "segtok",
+      "language": "Rust",
+      "version": "0.1.5",
+      "repository": "https://github.com/xamgore/segtok",
+      "license": "MIT (crates.io) -- GitHub's own license detector finds no LICENSE file present, an unresolved inconsistency flagged in docs/COMPETITIVE_BENCHMARKS.md, not silently assumed",
+      "modules": [
+        "tokenizers"
+      ],
+      "notes": "Wired in this audit round (was selected but never benchmarked). Rule-based, orthographic-feature sentence(+word) segmenter, Rust port of the (unmaintained) Python segtok package -- matrix Selected cases for SentenceTokenizer (sentence_tokenization group), benchmarked via segmenter::split_single with SegmentConfig::default(). Adoption signal is explicitly ambiguous: 452K/90d crates.io downloads but only 2 GitHub stars, most plausibly mostly-transitive use rather than direct adoption -- flagged here and in benches/tokenizers.rs's own doc comment, not hidden. Both segtok and Verbora trim() each returned sentence internally (confirmed by reading segtok-0.1.5/src/segmenter/mod.rs directly), so no formatting normalization is needed to compare it against Verbora, unlike unicode-segmentation's two APIs. Verbora beats segtok by a wide margin at every size measured (5.9x-24.0x, non-monotonic, narrowest at the largest size) -- see docs/PERFORMANCE.md's Tokenizers section."
+    },
+    {
+      "name": "whatlang",
+      "language": "Rust",
+      "version": "0.18.0",
+      "repository": "https://github.com/greyblake/whatlang-rs",
+      "license": "MIT",
+      "modules": [
+        "language-detection",
+        "script-detection"
+      ],
+      "notes": "The literal engine Verbora's own WhatlangDetector wraps -- the language-detection benchmark group (whatlang_wrapper_overhead) isolates wrapper overhead ONLY, never reported as a rival algorithm. detect_script (a separate, standalone public fn in the same crate) IS a genuine algorithmic-complexity comparison: linear scan of up to 25 script predicates per codepoint vs. Verbora's one match per codepoint. Also the underlying implementation of the 'Verbora' row in the language-detection accuracy report (examples/language_accuracy.rs), since WhatlangDetector::detect's answer IS whatlang's answer."
+    },
+    {
+      "name": "lingua",
+      "language": "Rust",
+      "version": "1.8.0",
+      "repository": "https://github.com/pemistahl/lingua-rs",
+      "license": "Apache-2.0",
+      "modules": [
+        "language-detection"
+      ],
+      "notes": "Genuinely different algorithm: rule-based alphabet pre-filter + 1-5-gram statistical model (vs. whatlang's trigram-only model). Built with default-features=false and only the 21 per-language-model features matching Verbora's Language::ALL minus Galician (lingua has no Galician variant at all) -- NEVER benchmarked in its default 75-language configuration, per the spec's own '5 idiomas vs 75' fairness rule. detect_language_of() takes its input by value (allocates an owned String per call) -- real API cost, included as-is, not special-cased away."
+    },
+    {
+      "name": "whichlang",
+      "language": "Rust",
+      "version": "0.1.1",
+      "repository": "https://github.com/quickwit-oss/whichlang",
+      "license": "MIT",
+      "modules": [
+        "language-detection"
+      ],
+      "notes": "Hashed n-gram linear model, zero dependencies. Only 13 of Verbora's 22 languages overlap (verified from src/weights.rs) -- the language-accuracy dataset is restricted to exactly this 13-language triple overlap with whatlang/lingua so all three detectors are scored on identical answer classes. Cannot abstain: detect_language() always returns a concrete Lang (defaults to Eng on zero extracted features) -- the accuracy report tracks 'coverage' separately from accuracy for exactly this reason, since whichlang's coverage is 100% by construction, not by confidence."
+    },
+    {
+      "name": "wana_kana",
+      "language": "Rust",
+      "version": "5.0.0",
+      "repository": "https://github.com/PSeitz/wana_kana_rust",
+      "license": "MIT",
+      "modules": [
+        "transliteration"
+      ],
+      "notes": "Kana<->romaji<->kana conversion utility. Uses a doubled-vowel romanization convention ('suupaa') vs. Verbora/the reference's modified-Hepburn macrons ('supa-' -> 'sūpā') -- verified genuinely different in tests/transliteration_convention_diff.rs, not merely asserted. Benchmarked for THROUGHPUT ONLY on identical kana input via to_romaji(); output values are never compared for correctness."
+    },
+    {
+      "name": "rust-stemmers",
+      "language": "Rust",
+      "version": "1.2.0",
+      "repository": "https://github.com/CurrySoftware/rust-stemmers",
+      "license": "MIT/BSD-3-Clause",
+      "modules": [
+        "stemmers"
+      ],
+      "notes": "Snowball-to-Rust-compiler output. Byte-exact agreement verified in tests/stemmers_correctness.rs for the 9 shared canonical-Snowball languages (de es fr it nl no pt sv, and ru outside words containing the letter 'yo' which Verbora folds pre-stem and rust-stemmers does not -- a real, documented divergence outside the Snowball spec's own scope, not a bug). NOT used for English: its 'English' algorithm is Snowball Porter2, a different algorithm from Verbora's original-1980 Porter (matrix row marked No) -- see nltk-porter below instead. NOT used for CarryStemmerFr: confirmed by direct comparison to be standard Snowball French, not the Carry variant. Dutch benchmarked with a fresh Verbora instance per word (not reused across a batch) because PorterStemmerNl carries sticky cross-call state rust-stemmers has no equivalent of -- see benches/stemmers.rs's own doc comment."
+    },
+    {
+      "name": "snowball_stemmers_rs",
+      "language": "Rust",
+      "version": "1.0.1",
+      "repository": "https://github.com/SeekStorm/snowball-stemmers-rs",
+      "license": "MIT",
+      "modules": [
+        "stemmers"
+      ],
+      "notes": "A SECOND, independent Snowball-family competitor alongside rust-stemmers above, covering all 9 shared canonical-Snowball languages. Brand-new (created 2026-03-09, 2 releases at pinning time -- a real, disclosed maturity/adoption caveat), published by Wolf Garbe (the original SymSpell author) under the SeekStorm org. Per-language correctness checked empirically, not assumed: 7 languages (de es fr it no pt sv) agree 100% byte-exact with no exclusions; ru agrees 100% INCLUDING words containing 'yo' -- this crate's russian.sbl carries the same fold Verbora's port does, rust-stemmers does not, a genuine positive finding stronger than the existing rust-stemmers row; nl requires Algorithm::DutchPorter specifically -- the plainly-named Algorithm::Dutch is actually Kraaij-Pohlmann, a different, non-canonical stemmer that disagrees with both Verbora and rust-stemmers on most words (confirmed by reading the crate's own algorithm list, not assumed from the name). Per-language results at n=1024 (no averaging, per benchmark.md's own directive): Verbora wins German only (1.32x faster) and loses the other 8, most by 2x-8x (es 7.08x, fr 3.02x, it 2.93x, no 6.89x, pt 6.96x, ru 7.24x, sv 6.26x slower); Dutch is a genuine split -- Verbora beats rust-stemmers (2.93x) but loses to this crate (1.38x slower). Root cause, source-confirmed: Verbora's suffix matching is a linear scan (ported from the reference reference's regex alternation), both rust-stemmers and this crate are compiled by the official Snowball-to-Rust compiler's shared find_among/find_among_b runtime, a binary search over a sorted table -- explains 7 of 9 losses with one mechanism. See docs/PERFORMANCE_GAPS.md entry 34."
+    },
+    {
+      "name": "nltk-porter",
+      "language": "Rust",
+      "version": "0.1.0",
+      "repository": "https://github.com/VoiceLessQ/nltk-porter",
+      "license": "Apache-2.0",
+      "modules": [
+        "stemmers"
+      ],
+      "notes": "Faithful port of NLTK's PorterStemmer(ORIGINAL_ALGORITHM), run here in Mode::Original -- the matrix's 'closer algorithmic match, but brand-new/unproven' alternative to rust-stemmers for English specifically. Verified in tests/stemmers_correctness.rs: 64/64 agreement with Verbora's PorterStemmer on a realistic English word list plus five inputs chosen to trigger Verbora's own documented Porter quirks (measure-as-float, no-early-exit rule application, empty-string-falsy) -- real, not exhaustive, evidence resolving the matrix's 'unverified pre-benchmark' caveat for the benchmarked corpus."
+    },
+    {
+      "name": "porter-stemmer",
+      "language": "Rust",
+      "version": "0.1.2",
+      "repository": "https://github.com/samgiles/porter-stemmer",
+      "license": "MPL-2.0",
+      "modules": [
+        "stemmers"
+      ],
+      "notes": "Real original-1980-Porter algorithm on grapheme clusters (unicode_segmentation), a second real Rust alternative to rust-stemmers for English, benchmarked alongside nltk-porter in the same porter_en group. Verified in tests/stemmers_correctness.rs: 63/64 agreement with Verbora plus all five documented Porter-quirk inputs -- the grapheme-cluster-vs-UTF-16 architecture question the matrix flagged does not manifest on this plain-ASCII corpus. The one mismatch ('sky' -> 'ski') is a real, isolated bug in this crate (both Verbora and nltk-porter agree 'sky' is unchanged), excluded from the benchmarked sample. Verbora LOSES on both time (1.6x-5.0x slower at batch sizes >=16) and allocation count (1571 vs 493 over the 63-word list) -- see docs/PERFORMANCE_GAPS.md entry 24."
+    },
+    {
+      "name": "lindera-analysis",
+      "language": "Rust",
+      "version": "5.2.0",
+      "repository": "https://github.com/lindera/lindera",
+      "license": "MIT",
+      "modules": [
+        "stemmers"
+      ],
+      "notes": "Carries JapaneseKatakanaStemTokenFilter at real version 5.2.0. Package-name correction found during implementation: the matrix named 'lindera-filter', but that package's own last release is 0.32.3 (2025-03-18), predating Lindera's 5.x rewrite which folded token/character filters into this lindera-analysis crate instead -- confirmed by reading both crates' published source. Also requires lindera=5.2.0 (embed-ipadic feature, for a real Dictionary reference Token structurally needs but the filter itself never reads) and lindera-dictionary=5.2.0 (for LexType/WordId). Benchmarked with min=3 (the filter's own default), verified in tests/stemmers_correctness.rs to reproduce StemmerJa's >=4-UTF-16-unit threshold exactly, as an isolated filter call on manually pre-tokenized Tokens only, never through Lindera's own tokenizer/dictionary pipeline. Verbora wins decisively on both time (~13x-15x) and allocations (0 vs 6 over the 7-word list)."
+    },
+    {
+      "name": "sastrawi",
+      "language": "Rust",
+      "version": "0.1.1",
+      "repository": "https://github.com/idevoid/rust-sastrawi",
+      "license": "MIT",
+      "modules": [
+        "stemmers"
+      ],
+      "notes": "Genuine shared PHP-Sastrawi lineage with Verbora's own StemmerId port -- confirmed directly: both dictionaries hold exactly 29,932 root words. Verified in tests/stemmers_correctness.rs: the real correctness pass the matrix's own dossier flagged as never having been performed, finding two genuine algorithmic gaps vs. the shared reference -- no hyphenated-reduplication/compound-plural handling at all, and only a single (not iterated-up-to-3x) prefix-stripping pass. 13 of 16 benchmarked words agree byte-for-byte; the three exercising those gaps are excluded from the benchmarked sample. Verbora LOSES decisively on time (sastrawi ~3.6x-6.8x faster at every batch size) despite a mixed memory picture (fewer allocations but more bytes) -- see docs/PERFORMANCE_GAPS.md entry 25. sastrawi's own one-time Dictionary::new()+Stemmer::new() construction cost (~47K allocations, ~21 MB) is real but paid once; Verbora's StemmerId::new() is a zero-sized unit struct backed by compiled-in static data, needing no runtime construction at all."
+    },
+    {
+      "name": "diacritics",
+      "language": "Rust",
+      "version": "0.2.2",
+      "repository": "https://github.com/YesSeri/diacritics",
+      "license": "GPL-3.0",
+      "modules": [
+        "normalizers"
+      ],
+      "notes": "Case-preserving, non-decomposing per-character table lookup for Latin diacritic folding -- the matrix's closest semantic match to Verbora's remove_diacritics. Verified in tests/normalizers_correctness.rs to agree on ASCII rejection, precomposed accented Latin, the oe/OE ligature fold, ss/SS-avoiding ss-fold (beta->s, capital-sharp-s->S), the documented long-s->l bug, the dotted/dotless Turkish I fold, and Cyrillic rejection. One real divergence found: it silently strips standalone Unicode combining marks (U+0300-U+036F and two extension blocks) that Verbora, which never decomposes, leaves untouched -- benches/normalizers.rs's benchmarked domain (precomposed text only, no bare combining marks) never triggers it."
+    },
+    {
+      "name": "unicode-jp",
+      "language": "Rust",
+      "version": "0.4.0",
+      "repository": "https://github.com/gemmarx/unicode-jp-rs",
+      "license": "MIT",
+      "modules": [
+        "normalizers"
+      ],
+      "notes": "Matrix: Selected cases -- covers only 2 of normalize_ja's 17 conversions (its own published `[lib] name` is `kana`, imported as `kana::` here, not `unicode_jp::`). `hira2kata`/`kata2hira` are a bare codepoint shift with none of Verbora's `hiragana_to_katakana`/`katakana_to_hiragana` extra stages (halfwidth-katakana folding, small-tsu-before-n-row and standalone-voiced-mark phonetic fixes). Verified byte-exact in tests/normalizers_correctness.rs on pure hiragana/katakana input (the Iroha pangram) with neither halfwidth characters nor a small tsu before an n-row consonant; two real divergences (small-tsu fix, halfwidth folding) confirmed explicitly and excluded from the benchmarked domain."
+    },
+    {
+      "name": "kana-converter",
+      "language": "Rust",
+      "version": "0.1.2",
+      "repository": "https://github.com/kitsuneninetails/kana-converter",
+      "license": "MIT",
+      "modules": [
+        "normalizers"
+      ],
+      "notes": "Matrix: Selected cases -- a single-purpose halfwidth-kana/ASCII-to-fullwidth converter, narrower than unicode-jp. `to_double_byte(_, KanaOnly)` composes a halfwidth katakana base with a following voiced/semi-voiced mark by adding a raw +1/+2 codepoint offset, with no table of which pairs are real (unlike Verbora's katakana_hf, a literal two-character-key lookup) -- that arithmetic happens to land correctly for the ordinary gojuon rows (Unicode groups them adjacently) but not for wo/wa + dakuten (whose real voiced forms were added non-adjacently) or an orphan mark with no valid preceding base, and it additionally folds halfwidth CJK punctuation/space, a job Verbora keeps in a separate function. All three divergences verified in tests/normalizers_correctness.rs and excluded from the benchmarked domain (valid dakuten pairs only, no punctuation, no space, no orphan marks, no wo/wa + dakuten)."
+    },
+    {
+      "name": "ordinal",
+      "language": "Rust",
+      "version": "0.4.0",
+      "repository": "https://github.com/heaths/ordinal-rs",
+      "license": "MPL-2.0",
+      "modules": [
+        "inflectors"
+      ],
+      "notes": "The matrix's single full-equivalence (Yes) row in the whole Inflectors group for CountInflector::nth. Two real divergences found and verified in tests/inflectors_correctness.rs, both excluded from the benchmarked domain rather than hidden: (1) negative integers -- ordinal takes the absolute value before choosing a suffix, Verbora reproduces the reference's signed '%' so every negative number outside the 11/12/13 coincidence gets 'th' where ordinal gives st/nd/rd; (2) a genuine bug in ordinal 0.4.0 itself, found during this verification pass and not in the matrix's original dossier -- its teens-exception check uses `n % 20` instead of `n % 100`, misformatting 120 of every 1000 (12%) non-negative integers (e.g. 31 -> '31th' instead of '31st'). benches/inflectors.rs's fixed sample set was chosen before this bug was found and, verified by test, happens to avoid every affected value."
+    },
+    {
+      "name": "pluralizer",
+      "language": "Rust",
+      "version": "0.5.0",
+      "repository": "https://github.com/KennethGomez/pluralizer",
+      "license": "MIT",
+      "modules": [
+        "inflectors"
+      ],
+      "notes": "Matrix: Partial for NounInflector -- same regex-suffix-rule-chain-plus-irregulars strategy as Verbora's port, but an independently maintained rule table that genuinely disagrees on contested irregulars (e.g. octopus -> octopuses here vs. Verbora's octopi). Benchmarked only over a verified-agreeing 73-word (singular, plural) list -- probed a much larger candidate set spanning every rule class in crates/verbora-inflectors/src/data.rs and kept only the words where pluralize AND singularize both agree with Verbora, per tests/inflectors_correctness.rs's benchmarked_pairs_agree_across_all_three_implementations."
+    },
+    {
+      "name": "Inflector",
+      "language": "Rust",
+      "version": "0.11.4",
+      "repository": "https://github.com/whatisinternet/inflector",
+      "license": "BSD-2-Clause",
+      "modules": [
+        "inflectors"
+      ],
+      "notes": "Matrix: Partial for NounInflector (string::pluralize/singularize) and CountInflector (numbers::ordinalize::ordinalize) -- its own published `[lib] name` is `inflector` (lowercase), imported as `inflector::` here, not `Inflector::`. NounInflector: same verified-agreeing 73-word domain as pluralizer above; on the headline octopus divergence, Inflector's own forward rule table happens to list the `octop` prefix, so it agrees with Verbora there (octopi) while pluralizer does not -- a genuine three-way split confirmed in tests/inflectors_correctness.rs. CountInflector: ordinalize operates on the decimal string directly (no remainder computed at all), and was found during this pass to fully agree with CountInflector::nth_str over every non-negative i64 in 0..2_000_000, exhaustively checked -- a cleaner result than the ordinal crate's own real % 20/% 100 bug (see that entry above). Shares ordinal's negative-integer divergence (reference signed % vs. absolute value)."
+    },
+    {
+      "name": "postagger",
+      "language": "Rust",
+      "version": "0.0.3",
+      "repository": "https://github.com/shubham0204/postagger.rs",
+      "license": "Apache-2.0",
+      "modules": [
+        "pos-tagging"
+      ],
+      "notes": "Pretrained averaged-perceptron POS tagger (NLTK weights), ready to use out of the box -- a different algorithm class from Verbora's Brill transformation-rule tagger (matrix: Partial). Pretrained weights.json/classes.txt/tags.json are not published on crates.io; fetched from the GitHub repository by scripts/fetch-models.sh (Apache-2.0, same as the crate). Cold-start (PerceptronTagger::new, ~5.6 MB weights.json parse) and steady-state per-sentence tagging measured and reported separately in benches/pos_tagging.rs, never blended into one number."
+    },
+    {
+      "name": "rust-bert",
+      "language": "Rust",
+      "version": "0.23.0",
+      "repository": "https://github.com/guillaume-be/rust-bert",
+      "license": "Apache-2.0",
+      "modules": [
+        "pos-tagging"
+      ],
+      "notes": "POSModel: MobileBERT transformer forward pass, by far the most widely adopted general Rust NLP crate found in the whole audit (matrix: Partial, selected cases) -- a categorically different technique from Verbora's rule table. Built with default-features=false, features=['download-libtorch']: the crate's default 'remote' feature pulls cached-path -> indicatif 0.16.2, whose unconstrained `console = \">=0.9.1, <1.0.0\"` dependency resolves to console 0.16.4, which removed the `std` feature from its own defaults and no longer compiles (confirmed by attempting the build with 'remote' enabled and reading the resulting E0432 errors -- a real upstream breakage, not a convenience workaround). The MobileBERT checkpoint (mrm8488/mobilebert-finetuned-pos, MIT) is fetched by scripts/fetch-models.sh and loaded via rust_bert::resources::LocalResource, which needs no 'remote' feature. Cold-start (~94 MB checkpoint load into a VarStore) and steady-state per-sentence/per-batch latency measured and reported separately in benches/pos_tagging.rs."
+    },
+    {
+      "name": "symspell",
+      "language": "Rust",
+      "version": "0.5.2",
+      "repository": "https://github.com/reneklacan/symspell",
+      "license": "MIT",
+      "modules": [
+        "spellcheck"
+      ],
+      "notes": "Same lookup(word, Verbosity, max_edit_distance) task shape as Verbora's get_corrections; different algorithm (delete-precomputation, O(1)-average lookup vs. Verbora's combinatorial edit generation) -- matrix: Partial. Loaded with the exact same benches/data/words.json corpus and per-word frequencies as Verbora (matrix's 'same frequency dictionary' instruction), same max_distance per call. Verbosity::All used (accumulates every distance level up to max_distance, matching Spellcheck::corrections_over's own depth-by-depth accumulation) rather than Verbosity::Closest."
+    },
+    {
+      "name": "harper-core",
+      "language": "Rust",
+      "version": "2.8.0",
+      "repository": "https://github.com/Automattic/harper",
+      "license": "Apache-2.0",
+      "modules": [
+        "spellcheck"
+      ],
+      "notes": "By far the most widely adopted/actively maintained standalone spellchecking crate found in the whole audit (matrix: Partial). Built with default-features=false (drops the crate's default 'thesaurus' feature -- harper-thesaurus, irrelevant to spellchecking and a very heavy transitive dependency (the `burn` ML tensor framework) that has no bearing on this benchmark). spell::FstDictionary::new accepts an arbitrary word list, so it is loaded with Verbora's own words.json corpus (the matrix's 'load a comparable dictionary' branch) rather than FstDictionary::curated(); Dictionary::fuzzy_match_str is the closest analogue to get_corrections."
+    },
+    {
+      "name": "fast_symspell",
+      "language": "Rust",
+      "version": "0.1.10",
+      "repository": "unregistered on crates.io -- read via cargo's registry-cache tarball, source confirmed real and readable",
+      "license": "MIT",
+      "modules": [
+        "spellcheck"
+      ],
+      "notes": "A SECOND SymSpell-family implementation alongside `symspell` above -- confirmed by reading source directly to be a near-verbatim fork of symspell 0.5.2's own SymSpell::lookup/create_dictionary_entry/edits_prefix, line-for-line, not merely 'SymSpell-family' by name. Three real deltas: ahash::RandomState replaces DefaultHasher; triple_accel::levenshtein::rdamerau_exp (SIMD) replaces strsim::damerau_levenshtein for post-lookup verification (carries a real, independently-confirmed bug -- see triple_accel's own entry above); rkyv Archive/Serialize derives add a second, zero-copy archived-load construction path. VERDICT OVERTURNED this round: docs/COMPETITIVE_BENCHMARKS.md previously carried No/No ('no repository URL -- unverifiable provenance; download curve consistent with abandonment'). Both claims re-checked directly: crates.io always hosts the raw source tarball regardless of repository metadata (confirmed readable); the download curve is genuinely low (22,760 total, 129/90-day) but a real steady 1-9/day spread across the whole window, not a cliff to zero -- 'stale development' (no release since 2025-01-17), not the 'abandonment' the prior verdict claimed. Now Partial/Yes, same classification symspell itself carries. Benchmarked and verified (tests/spellcheck_fast_symspell_correctness.rs, 5 tests before any timing trusted): construction -- Verbora wins decisively, 25x-34x faster, widening with corpus size (a delete-precomputation index is inherently more expensive to build as corpus/max_distance grow). get_corrections at distance 1 -- fast_symspell wins, 26x-31x faster, both flat with size. At distance 2 -- fast_symspell wins by a dramatically wider margin, 1,686x-2,769x, the sharpest one-sided result in this whole document. Loading a pre-built rkyv archive is ~36.8 million times faster than build_from_scratch. Also compared directly against verbora-spellcheck::FuzzyIndex (Verbora's own BK-tree extension, a different data structure answering the same question): FuzzyIndex wins construction (1.72x-9.91x, narrowing with size), fast_symspell wins query with a margin widening sharply from 2.15x (n=100) to 66.7x (n=20,000). See docs/PERFORMANCE_GAPS.md entry 35 and docs/COMPETITIVE_BENCHMARKS.md §1.17's 'Architectural decision' note (a second, deletion-index-backed spellcheck structure alongside FuzzyIndex is the evidence-based recommendation, not implemented this round)."
+    },
+    {
+      "name": "spellbook",
+      "language": "Rust",
+      "version": "0.4.2",
+      "repository": "https://github.com/helix-editor/spellbook",
+      "license": "MPL-2.0",
+      "modules": [
+        "spellcheck"
+      ],
+      "notes": "Hunspell affix-rule + morphological correction (matrix: Partial, selected cases) -- a meaningfully different mechanism whose .aff/.dic format cannot represent Verbora's flat frequency corpus. Per the matrix, benchmarked as a matched-workload TIMING comparison only, on a real en_US Hunspell dictionary (LibreOffice's SCOWL-derived en_US, permissive 'use/copy/modify/distribute' notice) fetched by scripts/fetch-models.sh -- never Verbora's own corpus, and never presented as an output-equivalence comparison."
+    },
+    {
+      "name": "tfidf",
+      "language": "Rust",
+      "version": "0.3.0",
+      "repository": "https://github.com/afshinm/tf-idf",
+      "license": "MIT",
+      "modules": [
+        "tfidf"
+      ],
+      "notes": "Closest architectural match of any Rust TF-IDF crate found (stateful struct, .add()/.idf()/.tf()/.tfidf() -- matrix: Partial). Genuinely different weighting: idf = log10(N/df) unsmoothed vs. Verbora's 1 + ln(N/(1+df)) smoothed. Build/query SPEED comparison only, never output values. Imported under its own published name `tfidf`; renamed on the `rust-tfidf` side below to avoid an `E0464` crate-name collision (both crates' own `[lib] name` is `tfidf`)."
+    },
+    {
+      "name": "rust-tfidf",
+      "language": "Rust",
+      "version": "1.1.1",
+      "repository": "https://github.com/ferristseng/rust-tfidf",
+      "license": "MIT OR Apache-2.0",
+      "modules": [
+        "tfidf"
+      ],
+      "notes": "Stateless trait-based scoring over a caller-supplied, already-vectorized Vec<(&str, usize)> document -- no ingestion/add step exists at all (matrix confirms), so this crate is benchmarked for query only, never build. Imported as `rust_tfidf` (Cargo `package =` rename) since its own `[lib] name` is `tfidf`, colliding with the `tfidf` (afshinm) crate above."
+    },
+    {
+      "name": "smartcore",
+      "language": "Rust",
+      "version": "0.6.5",
+      "repository": "https://github.com/smartcorelib/smartcore",
+      "license": "Apache-2.0",
+      "modules": [
+        "classifiers"
+      ],
+      "notes": "naive_bayes::multinomial::MultinomialNB (matrix: Partial, selected cases) -- most widely adopted/actively maintained general Rust ML crate found in the whole audit. Operates on a pre-built dense DenseMatrix<u32> count matrix, not raw text; benchmarked with an explicit tokenize+vectorize adapter run INSIDE the timed region (see benches/classifiers.rs's own doc comment) to match the same raw-text-in/trained-model-out boundary Verbora's own add_document+train() times. ALSO: linear::logistic_regression::LogisticRegression (matrix: Partial, selected cases) -- multiclass softmax via LBFGS (argmin-family), same DenseMatrix adapter reused as f64 instead of u32 (LogisticRegression's TX bound requires FloatNumber). Verbora wins TIME at every tested size (4/8/16 docs, 1.6x-5.4x faster, margin narrowing) but loses gross-allocation-count memory 2.0x at 16 docs -- see docs/PERFORMANCE_GAPS.md entries 21 (TIME) and 22 (MEMORY)."
+    },
+    {
+      "name": "linfa-bayes",
+      "language": "Rust",
+      "version": "0.8.1",
+      "repository": "https://github.com/rust-ml/linfa",
+      "license": "MIT OR Apache-2.0",
+      "modules": [
+        "classifiers"
+      ],
+      "notes": "MultinomialNb (matrix: Partial, selected cases) -- second major Rust ML framework, included per the spec's 'do not limit to one rival' instruction. Same pre-built-dense-matrix situation and adapter as smartcore above. Its own published 0.8.1 source contains a leftover `dbg!` call in `multinomial_nb.rs`'s `fit_with` that writes to stderr once per class on every .fit() call -- confirmed by reading the crate source directly; left in (not patched around) since it is what a normal caller of the published crate actually experiences."
+    },
+    {
+      "name": "naivebayes",
+      "language": "Rust",
+      "version": "0.1.2",
+      "repository": "https://gitlab.com/ruivieira/naive-bayes",
+      "license": "Apache-2.0",
+      "modules": [
+        "classifiers"
+      ],
+      "notes": "NaiveBayes::train/classify (matrix: Partial, selected cases) -- pre-tokenized Vec<String> input (this crate's own benches/classifiers.rs `tokenize`, same whitespace-split-and-lowercase as the smartcore/linfa-bayes Vocab adapter, so all three Naive Bayes competitors do the identical amount of preprocessing). Smoothing is a FIXED probability floor (minimum_probability = 1e-9 in the published source's calculate_attr_prob), not Verbora's count-based (count+smoothing)/(total+smoothing*|V|) additive smoothing -- confirmed to stay exactly 1e-9 regardless of a 1000x difference in a label's own document count by rust-competitors/tests/classifiers_naivebayes_logistic.rs's naivebayes_smoothing_floor_is_fixed_not_count_based, a speed-only comparison per that test's own doc comment. A clean, one-sided TIME win for naivebayes at every corpus size tested (4.4x-9.5x faster training, 2.9x faster prediction) -- see docs/PERFORMANCE_GAPS.md entry 20; memory dimension already covered by entry 19 (a sibling agent's earlier pass, naivebayes included there too)."
+    },
+    {
+      "name": "linfa-logistic",
+      "language": "Rust",
+      "version": "0.8.1",
+      "repository": "https://github.com/rust-ml/linfa",
+      "license": "MIT OR Apache-2.0",
+      "modules": [
+        "classifiers"
+      ],
+      "notes": "MultiLogisticRegression (matrix: Partial, selected cases) -- a SEPARATE published crate from linfa-bayes above (confirmed on crates.io before pinning), same workspace/version. Joint softmax/L-BFGS via the argmin crate (argmin::solver::quasinewton::LBFGS + MoreThuenteLineSearch, confirmed by reading linfa-logistic-0.8.1/src/lib.rs directly) -- a different multiclass strategy than Verbora's one-vs-rest plain gradient descent, and a different one than smartcore's own LBFGS-family implementation too (separate solver/line-search machinery). A genuine TIME crossover against Verbora: Verbora is faster at the smallest size tested (4 docs, 1.5x) but slower from 8 docs on (1.5x-2.8x slower, widening) -- see docs/PERFORMANCE_GAPS.md entry 21. Memory: Verbora allocates 14.4x more times but only 1.10x more gross bytes at 16 docs -- entry 22."
+    },
+    {
+      "name": "rustlearn",
+      "language": "Rust",
+      "version": "0.5.0",
+      "repository": "https://github.com/maciejkula/rustlearn",
+      "license": "Apache-2.0",
+      "modules": [
+        "classifiers"
+      ],
+      "notes": "multiclass::OneVsRestWrapper<linear_models::sgdclassifier::SGDClassifier> (matrix: Partial, selected cases) -- SGD (Adagrad) one-vs-rest, the matrix's own explicitly flagged weakest/lowest-priority of the three Logistic Regression ML-framework candidates (unmaintained since 2018, last push 2018-07-29), included anyway per the spec's multi-competitor policy. Its own dense Array type only holds f32, so the shared Vocab adapter's u32 counts are cast down. Links a small bundled libsvm C++ library at build time (links = \"libsvm\", dependencies/libsvm/svm.cpp compiled via the gcc build-dependency) for its own (here-unused) SVM module -- confirmed to compile clean on this workspace's pinned toolchain despite the extra build-time C++ compile. A single fit() call here is exactly one SGD epoch (confirmed by reading rustlearn-0.5.0/src/linear_models/sgdclassifier.rs's SGDClassifier::fit and its own module doc comment directly -- no convergence loop at all), a genuinely different, asymptotically-cheaper algorithm than Verbora's/smartcore's/linfa-logistic's iterate-to-convergence gradient descent/LBFGS -- explains a clean, one-sided, growing TIME loss for Verbora at every size (11.5x-17.7x slower training, 11.9x slower prediction) and the largest MEMORY gap of the three competitors (71.6x more allocations, 92.0x more gross bytes at 16 docs) -- see docs/PERFORMANCE_GAPS.md entries 21 and 22."
+    },
+    {
+      "name": "classifier (jackm321/Rust_Classifier)",
+      "language": "Rust",
+      "version": "0.0.3",
+      "repository": "https://github.com/jackm321/Rust_Classifier",
+      "license": "Apache-2.0",
+      "modules": [],
+      "notes": "NOT benchmarked despite the matrix marking it Yes/Yes (closest text-in/text-out Naive Bayes API match). Verified during implementation that it fails to compile on this workspace's pinned toolchain (rustc 1.97.1, edition 2024): its Classifier struct derives RustcDecodable/RustcEncodable from rustc-serialize, which needs the pre-1.15 compiler-plugin custom-derive mechanism removed from stable Rust years ago (rustc-serialize itself has had no release since 2016). A minimal probe crate depending on `classifier = \"=0.0.3\"` alone fails with E0277 (`the trait bound Classifier: Encodable is not satisfied`). Recorded here, with an empty `modules` list, rather than silently omitted -- the matrix's optimistic build assessment was not re-verified by compiling it; this implementation pass did, and found it broken."
+    }
+  ]
+}

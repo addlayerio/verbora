@@ -1,0 +1,36 @@
+[package]
+name = "verbora-analyzers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Sentence structure analysis for Rust"
+keywords = ["nlp", "sentence", "analysis"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+# `par_analyze_batch`: data-parallel fan-out over the per-sentence
+# `SentenceAnalyzer` pipeline, gated behind the `parallel` feature. See
+# `src/par.rs` for when to reach for it.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Adds `par_analyze_batch`, a `rayon`-backed fan-out over the existing
+# sequential `SentenceAnalyzer` pipeline (`part` + `type_of` + rendering). See
+# `src/par.rs` for when to reach for it.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "analyzers"
+harness = false
+
+[lints]
+workspace = true

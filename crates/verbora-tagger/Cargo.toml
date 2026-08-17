@@ -1,0 +1,36 @@
+[package]
+name = "verbora-tagger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Brill part-of-speech tagger for Rust"
+keywords = ["pos-tagger", "brill", "nlp"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+rustc-hash = { workspace = true }
+rayon = { workspace = true, optional = true }
+
+[build-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+verbora-tokenizers = { workspace = true }
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "tagger"
+harness = false
+
+[lints]
+workspace = true

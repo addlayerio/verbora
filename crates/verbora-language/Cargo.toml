@@ -1,0 +1,51 @@
+[package]
+name = "verbora-language"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Language and script detection, and phonetic-strategy recommendation"
+keywords = ["language-detection", "phonetics", "i18n"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+verbora-phonetics = { workspace = true }
+verbora-transliterators = { workspace = true }
+# Statistical language detection (n-gram frequency profiles), feature-gated —
+# see src/whatlang_detector.rs's own doc comment for the evaluation this
+# workspace did against lingua and whichlang before choosing it: MIT license,
+# one transitive dependency (hashbrown), 20 of this crate's 22 languages
+# covered, and an honest is_reliable() signal instead of a bare guess.
+whatlang = { version = "0.18", optional = true }
+# Optional: batch-detects many independent texts against one shared
+# detector, behind the `parallel` feature. Off by default — a single
+# `detect()` call is cheap enough that Rayon must never be the
+# implementation of detection itself (see AGENTS.md's Rayon Policy). See
+# `src/parallel.rs`.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[features]
+default = []
+# Adds WhatlangDetector, a real LanguageDetector backed by the `whatlang`
+# crate. Without this feature, LanguageDetector and every explicit
+# (language-supplied) API still work — only automatic detection needs it.
+# See AGENTS.md's "Verbora-Native Extensions" section for the policy this
+# follows.
+language-detection = ["dep:whatlang"]
+# `par_detect_batch` — see `src/parallel.rs` for why it exists and when to
+# reach for it. Independent of `language-detection`: it is generic over any
+# `LanguageDetector + Sync`, not tied to `WhatlangDetector`.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "language"
+harness = false
+
+[lints]
+workspace = true

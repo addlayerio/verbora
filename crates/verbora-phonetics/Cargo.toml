@@ -1,0 +1,46 @@
+[package]
+name = "verbora-phonetics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Phonetic algorithms (Soundex, Metaphone, Double Metaphone) for Rust"
+keywords = ["soundex", "metaphone", "phonetics"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+verbora-tokenizers = { workspace = true }
+rayon = { workspace = true, optional = true }
+# Beider-Morse's rule contexts are genuine regexes (`src/beider_morse/`'s own
+# doc comment) -- already a workspace dependency used by verbora-tokenizers
+# and verbora-inflectors, not a new dependency category for the workspace.
+regex = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Enables `par_encode_batch` / `par_encode_double_batch`, chunked batch
+# encoding over `rayon`. See `src/parallel.rs` for why this is opt-in and why
+# it is chunked rather than one Rayon task per word.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "phonetics"
+harness = false
+
+[[bench]]
+name = "phonetic_index"
+harness = false
+
+[[bench]]
+name = "beider_morse"
+harness = false
+
+[lints]
+workspace = true

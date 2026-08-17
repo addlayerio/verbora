@@ -1,0 +1,148 @@
+{
+  "$schema_comment": "See README.md in this directory for full sourcing, license, and extraction methodology.",
+  "languages": [
+    {
+      "iso639_1": "en",
+      "verbora_language": "English",
+      "udhr_key": "eng",
+      "items": {
+        "short_word": "dignity",
+        "short_phrase": "All human beings are born",
+        "sentence": "All human beings are born free and equal in dignity and rights.",
+        "paragraph": "All human beings are born free and equal in dignity and rights. They are endowed with reason and conscience and should act towards one another in a spirit of brotherhood. Everyone is entitled to all the rights and freedoms set forth in this Declaration, without distinction of any kind, such as race, colour, sex, language, religion, political or other opinion, national or social origin, property, birth or other status. Furthermore, no distinction shall be made on the basis of the political, jurisdictional or international status of the country or territory to which a person belongs, whether it be independent, trust, non‐self‐governing or under any other limitation of sovereignty."
+      }
+    },
+    {
+      "iso639_1": "es",
+      "verbora_language": "Spanish",
+      "udhr_key": "spa",
+      "items": {
+        "short_word": "dignidad",
+        "short_phrase": "Todos los seres humanos nacen",
+        "sentence": "Todos los seres humanos nacen libres e iguales en dignidad y derechos y, dotados como están de razón y conciencia, deben comportarse fraternalmente los unos con los otros.",
+        "paragraph": "Todos los seres humanos nacen libres e iguales en dignidad y derechos y, dotados como están de razón y conciencia, deben comportarse fraternalmente los unos con los otros. Toda persona tiene todos los derechos y libertades proclamados en esta Declaración, sin distinción alguna de raza, color, sexo, idioma, religión, opinión política o de cualquier otra índole, origen nacional o social, posición económica, nacimiento o cualquier otra condición. Además, no se hará distinción alguna fundada en la condición política, jurídica o internacional del país o territorio de cuya jurisdicción dependa una persona, tanto si se trata de un país independiente, como de un territorio bajo administración fiduciaria, no autónomo o sometido a cualquier otra limitación de soberanía."
+      }
+    },
+    {
+      "iso639_1": "fr",
+      "verbora_language": "French",
+      "udhr_key": "fra",
+      "items": {
+        "short_word": "dignité",
+        "short_phrase": "Tous les êtres humains naissent",
+        "sentence": "Tous les êtres humains naissent libres et égaux en dignité et en droits.",
+        "paragraph": "Tous les êtres humains naissent libres et égaux en dignité et en droits. Ils sont doués de raison et de conscience et doivent agir les uns envers les autres dans un esprit de fraternité. Chacun peut se prévaloir de tous les droits et de toutes les libertés proclamés dans la présente Déclaration, sans distinction aucune, notamment de race, de couleur, de sexe, de langue, de religion, d’opinion politique ou de toute autre opinion, d’origine nationale ou sociale, de fortune, de naissance ou de toute autre situation. De plus, il ne sera fait aucune distinction fondée sur le statut politique, juridique ou international du pays ou du territoire dont une personne est ressortissante, que ce pays ou territoire soit indépendant, sous tutelle, non autonome ou soumis à une limitation quelconque de souveraineté."
+      }
+    },
+    {
+      "iso639_1": "de",
+      "verbora_language": "German",
+      "udhr_key": "deu_1996",
+      "items": {
+        "short_word": "Würde",
+        "short_phrase": "Alle Menschen sind frei und",
+        "sentence": "Alle Menschen sind frei und gleich an Würde und Rechten geboren.",
+        "paragraph": "Alle Menschen sind frei und gleich an Würde und Rechten geboren. Sie sind mit Vernunft und Gewissen begabt und sollen einander im Geist der Brüderlichkeit begegnen. Jeder hat Anspruch auf die in dieser Erklärung verkündeten Rechte und Freiheiten ohne irgendeinen Unterschied, etwa nach Rasse, Hautfarbe, Geschlecht, Sprache, Religion, politischer oder sonstiger Überzeugung, nationaler oder sozialer Herkunft, Vermögen, Geburt oder sonstigem Stand. Des Weiteren darf kein Unterschied gemacht werden auf Grund der politischen, rechtlichen oder internationalen Stellung des Landes oder Gebiets, dem eine Person angehört, gleichgültig ob dieses unabhängig ist, unter Treuhandschaft steht, keine Selbstregierung besitzt oder sonst in seiner Souveränität eingeschränkt ist."
+      }
+    },
+    {
+      "iso639_1": "it",
+      "verbora_language": "Italian",
+      "udhr_key": "ita",
+      "items": {
+        "short_word": "dignità",
+        "short_phrase": "Tutti gli esseri umani nascono",
+        "sentence": "Tutti gli esseri umani nascono liberi ed eguali in dignità e diritti.",
+        "paragraph": "Tutti gli esseri umani nascono liberi ed eguali in dignità e diritti. Essi sono dotati di ragione e di coscienza e devono agire gli uni verso gli altri in spirito di fratellanza. Ad ogni individuo spettano tutti i diritti e tutte le libertà enunciate nella presente Dichiarazione, senza distinzione alcuna, per ragioni di razza, di colore, di sesso, di lingua, di religione, di opinione politica o di altro genere, di origine nazionale o sociale, di ricchezza, di nascita o di altra condizione. Nessuna distinzione sarà inoltre stabilita sulla base dello statuto politico, giuridico o internazionale del paese o del territorio cui una persona appartiene, sia indipendente, o sottoposto ad amministrazione fiduciaria o non autonomo, o soggetto a qualsiasi limitazione di sovranità."
+      }
+    },
+    {
+      "iso639_1": "pt",
+      "verbora_language": "Portuguese",
+      "udhr_key": "por_PT",
+      "items": {
+        "short_word": "dignidade",
+        "short_phrase": "Todos os seres humanos nascem",
+        "sentence": "Todos os seres humanos nascem livres e iguais em dignidade e em direitos.",
+        "paragraph": "Todos os seres humanos nascem livres e iguais em dignidade e em direitos. Dotados de razão e de consciência, devem agir uns para com os outros em espírito de fraternidade. Todos os seres humanos podem invocar os direitos e as liberdades proclamados na presente Declaração, sem distinção alguma, nomeadamente de raça, de cor, de sexo, de língua, de religião, de opinião política ou outra, de origem nacional ou social, de fortuna, de nascimento ou de qualquer outra situação. Além disso, não será feita nenhuma distinção fundada no estatuto político, jurídico ou internacional do país ou do território da naturalidade da pessoa, seja esse país ou território independente, sob tutela, autónomo ou sujeito a alguma limitação de soberania."
+      }
+    },
+    {
+      "iso639_1": "nl",
+      "verbora_language": "Dutch",
+      "udhr_key": "nld",
+      "items": {
+        "short_word": "waardigheid",
+        "short_phrase": "Alle mensen worden vrij en",
+        "sentence": "Alle mensen worden vrij en gelijk in waardigheid en rechten geboren.",
+        "paragraph": "Alle mensen worden vrij en gelijk in waardigheid en rechten geboren. Zij zijn begiftigd met verstand en geweten, en behoren zich jegens elkander in een geest van broederschap te gedragen. Een ieder heeft aanspraak op alle rechten en vrijheden, in deze Verklaring opgesomd, zonder enig onderscheid van welke aard ook, zoals ras, kleur, geslacht, taal, godsdienst, politieke of andere overtuiging, nationale of maatschappelijke afkomst, eigendom, geboorte of andere status. Verder zal geen onderscheid worden gemaakt naar de politieke, juridische of internationale status van het land of gebied, waartoe iemand behoort, onverschillig of het een onafhankelijk, trust-, of niet-zelfbesturend gebied betreft, dan wel of er een andere beperking van de soevereiniteit bestaat."
+      }
+    },
+    {
+      "iso639_1": "ru",
+      "verbora_language": "Russian",
+      "udhr_key": "rus",
+      "items": {
+        "short_word": "достоинстве",
+        "short_phrase": "Все люди рождаются свободными и",
+        "sentence": "Все люди рождаются свободными и равными в своем достоинстве и правах.",
+        "paragraph": "Все люди рождаются свободными и равными в своем достоинстве и правах. Они наделены разумом и совестью и должны поступать в отношении друг друга в духе братства. Каждый человек должен обладать всеми правами и всеми свободами, провозглашенными настоящей Декларацией, без какого бы то ни было различия, как-то в отношении расы, цвета кожи, пола, языка, религии, политических или иных убеждений, национального или социального происхождения, имущественного, сословного или иного положения. Кроме того, не должно проводиться никакого различия на основе политического, правового или международного статуса страны или территории, к которой человек принадлежит, независимо от того, является ли эта территория независимой, подопечной, несамоуправляющейся или как-либо иначе ограниченной в своем суверенитете."
+      }
+    },
+    {
+      "iso639_1": "hi",
+      "verbora_language": "Hindi",
+      "udhr_key": "hin",
+      "items": {
+        "short_word": "गौरव",
+        "short_phrase": "सभी मनुष्यों को गौरव और",
+        "sentence": "सभी मनुष्यों को गौरव और अधिकारों के मामले में जन्मजात स्वतन्त्रता और समानता प्राप्त है ।",
+        "paragraph": "सभी मनुष्यों को गौरव और अधिकारों के मामले में जन्मजात स्वतन्त्रता और समानता प्राप्त है । उन्हें बुद्धि और अन्तरात्मा की देन प्राप्त है और परस्पर उन्हें भाईचारे के भाव से बर्ताव करना चाहिए । सभी को इस घोषणा में सन्निहित सभी अधिकारों और आज़ादियों को प्राप्त करने का हक़ है और इस मामले में जाति, वर्ण, लिंग, भाषा, धर्म, राजनीति या अन्य विचार-प्रणाली, किसी देश या समाज विशेष में जन्म, सम्पत्ति या किसी प्रकार की अन्य मर्यादा आदि के कारण भेदभाव का विचार न किया जाएगा । इसके अतिरिक्त, चाहे कोई देश या प्रदेश स्वतन्त्र हो, संरक्षित हो, या स्त्रशासन रहित हो या परिमित प्रभुसत्ता वाला हो, उस देश या प्रदेश की राजनैतिक, क्षेत्रीय या अन्तर्राष्ट्रीय स्थिति के आधार पर वहां के निवासियों के प्रति कोई फ़रक़ न रखा जाएगा ।"
+      }
+    },
+    {
+      "iso639_1": "vi",
+      "verbora_language": "Vietnamese",
+      "udhr_key": "vie",
+      "items": {
+        "short_word": "phẩm",
+        "short_phrase": "Tất cả mọi người sinh",
+        "sentence": "Tất cả mọi người sinh ra đều được tự do và bình đẳng về nhân phẩm và quyền.",
+        "paragraph": "Tất cả mọi người sinh ra đều được tự do và bình đẳng về nhân phẩm và quyền. Mọi con người đều được tạo hoá ban cho lý trí và lương tâm và cần phải đối xử với nhau trong tình bằng hữu. Mọi người đều được hưởng tất cả những quyền và tự do nêu trong Bản tuyên ngôn này, không phân biệt chủng tộc, màu da, giới tính, ngôn ngữ, tôn giáo, quan điểm chính trị hay các quan điểm khác, nguồn gốc quốc gia hay xã hội, tài sản, thành phần xuất thân hay địa vị xã hội. Ngoài ra, cũng không có bất cứ sự phân biệt nào về địa vị chính trị, pháp quyền hay quốc tế của quốc gia hay lãnh thổ mà một người xuất thân, cho dù quốc gia hay lãnh thổ đó được độc lập, được đặt dưới chế độ uỷ trị, chưa tự quản hay có chủ quyền hạn chế."
+      }
+    },
+    {
+      "iso639_1": "ja",
+      "verbora_language": "Japanese",
+      "udhr_key": "jpn",
+      "items": {
+        "short_word": "尊厳",
+        "short_phrase": "すべての人間は、",
+        "sentence": "すべての人間は、生まれながらにして自由であり、かつ、尊厳と権利とについて平等である。",
+        "paragraph": "すべての人間は、生まれながらにして自由であり、かつ、尊厳と権利とについて平等である。人間は、理性と良心とを授けられており、互いに同胞の精神をもって行動しなければならない。 すべて人は、人種、皮膚の色、性、言語、宗教、政治上その他の意見、国民的もしくは社会的出身、財産、門地その他の地位又はこれに類するいかなる自由による差別をも受けることなく、この宣言に掲げるすべての権利と自由とを享有することができる。 さらに、個人の属する国又は地域が独立国であると、信託統治地域であると、非自治地域であると、又は他のなんらかの主権制限の下にあるとを問わず、その国又は地域の政治上、管轄上又は国際上の地位に基ずくいかなる差別もしてはならない。"
+      }
+    },
+    {
+      "iso639_1": "zh",
+      "verbora_language": "Chinese",
+      "udhr_key": "cmn_hans",
+      "items": {
+        "short_word": "尊严",
+        "short_phrase": "人人生而自由，",
+        "sentence": "人人生而自由，在尊严和权利上一律平等。",
+        "paragraph": "人人生而自由，在尊严和权利上一律平等。他们赋有理性和良心，并应以兄弟关系的精神相对待。 人人有资格享有本宣言所载的一切权利和自由，不分种族、肤色、性别、语言、宗教、政治或其他见解、国籍或社会出身、财产、出生或其他身分等任何区别。 并且不得因一人所属的国家或领土的政治的、行政的或者国际的地位之不同而有所区别，无论该领土是独立领土、托管领土、非自治领土或者处于其他任何主权受限制的情况之下。"
+      }
+    },
+    {
+      "iso639_1": "sv",
+      "verbora_language": "Swedish",
+      "udhr_key": "swe",
+      "items": {
+        "short_word": "värde",
+        "short_phrase": "Alla människor äro födda fria",
+        "sentence": "Alla människor äro födda fria och lika i värde och rättigheter.",
+        "paragraph": "Alla människor äro födda fria och lika i värde och rättigheter. De äro utrustade med förnuft och samvete och böra handla gentemot varandra i en anda av broderskap. Envar är berättigad till alla de fri- och rättigheter, som uttalas i denna förklaring, utan åtskillnad av något slag, såsom ras, hudfärg, kön, språk, religion, politisk eller annan uppfattning, nationellt eller socialt ursprung, egendom, börd eller ställning i övrigt. Ingen åtskillnad må vidare göras på grund av den politiska, juridiska eller internationella ställning, som intages av det land eller område, till vilket en person hör, vare sig detta land eller område är oberoende, står under förvaltarskap, är icke-självstyrande eller är underkastat någon annan begränsning av sin suveränitet."
+      }
+    }
+  ]
+}

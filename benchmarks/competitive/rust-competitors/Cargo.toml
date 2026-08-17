@@ -1,0 +1,550 @@
+[package]
+name = "competitive-rust"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# No [lib] target beyond the small shared support module under src/ (see
+# src/lib.rs) — this crate exists to host Criterion benchmarks under
+# benches/ and one accuracy-report example under examples/ (§1.9 needs
+# accuracy, not just speed — see examples/language_accuracy.rs). See
+# ../README.md for why this lives outside the main workspace.
+
+[dependencies]
+# Verbora itself, via the real published crate at its real path — not a
+# reimplementation, not a stub. Add one line here per module this workspace
+# benchmarks against a third-party competitor.
+verbora-distance = { path = "../../../crates/verbora-distance" }
+verbora-tokenizers = { path = "../../../crates/verbora-tokenizers" }
+verbora-stemmers = { path = "../../../crates/verbora-stemmers" }
+verbora-normalizers = { path = "../../../crates/verbora-normalizers" }
+verbora-inflectors = { path = "../../../crates/verbora-inflectors" }
+verbora-trie = { path = "../../../crates/verbora-trie" }
+verbora-phonetics = { path = "../../../crates/verbora-phonetics" }
+# §1.9-1.11 Language Detection / Script Detection / Transliteration.
+# `language-detection` adds `WhatlangDetector`; `detect_script` and
+# `transliterate_ja` need no feature.
+verbora-language = { path = "../../../crates/verbora-language", features = ["language-detection"] }
+verbora-transliterators = { path = "../../../crates/verbora-transliterators" }
+# §1.9 Language Detection — `lingua` and `whichlang` are NORMAL dependencies,
+# not dev-dependencies, unlike every other competitor pinned below: they are
+# the only two competitor crates referenced from `src/language_support.rs`
+# itself (the shared `iso639_1`-mapping helpers `benches/language.rs`,
+# `examples/language_accuracy.rs`, and `tests/language_detection_correctness.rs`
+# all import), which is part of this crate's `[lib]` target — and Cargo only
+# makes `[dev-dependencies]` visible to test/example/bench targets, never to
+# `lib`. Declaring them here keeps them equally visible to every one of
+# those three consumers, so nothing is lost by the move. Their pinned
+# versions still track docs/COMPETITIVE_BENCHMARKS.md's matrix exactly, same
+# as the competitors under `[dev-dependencies]`.
+#
+# `lingua` is a genuinely different algorithm (rule-based alphabet filter +
+# 1-5-gram model). Restricted via `default-features = false` to the
+# 21-language overlap with Verbora's `Language::ALL` (all but Galician, which
+# lingua does not support) — never benchmarked in its default 75-language
+# configuration, per the matrix's own fairness note and the spec's "5 idiomas
+# vs 75" rule.
+lingua = { version = "=1.8.0", default-features = false, features = [
+    "english", "spanish", "portuguese", "italian", "french", "german",
+    "dutch", "russian", "ukrainian", "polish", "persian", "hindi",
+    "indonesian", "vietnamese", "japanese", "chinese", "bokmal", "swedish",
+    "finnish", "catalan", "basque",
+] }
+# `whichlang` covers a 13-language overlap only and cannot abstain (always
+# returns a `Lang`). See `docs/COMPETITIVE_BENCHMARKS.md` §1.9's own note:
+# accounted for explicitly in the accuracy report, not silently ignored.
+whichlang = "=0.1.1"
+# §1.15-1.17 WordNet / POS Tagging / Spellcheck. WordNet gets no competitor
+# dependency here (matrix: NO FAIR COMPETITOR FOUND (Rust) — see
+# docs/COMPETITIVE_BENCHMARKS.md §1.15); its Verbora-side TIMING numbers come
+# from `crates/verbora-wordnet`'s own in-workspace Criterion suite instead.
+# `verbora-wordnet` itself IS a normal dependency here (not a competitor —
+# Verbora's own crate, added for `examples/memory_report.rs`'s internal-only
+# storage-strategy memory comparison, per §1.15's "internal-only" note).
+verbora-tagger = { path = "../../../crates/verbora-tagger" }
+verbora-spellcheck = { path = "../../../crates/verbora-spellcheck" }
+verbora-wordnet = { path = "../../../crates/verbora-wordnet" }
+# §1.12-1.14 TF-IDF / Classifiers / Sentiment.
+verbora-tfidf = { path = "../../../crates/verbora-tfidf" }
+verbora-classifiers = { path = "../../../crates/verbora-classifiers" }
+
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+# Same `regex` major version verbora-tokenizers itself builds
+# `Pattern`/`RegexpTokenizer` on (see its own Cargo.toml) — needed here to
+# construct the `\s+` pattern for the whitespace-tokenization row directly,
+# exactly as Verbora's own callers would.
+regex = "1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# --- real, pinned third-party competitors ---
+# Every version here must match docs/COMPETITIVE_BENCHMARKS.md's matrix
+# exactly (the spec's VERSION PINNING rule: no implicit `latest`). Update
+# both files together if a competitor is re-pinned.
+strsim = "=0.11.1"
+rapidfuzz = "=0.5.0"
+# §1.8 Distances — Levenshtein and Hamming only (both matrix `Yes`). Its
+# `damerau_levenshtein` is deliberately NOT benchmarked: read directly from
+# `stringmetrics-2.2.2/src/algorithms.rs`/`damerau_impl.rs` — the `damerau`
+# module is commented out of `mod`/`pub use` entirely (not merely an
+# unimplemented stub reachable through the public API; it is not compiled
+# into the crate at all in this version) and the file that would back it is
+# a two-line function that always `return 0`. Confirmed by reading the
+# vendored source, not assumed from the matrix note — see
+# benches/distance.rs's own doc comment.
+stringmetrics = "=2.2.2"
+# §1.8 Distances — Jaro and Jaro-Winkler only (both matrix `Yes`). Crate
+# abandoned since 2020; `tests/distance_correctness.rs` re-verifies its
+# output against Verbora's on fresh vectors before any timing number here is
+# trusted, per the matrix's own "re-verify" flag. Struct-based API
+# (`eddie::Jaro::new()` / `eddie::JaroWinkler::new()`), reused across calls
+# exactly like `strsim`'s/`rapidfuzz`'s options structs above — see
+# benches/distance.rs.
+eddie = "=0.4.2"
+# §1.8 Distances — Levenshtein, restricted-only Damerau (`rdamerau`),
+# Hamming, and fuzzy substring search (`levenshtein_search`), all matrix
+# `Selected cases`/`Partial`: byte-level (raw UTF-8 bytes, not chars/UTF-16
+# units), so fair only on the same ASCII-only pairs `benches/distance.rs`
+# already restricts every byte-indexed row to.
+triple_accel = "=0.4.0"
+# §1.8 Distances — Levenshtein only (matrix `Selected cases`): byte-level,
+# fixed unit costs only, no Damerau variant — ASCII-only fair, same
+# restriction as triple_accel above.
+editdistancek = "=1.0.2"
+# Tokenization-layer overlap only, per the spec's TANTIVY POLICY — no
+# indexing/query features, so `default-features = false` with nothing turned
+# back on: `tantivy::tokenizer::{WhitespaceTokenizer, SimpleTokenizer}` need
+# none of the storage/compression/mmap machinery those features gate.
+tantivy = { version = "=0.26.1", default-features = false }
+# Same discipline for Hugging Face `tokenizers`: only the standalone
+# `WhitespaceSplit`/`Whitespace` pre-tokenizer *components* are exercised
+# (see docs/COMPETITIVE_BENCHMARKS.md §1.1), never `Tokenizer::encode`'s full
+# BPE/WordPiece pipeline. `onig` is kept (it is one of two features the crate
+# hard-requires at compile time via its own `compile_error!` — see
+# `tokenizers-0.23.1/src/utils/mod.rs` — for the *model*-layer regex
+# splitting neither `Whitespace` nor `WhitespaceSplit` uses); `esaxx_fast`
+# and `progressbar` are dropped since nothing benchmarked here trains a
+# tokenizer or shows progress.
+tokenizers = { version = "=0.23.1", default-features = false, features = ["onig"] }
+# §1.1 Tokenizers — the matrix's third and fourth tokenizer competitors,
+# selected but never wired in until this pass (docs/COMPETITIVE_BENCHMARKS.md
+# §1.1 flagged this as a real, undocumented gap distinct from the deliberate
+# exclusions in this file's other comments). `unicode-segmentation` is
+# UAX#29-conformant and covers three separate matrix rows: `unicode_words()`/
+# `split_word_bounds()` vs. `WordTokenizer` ("Selected cases"), `unicode_words()`
+# vs. `AggressiveTokenizer`'s English variant only ("Selected cases"), and
+# `UnicodeSentences`/`USentenceBounds` vs. `SentenceTokenizer` ("Yes"). No
+# features beyond the default `std`-based UAX#29 tables are needed. Already a
+# transitive dependency of this workspace (pulled in at 1.13.3 by other
+# crates already), so this pin does not add a new crate to the tree, only a
+# direct one.
+unicode-segmentation = "=1.13.3"
+# §1.1 Tokenizers — `SentenceTokenizer`, "Selected cases": a rule-based,
+# orthographic-feature sentence(+word) segmenter (Rust port of the Python
+# `segtok` package). The matrix's own dossier (§2.1) flags its adoption
+# signal as ambiguous (452K/90d downloads but only 2 GitHub stars — likely
+# mostly transitive use, not direct adoption) and a license-metadata
+# inconsistency (crates.io lists MIT, but GitHub's own detector finds no
+# LICENSE file) — both noted again in `benches/tokenizers.rs`'s own doc
+# comment rather than silently dropped. Pulls in `fancy-regex` for its
+# lookaround-heavy segmentation rules; no feature flags to restrict.
+segtok = "=0.1.5"
+# §1.3 Stemmers — the 9 shared canonical-Snowball languages (de es fr it nl
+# no pt ru sv). NOT used for English: rust-stemmers' "English" is Snowball
+# Porter2, a different algorithm than Verbora's original-1980 Porter (matrix
+# row marked `No`) — see benches/stemmers.rs's own doc comment.
+rust-stemmers = "=1.2.0"
+# §1.3 Stemmers — a second, independent Snowball-family competitor per
+# language, alongside rust-stemmers above. Brand-new (created 2026-03-09, 2
+# releases total as of pinning — a real maturity/adoption caveat, disclosed
+# rather than silently overlooked per this file's own "validate before
+# treating as a hard gate" discipline), published by Wolf Garbe (the original
+# SymSpell author) under the SeekStorm org; its own docs describe it as
+# providing "rust implementations for some stemmer algorithms written in the
+# snowball language" — plausibly code-generated from the official `.sbl`
+# definitions rather than hand-ported (Verbora's own stemmers, by contrast,
+# are hand-ported from the reference). See benches/stemmers.rs's own
+# doc comment for the per-language comparison and any correctness caveats
+# found. `Algorithm::English` here is genuine Snowball Porter2 (matching
+# rust-stemmers' own English variant, matrix row `No` against Verbora's
+# original-1980 Porter) — not benchmarked against Verbora's English stemmer
+# for the same reason rust-stemmers' English isn't, only against the 9
+# canonical-Snowball languages both crates share.
+snowball_stemmers_rs = "=1.0.1"
+# §1.3 Stemmers — English only, as the documented "closer algorithmic match,
+# but brand-new/unproven crate" alternative to rust-stemmers for English
+# (matrix: Partial, faithful NLTK port of the original-Porter mode).
+nltk-porter = "=0.1.0"
+# §1.3 Stemmers — English, SECOND Rust alternative, real original-1980 Porter
+# (matrix: Partial, "operates on grapheme clusters rather than UTF-16 units").
+# `benches/stemmers.rs`'s own `porter_en` group benchmarks this alongside
+# `nltk-porter` above so both Rust alternatives are directly comparable, per
+# this round's own instruction. `tests/stemmers_correctness.rs` verifies the
+# grapheme-cluster architecture causes no real divergence on the benchmarked
+# (plain-ASCII) English word list, and separately documents the one genuine
+# algorithm-level mismatch found ("sky" -> "ski", a `y`-to-`i` bug unrelated
+# to graphemes-vs-UTF-16 — both Verbora and `nltk-porter` agree it should stay
+# "sky") by excluding that one word from the group's shared sample, mirroring
+# `porter_ru`'s own `ёлка`-filtering precedent below.
+porter-stemmer = "=0.1.2"
+# §1.3 Stemmers — StemmerJa (Japanese katakana), "Selected cases". The matrix
+# names this "the lindera-filter sub-crate"; `lindera-filter` itself never
+# published a 5.2.0 release (crates.io: 0.32.3 is its last, from
+# 2025-03-18 — a full architecture generation stale) — Lindera's own 5.x
+# rewrite dropped the separate `-core`/`-tokenizer`/`-filter` crates and
+# folded token/character filters into `lindera-analysis` instead (confirmed
+# by reading both crates' published source, not assumed). `lindera-analysis`
+# 5.2.0 is the real, correctly-versioned current package carrying
+# `JapaneseKatakanaStemTokenFilter` — same technique, same configurable `min`
+# parameter the matrix describes. `lindera`/`lindera-dictionary` are needed
+# directly too: constructing even one filter-only `Token` requires a real
+# `&Dictionary` reference and a `WordId` (see `benches/stemmers.rs`'s own doc
+# comment for why, and why that dictionary is loaded once, outside every
+# timed closure). `embed-ipadic` compiles a real IPADIC dictionary in via
+# `lindera-ipadic`'s own build script (a one-time, cached network fetch at
+# build time, ~13 MB gzip from lindera.dev) — the same "real third-party
+# asset, not vendored" shape `scripts/fetch-models.sh` already uses for
+# POS-tagging/spellcheck, just fetched by the dependency's own build.rs
+# rather than this repo's script; nothing here re-implements or bypasses it.
+lindera = { version = "=5.2.0", features = ["embed-ipadic"] }
+lindera-analysis = { version = "=5.2.0", features = ["embed-ipadic"] }
+lindera-dictionary = "=5.2.0"
+# §1.3 Stemmers — StemmerId (Indonesian, Sastrawi/Nazief–Adriani), "Yes"
+# (genuine shared PHP-Sastrawi lineage with Verbora's own port — confirmed
+# directly: both dictionaries hold exactly 29,932 root words). Dormant since
+# 2020; `tests/stemmers_correctness.rs` is the real correctness pass the
+# matrix itself never performed, and found two genuine algorithmic gaps in
+# this crate versus the shared PHP reference both ports target (no
+# hyphenated-reduplication/compound-plural handling at all, and only a
+# single, non-iterated prefix-stripping pass where the reference loops up to
+# three times) — narrowed out of the benchmarked word sample, not hidden; see
+# that test file and `benches/stemmers.rs`'s own doc comment.
+sastrawi = "=0.1.1"
+# §1.4 Normalizers — remove_diacritics. Case-preserving, non-decomposing
+# table lookup, the closest semantic match found (matrix: Partial,
+# "case-preserving, closer semantic shape"). `unaccent` (decomposition-based,
+# non-standard license) and `secular` (forces lowercasing) are deliberately
+# not pinned here — see benches/normalizers.rs's own doc comment.
+diacritics = "=0.2.2"
+# §1.4 Normalizers — normalize_ja, matrix `Selected cases`: covers only 2 of
+# Verbora's 17 conversions (`hira2kata`/`kata2hira`, a bare codepoint shift
+# with none of `hiragana_to_katakana`/`katakana_to_hiragana`'s halfwidth-fold
+# or small-tsu/voiced-mark phonetic fixups) — narrowed to pure hiragana/
+# katakana input with neither, verified in
+# tests/normalizers_correctness.rs. The published package is `unicode-jp`,
+# but its own `[lib] name = "kana"` (see its Cargo.toml), so Rust code below
+# imports it as `kana::`, not `unicode_jp::`.
+unicode-jp = "=0.4.0"
+# §1.4 Normalizers — normalize_ja, narrower still (matrix `Selected cases`):
+# a single-purpose halfwidth-kana/ASCII-to-fullwidth converter. Its
+# `to_double_byte(_, KanaOnly)` composes voiced/semi-voiced halfwidth
+# katakana pairs like Verbora's `katakana_hf`, but ALSO folds halfwidth CJK
+# punctuation and space (a job Verbora keeps in a separate function,
+# `pure_punctuation_hf`) and drops/miscomposes an orphan dakuten/handakuten
+# mark with no valid preceding base character, where `katakana_hf` passes it
+# through as a standalone spacing mark — both divergences verified in
+# tests/normalizers_correctness.rs and excluded from the benchmarked domain.
+kana-converter = "=0.1.2"
+# §1.5 Inflectors — CountInflector. Matrix's single "Yes" (full equivalence)
+# row in the whole Inflectors group.
+ordinal = "=0.4.0"
+# §1.5 Inflectors — NounInflector, matrix `Partial`: same regex-suffix-rule-
+# chain-plus-irregulars strategy as Verbora's port, but an independently
+# maintained rule table (`pluralize`-inspired) that genuinely disagrees
+# on contested irregulars — e.g. `pluralize("octopus", 2, false)` is
+# `"octopuses"` here vs. Verbora's `"octopi"`. Narrowed to a word list
+# verified (`tests/inflectors_correctness.rs`) to agree with Verbora on both
+# `pluralize` and `singularize` before any timing number is trusted — see
+# benches/inflectors.rs's own doc comment.
+pluralizer = "=0.5.0"
+# §1.5 Inflectors — NounInflector (`to_plural`/`to_singular`, matrix
+# `Partial`, same narrowing discipline as `pluralizer` above) and, found
+# while implementing this pass, a genuine second CountInflector match: its
+# string-shaped `numbers::ordinalize::ordinalize` fully agrees with
+# `CountInflector::nth_str` over every non-negative `i64` in `0..2_000_000`
+# (exhaustively checked in tests/inflectors_correctness.rs) — a cleaner
+# result than the existing `ordinal` crate row, which has a real teens-
+# exception bug (see that file's own doc comment). The published package is
+# `Inflector`, but its own `[lib] name = "inflector"` (lowercase — see its
+# Cargo.toml), so Rust code below imports it as `inflector::`.
+Inflector = "=0.11.4"
+# §1.18 Trie — generic insert/contains/prefix-enumeration throughput only
+# (matrix: Partial/"Selected cases"); highest download count of any candidate
+# in the whole research pass. LOUDS-based, byte-keyed/byte-ordered — see
+# benches/trie.rs's own doc comment for why output/ordering equivalence is
+# never claimed.
+trie-rs = "=0.4.2"
+# §1.18 Trie — general ordered radix map, weaker fit than trie-rs (matrix:
+# Partial/"Selected cases"); no native "stored words that are prefixes of a
+# query" operation, so it is benchmarked only for build/contains/predictive
+# prefix-enumeration — see benches/trie.rs's own doc comment.
+qp-trie = "=0.8.2"
+# §1.18 Trie — memory-efficient radix/patricia trie, created 2025-10-30 and
+# actively updated (bluecatengineering); uses `unsafe` internally (raw
+# pointers for dynamically-sized nodes, tested with miri per its own docs) —
+# fine for a third-party dependency in this isolated benchmark workspace,
+# which is not bound by the main workspace's `unsafe_code = "deny"` lint, but
+# worth noting since Verbora's own trie has no unsafe anywhere. See
+# benches/trie.rs's own doc comment for exactly which operations are fair.
+fast_radix_trie = "=1.2.0"
+# §1.18 Trie / §1.17 Spellcheck — Andrew Gallant's finite-state-transducer
+# crate. Architecturally NOT a mutable trie or a BK-tree: requires
+# lexicographically SORTED input streamed to a builder at construction time,
+# queried via a `Streamer` trait rather than a standard `Iterator`. Used here
+# for two distinct comparisons — frozen/prefix dictionary lookup (vs.
+# `verbora-trie`) and Levenshtein-automaton fuzzy search (vs.
+# `verbora-spellcheck::FuzzyIndex`, via the `levenshtein` feature, off by
+# default upstream) — never assumed EXACT by default; see benches/trie.rs's
+# own doc comment for the operation-by-operation classification
+# (EXACT/NARROWED_EXACT/TECHNIQUE) and why. Also already an indirect
+# presence in this workspace: `harper-core` below builds its own
+# `FstDictionary` on top of this exact crate (composed with the *separate*
+# `levenshtein_automata` crate for fuzzy matching, not this feature).
+fst = { version = "=0.4.7", features = ["levenshtein"] }
+# §1.6 Phonetics — the one actively-maintained Rust crate covering all four
+# of Verbora's phonetic families (Soundex, Metaphone, Double Metaphone,
+# Daitch-Mokotoff) from the canonical Apache commons-codec reference (matrix:
+# Partial on every row — same shape of work, documented algorithm-variant
+# divergence, never byte-exact). `embedded_dm` pulls in the crate's bundled
+# `dmrules.txt` so `DaitchMokotoffSoundex::default()` is available without
+# hand-loading a rules file. `embedded_bm` (Beider-Morse) closes a real,
+# previously-undiscovered coverage gap: `verbora-phonetics::BeiderMorse`
+# (a Verbora-native extension added this same round, no reference
+# counterpart) names this exact crate as its own design-time cross-checking
+# oracle in its own doc comment, but nothing here ever actually benchmarked
+# it until now. Ships only the `"any"`-language rule files, not the full
+# per-language corpus — a real, disclosed asymmetry, not a fully equivalent
+# comparison; see benches/phonetics.rs's own doc comment for exactly how
+# that's handled fairly.
+rphonetic = { version = "=3.0.6", default-features = false, features = ["embedded_dm", "embedded_bm"] }
+# §1.9 Language Detection — the literal engine `WhatlangDetector` wraps.
+# Benchmarked standalone only to isolate wrapper overhead (matrix: this is
+# NOT a rival algorithm) and as the "Verbora" accuracy row's underlying
+# implementation.
+whatlang = "=0.18.0"
+# §1.9-1.11 `lingua` and `whichlang` are NOT pinned here — they are referenced
+# from `src/` and so live under `[dependencies]` above; see the note there.
+# §1.11 Transliteration — kana→romaji, but a different romanization
+# convention (doubled vowels vs. Verbora/Natural's modified-Hepburn
+# macrons). Fair for throughput on identical kana input only, never for
+# output correctness — see benches/language.rs's own doc comment.
+wana_kana = "=5.0.0"
+# §1.16 POS Tagging — pretrained averaged-perceptron (NLTK weights), ready to
+# use out of the box, but a different algorithm class than Verbora's Brill
+# transformation-rule tagger (matrix: Partial). See benches/pos_tagging.rs's
+# own doc comment for cold-start-vs-steady-state methodology.
+postagger = "=0.0.3"
+# §1.16 POS Tagging — rust-bert's `POSModel` (MobileBERT transformer
+# pipeline), by far the most widely adopted general Rust NLP crate found in
+# the whole audit (matrix: Partial, selected cases). `default-features =
+# false` deliberately drops the crate's own default "remote" feature (which
+# pulls `cached-path` -> `indicatif` 0.16.2, whose *unconstrained*
+# `console = ">=0.9.1, <1.0.0"` dependency resolves to a `console` 0.16
+# release that removed the `std` feature from its own defaults and no longer
+# compiles as of this research pass — a real, reproducible upstream breakage,
+# not a workaround for convenience). `download-libtorch` is kept: it is
+# rust-bert's own supported way to obtain the libtorch shared library this
+# crate links against, independent of the broken "remote" chain. The model
+# checkpoint itself is fetched by scripts/fetch-models.sh and loaded through
+# `LocalResource`, which is not gated by "remote" — see pos_tagging.rs.
+rust-bert = { version = "=0.23.0", default-features = false, features = ["download-libtorch"] }
+tch = "=0.17.0"
+# §1.17 Spellcheck — same `lookup(word, verbosity, max_edit_distance)` shape
+# as Verbora's `get_corrections`, loaded with the SAME frequency corpus
+# (matrix: Partial, different algorithm — delete-precomputation vs.
+# combinatorial edit generation).
+symspell = "=0.5.2"
+# §1.17 Spellcheck — most widely adopted standalone spellchecking crate found
+# in the whole audit (matrix: Partial). `default-features = false` drops the
+# crate's default "thesaurus" feature (`harper-thesaurus`, irrelevant to
+# spellchecking) and "concurrent" (unused here); only the `spell` module's
+# `FstDictionary`/`Dictionary::fuzzy_match_str` is exercised, loaded with
+# Verbora's own corpus per the matrix's "load a comparable dictionary" note
+# — see benches/spellcheck.rs's own doc comment.
+harper-core = { version = "=2.8.0", default-features = false }
+# §1.17 Spellcheck — a SECOND SymSpell-family implementation alongside
+# `symspell` above, this one depending on `memmap2`, `rkyv`, and
+# `triple_accel` in its own Cargo.toml — strongly suggesting a precomputed
+# deletion index with zero-copy loading and SIMD-accelerated distance
+# verification, the same architectural territory
+# `verbora-spellcheck::FuzzyIndex` (a BK-tree, chosen instead for its
+# simpler, triangle-inequality-only correctness argument — see that type's
+# own doc comment) was weighed against on paper but never benchmarked
+# against a real implementation until now. No repository link on crates.io;
+# read via `cargo doc`/docs.rs source view, not GitHub. See
+# benches/spellcheck.rs's own doc comment for the independent
+# build/lookup/correction-distance-1/correction-distance-2 scenarios and the
+# architectural analysis of why it wins or loses where it does.
+fast_symspell = "=0.1.10"
+# §1.17 Spellcheck — Hunspell affix-rule + morphological correction, a
+# meaningfully different mechanism (matrix: Partial, selected cases).
+# Dictionaries cannot be shared with Verbora's flat frequency corpus, so this
+# is a matched-workload TIMING comparison only, loaded with a real en_US
+# `.aff`/`.dic` pair fetched by scripts/fetch-models.sh (never Verbora's own
+# corpus) — see benches/spellcheck.rs's own doc comment.
+spellbook = "=0.4.2"
+# §1.12 TF-IDF — closest architectural match found (stateful `add()`/
+# `add_vec()`), but a genuinely different weighting variant (matrix: Partial,
+# `idf = log10(N/df)` unsmoothed vs. Verbora's `1 + ln`-smoothed) — a
+# build/query-time SPEED comparison only, never an output-value comparison.
+# Its own published lib path is `tfidf::tfidf::TfIdf`, which happens to share
+# a crate name with `rust-tfidf` below (whose OWN `[lib] name` is also
+# `tfidf`) — Cargo cannot link two crates both named `tfidf` into one
+# dependency graph, hence the `rust_tfidf` rename directly below.
+tfidf = "=0.3.0"
+# §1.12 TF-IDF — query/scoring only (matrix: no ingestion step exists at all,
+# so nothing to benchmark as "build"). Renamed on import: its own `[lib] name`
+# is `tfidf`, which collides with the `tfidf` (afshinm) crate pinned directly
+# above — `cargo build` fails with E0464 ("multiple candidates for `rlib`
+# dependency `tfidf`") without this rename.
+rust_tfidf = { package = "rust-tfidf", version = "=1.1.1" }
+# §1.13 Classifiers — Naive Bayes. `smartcore::naive_bayes::multinomial::MultinomialNB`
+# operates on a pre-built dense `DenseMatrix<u32>` count matrix, not raw text
+# (matrix: Partial, selected cases) — see benches/classifiers.rs's own doc
+# comment for the documented tokenize+vectorize adapter this crate needs.
+smartcore = "=0.6.5"
+# §1.13 Classifiers — Naive Bayes, second major Rust ML framework per the
+# spec's "don't limit to one rival" (matrix: Partial, selected cases). Same
+# pre-built-matrix situation as smartcore.
+linfa = "=0.8.1"
+linfa-bayes = "=0.8.1"
+# `linfa`'s `DatasetView`/`Array2` construction for the count-matrix adapter
+# shared by the smartcore and linfa-bayes rows.
+ndarray = "=0.16.1"
+# §1.13 Classifiers — Naive Bayes, `naivebayes` (ruivieira) 0.1.2. Pre-
+# tokenized `Vec<String>` input (matrix: Partial, selected cases) — closer to
+# Verbora's own text-in shape than smartcore/linfa-bayes' dense-matrix
+# adapters, but its own `calculate_attr_prob` uses a FIXED probability floor
+# (`minimum_probability = 1e-9`) for an attribute unseen under a given label,
+# rather than Verbora's count-based `(count+smoothing)/(total+smoothing*|V|)`
+# additive smoothing — a real smoothing-*mechanics* difference, not just an
+# API one, so this is a speed-only comparison; see `benches/classifiers.rs`'s
+# own doc comment. No dependencies of its own (confirmed by reading its
+# published `Cargo.toml`), so it carries no transitive-version risk.
+naivebayes = "=0.1.2"
+# §1.13 Classifiers — Logistic Regression. `smartcore::linear::
+# logistic_regression::LogisticRegression` (same `smartcore` crate/version
+# already pinned above for Naive Bayes) — multiclass softmax via LBFGS, dense
+# `DenseMatrix<f64>` input, no text vectorizer (matrix: Partial, selected
+# cases) — different multiclass strategy/optimizer than Verbora's one-vs-rest
+# gradient descent. Reuses the same `Vocab` tokenize+vectorize adapter as the
+# Naive Bayes rows, built inside the timed region.
+#
+# §1.13 Classifiers — Logistic Regression, linfa `linfa-logistic` 0.8.1. A
+# SEPARATE crate from `linfa-bayes` above (confirmed on crates.io before
+# pinning), same workspace/version. `MultiLogisticRegression` — joint
+# softmax/L-BFGS via `argmin`, dense `ndarray` input, no text pipeline
+# (matrix: Partial, selected cases) — same caveat as smartcore, plus a
+# different multiclass strategy (joint softmax vs. Verbora's one-vs-rest).
+linfa-logistic = "=0.8.1"
+# §1.13 Classifiers — Logistic Regression, rustlearn 0.5.0. SGD-based
+# (Adagrad), one-vs-rest via `OneVsRestWrapper<SGDClassifier>` — the closest
+# multiclass *strategy* match to Verbora's own one-vs-rest gradient descent of
+# any Rust competitor found, but unmaintained since 2018 (last push
+# 2018-07-29) and the matrix's own explicitly flagged "weakest/lowest-
+# priority" of the three ML-framework candidates — included anyway per the
+# spec's multi-competitor policy, clearly labeled as such in
+# `benches/classifiers.rs`. Links a small bundled `libsvm` C++ library at
+# build time (`links = "libsvm"`, `dependencies/libsvm/svm.cpp` compiled via
+# the `gcc` build-dependency) for its (here-unused) SVM module — this is real
+# build-time cost for a feature this benchmark never calls, not a workaround;
+# confirmed to compile clean on this workspace's pinned toolchain.
+rustlearn = "=0.5.0"
+#
+# NOT pinned here: `classifier` (jackm321/Rust_Classifier) 0.0.3, despite the
+# matrix marking it Yes/Yes (closest text-in/text-out API match). Verified
+# during implementation that it does not compile on this workspace's pinned
+# toolchain (rustc 1.97.1, edition 2024): `Classifier`'s
+# `#[derive(RustcDecodable, RustcEncodable)]` needs `rustc-serialize`'s custom
+# compiler-plugin derive, removed from stable Rust years before this
+# toolchain — `cargo build -p probe --dependencies classifier` fails with
+# E0277 ("the trait bound `Classifier: Encodable` is not satisfied"), not a
+# version-pinning problem (0.0.3 is `classifier`'s only published release).
+# The matrix's optimistic build assessment was not re-verified by compiling
+# it; this implementation pass did, and found it broken. Recorded here rather
+# than silently dropped — see `benches/classifiers.rs`'s own doc comment.
+
+[[bench]]
+name = "distance"
+harness = false
+
+[[bench]]
+name = "tokenizers"
+harness = false
+
+[[bench]]
+name = "stemmers"
+harness = false
+
+[[bench]]
+name = "normalizers"
+harness = false
+
+[[bench]]
+name = "inflectors"
+harness = false
+
+[[bench]]
+name = "trie"
+harness = false
+
+[[bench]]
+name = "phonetics"
+harness = false
+
+[[bench]]
+name = "language"
+harness = false
+
+[[bench]]
+name = "pos_tagging"
+harness = false
+
+[[bench]]
+name = "spellcheck"
+harness = false
+
+[[bench]]
+name = "fst_fuzzy"
+harness = false
+
+[[bench]]
+name = "tfidf"
+harness = false
+
+[[bench]]
+name = "classifiers"
+harness = false
+
+# Accuracy report for §1.9's three real language detectors, over
+# datasets/language-accuracy/ (see that directory's README). Not a
+# Criterion bench — this measures correctness, not speed; per the spec's
+# LANGUAGE DETECTION BENCHMARKS section, performance alone is not enough.
+# Lives at examples/language_accuracy.rs (auto-discovered, no [[example]]
+# entry needed) rather than src/bin/.
+# Run with: cargo run --release --example language_accuracy
+
+# Memory report (allocation counts + RSS) across every module this pass of
+# the audit found `memory::measure` had not yet been applied to — lang/tfidf/
+# classifiers plus (this pass) Phonetic Index, Spellcheck, WordNet. Not a
+# Criterion bench for the same reason language_accuracy.rs above is not one:
+# `memory::measure`'s own doc comment explains there is no batching/
+# statistics problem to solve here, so one clean run is the real number.
+# Lives at examples/memory_report.rs (auto-discovered).
+# Run with: cargo run --release --example memory_report
+# Writes: results/memory-report.json (merged across modules — see that
+# file's own doc comment for the merge discipline).
+
+# Memory report (allocation counts + RSS) for §1.8 Distances specifically —
+# every (group, size, implementation) triple benches/distance.rs benchmarks
+# for speed. Written as its own file/example rather than folded into
+# examples/memory_report.rs above (a different pass's file, scoped to a
+# disjoint set of modules per its own doc comment) to avoid two concurrently
+# developed passes writing the same example file. Not a Criterion bench, same
+# reasoning as memory_report.rs above.
+# Lives at examples/distance_memory.rs (auto-discovered).
+# Run with: cargo run --release --example distance_memory
+# Writes: results/distance-memory.json.

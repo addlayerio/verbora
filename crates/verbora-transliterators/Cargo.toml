@@ -1,0 +1,58 @@
+[package]
+name = "verbora-transliterators"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Kana-to-romaji transliteration for Rust"
+keywords = ["transliteration", "japanese", "romaji"]
+categories.workspace = true
+
+[dependencies]
+# `verbora-normalizers` is the parity-verified port of `normalizeJa` and the
+# Japanese `Converters`. `TransliterateJa` does not call them, but every caller
+# of it in the reference tree does — the transliterator has no halfwidth-katakana
+# keys, so its `stemmer_ja` and `noun_inflector` both normalize first.
+# `ja::transliterate_normalized` is that pairing, reusing the verified tables
+# rather than growing a second copy of them here.
+verbora-normalizers = { workspace = true }
+
+# Deliberately no `regex`:
+#
+#   * 30 of the reference's rules use lookahead, `/X(?=[…])/g`, which the crate
+#     cannot express at all;
+#   * the closing rule keys on the reference's ASCII-only `\B`, which the crate
+#     makes Unicode-aware and therefore gets backwards on kana and kanji; and
+#   * the three table phases are leftmost-longest scans over static tables whose
+#     keys are at most three `char`s, which is three binary searches behind a
+#     bitmap gate — strictly less work than a 382-branch alternation.
+#
+# And deliberately no `verbora-core`: nothing here splits or trims on `\s`, so
+# `is_js_whitespace` has no call site. The only reference character semantics
+# that bite are `\w` and `\B`, both of which are ASCII-only and local to
+# `src/ja.rs`.
+#
+# `par_transliterate_ja_batch`: data-parallel fan-out over `transliterate_ja`,
+# gated behind the `parallel` feature. See that function's doc comment in
+# `src/ja.rs` for when to reach for it.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Adds `par_transliterate_ja_batch`, a `rayon`-backed fan-out over the
+# existing sequential `transliterate_ja`. See its doc comment in `src/ja.rs`
+# for when to reach for it.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "transliterators"
+harness = false
+
+[lints]
+workspace = true

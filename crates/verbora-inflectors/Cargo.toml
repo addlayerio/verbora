@@ -1,0 +1,26 @@
+[package]
+name = "verbora-inflectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Noun, verb and ordinal inflection for Rust"
+keywords = ["inflection", "pluralize"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "inflectors"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,871 @@
+/* ==========================================================================
+   Verbora — "oxide" theme (VitePress)
+   --------------------------------------------------------------------------
+   Dark-first. The palette is iron and oxidised steel: near-black grounds, a
+   rust accent, copper for secondary emphasis, warm off-white type.
+
+   Every foreground/background pair used for text meets WCAG AA (>= 4.5:1)
+   against its own ground; the values are noted next to each declaration where
+   the margin is not obvious. Ported from the mdBook build's theme/oxide.css —
+   same palette and component catalogue, retargeted at VitePress's own
+   variables and its light/`.dark` toggle instead of mdBook's five named
+   themes.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Palette
+   -------------------------------------------------------------------------- */
+
+:root {
+    /* Grounds */
+    --ox-bg-0: #0d0f10; /* page */
+    --ox-bg-1: #151819; /* sidebar, cards */
+    --ox-bg-2: #1c2022; /* code, table headers */
+    --ox-bg-3: #23282a; /* hover, borders-as-fills */
+
+    /* Oxide */
+    --ox-rust-700: #8f3208;
+    --ox-rust-600: #b7410e;
+    --ox-rust-500: #c65d2e;
+    --ox-rust-400: #d2693c;
+    --ox-copper: #b87333;
+    --ox-copper-bright: #d99a5b;
+
+    /* Type */
+    --ox-fg: #e7e2dc;
+    --ox-fg-muted: #a8a29b;
+    --ox-fg-faint: #7e7973;
+
+    /* Lines */
+    --ox-line: #2a2f31;
+    --ox-line-strong: #3a4144;
+
+    /* Semantic accents (dark ground) */
+    --ox-good: #7fb069;
+    --ox-warn: #d9a441;
+    --ox-info: #6fa8b8;
+}
+
+/* --------------------------------------------------------------------------
+   2. Wire the palette into VitePress's own variables
+   --------------------------------------------------------------------------
+   VitePress is light-mode-first at :root, with `.dark` added to <html> for
+   dark mode. Both directions are defined explicitly rather than relying on
+   `prefers-color-scheme`, matching VitePress's own toggle behaviour.
+   -------------------------------------------------------------------------- */
+
+/* Light (default) ---------------------------------------------------------- */
+
+:root {
+    --vp-c-bg: #f5f2ee;
+    --vp-c-bg-alt: #ece7e0;
+    --vp-c-bg-elv: #fffdfa;
+    --vp-c-bg-soft: #e3ddd5;
+
+    --vp-c-text-1: #1c2022;
+    --vp-c-text-2: #423e38;
+    --vp-c-text-3: #7d766d;
+
+    --vp-c-border: #ddd6ce;
+    --vp-c-divider: #ddd6ce;
+    --vp-c-gutter: #ddd6ce;
+
+    --vp-c-brand-1: #8f3208; /* 7.2:1 on --vp-c-bg */
+    --vp-c-brand-2: #b7410e;
+    --vp-c-brand-3: #c65d2e;
+    --vp-c-brand-soft: rgba(183, 65, 14, 0.14);
+
+    --vp-code-bg: #e3ddd5;
+    --vp-code-color: #8a4b16;
+
+    --vp-button-brand-bg: var(--vp-c-brand-1);
+    --vp-button-brand-hover-bg: var(--vp-c-brand-2);
+    --vp-button-brand-active-bg: var(--vp-c-brand-1);
+    --vp-button-brand-text: #fffdfa;
+    --vp-button-brand-hover-text: #fffdfa;
+
+    /* Local aliases used by the component classes below (.perf, .badge-*, …) */
+    --c-bg: var(--vp-c-bg);
+    --c-surface: var(--vp-c-bg-alt);
+    --c-surface-2: var(--vp-c-bg-soft);
+    --c-line: var(--vp-c-border);
+    --c-line-strong: #c9c1b8;
+    --c-fg: var(--vp-c-text-1);
+    --c-muted: var(--vp-c-text-2);
+    --c-accent: var(--vp-c-brand-1);
+    --c-copper: #8a5a1e;
+    --c-good: #3f6b2c;
+    --c-warn: #78570d; /* 4.9:1 on --c-surface-2 */
+    --c-info: #2f6273;
+}
+
+/* Dark ---------------------------------------------------------------------- */
+
+.dark {
+    --vp-c-bg: var(--ox-bg-0);
+    --vp-c-bg-alt: var(--ox-bg-1);
+    --vp-c-bg-elv: var(--ox-bg-1);
+    --vp-c-bg-soft: var(--ox-bg-2);
+
+    --vp-c-text-1: var(--ox-fg);
+    --vp-c-text-2: #c9c4bd;
+    --vp-c-text-3: var(--ox-fg-faint);
+
+    --vp-c-border: var(--ox-line);
+    --vp-c-divider: var(--ox-line);
+    --vp-c-gutter: var(--ox-line);
+
+    --vp-c-brand-1: var(--ox-rust-400); /* 5.3:1 on --vp-c-bg */
+    --vp-c-brand-2: var(--ox-rust-500);
+    --vp-c-brand-3: var(--ox-rust-600);
+    --vp-c-brand-soft: rgba(183, 65, 14, 0.22);
+
+    --vp-code-bg: var(--ox-bg-2);
+    --vp-code-color: var(--ox-copper-bright);
+
+    --vp-button-brand-bg: var(--ox-rust-600);
+    --vp-button-brand-hover-bg: var(--ox-rust-500);
+    --vp-button-brand-active-bg: var(--ox-rust-700);
+    --vp-button-brand-text: var(--ox-fg);
+    --vp-button-brand-hover-text: var(--ox-fg);
+
+    --c-bg: var(--vp-c-bg);
+    --c-surface: var(--ox-bg-1);
+    --c-surface-2: var(--ox-bg-2);
+    --c-line: var(--ox-line);
+    --c-line-strong: var(--ox-line-strong);
+    --c-fg: var(--ox-fg);
+    --c-muted: var(--ox-fg-muted);
+    --c-accent: var(--ox-rust-400);
+    --c-copper: var(--ox-copper-bright);
+    --c-good: var(--ox-good);
+    --c-warn: var(--ox-warn);
+    --c-info: var(--ox-info);
+}
+
+/* Sidebar / nav chrome, both modes */
+:root {
+    --vp-sidebar-bg-color: var(--vp-c-bg-alt);
+    --vp-nav-bg-color: var(--vp-c-bg);
+}
+
+/* Hero gradient text, matched to the mdBook build's h1 treatment */
+:root {
+    --vp-home-hero-name-color: transparent;
+    --vp-home-hero-name-background: linear-gradient(
+        100deg,
+        var(--ox-copper-bright),
+        var(--ox-rust-400) 55%,
+        var(--ox-rust-600)
+    );
+}
+
+/* --------------------------------------------------------------------------
+   3. Code blocks — the oxide accent rule
+   -------------------------------------------------------------------------- */
+
+.vp-doc div[class*='language-'] {
+    border: 1px solid var(--c-line);
+    border-radius: 6px;
+    position: relative;
+}
+
+.vp-doc div[class*='language-']::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--ox-rust-600), var(--ox-copper));
+    opacity: 0.55;
+    border-radius: 6px 0 0 6px;
+    z-index: 1;
+}
+
+/* ASCII diagrams and decision trees: a plain-text fence, no language rule, just
+   a neutral marker so it still reads as a "block" without implying code. */
+.vp-doc div.language-text::before {
+    background: var(--c-line-strong);
+    opacity: 0.8;
+}
+
+.vp-doc div.language-text pre,
+.vp-doc div.language-text code {
+    color: var(--c-muted);
+    line-height: 1.4;
+}
+
+/* --------------------------------------------------------------------------
+   4. Component — API badges
+   -------------------------------------------------------------------------- */
+
+.badge {
+    display: inline-block;
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    line-height: 1;
+    padding: 0.32em 0.55em;
+    margin: 0 0.25em 0.25em 0;
+    border-radius: 3px;
+    border: 1px solid;
+    text-decoration: none !important;
+    white-space: nowrap;
+    vertical-align: middle;
+    transition:
+        filter 0.12s ease,
+        transform 0.12s ease;
+}
+
+.badge:hover {
+    filter: brightness(1.15);
+}
+
+.badge-lazy {
+    color: #1f5f5e;
+    border-color: rgba(143, 188, 187, 0.4);
+    background: rgba(143, 188, 187, 0.14);
+}
+.dark .badge-lazy {
+    color: #8fbcbb;
+    background: rgba(143, 188, 187, 0.1);
+}
+
+.badge-zerocopy,
+.badge-alloc {
+    color: #3f6b2c;
+    border-color: rgba(127, 176, 105, 0.4);
+    background: rgba(127, 176, 105, 0.14);
+}
+.dark .badge-zerocopy,
+.dark .badge-alloc {
+    color: var(--ox-good);
+    background: rgba(127, 176, 105, 0.1);
+}
+
+.badge-reuse {
+    color: #8a5a1e;
+    border-color: rgba(217, 154, 91, 0.4);
+    background: rgba(217, 154, 91, 0.16);
+}
+.dark .badge-reuse {
+    color: var(--ox-copper-bright);
+    background: rgba(217, 154, 91, 0.1);
+}
+
+.badge-batch {
+    color: #2f6273;
+    border-color: rgba(111, 168, 184, 0.4);
+    background: rgba(111, 168, 184, 0.14);
+}
+.dark .badge-batch {
+    color: var(--ox-info);
+    background: rgba(111, 168, 184, 0.1);
+}
+
+.badge-owned {
+    color: #5c5750;
+    border-color: var(--c-line-strong);
+    background: rgba(127, 127, 127, 0.1);
+}
+.dark .badge-owned {
+    color: var(--c-muted);
+    background: rgba(127, 127, 127, 0.08);
+}
+
+.badge-cow {
+    color: var(--ox-rust-700);
+    border-color: rgba(210, 105, 60, 0.45);
+    background: rgba(210, 105, 60, 0.12);
+}
+.dark .badge-cow {
+    color: var(--ox-rust-400);
+    background: rgba(210, 105, 60, 0.1);
+}
+
+.badge-utf16,
+.badge-global {
+    color: #74500f;
+    border-color: rgba(217, 164, 65, 0.5);
+    background: rgba(217, 164, 65, 0.16);
+}
+.dark .badge-utf16,
+.dark .badge-global {
+    color: var(--c-warn);
+    background: rgba(217, 164, 65, 0.14);
+}
+
+.badge-fallible {
+    color: var(--c-muted);
+    border-color: var(--c-line-strong);
+    background: transparent;
+}
+
+/* --------------------------------------------------------------------------
+   5. Component — Performance characteristics card
+   -------------------------------------------------------------------------- */
+
+.perf {
+    border: 1px solid var(--c-line);
+    border-left: 3px solid var(--ox-copper);
+    border-radius: 5px;
+    background: var(--c-surface);
+    margin: 1.3em 0;
+    padding: 0.2em 0;
+    font-size: 0.9rem;
+}
+
+.perf::before {
+    content: 'Performance characteristics';
+    display: block;
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.64rem;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--c-copper);
+    padding: 0.75em 1em 0.5em;
+}
+
+.perf-row {
+    display: flex;
+    gap: 1em;
+    padding: 0.32em 1em;
+    border-top: 1px solid var(--c-line);
+}
+
+.perf-k {
+    flex: 0 0 9.5em;
+    color: var(--c-muted);
+    font-size: 0.86em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding-top: 0.15em;
+}
+
+.perf-v {
+    flex: 1 1 auto;
+    color: var(--c-fg);
+    min-width: 0;
+}
+
+.perf-v code {
+    white-space: normal !important;
+}
+
+@media (max-width: 620px) {
+    .perf-row {
+        flex-direction: column;
+        gap: 0.15em;
+    }
+    .perf-k {
+        flex: none;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   6. Component — Callouts
+   -------------------------------------------------------------------------- */
+
+.callout {
+    border: 1px solid var(--c-line);
+    border-left: 3px solid var(--c-line-strong);
+    border-radius: 5px;
+    background: var(--c-surface);
+    padding: 0.85em 1.1em;
+    margin: 1.4em 0;
+}
+
+.callout > :first-child {
+    margin-top: 0;
+}
+.callout > :last-child {
+    margin-bottom: 0;
+}
+.callout strong:first-child {
+    color: var(--c-fg);
+}
+
+.callout-note {
+    border-left-color: var(--c-info);
+}
+.callout-note strong:first-child {
+    color: var(--c-info);
+}
+
+.callout-warn {
+    border-left-color: var(--c-warn);
+    background: rgba(217, 164, 65, 0.08);
+}
+.callout-warn strong:first-child {
+    color: var(--c-warn);
+}
+
+.callout-spec {
+    border-left-color: var(--c-accent);
+    background: rgba(198, 93, 46, 0.07);
+}
+.callout-spec strong:first-child {
+    color: var(--c-accent);
+}
+
+.callout-good {
+    border-left-color: var(--c-good);
+}
+.callout-good strong:first-child {
+    color: var(--c-good);
+}
+
+/* --------------------------------------------------------------------------
+   7. Component — Home hero and cards
+   -------------------------------------------------------------------------- */
+
+.hero {
+    margin: 0.5em 0 2.4em;
+}
+
+.hero h1 {
+    font-size: 2.6rem;
+    border-bottom: 0;
+    margin-bottom: 0.1em;
+    padding-bottom: 0;
+    background: var(--vp-home-hero-name-background);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: var(--c-accent);
+}
+
+.hero-tagline {
+    font-size: 1.22rem;
+    color: var(--c-fg);
+    margin: 0.2em 0 0.8em;
+    max-width: 44em;
+}
+
+.hero-sub {
+    color: var(--c-muted);
+    max-width: 46em;
+}
+
+.ladder {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 0.9em;
+    margin: 1.6em 0 2em;
+}
+
+.rung {
+    border: 1px solid var(--c-line);
+    border-top: 2px solid var(--rung-accent, var(--c-line-strong));
+    border-radius: 5px;
+    background: var(--c-surface);
+    padding: 0.95em 1em 1.1em;
+    min-width: 0;
+}
+
+.rung-1 {
+    --rung-accent: var(--ox-copper);
+}
+.rung-2 {
+    --rung-accent: #3f8f8e;
+}
+.dark .rung-2 {
+    --rung-accent: #8fbcbb;
+}
+.rung-3 {
+    --rung-accent: var(--ox-rust-500);
+}
+.rung-4 {
+    --rung-accent: var(--c-info);
+}
+
+.rung h3 {
+    margin: 0 0 0.5em;
+    font-size: 0.72rem;
+    font-family: var(--vp-font-family-mono);
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--rung-accent);
+    border: 0;
+    padding: 0;
+}
+
+.rung div[class*='language-'] {
+    margin: 0 0 0.7em;
+    font-size: 0.86em;
+}
+
+.rung p {
+    margin: 0;
+    font-size: 0.88rem;
+    color: var(--c-muted);
+    line-height: 1.5;
+}
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.9em;
+    margin: 1.5em 0 2em;
+}
+
+.card {
+    display: block;
+    border: 1px solid var(--c-line);
+    border-radius: 5px;
+    background: var(--c-surface);
+    padding: 1em 1.1em;
+    text-decoration: none !important;
+    transition:
+        border-color 0.14s ease,
+        background 0.14s ease,
+        transform 0.14s ease;
+    min-width: 0;
+}
+
+.card:hover {
+    border-color: var(--c-accent);
+    background: var(--c-surface-2);
+    transform: translateY(-1px);
+}
+
+.card-title {
+    display: block;
+    font-weight: 600;
+    color: var(--c-accent);
+    margin-bottom: 0.3em;
+}
+
+.card-desc {
+    display: block;
+    font-size: 0.88rem;
+    color: var(--c-muted);
+    line-height: 1.5;
+}
+
+.status {
+    display: inline-block;
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    padding: 0.25em 0.5em;
+    border-radius: 3px;
+    border: 1px solid;
+    white-space: nowrap;
+}
+
+.status-verified {
+    color: #3f6b2c;
+    border-color: rgba(127, 176, 105, 0.45);
+    background: rgba(127, 176, 105, 0.14);
+}
+.dark .status-verified {
+    color: var(--c-good);
+    background: rgba(127, 176, 105, 0.1);
+}
+
+.status-planned {
+    color: var(--c-muted);
+    border-color: var(--c-line-strong);
+    background: transparent;
+}
+
+/* --------------------------------------------------------------------------
+   8. Responsive
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 700px) {
+    .hero h1 {
+        font-size: 2rem;
+    }
+    .hero-tagline {
+        font-size: 1.05rem;
+    }
+    .ladder,
+    .cards {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   9. Component — Capability map
+   --------------------------------------------------------------------------
+   The architecture diagram on the home page: one root, four capability
+   families, one toolkit — with every crate in the workspace named on a leaf.
+
+   Layout, and why it is this and not something cleverer:
+
+   * The families are a CSS **grid** of equal cards, and the leaves live
+     *inside* their card as full-width rows. The previous version floated
+     nowrap pills below each card in a three-column flex row, so any label
+     wider than the column (`Damerau–Levenshtein` in a 15em column) escaped
+     its branch and the three columns drifted out of alignment. A row inside
+     a card cannot do that: it is bounded by the card, and long text wraps.
+   * The connectors are two centred trunk lines — root → grid, grid →
+     toolkit. There are deliberately no per-column drop lines: the grid
+     reflows from four columns to two to one, and any connector drawn to a
+     specific column would dangle at the widths where that column moves.
+   * No SVG and no canvas. Every label here is real text, so it wraps to the
+     reader's font size, is selectable, is indexed by the local search, and
+     is in the accessibility tree; a canvas would be a bitmap of none of
+     those, and would need JS to redraw on the light/dark toggle.
+
+   Hover changes borders and the leaf underline only — never text colour on a
+   ground that would drop it below AA, and never opacity — so the diagram is
+   exactly as legible with hover unused as with it.
+   -------------------------------------------------------------------------- */
+
+.capmap {
+    /* Per-family accent, overridden by .cap-1…4 below. Both modes are stated
+       explicitly: the mid-tone copper/teal that read well on the dark ground
+       fall to ~3:1 on the light one, so light mode gets darker variants. */
+    --cap-accent: var(--c-copper);
+    margin: 2em 0 2.6em;
+}
+
+.capmap-toolkit {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    margin: 0 auto;
+    padding: 0.6em 1.2em;
+    border: 1px solid var(--c-line-strong);
+    border-radius: 6px;
+    background: var(--c-surface-2);
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.35;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--c-fg);
+    width: fit-content;
+    max-width: 100%;
+}
+
+/* The root is the mark itself — no frame, no ground, no padding. It reads as
+   the head of the trunk on its own, so the pill treatment the other nodes use
+   would only box in a logo that already has its own silhouette. */
+.capmap-root {
+    display: flex;
+    justify-content: center;
+    margin: 0 auto;
+    width: fit-content;
+    max-width: 100%;
+}
+
+/* The mark is a square SVG with a transparent ground, so it needs an explicit
+   height (its intrinsic 1024px is not a usable box) and reads identically in
+   both themes — it carries its own palette rather than `currentColor`. */
+.capmap-logo {
+    display: block;
+    height: 4.1rem;
+    width: auto;
+    margin: 0;
+}
+
+/* The trunk: a short centred rule, root → grid and grid → toolkit. */
+.capmap-trunk {
+    width: 1px;
+    height: 1.5em;
+    margin: 0 auto;
+    background: var(--c-line-strong);
+}
+
+/* The rails: one rule above the grid and one below it, spanning the whole
+   group. The trunks meet them, so root and toolkit stay visibly attached to
+   the family cards at every column count — unlike a per-column drop line,
+   which dangles the moment the grid reflows. */
+.capmap-branches {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.8em;
+    padding: 0.9em 0;
+    border-top: 1px solid var(--c-line-strong);
+    border-bottom: 1px solid var(--c-line-strong);
+}
+
+.capmap-branch {
+    display: flex;
+    flex-direction: column;
+    min-width: 0; /* a grid item defaults to min-content: without this, one
+                     long leaf label would widen the whole column */
+    padding: 0.85em 1em 0.75em;
+    border: 1px solid var(--c-line);
+    border-top: 2px solid var(--cap-accent);
+    border-radius: 6px;
+    background: var(--c-surface);
+}
+
+/* Family accents. Light values first, dark overrides after — same hues,
+   lightened for the near-black ground. */
+.cap-1 {
+    --cap-accent: #8a5a1e;
+}
+.cap-2 {
+    --cap-accent: var(--ox-rust-700);
+}
+.cap-3 {
+    --cap-accent: #2d6b63;
+}
+.cap-4 {
+    --cap-accent: #2f6273;
+}
+.dark .cap-1 {
+    --cap-accent: var(--ox-copper-bright);
+}
+.dark .cap-2 {
+    --cap-accent: var(--ox-rust-400);
+}
+.dark .cap-3 {
+    --cap-accent: #8fbcbb;
+}
+.dark .cap-4 {
+    --cap-accent: var(--ox-info);
+}
+
+.capmap-node h3 {
+    display: flex;
+    align-items: baseline;
+    gap: 0.55em;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--cap-accent);
+}
+
+.capmap-idx {
+    font-size: 0.68rem;
+    font-weight: 400;
+    letter-spacing: 0.06em;
+    color: var(--c-muted);
+}
+
+.capmap-sub {
+    margin: 0.4em 0 0;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: var(--c-muted);
+}
+
+.capmap-leaves {
+    margin: 0.8em 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.capmap-leaves li {
+    /* Belt and suspenders: VitePress's own `.vp-doc li` rule sets a marker
+       with equal-or-greater specificity depending on bundle order, so
+       list-style: none on the parent <ul> alone is not reliable — set it on
+       the <li> too. */
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.2em 0.7em;
+    margin: 0;
+    padding: 0.42em 0;
+    border-top: 1px solid var(--c-line);
+    font-size: 0.86rem;
+    line-height: 1.35;
+    color: var(--c-fg);
+    overflow-wrap: anywhere;
+}
+
+/* A leaf whose crate ships but has no feature page: plain text, not a link,
+   and muted so the difference is visible before the "no page yet" marker is
+   read. */
+.capmap-leaves li.is-pending {
+    color: var(--c-muted);
+}
+
+.capmap-leaves a {
+    color: var(--c-fg);
+    font-weight: 500;
+    text-decoration: underline !important;
+    text-decoration-color: var(--c-line-strong) !important;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.22em;
+}
+
+.capmap-leaves a:hover {
+    color: var(--cap-accent);
+    text-decoration-color: var(--cap-accent) !important;
+}
+
+/* Pushed right on one line; drops below the label only when the card is too
+   narrow to hold both, which is why the row wraps rather than truncates. */
+.capmap-meta {
+    margin-left: auto;
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.7rem;
+    color: var(--c-muted);
+    white-space: nowrap;
+}
+
+.capmap-status {
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.05em;
+    color: var(--c-muted);
+    border-bottom: 1px dotted var(--c-line-strong);
+}
+
+.capmap-status.is-native {
+    color: var(--cap-accent);
+    border-bottom-color: var(--cap-accent);
+}
+
+.capmap-base {
+    max-width: 44em;
+    margin: 1.1em auto 0;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    text-align: center;
+    /* Centred text left to itself strands a one-word last line. Balanced
+       where supported; an ordinary ragged wrap everywhere else. */
+    text-wrap: balance;
+    color: var(--c-muted);
+}
+
+/* A crate name broken across two lines ("verbora-" / "util") is the exact
+   sort of mid-word split this caption is too short to justify. */
+.capmap-base code {
+    white-space: nowrap;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .capmap-branch:hover {
+        border-color: var(--cap-accent);
+    }
+}
+
+@media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
+    .capmap-branch,
+    .capmap-leaves a {
+        transition:
+            border-color 0.15s ease,
+            color 0.15s ease,
+            text-decoration-color 0.15s ease;
+    }
+}
+
+/* Two columns as soon as a card can hold a leaf row without wrapping it, and
+   never three: with four families, a three-column row would leave one card
+   stranded on a row of its own. */
+@media (min-width: 700px) {
+    .capmap-branches {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}

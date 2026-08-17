@@ -1,0 +1,30 @@
+[package]
+name = "verbora-trie"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Arena-backed prefix trie for Rust"
+keywords = ["trie", "prefix-tree"]
+categories.workspace = true
+
+[dependencies]
+# Child lists are one or two entries for the overwhelming majority of nodes;
+# inline storage keeps a bulk load from making one heap allocation per node.
+smallvec = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+# Benchmarks only: the hash-map-per-node baseline the arena is measured against
+# is given the fastest hasher available, so the comparison is not won by SipHash.
+rustc-hash = { workspace = true }
+
+[[bench]]
+name = "trie"
+harness = false
+
+[lints]
+workspace = true

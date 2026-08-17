@@ -1,0 +1,26 @@
+[package]
+name = "verbora-ngrams"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "N-gram generation and frequency tables for Rust"
+keywords = ["ngram", "bigram", "trigram"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+rustc-hash = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "ngrams"
+harness = false
+
+[lints]
+workspace = true

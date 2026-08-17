@@ -1,0 +1,40 @@
+[package]
+name = "verbora-tfidf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "TF-IDF term weighting for Rust"
+keywords = ["tfidf", "information-retrieval", "nlp"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+verbora-tokenizers = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `TfIdf::par_add_documents_batch`: parallel tokenizing of a document batch
+# ahead of the existing, unchanged sequential interning/counting loop. See
+# that method's doc comment in `src/tfidf.rs` for why the split is shaped
+# this way and when to reach for it.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "tfidf"
+harness = false
+
+[features]
+default = []
+# Adds `TfIdf::par_add_documents_batch`, a `rayon`-backed parallel tokenizing
+# pass ahead of the existing sequential interning/counting loop. See that
+# method's doc comment in `src/tfidf.rs` for why it exists and what it costs.
+parallel = ["dep:rayon"]
+
+[lints]
+workspace = true

@@ -1,0 +1,52 @@
+[package]
+name = "verbora-spellcheck"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Norvig-style spelling correction for Rust"
+keywords = ["spellcheck", "levenshtein"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+verbora-distance = { workspace = true }
+verbora-trie = { workspace = true }
+# The edit generator de-duplicates ~10^5 candidates per call, where the hash is
+# pure overhead on 1–20 byte keys; FxHash measurably beats SipHash there.
+rustc-hash = { workspace = true }
+# `par_get_corrections_batch`: data-parallel fan-out over
+# `Spellcheck::get_corrections`, gated behind the `parallel` feature. See that
+# method's docs in `src/spellcheck.rs` for when to reach for it.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Adds `Spellcheck::par_get_corrections_batch`, a `rayon`-backed fan-out over
+# the existing sequential `Spellcheck::get_corrections`. `get_corrections`
+# alone measures 3.9–5.5 ms/call at distance 2 (this crate's own
+# `spellcheck_get_corrections_d2` benchmark) and every call is independent
+# against one shared, read-only `Spellcheck`, which is the shape a `rayon`
+# fan-out is for.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "spellcheck"
+harness = false
+
+[[bench]]
+name = "fuzzy_index"
+harness = false
+
+[[bench]]
+name = "deletion_index"
+harness = false
+
+[lints]
+workspace = true

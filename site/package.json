@@ -1,0 +1,16 @@
+{
+  "name": "@verbora/website",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Verbora documentation (VitePress, deployed to GitHub Pages).",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview",
+    "check": "python3 check-snippets.py && vitepress build && python3 check-links.py"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  }
+}

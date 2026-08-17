@@ -1,0 +1,12 @@
+{
+  "timestamp": "2026-08-15T23:50:55.956157+00:00",
+  "verbora_commit": "af1aee9d9da2b1d1b750f0761ef250d4c290b48c",
+  "verbora_version": "0.1.0",
+  "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "cpu": "Intel(R) Core(TM) i9-14900KF",
+  "cores": 32,
+  "ram": "125Gi",
+  "os": "Linux",
+  "kernel": "7.0.11-76070011-generic",
+  "note": "CPU affinity pinning, thermal monitoring, and Docker were evaluated (Fase 6 Benchmark.md marks all three optional -- 'cuando sea posible' / 'evaluar si ayuda') and deliberately not built: this is a single dedicated run on one physical machine with no other significant workload active, which the spec accepts as sufficient ('usar la misma maquina; cerrar workloads externos significativos')."
+}

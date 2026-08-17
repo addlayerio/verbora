@@ -1,0 +1,37 @@
+[package]
+name = "verbora-distance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "String distance and similarity metrics for Rust"
+keywords = ["levenshtein", "jaro-winkler", "hamming", "dice", "string-distance"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+rustc-hash = { workspace = true }
+# `par_*_batch` functions: data-parallel fan-out over the existing sequential
+# metrics, gated behind the `parallel` feature.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "distance"
+harness = false
+
+[features]
+default = []
+# Adds `par_levenshtein_batch`, `par_damerau_levenshtein_batch`,
+# `par_jaro_winkler_batch`, `par_dice_coefficient_batch` and
+# `par_hamming_batch` — `rayon`-backed fan-outs over the existing sequential
+# metrics. See each function's doc comment for when to reach for it.
+parallel = ["dep:rayon"]
+
+[lints]
+workspace = true

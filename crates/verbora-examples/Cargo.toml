@@ -1,0 +1,35 @@
+[package]
+name = "verbora-examples"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Runnable examples used verbatim by the documentation site"
+publish = false
+
+# This package exists so that every example printed on the documentation site is
+# a real program the CI compiles. `site/check-snippets.py` extracts every
+# published Rust snippet into a generated example here and runs it, so a
+# snippet cannot drift from the API it shows.
+
+[dependencies]
+verbora-classifiers = { workspace = true }
+verbora-core = { workspace = true }
+verbora-distance = { workspace = true }
+verbora-inflectors = { workspace = true }
+verbora-ngrams = { workspace = true }
+verbora-normalizers = { workspace = true }
+verbora-phonetics = { workspace = true }
+verbora-sentiment = { workspace = true }
+verbora-spellcheck = { workspace = true }
+verbora-stemmers = { workspace = true }
+verbora-tfidf = { workspace = true }
+verbora-tokenizers = { workspace = true }
+verbora-transliterators = { workspace = true }
+verbora-trie = { workspace = true }
+verbora-wordnet = { workspace = true }
+
+[lints]
+workspace = true

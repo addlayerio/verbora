@@ -1,0 +1,113 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/verbora-core",
+    "crates/verbora-distance",
+    "crates/verbora-examples",
+    "crates/verbora-inflectors",
+    "crates/verbora-language",
+    "crates/verbora-ngrams",
+    "crates/verbora-normalizers",
+    "crates/verbora-analyzers",
+    "crates/verbora-spellcheck",
+    "crates/verbora-stemmers",
+    "crates/verbora-tagger",
+    "crates/verbora-transliterators",
+    "crates/verbora-util",
+    "crates/verbora-wordnet",
+    "crates/verbora-classifiers",
+    "crates/verbora-sentiment",
+    "crates/verbora-tfidf",
+    "crates/verbora-phonetics",
+    "crates/verbora-tokenizers",
+    "crates/verbora-trie",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/addlayerio/verbora"
+authors = ["Verbora contributors"]
+description = "A high-performance, Rust-native natural language processing toolkit"
+keywords = ["nlp", "natural-language", "stemmer", "tokenizer", "text"]
+categories = ["text-processing", "science"]
+
+[workspace.dependencies]
+# --- internal ---
+verbora-core = { path = "crates/verbora-core", version = "0.1.0" }
+verbora-distance = { path = "crates/verbora-distance", version = "0.1.0" }
+verbora-inflectors = { path = "crates/verbora-inflectors", version = "0.1.0" }
+verbora-language = { path = "crates/verbora-language", version = "0.1.0" }
+verbora-ngrams = { path = "crates/verbora-ngrams", version = "0.1.0" }
+verbora-normalizers = { path = "crates/verbora-normalizers", version = "0.1.0" }
+verbora-analyzers = { path = "crates/verbora-analyzers", version = "0.1.0" }
+verbora-spellcheck = { path = "crates/verbora-spellcheck", version = "0.1.0" }
+verbora-stemmers = { path = "crates/verbora-stemmers", version = "0.1.0" }
+verbora-tagger = { path = "crates/verbora-tagger", version = "0.1.0" }
+verbora-transliterators = { path = "crates/verbora-transliterators", version = "0.1.0" }
+verbora-util = { path = "crates/verbora-util", version = "0.1.0" }
+verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.1.0" }
+verbora-classifiers = { path = "crates/verbora-classifiers", version = "0.1.0" }
+verbora-sentiment = { path = "crates/verbora-sentiment", version = "0.1.0" }
+verbora-tfidf = { path = "crates/verbora-tfidf", version = "0.1.0" }
+verbora-phonetics = { path = "crates/verbora-phonetics", version = "0.1.0" }
+verbora-tokenizers = { path = "crates/verbora-tokenizers", version = "0.1.0" }
+verbora-trie = { path = "crates/verbora-trie", version = "0.1.0" }
+
+# --- external ---
+# Kept deliberately small. Every dependency here must be justified by a
+# benchmark or an architectural need, per the project's performance charter.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+memchr = "2"
+smallvec = { version = "1", features = ["union", "const_generics"] }
+rustc-hash = "2"
+criterion = { version = "0.5", features = ["html_reports"] }
+rayon = "1"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+# Correctness comes first; these catch the classes of mistake most
+# likely to silently change specified behaviour.
+all = { level = "warn", priority = -1 }
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+inefficient_to_string = "warn"
+# Indexing/slicing panics are real bugs in a library that ingests arbitrary text.
+indexing_slicing = "allow"       # enabled per-crate where inputs are pre-validated
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+panic = "unwind"
+
+# Maximum-optimization profile. Measured separately from `release` because
+# `lto = "fat"` + `codegen-units = 1` costs significant compile time; see
+# docs/PERFORMANCE.md for the measured runtime/compile-time trade-off.
+[profile.release-max]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+# Benchmarks run with debug symbols so `perf`/`samply` can resolve frames.
+[profile.bench]
+inherits = "release"
+debug = true
+
+# Parity suites replay large golden corpora; unoptimized debug builds make them
+# unusably slow, so give dependencies (and the crates under test) real codegen.
+[profile.test]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 2

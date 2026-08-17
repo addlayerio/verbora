@@ -1,0 +1,21 @@
+[package]
+name = "verbora-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Core traits and shared types for Verbora"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[lints]
+workspace = true

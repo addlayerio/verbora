@@ -1,0 +1,37 @@
+[package]
+name = "verbora-stemmers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Stemmers for sixteen languages"
+keywords = ["stemmer", "porter", "snowball"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+# The Norwegian and Swedish tokenizers fold diacritics before splitting, and the
+# folders are already parity-verified in the normalizers crate.
+verbora-normalizers = { workspace = true }
+verbora-tokenizers = { workspace = true }
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Adds `TokenizeAndStem::par_tokenize_and_stem_batch`, a per-document-granularity
+# rayon fan-out over the existing sequential pipeline. See `base.rs` for why the
+# granularity is per document rather than per word.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "stemmers"
+harness = false
+
+[lints]
+workspace = true

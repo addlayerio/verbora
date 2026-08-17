@@ -1,0 +1,41 @@
+[package]
+name = "verbora-wordnet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "WordNet lexical database access for Rust"
+keywords = ["wordnet", "lexical", "nlp"]
+categories.workspace = true
+# The WordNet database itself is NOT distributed with this crate; it is read at
+# run time from a directory the caller supplies. See LICENSE-WORDNET.
+include = ["src/**", "benches/**", "tests/**", "LICENSE-WORDNET", "README.md"]
+
+[dependencies]
+# `is_js_whitespace`: the reference's \s excludes U+0085 and includes U+FEFF, and
+# both differences change how an index line tokenises.
+verbora-core = { workspace = true }
+# Newline scanning: line-start tables, findPrevEOL, and the forward line read.
+memchr = { workspace = true }
+# `par_lookup_batch`: data-parallel fan-out over `WordNet::lookup`, gated
+# behind the `parallel` feature. See `WordNet::par_lookup_batch`'s docs.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[features]
+default = []
+# Adds `WordNet::par_lookup_batch`, a `rayon`-backed fan-out over the existing
+# sequential `WordNet::lookup`. See its doc comment in `src/wordnet.rs` for
+# when to reach for it.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "wordnet"
+harness = false
+
+[lints]
+workspace = true

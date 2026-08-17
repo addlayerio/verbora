@@ -1,0 +1,37 @@
+[package]
+name = "verbora-tokenizers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Twenty-five text tokenizers for Rust"
+keywords = ["tokenizer", "nlp", "text"]
+categories.workspace = true
+
+[dependencies]
+verbora-core = { workspace = true }
+regex = { workspace = true }
+# `Tokenize::par_tokenize_batch`: data-parallel fan-out over the existing
+# sequential `Tokenize::tokenize`, gated behind the `parallel` feature. See
+# that method's doc comment in `src/lib.rs` for when to reach for it.
+rayon = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Adds `Tokenize::par_tokenize_batch`, a `rayon`-backed fan-out over the
+# existing sequential `Tokenize::tokenize`. See its doc comment in
+# `src/lib.rs` for when to reach for it.
+parallel = ["dep:rayon"]
+
+[[bench]]
+name = "tokenizers"
+harness = false
+
+[lints]
+workspace = true
