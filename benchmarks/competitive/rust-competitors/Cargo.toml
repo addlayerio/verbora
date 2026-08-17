@@ -11,6 +11,14 @@ publish.workspace = true
 # accuracy, not just speed — see examples/language_accuracy.rs). See
 # ../README.md for why this lives outside the main workspace.
 
+# §1.6 Phonetics — compiles the vendored pixelglow/double_metaphone C++11
+# header (build.rs, via the `cc` crate) into this crate's own FFI binding,
+# src/double_metaphone_cpp.rs. The one non-Cargo, compiled-from-source
+# competitor in this workspace; requires a C++11 toolchain to build. See
+# vendor/pixelglow-double_metaphone/README.md.
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 # Verbora itself, via the real published crate at its real path — not a
 # reimplementation, not a stub. Add one line here per module this workspace
@@ -488,6 +496,10 @@ harness = false
 
 [[bench]]
 name = "ngrams"
+harness = false
+
+[[bench]]
+name = "double_metaphone_cpp"
 harness = false
 
 [[bench]]

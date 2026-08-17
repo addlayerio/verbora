@@ -1139,6 +1139,7 @@ name = "competitive-rust"
 version = "0.0.0"
 dependencies = [
  "Inflector",
+ "cc",
  "criterion",
  "diacritics",
  "eddie",

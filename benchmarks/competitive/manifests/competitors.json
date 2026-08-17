@@ -179,6 +179,17 @@
       "notes": "Character n-gram + frequency-count generation only (NgramBuilder/Ngram), verified byte-identical to Verbora's char-level ngrams() output over the full word list at arity 2 and 3 (tests/ngrams_correctness.rs). Its fuzzy corpus-search feature (Corpus/search) is a different problem with no Verbora equivalent and is not benchmarked -- see benches/ngrams.rs."
     },
     {
+      "name": "pixelglow/double_metaphone",
+      "language": "C++11",
+      "version": "79dd226 (2014-08-26, the repository's only commit)",
+      "repository": "https://github.com/pixelglow/double_metaphone",
+      "license": "BSD-2-Clause (stated in the header/README; GitHub reports none because there is no separate LICENSE file)",
+      "modules": [
+        "phonetics"
+      ],
+      "notes": "Vendored (header-only, no crates.io package -- see benchmarks/competitive/rust-competitors/vendor/pixelglow-double_metaphone/README.md), compiled by build.rs and called via a thin extern C shim -- the one non-Cargo, non-Rust competitor in this workspace. Double Metaphone vs Verbora's own DoubleMetaphone::process. Partial, not byte-exact: 584/653 (89.4%) of real English surnames agree; the confirmed dominant cause is a trailing-S-after-A/I rule Verbora applies unconditionally where this library applies it only to the narrower island/isle (ISL/YSL) pattern -- see tests/double_metaphone_cpp_correctness.rs. Verbora wins on speed, ~1.9x faster (median across 3 runs, full Criterion defaults)."
+    },
+    {
       "name": "whatlang",
       "language": "Rust",
       "version": "0.18.0",

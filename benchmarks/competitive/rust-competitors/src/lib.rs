@@ -14,7 +14,12 @@
 //! measurement, installed below as the process's global allocator so it sees
 //! every allocation any bench file or example makes, on both sides of every
 //! comparison equally.
+//!
+//! [`double_metaphone_cpp`] is the one non-Rust competitor in this
+//! workspace: an FFI binding to a vendored C++11 library, compiled by
+//! `build.rs`. See that module's own doc comment.
 
+pub mod double_metaphone_cpp;
 pub mod language_support;
 pub mod memory;
 
