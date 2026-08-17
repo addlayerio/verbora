@@ -555,7 +555,7 @@ fn main() {
 
 <div class="callout callout-note">
 <strong>Note.</strong> <code>verbora-trie</code> ships <strong>no <code>par_*</code>
-API</strong> — the Fase 2 performance audit evaluated one and rejected it: query
+API</strong> — a <code>par_*</code> candidate was evaluated and rejected: query
 cost measured at ~67 ns, at or below typical <code>rayon</code> dispatch
 overhead, so a naive <code>par_iter</code> over queries would likely lose to its
 own scheduling cost. <strong>Construction cannot be parallelised at all</strong>:

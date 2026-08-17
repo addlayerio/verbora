@@ -1,17 +1,15 @@
 # Cache locality and data layout
 
 Row-reduction and struct-of-arrays layout are not algorithmic improvements —
-they are the same algorithm operating on a different shape of memory. That
-distinction used to explain the single largest win in this repository, 29.6×
-on `levenshtein/ascii/1024`. It no longer does: that benchmark now runs a
-genuinely faster *algorithm* (a bit-vector Levenshtein, landed since this page
-was last measured) and posts 3307.7×, documented in
-[String distance results](../benchmarks/distance.md), not here. The layout
-techniques below are still real and still worth applying — but bit-parallel
-and snapshot kernels have since claimed most of the distance modes too, so the
-purest remaining demonstration is search mode, the one corner of the distance
-code that still fills the full matrix. This page collects the layout decisions
-Verbora makes and what each one is worth.
+they are the same algorithm operating on a different shape of memory. The
+single largest win in this repository, 3307.7× on `levenshtein/ascii/1024`
+(documented in [String distance results](../benchmarks/distance.md)), comes
+from a genuinely faster *algorithm* — a bit-vector Levenshtein — not from
+layout, so it is not covered here. The layout techniques below are still real
+and still worth applying, but bit-parallel and snapshot kernels cover most of
+the distance modes too, so the purest remaining demonstration is search mode,
+the one corner of the distance code that still fills the full matrix. This
+page collects the layout decisions Verbora makes and what each one is worth.
 
 ## 1. Pick the smallest working set that answers the question
 
@@ -32,23 +30,23 @@ where a genuinely cheaper algorithm exists, that instead:
 | distance, unrestricted Damerau | **2 rows + per-symbol snapshots** | transposition reaches an arbitrary earlier row, so the kernel snapshots the last row where each symbol occurred instead of keeping the whole matrix |
 | search, any variant | full matrix | the match start is recovered by walking parents |
 
-The two-row path is still exactly what a weighted-cost 1024-character
-comparison runs — turning roughly a million heap cells into two 8 KiB rows
-that stay in L1 — but it is no longer what `levenshtein/ascii/1024` measures.
-Unit-cost distance calls — plain and restricted Damerau alike, at any length —
-now take the bit-vector rows above instead, which is why that benchmark
-climbed from 29.6× first to 662.1× and, after the kernel's character-mask
-tables were flattened from a `HashMap` into plain arrays, to **3307.7×**.
-The three `levenshtein_variants` benchmarks used to isolate the row-reduction
-effect on its own; today only one of them still does, because the other two
-modes have since grown faster algorithms of their own (their benchmark names
-record the structures they used to measure):
+The two-row path is exactly what a weighted-cost 1024-character comparison
+runs — turning roughly a million heap cells into two 8 KiB rows that stay in
+L1 — but `levenshtein/ascii/1024` measures unit-cost distance instead. Unit-
+cost distance calls — plain and restricted Damerau alike, at any length —
+take the bit-vector rows above, with the kernel's character-mask tables held
+in plain arrays rather than a `HashMap`, which is why that benchmark posts
+**3307.7×**. Of the three `levenshtein_variants` benchmarks, only one still
+isolates the row-reduction effect on its own; the other two run faster
+algorithms instead of a row-reduced matrix (their benchmark names describe
+the structures being compared against on the reference side, not what
+Verbora's side runs):
 
 | Benchmark | Speedup | What it measures now |
 |---|--:|---|
 | `levenshtein_variants/search_matrix` | 13.8× | the same full matrix on both sides — the win is layout: flat struct-of-arrays vs per-cell heap objects |
-| `levenshtein_variants/damerau_unrestricted_matrix` | 39.2× | despite the name, no longer a full matrix: two rows plus per-symbol snapshots against the reference's full matrix |
-| `levenshtein_variants/damerau_restricted_3row` | 1059.5× | despite the name, no longer three rows: the bit-parallel OSA kernel — an algorithm win, not a layout win |
+| `levenshtein_variants/damerau_unrestricted_matrix` | 39.2× | despite the name, not a full matrix: two rows plus per-symbol snapshots against the reference's full matrix |
+| `levenshtein_variants/damerau_restricted_3row` | 1059.5× | despite the name, not three rows: the bit-parallel OSA kernel — an algorithm win, not a layout win |
 
 The lesson generalises: *before* optimising a loop, ask whether it needs the
 data structure it is filling — and whether a fundamentally cheaper algorithm

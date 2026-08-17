@@ -1039,9 +1039,8 @@ produced, and each window is either a borrow (constant time) or a copy of up to
 <div class="callout callout-note">
 <strong>Note.</strong> <code>verbora-ngrams</code> ships <strong>no
 <code>par_*</code> API</strong> of its own. Unlike thirteen other Verbora
-crates, its Rayon candidacy was <strong>not separately evaluated</strong> in
-the Fase 2 performance audit — treat this as "not yet evaluated," not
-"rejected." There is also <strong>no <code>_into</code> variant</strong> and
+crates, its Rayon candidacy has <strong>not been separately evaluated</strong>
+— treat this as "not yet evaluated," not "rejected." There is also <strong>no <code>_into</code> variant</strong> and
 <strong>no batch entry point</strong>. The only batch-shaped thing reachable
 from here is <code>verbora_core::Tokenizer::tokenize_batch</code>, which
 <code>WordTokenizer</code> inherits: its default body is

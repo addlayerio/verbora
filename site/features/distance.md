@@ -357,10 +357,9 @@ fn main() {
 
 Dice is the only metric here with no ASCII fast path: it always builds
 `Vec<u16>` operands, because the bigram keys are code-unit pairs. Its cost is
-dominated by hashing rather than by a quadratic sweep, which used to make it
-more than an order of magnitude cheaper than Jaro–Winkler at 1024 characters;
-the bit-parallel Jaro kernels have since closed that gap almost exactly —
-10.61 µs against 10.34 µs in the measured suite.
+dominated by hashing rather than by a quadratic sweep. At 1024 characters it
+costs about the same as Jaro–Winkler, both driven by bit-parallel kernels at
+that length — 10.61 µs against 10.34 µs in the measured suite.
 
 ### `hamming` and `hamming_checked`
 
@@ -828,10 +827,10 @@ question asked:
 | distance, no Damerau (fallback, weighted costs) | **2 rows** | each cell needs only `up`, `left`, `diag` |
 | distance, restricted Damerau, unit cost | **bit-vector** (word + block) | Hyyrö's 2003 transposition extension of Myers computes OSA in the same bit-parallel style |
 | distance, restricted Damerau (fallback, weighted costs) | **3 rows** | a transposition reaches back to row − 2 |
-| distance, unrestricted Damerau | **2 rows + per-symbol row snapshots** | a transposition reaches an arbitrary earlier row, so each symbol's last matching row is snapshotted into an arena (`u16` cells while the combined length fits, `u32` beyond) — the cost + parent matrices are no longer built |
+| distance, unrestricted Damerau | **2 rows + per-symbol row snapshots** | a transposition reaches an arbitrary earlier row, so each symbol's last matching row is snapshotted into an arena (`u16` cells while the combined length fits, `u32` beyond) — the cost + parent matrices are not built |
 | search (any variant) | full matrix | the match start is recovered by backtracking parents |
 
-Where the full matrix *is* required — now only in search mode — it is stored
+Where the full matrix *is* required — only in search mode — it is stored
 struct-of-arrays — costs in one
 flat `Vec<f64>`, parents in another `Vec<(u32, u32)>` — so the hot cost sweep is
 contiguous and the parents, touched only during backtracking, never pollute the
@@ -863,14 +862,13 @@ The complete 26-row table is in [Benchmarks](../benchmarks/distance.md).
 
 Three things in that table are worth reading carefully:
 
-- **The biggest wins now come from bit-parallel kernels, not from
-  row-count reduction.** At 1024 characters and the default unit costs,
-  `levenshtein` takes the Myers/Hyyrö bit-vector fast path instead of the
-  two-row scalar DP (see [`levenshtein`](#levenshtein) above), trading
-  `O(nm)` cell updates for `O(nm/64)` bitwise ones. Hence **3307.4×**, the
-  largest gap in the suite — well past the **29.6×** the two-row reduction
-  alone produced at this size before the bit-vector path existed.
-  Restricted Damerau now has a bit-parallel kernel of its own (Hyyrö's 2003
+- **The biggest wins come from bit-parallel kernels, not from row-count
+  reduction.** At 1024 characters and the default unit costs, `levenshtein`
+  takes the Myers/Hyyrö bit-vector fast path instead of the two-row scalar
+  DP (see [`levenshtein`](#levenshtein) above), trading `O(nm)` cell updates
+  for `O(nm/64)` bitwise ones — hence **3307.4×**, the largest gap in the
+  suite, well past what row-count reduction alone can reach at this size.
+  Restricted Damerau has a bit-parallel kernel of its own (Hyyrö's 2003
   transposition extension of Myers, unit costs only), and
   unrestricted-Damerau distance calls run on a two-row snapshot kernel
   instead of the full matrix. Row-count reduction is still the story for
@@ -881,15 +879,15 @@ Three things in that table are worth reading carefully:
   runtimes are dominated by call overhead, and the reference engine optimises the shape well. Small,
   genuine wins are the honest expectation; a large reported gap here would be a
   sign of a rigged benchmark.
-- **The variant benchmark names are now legacy.** `plain_2row` and
+- **The variant benchmark names are legacy.** `plain_2row` and
   `damerau_restricted_3row` both run bit-parallel kernels at their fixed
   64-character input — **1066.6×** and **1059.5×**, sitting together rather
-  than near the other two — and `damerau_unrestricted_matrix` no longer
-  builds a matrix at all (**39.2×** on the snapshot kernel). Only
+  than near the other two — and `damerau_unrestricted_matrix` does not
+  build a matrix at all (**39.2×** on the snapshot kernel). Only
   `search_matrix` still is what its name says: the full cost + parent
   matrix the backtrace requires, at **13.8×**. Choosing `restricted: true`
-  over the unrestricted metric is accordingly no longer a modest saving but
-  a large one at unit costs — 179.4 ns against 7.75 µs on the same input.
+  over the unrestricted metric is a large saving at unit costs — 179.4 ns
+  against 7.75 µs on the same input.
 
 Both sides read their inputs from the same files in `benches/data/`, generated
 once by `tools/bench-data/generate.py`, so neither can be tuned to a friendlier
@@ -904,15 +902,14 @@ cargo bench -p verbora-distance         # Rust, via Criterion
 
 ### A measured regression, and its fix
 
-The first recorded run had `jaro_winkler/4` at **0.6×** — Rust *slower* than
+An early benchmark run put `jaro_winkler/4` at **0.6×** — Rust *slower* than
 the reference. The cause was two `vec![false; len]` allocations per call: the reference engine's
 `new Array(4)` is nearly free, `malloc` is not.
 
-Moving the match flags to a stack buffer for inputs up to 128 units took the
-benchmark from **48.6 ns → 16.4 ns** (0.6× → 1.7×), with the test suite re-run
-and still green. Words are short by nature, so the stack path is the common case
-rather than a micro-optimisation for a rare one. (Today's measurement sits at
-15.3 ns — 1.8×.)
+Moving the match flags to a stack buffer for inputs up to 128 units fixed it:
+`jaro_winkler/4` measures **15.3 ns**, a **1.8×** speedup over the reference,
+with the test suite still green. Words are short by nature, so the stack path
+is the common case rather than a micro-optimisation for a rare one.
 
 That constant is why the Jaro allocation rule reads "none for ASCII operands of
 ≤ 128 units": above the threshold the flags go back to the heap, one `Vec<bool>`
@@ -940,11 +937,10 @@ per call:
 
 Three details you would only find by reading the source:
 
-- **Unrestricted Damerau in distance mode no longer allocates the matrix.** It
-  used to share `full_matrix` with search mode and drag the never-read parent
-  array along; distance calls now run a two-row kernel with per-symbol row
-  snapshots, and the full cost + parent matrix survives only in the search
-  functions.
+- **Unrestricted Damerau in distance mode does not allocate the matrix.**
+  Distance calls run a two-row kernel with per-symbol row snapshots instead;
+  the full cost + parent matrix is built only by the search functions,
+  which need it to backtrack.
 - **`jaro_winkler` on non-ASCII input converts to UTF-16 twice** — once inside
   `jaro`, once inside the shared-prefix scan — because each calls `dispatch`
   independently.

@@ -229,8 +229,8 @@ Speed is not a side effect of the language here; it is the thing the library is
 built around. Which is why "it's Rust, so it's fast" is not accepted as an
 argument — that assumption ships regressions. This project measured a
 Jaro–Winkler benchmark running **slower** than the reference, found two per-call
-`vec![false; len]` allocations, moved them to the stack, and took the benchmark
-from 48.6 ns to 16.4 ns. That story is
+`vec![false; len]` allocations, and moved them to the stack: the benchmark
+measures **15.3 ns**, a **1.8×** speedup over the reference. That story is
 [in the benchmarks](benchmarks/distance.md#a-measured-regression-and-its-fix),
 not hidden.
 

@@ -404,9 +404,9 @@ libraries — are simply absent here, and it is better to know that up front tha
 to search for them.
 
 - **No parallel API in this crate, and not yet evaluated either way.** Unlike
-  the thirteen crates that now ship an opt-in `par_*_batch` behind a
-  `parallel` feature, `verbora-ngrams` was not separately assessed for one in
-  that pass — treat its absence here as "not yet evaluated," not as a
+  the thirteen crates that ship an opt-in `par_*_batch` behind a
+  `parallel` feature, `verbora-ngrams` has not been separately assessed for
+  one — treat its absence here as "not yet evaluated," not as a
   rejection. Every entry point is a free function over borrowed input with no
   interior state, so you can parallelise across documents yourself today.
   Avoid `ngrams_str` and `tokenize` in worker threads because they read the

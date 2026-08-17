@@ -72,8 +72,8 @@ Three crates were evaluated and deliberately do not have a `par_*` API:
   `Topological`, path trees) operate on one shared graph per call, not
   independent items; there is no batch shape to parallelize.
 
-`verbora-ngrams` was not separately quantified for Rayon in this pass — treat
-its absence here as "not yet evaluated," not "evaluated and rejected."
+`verbora-ngrams` has not been separately quantified for Rayon — treat its
+absence here as "not yet evaluated," not "evaluated and rejected."
 
 For everything else — any crate above without a `par_*` API, or any workload
 those APIs don't fit — the reasoning that follows still applies. This
@@ -219,8 +219,8 @@ let total: usize = corpus
 
 > Parallel does not automatically mean faster.
 
-Real crossover numbers now exist for the thirteen built-in APIs — measured
-during the Fase 2 performance audit, not estimated:
+Real crossover numbers exist for the thirteen built-in APIs, measured rather
+than estimated:
 
 | API | Sequential | Parallel | Speedup | At |
 |---|---|---|---|---|

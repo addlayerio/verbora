@@ -418,10 +418,8 @@ so.
 ### The crate's own ambiguity tests
 
 `crates/verbora-language/tests/ambiguity.rs` pins exactly this behaviour.
-Its own doc comment states the rule plainly, quoting `Fase 5 Language.md`'s
-own wording directly: *"los tests no deben exigir un idioma específico si
-lingüísticamente es ambiguo"* ("the tests must not require a specific
-language if it is linguistically ambiguous") — asserting one language would
+Its own doc comment states the rule plainly: tests must not require a
+specific language when the input is linguistically ambiguous — asserting one language would
 itself be the false-confidence bug the test module exists to prevent. What
 it checks instead is that the *uncertainty is represented
 honestly*: either no candidate at all, or a candidate whose confidence a
@@ -645,10 +643,9 @@ fn main() {
 
 This exists for a caller holding a large, independent corpus — one language
 guess per document, per review, per record — not for detecting a single
-word or document faster. `Fase 5 Language.md`'s own specification is
-explicit that Rayon must never become the *implementation* of detecting one
-word's language, and the design agrees: a single `detect()` call does not
-benefit from a thread pool. See
+word or document faster. Rayon is never the *implementation* of detecting
+one word's language: a single `detect()` call does not benefit from a
+thread pool. See
 [Performance characteristics](#performance-characteristics) below for the
 real crossover this project measured, and
 [Parallelism](../performance/parallelism.md) for the same chunked-vs.-per-item

@@ -39,9 +39,11 @@ breaks behaviour is not an optimisation. The full test suite must still pass.
 
 **No optimisation is claimed without a measurement.** And the measurements
 include the ones that went the wrong way. `verbora-distance`'s Jaro–Winkler
-benchmark first came in at **0.6×** — Rust *slower* tha reference — because
-of two `vec![false; len]` allocations per call. Moving the match flags to a stack
-buffer for inputs up to 128 units took it from 48.6 ns to 16.4 ns. The story is
+benchmark first came in at **0.6×** — Rust *slower* than the reference —
+because of two `vec![false; len]` allocations per call. Moving the match
+flags to a stack buffer for inputs up to 128 units fixed it: the benchmark
+measures **15.3 ns**, a **1.8×** speedup, with the test suite still green.
+The story is
 [on the benchmark page](../benchmarks/distance.md#a-measured-regression-and-its-fix),
 kept because "it's Rust, so it's fast" would have shipped the regression.
 

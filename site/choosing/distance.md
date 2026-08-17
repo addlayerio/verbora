@@ -107,11 +107,10 @@ behaviour.
 
 Use `jaro_winkler` for short, ordered records — personal names above all, which
 is what it was designed for. Use `dice_coefficient` for longer strings and for
-titles and descriptions where word order varies. The old cost argument for Dice
-has narrowed, though: since the bit-parallel Jaro kernels landed, the two are
-effectively tied at 1024 characters in the measured suite — the `O(n + m)`
-advantage is real but asymptotic, not a factor at these sizes. Choose between
-them on behaviour, not speed.
+titles and descriptions where word order varies. The cost argument for Dice is
+modest at this size: the two are effectively tied at 1024 characters in the
+measured suite — the `O(n + m)` advantage is real but asymptotic, not a factor
+at these sizes. Choose between them on behaviour, not speed.
 
 <div class="callout callout-warn">
 <strong>Careful.</strong> <code>dice_coefficient("", "")</code> is
@@ -247,11 +246,10 @@ only place the actual metric is computed. Every call allocates its own
 working set and drops it.
 </div>
 
-That is a real cost, though what gets set up now depends on the path: the
+That is a real cost, and what gets set up depends on the path: the
 common case (unit-cost inputs) builds the bit-vector algorithm's character-mask
-tables instead of full-length rows — flat arrays now, not the `HashMap` earlier
-revisions used — and only the weighted-cost fallback allocates the two
-`Vec<f64>` rows. Either way, every call builds its working state from scratch,
+tables (flat arrays) instead of full-length rows, and only the weighted-cost
+fallback allocates the two `Vec<f64>` rows. Either way, every call builds its working state from scratch,
 and scanning a 100,000-entry corpus repeats that setup 100,000 times where a
 scratch API would amortise it. It has not been fixed, and it has not been
 benchmarked either — see [Benchmarks](../benchmarks/index.md).
@@ -448,10 +446,10 @@ Read the speedup column as a range across input sizes, not a single figure: the
 smallest numbers are at four characters, where both runtimes are dominated by
 call overhead, and the largest at 1024, where the reference's per-cell
 allocation dominates — and, for `levenshtein` specifically, where Verbora's own
-bit-vector algorithm now also does less work per comparison, not just less
+bit-vector algorithm also does less work per comparison, not just less
 allocation. That is also why `levenshtein`'s own range is the widest in this
-table: the bit-vector kernel now serves every unit-cost call (the old 8-unit
-floor is gone), so the low end, 45.9×, is a short Cyrillic input where the
+table: the bit-vector kernel serves every unit-cost call, so the low end,
+45.9×, is a short Cyrillic input where the
 per-call promotion to UTF-16 shares the bill, while the high end, 3307.7×, is
 the 1024-character ASCII comparison, where the kernel handles 64 cells per
 bitwise word. The

@@ -833,8 +833,8 @@ negatives, which recurse). See [Allocation](../performance/allocation.md).
 
 ## Concurrency
 
-`verbora-inflectors` ships **no `par_*` API** — the Fase 2 performance audit
-evaluated one and rejected it: per-word cost measured at ~360 ns, comparable to
+`verbora-inflectors` ships **no `par_*` API** — a `par_*` candidate was
+evaluated and rejected: per-word cost measured at ~360 ns, comparable to
 `rayon`'s own dispatch overhead, so a naive `par_iter` over words would likely
 lose to its own scheduling cost. (Thirteen other Verbora crates do ship a
 `par_*_batch` API where the per-item cost cleared that bar — see

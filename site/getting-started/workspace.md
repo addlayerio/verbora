@@ -78,9 +78,9 @@ with a comment explaining, per omitted crate, why it is absent.
 | [`verbora-sentiment`](../features/sentiment.md) | `SentimentAnalyzer`, `VocabularyKind`, `Contributions` |
 | [`verbora-classifiers`](../features/classifiers.md) | `BayesClassifier`, `LogisticRegressionClassifier`, `MaxEntClassifier` |
 
-**the recorded cases in total**, across 791 suites, every one of them
+**526,341 recorded cases in total**, across 791 suites, every one of them
 captured from the reference rather than transcribed by hand. See
-the roadmap.
+the [roadmap](../features/roadmap.md).
 
 ## Supporting directories
 
@@ -125,5 +125,5 @@ cargo test --workspace
 ## Next
 
 - [Cargo features](cargo-features.md) — all one of them.
-- [Features overview](../features/index.md) — what is implemented and what is not.
-  replayed.
+- [Features overview](../features/index.md) — what is implemented and what is not,
+  and how recorded behaviour is replayed.

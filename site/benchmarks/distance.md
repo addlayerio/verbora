@@ -4,19 +4,19 @@
 **Median speedup 23.4×**, range **1.4×–3307.4×**.
 
 <div class="callout callout-good">
-<strong>The Levenshtein-family and Jaro–Winkler rows below changed
-dramatically again this round.</strong> Plain <code>levenshtein</code>'s
-Myers/Hyyrö bit-vector kernels replaced their hash-map pattern
-preprocessing with flat tables and now take the single-word fast path for
-every operand from 1 to 64 units; restricted Damerau (OSA) gained brand-new
-bit-parallel kernels of its own (Hyyrö's 2003 transposition extension of
-Myers, unit costs only); unrestricted-Damerau distance calls dropped the
-full cost + parent matrices for a two-row snapshot kernel; and
-Jaro/Jaro–Winkler gained bit-parallel match-flagging kernels. See
-<a href="competitive.md#levenshtein">the competitive benchmarks page</a> for
-the mechanisms and how parity was verified. The reference-comparison
-numbers below are freshly re-measured on the Rust side; the reference's own
-numbers are unchanged (the reference implementation was not touched).
+<strong>The Levenshtein-family and Jaro–Winkler rows below run on
+bit-parallel kernels.</strong> Plain <code>levenshtein</code> uses
+Myers'/Hyyrö's bit-vector algorithm, with flat pattern-preprocessing tables
+(no hash map) and a single-word fast path covering every operand from 1 to
+64 units. Restricted Damerau (OSA) has its own bit-parallel kernels
+(Hyyrö's 2003 transposition extension of Myers, unit costs only).
+Unrestricted-Damerau distance calls use a two-row snapshot kernel instead of
+the full cost + parent matrices. Jaro and Jaro–Winkler use bit-parallel
+match-flagging kernels. See
+<a href="competitive#levenshtein">the competitive benchmarks page</a> for
+the mechanisms and how parity against the scalar implementations was
+verified. The reference is measured as shipped, unmodified; every number
+below comes from the Rust side.
 </div>
 
 The [method](index.md) matters more than the numbers: both sides read the same
@@ -69,24 +69,24 @@ fastest data structure:
 |---|---|---|
 | distance, no Damerau, unit cost | **bit-vector** (one `u64` word per 64 units of the shorter operand) | Myers'/Hyyrö's bit-parallel algorithm computes the same answer in `O(nm/64)` bitwise operations rather than `O(nm)` scalar cell updates; the pattern-preprocessing table is a flat array on the byte path (no hashing), and the single-word path covers operands of 1–64 units — see [the competitive benchmarks page](competitive.md#levenshtein) for the full story |
 | distance, no Damerau (fallback, weighted costs) | **2 rows** | a cell needs only `up`, `left`, `diag` |
-| distance, restricted Damerau, unit cost | **bit-vector** (word + block) | new this round: Hyyrö's 2003 transposition extension of Myers computes OSA in the same `O(nm/64)` bitwise style |
+| distance, restricted Damerau, unit cost | **bit-vector** (word + block) | Hyyrö's 2003 transposition extension of Myers computes OSA in the same `O(nm/64)` bitwise style |
 | distance, restricted Damerau (fallback, weighted costs) | **3 rows** | transposition reaches row − 2 |
 | distance, unrestricted Damerau | **2 rows + per-symbol row snapshots** | transposition reaches an arbitrary earlier row, so the kernel snapshots each symbol's last matching row into an arena (integer cells: `u16` while the combined length fits, `u32` beyond) instead of materialising the cost + parent matrices |
 | search, any variant | full matrix | the match start is recovered by walking parents |
 
 The bit-parallel kernels are why `levenshtein/ascii/1024` posts **3307.4×** —
-the largest gap on this page by a wide margin — and why two of the variants
-rows that used to sit near 20× no longer do.
-`levenshtein_variants/plain_2row` and `damerau_restricted_3row` are named
-for the code paths they originally exercised, but at 64 characters (their
-fixed input size) both now run bit-parallel kernels — hence **1066.6×** and
-**1059.5×**, not literal row-based scalar DP.
-`damerau_unrestricted_matrix` is also legacy-named: distance mode no longer
-builds any matrix, and the two-row snapshot kernel behind its **39.2×** (up
-from 21.8×) is what the name no longer describes. Only `search_matrix`
-still is what its name says — the full cost + parent matrix, required for
-the backtrace — and its **13.8×** moved only by ordinary run-to-run noise;
-it remains the structural-savings story below.
+the largest gap on this page by a wide margin. Two of the variants rows carry
+legacy names that no longer describe the code path they exercise:
+`levenshtein_variants/plain_2row` and `damerau_restricted_3row` are named for
+the row-based scalar DP they originally targeted, but at 64 characters (their
+fixed input size) both now run bit-parallel kernels instead — hence
+**1066.6×** and **1059.5×**, not what a literal two-row or three-row scalar
+sweep would produce.
+`damerau_unrestricted_matrix` is similarly legacy-named: distance mode never
+builds a matrix at all here — its **39.2×** comes from the two-row snapshot
+kernel described above. Only `search_matrix` is still what its name says —
+the full cost + parent matrix, required for the backtrace — and its
+**13.8×** is the structural-savings story below.
 
 Where the full matrix *is* required — now only in search mode — it is stored
 struct-of-arrays: costs in one
@@ -101,23 +101,20 @@ is a handful of comparisons; both runtimes are dominated by call overhead, and t
 optimises this shape very well. Small, genuine wins are the honest expectation
 here.
 
-**Jaro–Winkler beyond four characters (6.7×–57.5×).** An earlier version of
-this page said the algorithm had no bit-vector formulation the way plain
-Levenshtein does. That is no longer true: this round added bit-parallel
-match-flagging kernels (a single-word path, then a block extension, with
-the scalar loop kept for inputs of 16 units or fewer), preserving the
-fractional transposition semantics exactly. The ratio now *rises* with
-input size instead of falling — the old scalar version did the same
-quadratic work as the reference at 1024 units; the bit-parallel kernels do
-not.
+**Jaro–Winkler beyond four characters (6.7×–57.5×).** Jaro and Jaro–Winkler
+run on bit-parallel match-flagging kernels (a single-word path, then a block
+extension, with a scalar loop kept for inputs of 16 units or fewer), which
+preserve the fractional transposition semantics exactly. The ratio *rises*
+with input size instead of falling: a scalar implementation would do the
+same quadratic work as the reference at 1024 units, while the bit-parallel
+kernels do not.
 
 **Dice (3.2×–7.5×).** Dominated by hashing. Verbora hashes `(u16, u16)` tuples
 with `FxHashMap` instead of allocating a `String` per bigram as the reference
 does; the win grows with input size as that allocation pressure compounds.
 
 **Cyrillic vs ASCII.** `levenshtein/cyrillic/256` at 3.97 µs against
-`levenshtein/ascii/256` at 2.13 µs — about 86% slower. This gap grew again
-(it was ~8% when the absolute times were larger): promoting non-ASCII
+`levenshtein/ascii/256` at 2.13 µs — about 86% slower. Promoting non-ASCII
 operands to `Vec<u16>` for exact UTF-16 semantics is a fixed cost, and the
 `u16` bit-vector kernel builds its pattern-preprocessing table in a hash
 map where the byte path uses a flat 256-entry array. The absolute
@@ -132,11 +129,10 @@ the reference.
 The cause was two `vec![false; len]` allocations per call, for the match flags.
 The reference engine's `new Array(4)` is nearly free; `malloc` is not.
 
-Moving the match flags to a stack buffer for inputs up to 128 code units took the
-benchmark from **48.6 ns → 16.4 ns** — 0.6× to 1.7× — with the test suite
-re-run and still green. Words are short by nature, so the stack path is the
-common path rather than a micro-optimisation for a rare case. (Today's
-measurement sits at 15.3 ns — 1.8×.)
+Moving the match flags to a stack buffer for inputs up to 128 code units took
+the benchmark from **48.6 ns to 15.3 ns** — 0.6× to 1.8× — with the test
+suite re-run and still green. Words are short by nature, so the stack path
+is the common path rather than a micro-optimisation for a rare case.
 
 <div class="callout callout-good">
 <strong>Why this is on the site rather than in a commit message.</strong> Without

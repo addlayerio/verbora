@@ -37,7 +37,7 @@ Step 1 does the work. Step 2 makes the answer good.
 ## Step 1: bucket by phonetic key
 
 <div class="callout callout-note">
-<strong>A built-in version of this step now exists.</strong>
+<strong>A built-in version of this step exists.</strong>
 <a href="../features/phonetic-index">Phonetic neighbors</a>
 (<code>PhoneticIndex</code>) is a Verbora-native index that replaces the
 hand-rolled <code>HashMap</code> below for a build-once, query-many

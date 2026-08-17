@@ -162,11 +162,10 @@ the gap tracks allocation pressure almost exactly:
 The small number is as informative as the large one. Where there is nothing to
 save, there is no win, and the table says so.
 
-The largest number's own mechanism changed since this page was first measured.
-It no longer comes from reusing two rows instead of a whole matrix: a
-Myers/Hyyrö bit-vector algorithm now answers plain, unit-cost Levenshtein
-calls with a handful of `u64` words instead of any row at all — the same
-"smallest structure that can answer the question" instinct behind every other
+The largest number's mechanism is not two rows instead of a whole matrix: a
+Myers/Hyyrö bit-vector algorithm answers plain, unit-cost Levenshtein calls
+with a handful of `u64` words instead of any row at all — the same "smallest
+structure that can answer the question" instinct behind every other
 technique on this page, taken further. See [the distance
 benchmarks](../benchmarks/distance.md) for the full 26-row table and how the
 algorithm was verified.
