@@ -17,6 +17,7 @@ publish.workspace = true
 # benchmarks against a third-party competitor.
 verbora-distance = { path = "../../../crates/verbora-distance" }
 verbora-tokenizers = { path = "../../../crates/verbora-tokenizers" }
+verbora-ngrams = { path = "../../../crates/verbora-ngrams" }
 verbora-stemmers = { path = "../../../crates/verbora-stemmers" }
 verbora-normalizers = { path = "../../../crates/verbora-normalizers" }
 verbora-inflectors = { path = "../../../crates/verbora-inflectors" }
@@ -152,6 +153,16 @@ unicode-segmentation = "=1.13.3"
 # comment rather than silently dropped. Pulls in `fancy-regex` for its
 # lookaround-heavy segmentation rules; no feature flags to restrict.
 segtok = "=0.1.5"
+# §1.2 N-Grams — the matrix's own verdict was NO FAIR COMPETITOR FOUND
+# (`ngrammatic` = fuzzy corpus search, a different problem than plain n-gram
+# generation). Re-examined: `ngrammatic`'s `Ngram`/`NgramBuilder` (its
+# character n-gram + frequency-count generator, the primitive its `Corpus`
+# fuzzy-search feature is built on) genuinely is a fair, comparable
+# operation — see benches/ngrams.rs's own doc comment for exactly what is
+# and is not benchmarked. `Corpus`/`search` (the fuzzy-matching feature
+# itself) has no Verbora equivalent and stays unbenchmarked, per the
+# matrix's original verdict for that specific capability.
+ngrammatic = "=0.7.0"
 # §1.3 Stemmers — the 9 shared canonical-Snowball languages (de es fr it nl
 # no pt ru sv). NOT used for English: rust-stemmers' "English" is Snowball
 # Porter2, a different algorithm than Verbora's original-1980 Porter (matrix
@@ -473,6 +484,10 @@ harness = false
 
 [[bench]]
 name = "tokenizers"
+harness = false
+
+[[bench]]
+name = "ngrams"
 harness = false
 
 [[bench]]

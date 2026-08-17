@@ -168,6 +168,17 @@
       "notes": "Wired in this audit round (was selected but never benchmarked). Rule-based, orthographic-feature sentence(+word) segmenter, Rust port of the (unmaintained) Python segtok package -- matrix Selected cases for SentenceTokenizer (sentence_tokenization group), benchmarked via segmenter::split_single with SegmentConfig::default(). Adoption signal is explicitly ambiguous: 452K/90d crates.io downloads but only 2 GitHub stars, most plausibly mostly-transitive use rather than direct adoption -- flagged here and in benches/tokenizers.rs's own doc comment, not hidden. Both segtok and Verbora trim() each returned sentence internally (confirmed by reading segtok-0.1.5/src/segmenter/mod.rs directly), so no formatting normalization is needed to compare it against Verbora, unlike unicode-segmentation's two APIs. Verbora beats segtok by a wide margin at every size measured (5.9x-24.0x, non-monotonic, narrowest at the largest size) -- see docs/PERFORMANCE.md's Tokenizers section."
     },
     {
+      "name": "ngrammatic",
+      "language": "Rust",
+      "version": "0.7.0",
+      "repository": "https://github.com/compenguy/ngrammatic",
+      "license": "MIT",
+      "modules": [
+        "ngrams"
+      ],
+      "notes": "Character n-gram + frequency-count generation only (NgramBuilder/Ngram), verified byte-identical to Verbora's char-level ngrams() output over the full word list at arity 2 and 3 (tests/ngrams_correctness.rs). Its fuzzy corpus-search feature (Corpus/search) is a different problem with no Verbora equivalent and is not benchmarked -- see benches/ngrams.rs."
+    },
+    {
       "name": "whatlang",
       "language": "Rust",
       "version": "0.18.0",
