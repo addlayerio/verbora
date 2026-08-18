@@ -1,0 +1,69 @@
+name: Release crates
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      command:
+        description: Prepare a release PR, or process a merged release PR
+        required: true
+        default: release-pr
+        type: choice
+        options:
+          - release-pr
+          - release
+
+# A release PR is reviewed like any other change. After it is merged,
+# release-plz publishes the versioned workspace crates in dependency order,
+# creates their tags and creates GitHub releases.
+jobs:
+  release:
+    name: Publish a merged release PR
+    if: >-
+      github.repository_owner == 'addlayerio' &&
+      (github.event_name == 'push' || inputs.command == 'release')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify the release commit
+        run: cargo test --workspace --all-features
+      - name: Publish crates and create releases
+        uses: release-plz/action@v0.3
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-pr:
+    name: Prepare release PR
+    if: >-
+      github.repository_owner == 'addlayerio' &&
+      (github.event_name == 'push' || inputs.command == 'release-pr')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Create or update the release PR
+        uses: release-plz/action@v0.3
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

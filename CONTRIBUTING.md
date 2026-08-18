@@ -57,6 +57,13 @@ benchmark result. Call out intentional semantic changes and trade-offs plainly.
 Keep a pull request focused. Unrelated formatting or generated-file changes
 make correctness and performance review harder.
 
+## Releases
+
+Releases are prepared and published by GitHub Actions; contributors do not run
+`cargo publish` against a normal development checkout. See
+[`docs/RELEASING.md`](docs/RELEASING.md) for the release flow and one-time
+repository setup.
+
 ## Code and design
 
 Prefer idiomatic, safe Rust and preserve the crate's documented semantics.
