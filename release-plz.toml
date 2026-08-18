@@ -12,3 +12,4 @@ publish_timeout = "30m"
 [[package]]
 name = "verbora-examples"
 release = false
+publish = false
