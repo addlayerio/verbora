@@ -1,7 +1,11 @@
 import { defineConfig } from 'vitepress';
 
-const HOSTNAME = 'https://addlayerio.github.io';
-const BASE = '/verbora/';
+// GitHub Pages redirects the project URL to the configured custom domain.
+// The published site therefore lives at the domain root, not at `/verbora/`.
+// Keeping this aligned is essential: VitePress prefixes every JS, CSS, font
+// and image URL with `base`.
+const HOSTNAME = 'https://verbora.dev';
+const BASE = '/';
 
 export default defineConfig({
   base: BASE,
