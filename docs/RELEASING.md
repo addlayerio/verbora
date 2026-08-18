@@ -13,8 +13,10 @@ its policy is in [`release-plz.toml`](../release-plz.toml).
 5. The next workflow run verifies the workspace, publishes the affected
    `verbora-*` crates, and creates their tags and GitHub releases.
 
-`release_always = false` prevents an ordinary push to `main` from publishing a
-crate. Only the merge of release-plz's Release PR is a release event.
+The workflow runs on every push to `main`. It creates or updates Release PRs
+for changed crates, and publishes only crates whose release version is ready.
+You never need to create a `release-plz-*` branch yourself; release-plz creates
+its own Release PR branches.
 
 ## Independent versions
 
@@ -28,7 +30,7 @@ published dependency metadata remains valid.
 
 Use **Actions → Release crates → Run workflow** only to recover a failed run
 or refresh the Release PR. Choose `release-pr` to prepare it, or `release` to
-process an already-merged Release PR. Do not use `release` to bypass review.
+process packages ready for publication. Do not use `release` to bypass review.
 
 ## First public release and trusted publishing
 

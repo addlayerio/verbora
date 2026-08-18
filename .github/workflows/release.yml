@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: Prepare a release PR, or process a merged release PR
+        description: Prepare a release PR, or publish packages ready for release
         required: true
         default: release-pr
         type: choice
@@ -14,12 +14,12 @@ on:
           - release-pr
           - release
 
-# A release PR is reviewed like any other change. After it is merged,
-# release-plz publishes the versioned workspace crates in dependency order,
-# creates their tags and creates GitHub releases.
+# release-plz creates or updates a Release PR for version changes. On each
+# push to main it publishes packages whose release version is ready, in
+# dependency order, and creates their tags and GitHub releases.
 jobs:
   release:
-    name: Publish a merged release PR
+    name: Publish ready crates
     if: >-
       github.repository_owner == 'addlayerio' &&
       (github.event_name == 'push' || inputs.command == 'release')
