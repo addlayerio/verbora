@@ -138,12 +138,13 @@ assert!(inflector.pluralize("").is_err());
 Two things can make a latency profile spiky:
 
 **Input size you do not control.** `levenshtein` is `O(nm)`. A 100 kB paste into
-a search box is 10¹⁰ cell updates. Cap the input length at the boundary.
+a search box is 10¹⁰ cells — even at 64 cells per bitwise word, that is hundreds
+of millions of operations. Cap the input length at the boundary.
 
 **Non-ASCII promotion.** ASCII operands are compared as borrowed `&[u8]`;
-non-ASCII ones are promoted to `Vec<u16>`. The measured difference is small
-(`levenshtein/cyrillic/256` at 193.75 µs against ASCII's 191.34 µs) but it is not
-zero, and it is data-dependent.
+non-ASCII ones are promoted to `Vec<u16>` first. At 256 units,
+`levenshtein/cyrillic` measures 3.97 µs against ASCII's 2.13 µs — both fast, but
+the difference is real and data-dependent.
 
 ## Checklist
 

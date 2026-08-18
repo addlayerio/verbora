@@ -47,6 +47,15 @@ pub struct KeysWithPrefix<'t> {
     stack: Vec<Frame>,
     /// The node the prefix landed on, consumed by the first call to `next`.
     start: Option<u32>,
+    /// How many words this iterator has yet to yield.
+    ///
+    /// Initialised from the start node's maintained subtree word count and
+    /// decremented per item. The trie is borrowed for the iterator's whole
+    /// lifetime, so the subtree cannot change underneath it and the number is
+    /// *exact* at every point — which is what lets `count` be O(1) instead of
+    /// walking the rest of the subtree, and `size_hint` be tight enough that
+    /// `collect::<Vec<_>>()` allocates its result exactly once.
+    remaining: usize,
 }
 
 impl<'t> KeysWithPrefix<'t> {
@@ -69,6 +78,7 @@ impl<'t> KeysWithPrefix<'t> {
             pending: None,
             stack: Vec::new(),
             start,
+            remaining: start.map_or(0, |n| trie.node(n).word_count as usize),
         }
     }
 
@@ -109,6 +119,7 @@ impl Iterator for KeysWithPrefix<'_> {
                 restore_pending: None,
             });
             if trie.node(node).is_word {
+                self.remaining -= 1;
                 return Some(self.buf.clone());
             }
         }
@@ -141,9 +152,24 @@ impl Iterator for KeysWithPrefix<'_> {
             });
 
             if trie.node(child.node).is_word {
+                self.remaining -= 1;
                 return Some(self.buf.clone());
             }
         }
+    }
+
+    /// O(1): the maintained subtree word count, minus what was already
+    /// yielded — no walk, no string reconstruction. This is exact because the
+    /// borrow rules freeze the trie for the iterator's lifetime; see the
+    /// `remaining` field.
+    fn count(self) -> usize {
+        self.remaining
+    }
+
+    /// Exact bounds, for the same reason `count` is exact — so `collect`
+    /// pre-reserves the whole result vector in one allocation.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
     }
 }
 

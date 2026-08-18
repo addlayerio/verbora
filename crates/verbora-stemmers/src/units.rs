@@ -61,6 +61,28 @@ pub(crate) fn text(w: &[u16]) -> String {
     String::from_utf16_lossy(w)
 }
 
+/// `text(w).to_lowercase()`, without the second allocation when `w` is ASCII.
+///
+/// The Italian and French stemmers end with `.toLowerCase()` on the finished
+/// stem (it folds the `I`/`U`/`Y` consonant marks their preludes wrote). For
+/// a pure-ASCII buffer, `str::to_lowercase` is exactly the A–Z+32 fold —
+/// Unicode's simple mappings agree, and the final-sigma context rule only
+/// concerns `Σ`, which is not ASCII — so the fold can run in place on the
+/// code units and the `String` be built once. Anything non-ASCII takes the
+/// full `to_lowercase` path unchanged.
+pub(crate) fn text_lowercase(w: &mut [u16]) -> String {
+    if w.iter().all(|&c| c < 0x80) {
+        for c in w.iter_mut() {
+            if (0x41..=0x5A).contains(c) {
+                *c += 32;
+            }
+        }
+        text(w)
+    } else {
+        text(w).to_lowercase()
+    }
+}
+
 /// The number of UTF-16 code units in `s` — the reference's `s.length`.
 #[inline]
 pub(crate) fn slen(s: &str) -> usize {
@@ -193,6 +215,15 @@ pub(crate) fn longest_suffix<'s>(w: &[u16], suffixes: &[&'s str]) -> Option<&'s 
 /// The Italian tables and `Token#replaceSuffixInRegion` (which Portuguese is
 /// built on) both stop at the first hit, so their tables are hand-ordered
 /// longest-first and that order is load-bearing.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Italian/Portuguese hot paths now go through `among::find_among`, \
+                  whose first==longest equivalence their differential oracles — this \
+                  function's remaining callers — exist to prove"
+    )
+)]
 pub(crate) fn first_suffix<'s>(w: &[u16], suffixes: &[&'s str]) -> Option<&'s str> {
     suffixes.iter().copied().find(|s| ends_with(w, s))
 }
@@ -205,6 +236,14 @@ pub(crate) fn truncate_by(w: &mut Vec<u16>, n: usize) {
 }
 
 /// Replaces the trailing `suffix` with `replacement`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the Portuguese hot path now cuts by matched length; the verbatim \
+                  pre-conversion oracle in `pt.rs`'s tests is the remaining caller"
+    )
+)]
 #[inline]
 pub(crate) fn replace_suffix(w: &mut Vec<u16>, suffix: &str, replacement: &str) {
     truncate_by(w, slen(suffix));

@@ -15,16 +15,19 @@
 //!
 //! | Mode                              | Working set | Why |
 //! |-----------------------------------|-------------|-----|
-//! | distance, no Damerau, unit cost, 8–64-unit shorter operand | one `u64` word (bit-vector) | Myers' (1999) bit-parallel algorithm computes the same answer in O(n) bitwise ops instead of O(n·m) scalar cells — see `plain_levenshtein`'s own doc comment for why this range specifically |
-//! | distance, no Damerau (fallback) | 2 rows      | each cell needs only `up`, `left`, `diag` |
+//! | distance, no Damerau, unit cost, 1–64-unit shorter operand | one-word Myers state plus Peq lookup | Myers' (1999) bit-parallel algorithm computes the same answer in O(n) bitwise ops instead of O(n·m) scalar cells — see `plain_levenshtein`'s own doc comment |
+//! | distance, no Damerau, unit cost, 65+ unit shorter operand | multi-word Myers state plus packed Peq rows | Myers' state is carried across contiguous 64-bit blocks |
+//! | distance, no Damerau (weighted fallback) | 1 row | each cell needs only `up`, `left`, `diag` |
 //! | distance, restricted Damerau      | 3 rows      | transposition reaches back to row − 2 |
 //! | distance, unrestricted Damerau    | full matrix | transposition reaches an arbitrary earlier row |
-//! | search (any variant)              | full matrix | the match start is recovered by backtracking parents |
+//! | search, no Damerau, unit cost     | per-column bit-vector deltas | the parent of every cell is a pure function of its neighbours' costs, and unit-cost cell costs are recoverable from Myers' `Pv`/`Mv` words — see `search_bits` |
+//! | search (fallback)                 | full matrix | weighted costs have no bit-vector form, and unrestricted-Damerau parents depend on `last_row_map` state that cell costs alone cannot recover |
 //!
-//! The two- and three-row paths turn an `O(nm)` allocation into an `O(m)` one and
+//! The one- and three-row paths turn an `O(nm)` allocation into an `O(m)` one and
 //! keep the whole working set in cache. The bit-vector path goes further for the
-//! common case it covers — no per-cell allocation at all, just a handful of `u64`
-//! registers — closing most of the gap `docs/PERFORMANCE_GAPS.md` entry 26
+//! common case it covers — no per-cell allocation, and 64 dynamic-programming
+//! rows represented by each machine word — closing most of the gap
+//! `docs/PERFORMANCE_GAPS.md` entry 26
 //! documents against `triple_accel`'s SIMD without needing `unsafe`, which this
 //! workspace's `unsafe_code = "deny"` policy rules out by default.
 //!
@@ -123,7 +126,7 @@ pub fn damerau_levenshtein_search(source: &str, target: &str, opts: &Options) ->
 /// zero coordination cost between pairs. This function is exactly
 /// `pairs.par_iter().map(|(a, b)| levenshtein(a, b, opts)).collect()` — a thin
 /// fan-out over the existing sequential primitive, not a second
-/// implementation of it. The two-row/three-row/full-matrix dispatch inside
+/// implementation of it. The rolling-row/three-row/full-matrix dispatch inside
 /// `levenshtein` itself is untouched; if you need `levenshtein_search` or
 /// `damerau_levenshtein_search` in parallel, apply the same
 /// `par_iter().map(...)` pattern at your own call site (see
@@ -131,41 +134,22 @@ pub fn damerau_levenshtein_search(source: &str, target: &str, opts: &Options) ->
 ///
 /// # When to reach for it vs. the sequential loop
 ///
-/// Per-pair cost grows steeply with input length — from tens of nanoseconds
-/// for short ASCII pairs to single-digit milliseconds at 1024 characters (see
-/// `docs/PERFORMANCE.md`'s `levenshtein/ascii/*` rows) — while a `rayon` task
-/// costs on the order of a microsecond to schedule
-/// (`site/performance/parallelism.md`). Measured on this crate's own
-/// `distance` benchmark (`cargo bench -p verbora-distance --features
-/// parallel -- par_levenshtein`; 32-thread machine, default global `rayon`
-/// pool, `Options::default()`), batches of 300 pairs at each length:
-///
-/// | Pair length | Sequential (300 pairs) | Parallel (300 pairs) | Speedup |
-/// |---:|--:|--:|--:|
-/// | 4    | 25.4 µs  | 44.2 µs  | 0.6× (parallel *loses*) |
-/// | 16   | 313 µs   | 65.5 µs  | 4.8× |
-/// | 64   | 5.69 ms  | 364 µs   | 15.6× |
-/// | 256  | 92.3 ms  | 3.78 ms  | 24.4× |
-/// | 1024 | 1.27 s   | 57.6 ms  | 22.0× |
-///
-/// The crossover is in *batch size*, too, not just pair length: at a fixed 64
-/// characters, sweeping batch size from 16 to 8192 pairs showed parallel
-/// ahead even at 16 pairs (185 µs sequential vs. 64 µs parallel, ~2.9×),
-/// climbing to ~17× at 8192. At 4-character pairs, `hamming::par_hamming_batch`'s
-/// own doc table shows the opposite — parallel loses even at a 1000-pair
-/// batch — because `hamming` is cheaper still. The rule of thumb: for very short
-/// pairs (roughly ⩽16 ASCII characters) prefer the plain
-/// `pairs.iter().map(|(a, b)| levenshtein(a, b, opts)).collect()` loop unless
-/// the batch itself is large (thousands of pairs); for 64+ characters,
-/// parallel tends to win even at modest batch sizes. These are one machine's
-/// numbers, not a guarantee — reproduce with the command above before relying
-/// on them for capacity planning.
+/// Per-pair cost varies with length and shape: equal or near-equal inputs can
+/// be much cheaper than unrelated inputs because the sequential primitive
+/// trims common affixes. Rayon also has a fixed scheduling cost, so there is
+/// no input-independent crossover point. Benchmark the actual workload with
+/// `cargo bench -p verbora-distance --features parallel --
+/// par_levenshtein`; for very small batches or short strings, prefer the plain
+/// `pairs.iter().map(|(a, b)| levenshtein(a, b, opts)).collect()` loop.
 ///
 /// # Allocation behaviour
 ///
 /// One `Vec<f64>` sized to `pairs.len()` for the output, plus whatever
-/// `levenshtein` itself allocates per pair (up to two `Vec<f64>` rows sized to
-/// the shorter input). No additional buffering, no locking, no per-call
+/// `levenshtein` itself allocates per pair. Weighted plain distance uses one
+/// `Vec<f64>` row. Unit-cost ASCII uses integer bit-vectors and a Peq table;
+/// multi-word Peq rows and long UTF-16 operands may allocate, while short
+/// Unicode operands use fixed stack buffers. No additional buffering, no
+/// locking, no per-call
 /// thread-pool construction — this uses whichever global `rayon` pool is
 /// already installed (or `rayon`'s default one), so pool configuration
 /// remains the caller's responsibility, not this crate's.
@@ -207,10 +191,131 @@ pub fn par_damerau_levenshtein_batch(pairs: &[(&str, &str)], opts: &Options) -> 
 // ---------------------------------------------------------------------------
 
 fn distance_impl(source: &str, target: &str, opts: &Options, damerau: bool) -> f64 {
+    if !damerau {
+        // Preserve the scalar recurrence's repeated floating-point additions
+        // exactly while avoiding both its row allocation and, for non-ASCII
+        // input, UTF-16 materialization when one side is empty.
+        if source.is_empty() {
+            let units = utf16_len(target);
+            return if opts.insertion_cost == 1.0 {
+                units as f64
+            } else {
+                repeated_cost(units, opts.insertion_cost)
+            };
+        }
+        if target.is_empty() {
+            let units = utf16_len(source);
+            return if opts.deletion_cost == 1.0 {
+                units as f64
+            } else {
+                repeated_cost(units, opts.deletion_cost)
+            };
+        }
+
+        if source.is_ascii() && target.is_ascii() {
+            return plain_levenshtein(source.as_bytes(), target.as_bytes(), opts);
+        }
+
+        // Large near-identical Unicode strings should not allocate and encode
+        // their shared surroundings. Trim only at UTF-8 scalar boundaries;
+        // `plain_levenshtein` performs the finer UTF-16-unit trim afterward.
+        let (source, target) = if is_unit_cost(opts) && source.len().min(target.len()) > 64 {
+            trim_common_utf8_affixes(source, target)
+        } else {
+            (source, target)
+        };
+        if source.is_empty() {
+            return utf16_len(target) as f64;
+        }
+        if target.is_empty() {
+            return utf16_len(source) as f64;
+        }
+        if source.is_ascii() && target.is_ascii() {
+            return plain_levenshtein(source.as_bytes(), target.as_bytes(), opts);
+        }
+
+        // A UTF-16 sequence can never contain more units than its UTF-8 byte
+        // representation. Small non-ASCII operands therefore fit in these
+        // fixed buffers without a counting pass or a heap allocation.
+        const STACK_UNITS: usize = 64;
+        if source.len() <= STACK_UNITS && target.len() <= STACK_UNITS {
+            let mut source_units = [0u16; STACK_UNITS];
+            let mut target_units = [0u16; STACK_UNITS];
+            let source_len = encode_utf16_into(source, &mut source_units);
+            let target_len = encode_utf16_into(target, &mut target_units);
+            return plain_levenshtein(
+                &source_units[..source_len],
+                &target_units[..target_len],
+                opts,
+            );
+        }
+
+        let source_units: Vec<u16> = source.encode_utf16().collect();
+        let target_units: Vec<u16> = target.encode_utf16().collect();
+        return plain_levenshtein(&source_units, &target_units, opts);
+    }
+
     dispatch(source, target, |ops| match ops {
         Operands::Bytes(s, t) => distance_generic(s, t, opts, damerau),
         Operands::Units(s, t) => distance_generic(s, t, opts, damerau),
     })
+}
+
+#[inline]
+fn repeated_cost(count: usize, cost: f64) -> f64 {
+    (0..count).fold(0.0, |total, _| total + cost)
+}
+
+#[inline]
+fn utf16_len(input: &str) -> usize {
+    if input.is_ascii() {
+        input.len()
+    } else {
+        input.encode_utf16().count()
+    }
+}
+
+fn trim_common_utf8_affixes<'a>(mut source: &'a str, mut target: &'a str) -> (&'a str, &'a str) {
+    let mut prefix = source
+        .as_bytes()
+        .iter()
+        .zip(target.as_bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while prefix != 0 && (!source.is_char_boundary(prefix) || !target.is_char_boundary(prefix)) {
+        prefix -= 1;
+    }
+    source = &source[prefix..];
+    target = &target[prefix..];
+
+    let mut suffix = source
+        .as_bytes()
+        .iter()
+        .rev()
+        .zip(target.as_bytes().iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while suffix != 0
+        && (!source.is_char_boundary(source.len() - suffix)
+            || !target.is_char_boundary(target.len() - suffix))
+    {
+        suffix -= 1;
+    }
+    if suffix != 0 {
+        source = &source[..source.len() - suffix];
+        target = &target[..target.len() - suffix];
+    }
+    (source, target)
+}
+
+#[inline]
+fn encode_utf16_into(input: &str, out: &mut [u16]) -> usize {
+    let mut len = 0usize;
+    for (slot, unit) in out.iter_mut().zip(input.encode_utf16()) {
+        *slot = unit;
+        len += 1;
+    }
+    len
 }
 
 fn distance_generic<T: BitPeq + DamerauScratch>(
@@ -245,16 +350,11 @@ fn unrestricted_damerau<T: BitPeq + DamerauScratch>(
     target: &[T],
     opts: &Options,
 ) -> f64 {
-    if is_unit_cost(opts) && opts.transposition_cost == 1.0 {
-        let total = source.len().saturating_add(target.len());
-        // Every cell value is bounded by n + m, so the narrowest integer
-        // that can hold that bound is the cheapest correct cell.
-        if total <= u16::MAX as usize {
-            return damerau_unrestricted_unit::<T, u16>(source, target);
-        }
-        if total < u32::MAX as usize {
-            return damerau_unrestricted_unit::<T, u32>(source, target);
-        }
+    if is_unit_cost(opts)
+        && opts.transposition_cost == 1.0
+        && source.len().saturating_add(target.len()) < u32::MAX as usize
+    {
+        return T::damerau_unit_dispatch(source, target);
     }
     full_matrix(source, target, opts, true, false).final_cost()
 }
@@ -310,20 +410,17 @@ fn is_unit_cost(opts: &Options) -> bool {
 /// Plain Levenshtein distance, choosing the fastest correct algorithm for the
 /// input rather than always running [`plain_rows`]'s scalar DP.
 ///
-/// `docs/PERFORMANCE_GAPS.md` entry 26 measured Verbora's scalar two-row DP
+/// `docs/PERFORMANCE_GAPS.md` entry 26 measured Verbora's scalar rolling-row DP
 /// losing to `triple_accel`'s genuinely SIMD-accelerated Levenshtein by a
 /// widening margin from 16 characters up (5.7× at 1024) — closing that gap
 /// with literal SIMD intrinsics would require `unsafe`, which this
 /// workspace's `unsafe_code = "deny"` policy rules out by default. Myers'
 /// (1999) bit-vector algorithm gets a comparable *algorithmic* win in plain
 /// safe Rust instead: it computes the same unit-cost edit distance in O(n)
-/// bitwise-word operations rather than O(n·m) scalar cell updates, at the
-/// cost of only applying when every cost is exactly 1.0 (see
-/// [`is_unit_cost`] — weighted costs have no bit-vector formulation) and the
-/// shorter operand fits in one 64-bit word. Both conditions hold for the
-/// overwhelming majority of real NLP calls (ordinary words and short
-/// phrases, [`Options::default()`]), which is exactly the shape
-/// `docs/PERFORMANCE_GAPS.md`'s own comparison used.
+/// work for a one-word pattern, or O(n·ceil(m/64)) across multiple words,
+/// rather than O(n·m) scalar cell updates. It applies only when every cost is
+/// exactly 1.0 (see [`is_unit_cost`] — weighted costs use the rolling-row
+/// fallback). The shorter operand is always the bit-packed pattern.
 ///
 /// The lower bound was originally 8 because the then-`HashMap` Peq's setup
 /// cost made `n = 4` a wash against the scalar cells it replaced. The
@@ -331,10 +428,20 @@ fn is_unit_cost(opts: &Options) -> bool {
 /// path, gated at 2 from the start with the identical table shape,
 /// measures ~16 ns at n = 4 against the scalar path's ~40 ns — so the
 /// gate now starts at 1 (a 1-unit pattern has no Myers subtlety and the
-/// kernel handles it; 0-length operands short-circuit in the scalar
-/// fallback's first comparison anyway, and cost nothing either way).
+/// kernel handles it; 0-length operands short-circuit before dispatch).
 fn plain_levenshtein<T: BitPeq>(source: &[T], target: &[T], opts: &Options) -> f64 {
     if is_unit_cost(opts) {
+        let (source, target) = if source.len().min(target.len()) > 16 {
+            trim_common_affixes(source, target)
+        } else {
+            (source, target)
+        };
+        if source.is_empty() {
+            return target.len() as f64;
+        }
+        if target.is_empty() {
+            return source.len() as f64;
+        }
         let (shorter, longer) = if source.len() <= target.len() {
             (source, target)
         } else {
@@ -342,9 +449,12 @@ fn plain_levenshtein<T: BitPeq>(source: &[T], target: &[T], opts: &Options) -> f
         };
         // Unit costs are symmetric (insertion_cost == deletion_cost), so
         // treating whichever operand is shorter as Myers' "pattern" changes
-        // nothing about the result -- only which one gets the O(1)-word
+        // nothing about the result -- only which one gets the compact
         // bitmask representation.
-        if (1..=64).contains(&shorter.len()) {
+        if (1..=4).contains(&shorter.len()) {
+            return bit_vector_distance_tiny(shorter, longer);
+        }
+        if (5..=64).contains(&shorter.len()) {
             return bit_vector_distance(shorter, longer);
         }
         if shorter.len() > 64 {
@@ -354,11 +464,81 @@ fn plain_levenshtein<T: BitPeq>(source: &[T], target: &[T], opts: &Options) -> f
     plain_rows(source, target, opts)
 }
 
+/// Removes equal prefixes and suffixes before unit-cost plain Levenshtein.
+/// Those aligned runs cannot participate in a cheaper edit script, so this
+/// preserves the exact distance while shrinking the bit-vector pattern and
+/// scan. It is deliberately never used by weighted or Damerau variants.
+fn trim_common_affixes<'a, T: Unit>(
+    mut source: &'a [T],
+    mut target: &'a [T],
+) -> (&'a [T], &'a [T]) {
+    let shared = source.len().min(target.len());
+    let mut prefix = 0usize;
+    while prefix < shared && source[prefix] == target[prefix] {
+        prefix += 1;
+    }
+    source = &source[prefix..];
+    target = &target[prefix..];
+
+    let shared = source.len().min(target.len());
+    let mut suffix = 0usize;
+    while suffix < shared && source[source.len() - 1 - suffix] == target[target.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    if suffix != 0 {
+        source = &source[..source.len() - suffix];
+        target = &target[..target.len() - suffix];
+    }
+    (source, target)
+}
+
+/// Single-word Myers kernel for patterns of at most four units. Building the
+/// normal 256-entry byte Peq table costs more than deriving these few match
+/// bits directly from the pattern on every scanned unit.
+fn bit_vector_distance_tiny<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
+    let m = shorter.len();
+    debug_assert!((1..=4).contains(&m));
+
+    if m == 1 {
+        return (longer.len() - usize::from(longer.contains(&shorter[0]))) as f64;
+    }
+
+    let last_bit = 1u64 << (m - 1);
+    let mut pv = (1u64 << m) - 1;
+    let mut mv = 0u64;
+    let mut score = m as i64;
+
+    for &c in longer {
+        let mut eq = u64::from(shorter[0] == c);
+        eq |= u64::from(shorter[1] == c) << 1;
+        if m > 2 {
+            eq |= u64::from(shorter[2] == c) << 2;
+        }
+        if m > 3 {
+            eq |= u64::from(shorter[3] == c) << 3;
+        }
+
+        let xv = eq | mv;
+        let xh = (((eq & pv).wrapping_add(pv)) ^ pv) | eq;
+        let mut ph = mv | !(xh | pv);
+        let mut mh = pv & xh;
+
+        score += i64::from(ph & last_bit != 0) - i64::from(mh & last_bit != 0);
+        ph = (ph << 1) | 1;
+        mh <<= 1;
+        pv = mh | !(xv | ph);
+        mv = ph & xv;
+    }
+
+    score as f64
+}
+
 /// Myers' (1999) bit-vector algorithm for unit-cost edit distance: the
 /// "pattern" `shorter` must be non-empty and fit in one 64-bit word (`len()
-/// <= 64`) -- the single-word case only, no multi-word block extension for
-/// longer patterns (`plain_levenshtein` falls back to [`plain_rows`] past
-/// that bound). Computes exactly what [`plain_rows`] computes for
+/// <= 64`). [`plain_levenshtein`] selects the multi-word sibling
+/// [`bit_vector_distance_blocks`] past that bound. Computes exactly what
+/// [`plain_rows`] computes for
 /// [`Options::default()`]-equivalent (unit) costs, verified exhaustively
 /// against it in this module's own tests before being trusted for anything.
 fn bit_vector_distance<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
@@ -385,12 +565,7 @@ fn bit_vector_distance<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
         let mut ph = mv | !(xh | pv);
         let mut mh = pv & xh;
 
-        if ph & last_bit != 0 {
-            score += 1;
-        }
-        if mh & last_bit != 0 {
-            score -= 1;
-        }
+        score += i64::from(ph & last_bit != 0) - i64::from(mh & last_bit != 0);
 
         ph = (ph << 1) | 1;
         mh <<= 1;
@@ -436,6 +611,20 @@ fn bit_vector_distance<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
 /// get wrong, so agreement with the already-proven single-word path at the
 /// boundary is treated as load-bearing evidence, not a formality.
 fn bit_vector_distance_blocks<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
+    // Removing the per-column score dependency and reconstructing it from
+    // final Pv/Mv popcounts wins through four blocks in A/B benchmarks; past
+    // that crossover the extra popcounts lose to the simple last-bit update.
+    if shorter.len() <= 256 {
+        bit_vector_distance_blocks_impl::<T, true>(shorter, longer)
+    } else {
+        bit_vector_distance_blocks_impl::<T, false>(shorter, longer)
+    }
+}
+
+fn bit_vector_distance_blocks_impl<T: BitPeq, const FINAL_POPCOUNT: bool>(
+    shorter: &[T],
+    longer: &[T],
+) -> f64 {
     const WORD: usize = 64;
     let m = shorter.len();
     debug_assert!(m > 0);
@@ -457,14 +646,60 @@ fn bit_vector_distance_blocks<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
     // three quarters of the kernel's whole runtime; the packed table costs
     // one lookup per scanned character, then pure indexed loads per block.
     let peq = T::peqn(shorter, blocks);
-    let zeros = vec![0u64; blocks];
 
-    let mut pv = vec![u64::MAX; blocks];
-    let mut mv = vec![0u64; blocks];
-    let mut score = m as i64;
+    // Skip a leading run whose alphabet is absent from the pattern. Processing
+    // `k` such units through Myers would only clear the lowest `k` meaningful
+    // Pv bits; initializing that state directly avoids O(k·blocks) work. If
+    // the whole target is disjoint this reduces the answer to max(m, n). Unlike
+    // a separate all-target preflight, the absent prefix is never scanned twice
+    // when the first overlap happens late.
+    let leading_absent = longer
+        .iter()
+        .position(|&unit| T::peqn_row(&peq, unit).is_some())
+        .unwrap_or(longer.len());
+    if leading_absent == longer.len() {
+        return m.max(longer.len()) as f64;
+    }
+    const STACK_BLOCKS: usize = 16;
+    let zeros_stack = [0u64; STACK_BLOCKS];
+    let zeros_heap;
+    let zeros: &[u64] = if blocks <= STACK_BLOCKS {
+        &zeros_stack[..blocks]
+    } else {
+        zeros_heap = vec![0u64; blocks];
+        &zeros_heap
+    };
 
-    for &c in longer {
-        let row = T::peqn_row(&peq, c).unwrap_or(&zeros);
+    let mut pv_stack = [u64::MAX; STACK_BLOCKS];
+    let mut pv_heap;
+    let pv: &mut [u64] = if blocks <= STACK_BLOCKS {
+        &mut pv_stack[..blocks]
+    } else {
+        pv_heap = vec![u64::MAX; blocks];
+        &mut pv_heap
+    };
+
+    for (b, word) in pv.iter_mut().enumerate() {
+        let skipped_here = leading_absent.saturating_sub(b * WORD).min(WORD);
+        *word = if skipped_here == WORD {
+            0
+        } else {
+            u64::MAX << skipped_here
+        };
+    }
+
+    let mut mv_stack = [0u64; STACK_BLOCKS];
+    let mut mv_heap;
+    let mv: &mut [u64] = if blocks <= STACK_BLOCKS {
+        &mut mv_stack[..blocks]
+    } else {
+        mv_heap = vec![0u64; blocks];
+        &mut mv_heap
+    };
+    let mut score = m.max(leading_absent) as i64;
+
+    for &c in &longer[leading_absent..] {
+        let row = T::peqn_row(&peq, c).unwrap_or(zeros);
         let mut hp_carry_in = true;
         let mut hn_carry_in = false;
 
@@ -476,12 +711,16 @@ fn bit_vector_distance_blocks<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
             let mut hn = d0 & pv[b];
 
             let (hp_carry_out, hn_carry_out) = if b == last_block {
-                (hp & last_bit != 0, hn & last_bit != 0)
+                if FINAL_POPCOUNT {
+                    (false, false)
+                } else {
+                    (hp & last_bit != 0, hn & last_bit != 0)
+                }
             } else {
                 (hp & (1u64 << 63) != 0, hn & (1u64 << 63) != 0)
             };
 
-            if b == last_block {
+            if !FINAL_POPCOUNT && b == last_block {
                 score += i64::from(hp_carry_out) - i64::from(hn_carry_out);
             }
 
@@ -496,7 +735,25 @@ fn bit_vector_distance_blocks<T: BitPeq>(shorter: &[T], longer: &[T]) -> f64 {
         }
     }
 
-    score as f64
+    if FINAL_POPCOUNT {
+        let mut distance = longer.len() as i64;
+        for b in 0..blocks {
+            let mask = if b == last_block {
+                if last_bit == 1u64 << 63 {
+                    u64::MAX
+                } else {
+                    last_bit | (last_bit - 1)
+                }
+            } else {
+                u64::MAX
+            };
+            distance += (pv[b] & mask).count_ones() as i64;
+            distance -= (mv[b] & mask).count_ones() as i64;
+        }
+        distance as f64
+    } else {
+        score as f64
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +920,11 @@ trait DamerauScratch: Unit {
     /// Records `row` as `unit`'s last occurrence, assigning `next_slot` on
     /// first sight; returns the unit's slot.
     fn set(table: &mut Self::SymTable, unit: Self, row: u32, next_slot: u32) -> u32;
+    /// The unit-cost kernel dispatch for this unit type. Bytes get a
+    /// measured three-tier dispatcher (stack matrix / register-carried /
+    /// memory-carried — see [`damerau_unit_small`] and friends); UTF-16
+    /// units use the generic snapshot kernel.
+    fn damerau_unit_dispatch(source: &[Self], target: &[Self]) -> f64;
 }
 
 impl DamerauScratch for u8 {
@@ -688,6 +950,31 @@ impl DamerauScratch for u8 {
         table.0[u] = row;
         table.1[u]
     }
+
+    fn damerau_unit_dispatch(source: &[Self], target: &[Self]) -> f64 {
+        let n = source.len();
+        let m = target.len();
+        // The tier thresholds are measured crossovers (see
+        // `docs/PERFORMANCE_GAPS.md`'s unrestricted-Damerau entry): the
+        // stack matrix wins while its fixed costs beat any table setup;
+        // the register-carried mid kernel wins while the snapshot arena is
+        // L1-resident; past that, keeping the `cur[c-1]`/`prev[c]` loads
+        // memory-carried wins instead (the register chain otherwise puts
+        // the arena load's latency onto the loop-carried dependency).
+        if n <= 8 && m <= 8 {
+            return damerau_unit_small(source, target);
+        }
+        if n + m <= u16::MAX as usize {
+            if n <= 128 && m <= 128 {
+                return damerau_unit_mid(source, target);
+            }
+            return damerau_unit_large(source, target);
+        }
+        if n + m < u32::MAX as usize {
+            return damerau_unrestricted_unit::<u8, u32>(source, target);
+        }
+        f64::NAN // unreachable: gated at the caller
+    }
 }
 
 impl DamerauScratch for u16 {
@@ -707,6 +994,16 @@ impl DamerauScratch for u16 {
         let entry = table.entry(unit).or_insert((0, next_slot));
         entry.0 = row;
         entry.1
+    }
+    fn damerau_unit_dispatch(source: &[Self], target: &[Self]) -> f64 {
+        let total = source.len().saturating_add(target.len());
+        if total <= u16::MAX as usize {
+            return damerau_unrestricted_unit::<u16, u16>(source, target);
+        }
+        if total < u32::MAX as usize {
+            return damerau_unrestricted_unit::<u16, u32>(source, target);
+        }
+        f64::NAN // unreachable: gated at the caller
     }
 }
 
@@ -784,6 +1081,313 @@ impl DamCell for u32 {
     }
 }
 
+/// The pinned unrestricted-Damerau recurrence on a fixed stack matrix, for
+/// operands of at most 8 bytes each: no tables, no heap — the
+/// last-occurrence lookup is a plain `rposition` scan over the few source
+/// bytes seen so far, and the full (tiny) matrix makes the transposition
+/// read a direct index. Below this size the scratch-table zeroing the
+/// larger kernels pay costs more than the whole DP.
+fn damerau_unit_small(source: &[u8], target: &[u8]) -> f64 {
+    const CAP: usize = 9;
+    let n = source.len();
+    let m = target.len();
+    debug_assert!(n < CAP && m < CAP);
+    if n == 0 {
+        return m as f64;
+    }
+    if m == 0 {
+        return n as f64;
+    }
+    let w = m + 1;
+    let mut mat = [0u16; CAP * CAP];
+    for (c, cell) in mat[..=m].iter_mut().enumerate() {
+        *cell = c as u16;
+    }
+    for r in 1..=n {
+        mat[r * w] = r as u16;
+    }
+    for r in 1..=n {
+        let s = source[r - 1];
+        let base = r * w;
+        let pbase = base - w;
+        let mut lcm: usize = 0;
+        for c in 1..=m {
+            let t = target[c - 1];
+            let insert = mat[base + c - 1] + 1;
+            let delete = mat[pbase + c] + 1;
+            let sub = mat[pbase + c - 1] + u16::from(s != t);
+            let mut best = insert.min(delete).min(sub);
+            if r > 1 && c > 1 && lcm != 0 {
+                // `source[..r]` includes this row's own symbol, matching the
+                // reference's mid-row `last_row_map.set(s, r)`.
+                if let Some(p) = source[..r].iter().rposition(|&x| x == t) {
+                    let lrm = p + 1;
+                    let before = mat[(lrm - 1) * w + (lcm - 1)];
+                    let gaps = r + c - lrm - lcm - 1;
+                    let transpose = before + gaps as u16;
+                    if transpose < best {
+                        best = transpose;
+                    }
+                }
+            }
+            mat[base + c] = best;
+            if s == t {
+                lcm = c;
+            }
+        }
+    }
+    f64::from(mat[n * w + m])
+}
+
+/// The mid-range byte kernel (both operands ≤ 128 units): the generic
+/// snapshot kernel's recurrence with three measured restructurings —
+/// row `r = 1` and column `c = 1` peeled so the steady-state loop drops
+/// its `r > 1`/`c > 1` guards; the column loop split into a
+/// no-candidate-possible phase A (before the row's first match) and a
+/// candidate phase B; one packed `[u32; 256]` symbol table
+/// (`slot << 16 | row`, half the zeroing of the two-array form); and the
+/// `cur[c - 1]` operand carried in a register. Cells are `u16` — the
+/// dispatch gate guarantees `n + m` fits.
+fn damerau_unit_mid(source: &[u8], target: &[u8]) -> f64 {
+    let n = source.len();
+    let m = target.len();
+    if n == 0 {
+        return m as f64;
+    }
+    if m == 0 {
+        return n as f64;
+    }
+    let w = m + 1;
+    let mut prev: Vec<u16> = (0..=m).map(|v| v as u16).collect();
+    let mut cur: Vec<u16> = vec![0u16; w];
+    let mut table = [0u32; 256]; // low 16 bits: row (0 vacant); high 16: slot
+    let mut arena: Vec<u16> = Vec::new();
+    let mut next_slot: u32;
+
+    // Row r = 1: the candidate needs r > 1, so this is a plain DP row.
+    {
+        let s = source[0];
+        table[s as usize] = 1; // slot 0, row 1
+        arena.resize(w, 0);
+        next_slot = 1;
+        arena[..w].copy_from_slice(&prev);
+
+        cur[0] = 1;
+        let mut left: u16 = 1;
+        let mut diag = prev[0];
+        for c in 1..=m {
+            let t = target[c - 1];
+            let up = prev[c];
+            let insert = left + 1;
+            let delete = up + 1;
+            let sub = diag + u16::from(s != t);
+            let best = insert.min(delete).min(sub);
+            cur[c] = best;
+            left = best;
+            diag = up;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+
+    for r in 2..=n {
+        let s = source[r - 1];
+        let su = s as usize;
+        let old = table[su];
+        let slot = if old == 0 {
+            let sl = next_slot;
+            next_slot += 1;
+            arena.resize(arena.len() + w, 0);
+            sl
+        } else {
+            old >> 16
+        };
+        table[su] = (slot << 16) | r as u32;
+        arena[slot as usize * w..][..w].copy_from_slice(&prev);
+
+        let rw = r as u16;
+        cur[0] = rw;
+        // c = 1 peeled: the candidate needs c > 1.
+        let t0 = target[0];
+        let mut diag;
+        let mut left;
+        {
+            let up = prev[1];
+            let insert = rw + 1;
+            let delete = up + 1;
+            let sub = prev[0] + u16::from(s != t0);
+            let best = insert.min(delete).min(sub);
+            cur[1] = best;
+            left = best;
+            diag = up;
+        }
+        let mut lcm: usize = if s == t0 { 1 } else { 0 };
+        let mut c = 2usize;
+
+        // Phase A: no match seen this row yet, so no candidate is possible.
+        if lcm == 0 {
+            while c <= m {
+                let t = target[c - 1];
+                let up = prev[c];
+                let insert = left + 1;
+                let delete = up + 1;
+                let sub = diag + u16::from(s != t);
+                let best = insert.min(delete).min(sub);
+                cur[c] = best;
+                left = best;
+                diag = up;
+                if s == t {
+                    lcm = c;
+                    c += 1;
+                    break;
+                }
+                c += 1;
+            }
+        }
+
+        // Phase B: `lcm != 0` guaranteed.
+        while c <= m {
+            let t = target[c - 1];
+            let up = prev[c];
+            let insert = left + 1;
+            let delete = up + 1;
+            let sub = diag + u16::from(s != t);
+            let mut best = insert.min(delete).min(sub);
+
+            let e = table[t as usize];
+            let lrm = e & 0xFFFF;
+            if lrm != 0 {
+                let before = arena[(e >> 16) as usize * w + (lcm - 1)];
+                let gaps = r + c - lrm as usize - lcm - 1;
+                let transpose = before + gaps as u16;
+                if transpose < best {
+                    best = transpose;
+                }
+            }
+            cur[c] = best;
+            left = best;
+            diag = up;
+            if s == t {
+                lcm = c;
+            }
+            c += 1;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    f64::from(prev[m])
+}
+
+/// The large byte kernel (either operand > 128 units): identical to
+/// [`damerau_unit_mid`] except the `cur[c - 1]`/`prev[c]` operands stay
+/// memory-carried — measured as the winning shape once the snapshot arena
+/// outgrows L1, where the register-carried chain instead puts the arena
+/// load's miss latency onto the loop-carried dependency.
+fn damerau_unit_large(source: &[u8], target: &[u8]) -> f64 {
+    let n = source.len();
+    let m = target.len();
+    if n == 0 {
+        return m as f64;
+    }
+    if m == 0 {
+        return n as f64;
+    }
+    let w = m + 1;
+    let mut prev: Vec<u16> = (0..=m).map(|v| v as u16).collect();
+    let mut cur: Vec<u16> = vec![0u16; w];
+    let mut table = [0u32; 256];
+    let mut arena: Vec<u16> = Vec::new();
+    let mut next_slot: u32;
+
+    {
+        let s = source[0];
+        table[s as usize] = 1;
+        arena.resize(w, 0);
+        next_slot = 1;
+        arena[..w].copy_from_slice(&prev);
+        cur[0] = 1;
+        let mut diag = prev[0];
+        for c in 1..=m {
+            let t = target[c - 1];
+            let insert = cur[c - 1] + 1;
+            let delete = prev[c] + 1;
+            let sub = diag + u16::from(s != t);
+            cur[c] = insert.min(delete).min(sub);
+            diag = prev[c];
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+
+    for r in 2..=n {
+        let s = source[r - 1];
+        let su = s as usize;
+        let old = table[su];
+        let slot = if old == 0 {
+            let sl = next_slot;
+            next_slot += 1;
+            arena.resize(arena.len() + w, 0);
+            sl
+        } else {
+            old >> 16
+        };
+        table[su] = (slot << 16) | r as u32;
+        arena[slot as usize * w..][..w].copy_from_slice(&prev);
+
+        cur[0] = r as u16;
+        let t0 = target[0];
+        {
+            let insert = cur[0] + 1;
+            let delete = prev[1] + 1;
+            let sub = prev[0] + u16::from(s != t0);
+            cur[1] = insert.min(delete).min(sub);
+        }
+        let mut lcm: usize = if s == t0 { 1 } else { 0 };
+        let mut diag = prev[1];
+        let mut c = 2usize;
+
+        if lcm == 0 {
+            while c <= m {
+                let t = target[c - 1];
+                let insert = cur[c - 1] + 1;
+                let delete = prev[c] + 1;
+                let sub = diag + u16::from(s != t);
+                cur[c] = insert.min(delete).min(sub);
+                diag = prev[c];
+                if s == t {
+                    lcm = c;
+                    c += 1;
+                    break;
+                }
+                c += 1;
+            }
+        }
+
+        while c <= m {
+            let t = target[c - 1];
+            let insert = cur[c - 1] + 1;
+            let delete = prev[c] + 1;
+            let sub = diag + u16::from(s != t);
+            let mut best = insert.min(delete).min(sub);
+            let e = table[t as usize];
+            let lrm = e & 0xFFFF;
+            if lrm != 0 {
+                let before = arena[(e >> 16) as usize * w + (lcm - 1)];
+                let gaps = r + c - lrm as usize - lcm - 1;
+                let transpose = before + gaps as u16;
+                if transpose < best {
+                    best = transpose;
+                }
+            }
+            diag = prev[c];
+            cur[c] = best;
+            if s == t {
+                lcm = c;
+            }
+            c += 1;
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    f64::from(prev[m])
+}
+
 fn damerau_unrestricted_unit<T: BitPeq + DamerauScratch, C: DamCell>(
     source: &[T],
     target: &[T],
@@ -846,18 +1450,47 @@ fn damerau_unrestricted_unit<T: BitPeq + DamerauScratch, C: DamCell>(
     prev[m].to_f64()
 }
 
-/// Two-row Levenshtein. No parent tracking, so no tie-breaking concerns.
+/// One-row Levenshtein. No parent tracking, so no tie-breaking concerns.
 fn plain_rows<T: Unit>(source: &[T], target: &[T], opts: &Options) -> f64 {
-    let n = source.len();
     let m = target.len();
 
+    let mut row: Vec<f64> = Vec::with_capacity(m + 1);
+    row.push(0.0);
+    for c in 1..=m {
+        row.push(row[c - 1] + opts.insertion_cost);
+    }
+
+    for &s in source {
+        let mut diag = row[0];
+        row[0] += opts.deletion_cost;
+        let mut left = row[0];
+        for c in 1..=m {
+            let up = row[c];
+            let insert = left + opts.insertion_cost;
+            let delete = up + opts.deletion_cost;
+            let mut sub = diag;
+            if s != target[c - 1] {
+                sub += opts.substitution_cost;
+            }
+            let best = min3(insert, delete, sub);
+            row[c] = best;
+            diag = up;
+            left = best;
+        }
+    }
+    row[m]
+}
+
+#[cfg(test)]
+fn plain_rows_two_oracle<T: Unit>(source: &[T], target: &[T], opts: &Options) -> f64 {
+    let n = source.len();
+    let m = target.len();
     let mut prev: Vec<f64> = Vec::with_capacity(m + 1);
     prev.push(0.0);
     for c in 1..=m {
         prev.push(prev[c - 1] + opts.insertion_cost);
     }
     let mut cur = vec![0.0f64; m + 1];
-
     for r in 1..=n {
         cur[0] = prev[0] + opts.deletion_cost;
         let s = source[r - 1];
@@ -919,8 +1552,8 @@ fn restricted_rows<T: Unit>(source: &[T], target: &[T], opts: &Options) -> f64 {
 
 #[inline]
 fn min3(a: f64, b: f64, c: f64) -> f64 {
-    // Plain comparisons rather than f64::min: these values are never NaN (they
-    // are sums of finite costs), and `<` compiles to a single minsd.
+    // Strict comparisons preserve the first candidate on ties and reproduce
+    // the existing NaN behavior; `f64::min` has different NaN semantics.
     let mut best = a;
     if b < best {
         best = b;
@@ -1111,7 +1744,34 @@ fn search_impl(source: &str, target: &str, opts: &Options, damerau: bool) -> Sea
 /// Returns `(match_start, match_end, distance)` in units of the operand slice.
 ///
 /// `match_start` is signed; see [`SearchResult::offset`].
-fn search_generic<T: Unit>(
+///
+/// Dispatch mirrors [`plain_levenshtein`]'s: unit-cost plain Levenshtein —
+/// the overwhelmingly common shape ([`Options::default()`]) — takes the
+/// bit-parallel [`search_bits`] path; everything else keeps the original
+/// full-matrix walk. Damerau search must **never** take the fast path even
+/// under unit costs: an unrestricted transposition parent depends on
+/// `last_row_map` state at the moment the cell was filled, which cell costs
+/// alone cannot recover — a structural blocker, not an unimplemented case.
+/// Empty operands are excluded so the kernels can assume a non-empty
+/// pattern; [`search_full_matrix`] handles them at no measurable cost.
+fn search_generic<T: BitPeq>(
+    source: &[T],
+    target: &[T],
+    opts: &Options,
+    damerau: bool,
+) -> (isize, usize, f64) {
+    if !damerau && is_unit_cost(opts) && !source.is_empty() && !target.is_empty() {
+        return search_bits(source, target);
+    }
+    search_full_matrix(source, target, opts, damerau)
+}
+
+/// The original full-matrix search: [`full_matrix`] with a free row 0, the
+/// reference's first-minimum scan of the last row, and a parent-chain
+/// backtrack. The only search evaluation for weighted costs and both
+/// Damerau variants — and the oracle [`search_bits`] is differentially
+/// tested against.
+fn search_full_matrix<T: Unit>(
     source: &[T],
     target: &[T],
     opts: &Options,
@@ -1151,6 +1811,309 @@ fn search_generic<T: Unit>(
     };
 
     (match_start, match_end, min_distance)
+}
+
+// ---------------------------------------------------------------------------
+// Bit-parallel search (unit-cost plain Levenshtein)
+// ---------------------------------------------------------------------------
+
+/// What the search forward pass stores per target column: the Myers/Hyyrö
+/// vertical-delta words `Pv`/`Mv`, from which any cell cost of the search
+/// DP is recoverable (see [`search_cell_cost`]).
+///
+/// This is the structure that replaces [`full_matrix`]'s cost + parent
+/// matrices for the fast path: `2 × ⌈n/64⌉` words per column instead of
+/// `24 (n+1)` bytes per column — 96× less memory at 1024×1024 — because
+/// under unit costs the full cost column is redundant with its own delta
+/// bits, and the parent matrix is redundant with the costs (see
+/// [`search_bits`]'s backtrack).
+struct SearchColumns {
+    /// Concatenated per-column `Pv` words, laid out `[(c − 1) · blocks + b]`
+    /// for `c` in `1..=m` (column 0 needs no storage: its costs are the
+    /// boundary `D[r][0] = r`).
+    col_pv: Vec<u64>,
+    /// Same layout for `Mv`.
+    col_mv: Vec<u64>,
+    /// Words per column: `⌈n/64⌉`.
+    blocks: usize,
+    /// First column attaining the minimum of the last row — the reference's
+    /// first-minimum scan (`>`, so ties keep the earliest column), with
+    /// column 0's cost `n` included ahead of the scanned columns.
+    match_end: usize,
+    /// That minimum. An integer (unit costs), converted to `f64` at the
+    /// boundary — lossless, values are bounded by `n + m`.
+    min_distance: i64,
+}
+
+/// Bit-parallel evaluation of unit-cost plain-Levenshtein search:
+/// [`search_full_matrix`]'s exact `(match_start, match_end, distance)`
+/// tuple — same first-minimum tie-breaking, same backtrack parents — from a
+/// Myers/Hyyrö forward pass plus a cost-recomputing backtrack, with **no**
+/// parent matrix.
+///
+/// Two observations make exact parity possible without one:
+///
+/// 1. The stored parent of every cell is a *pure function* of the three
+///    neighbour costs: candidate order insert → delete → substitute, first
+///    strict `<` wins ([`full_matrix`]'s pinned tie-break). So the
+///    backtrack can recompute each parent choice from cell costs alone.
+/// 2. Under unit costs any cell cost is recoverable from the per-column
+///    vertical deltas the forward kernel already produces:
+///    `D[r][c] = Σ_{i<r} (Pv[c] bit i) − (Mv[c] bit i)` (row 0 is 0
+///    everywhere in search mode; column 0 is `r`). Storing `Pv`/`Mv` per
+///    column is enough.
+///
+/// The forward pass is the crate's existing Hyyrö block kernel
+/// ([`bit_vector_distance_blocks`]) with exactly one change: the
+/// per-column horizontal carry-in is 0 instead of 1, because search mode's
+/// row 0 is free (`D[0][j] − D[0][j−1] = 0`, Sellers' boundary) where
+/// distance mode's costs `+1` per column. A single-word specialisation
+/// covers `n ≤ 64` the way [`bit_vector_distance`] does for distance mode.
+///
+/// Requires non-empty operands (gated in [`search_generic`]). Verified
+/// against the full-matrix oracle on full-`SearchResult` equality —
+/// substring, `f64` distance bits, signed offset — across randomized
+/// corpora with embedded near-matches forcing real ties, both unit types.
+fn search_bits<T: BitPeq>(source: &[T], target: &[T]) -> (isize, usize, f64) {
+    let n = source.len();
+    let m = target.len();
+    debug_assert!(n >= 1 && m >= 1);
+
+    let fw = if n <= 64 {
+        search_forward_word(source, target)
+    } else {
+        search_forward_blocks(source, target)
+    };
+    let match_end = fw.match_end;
+
+    let match_start: isize = if match_end == 0 {
+        0
+    } else {
+        // The parent walk, with each parent recomputed instead of loaded.
+        // Stops exactly where the full-matrix walk stops (`row > 1 &&
+        // col > 1`), so parents of row-1/column-1 cells — which the matrix
+        // records but never reads — need no recomputation either.
+        let mut row = n;
+        let mut col = match_end;
+        while row > 1 && col > 1 {
+            let insert = search_cell_cost(&fw, row, col - 1) + 1;
+            let delete = search_cell_cost(&fw, row - 1, col) + 1;
+            let substitute = search_cell_cost(&fw, row - 1, col - 1)
+                + i64::from(source[row - 1] != target[col - 1]);
+
+            // Candidate order insert → delete → substitute; first strict
+            // minimum wins — byte-for-byte the comparison sequence
+            // `full_matrix` used to pick the parent it stored.
+            let mut best = insert;
+            let mut parent = (row, col - 1);
+            if delete < best {
+                best = delete;
+                parent = (row - 1, col);
+            }
+            if substitute < best {
+                parent = (row - 1, col - 1);
+            }
+            (row, col) = parent;
+        }
+        col as isize - 1
+    };
+
+    (match_start, match_end, fw.min_distance as f64)
+}
+
+/// Single-word (`n ≤ 64`) search forward pass: [`bit_vector_distance`]'s
+/// Myers kernel with the search boundary (horizontal carry-in 0 — the
+/// `| 1` after the `ph` shift is the one deliberate omission) and a
+/// per-column store of `Pv`/`Mv`.
+///
+/// `pv` starts at `u64::MAX` rather than the distance kernel's masked
+/// `(1 << n) − 1`: bits at positions ≥ n are junk, but harmlessly so — the
+/// kernel itself only inspects `last_bit` (position `n − 1`), carries in
+/// the `wrapping_add` only propagate upward, and [`search_cell_cost`] reads
+/// masked prefixes of at most `n` bits. Pinned by the exhaustive
+/// cell-cost test against the scalar DP.
+fn search_forward_word<T: BitPeq>(source: &[T], target: &[T]) -> SearchColumns {
+    let n = source.len();
+    let m = target.len();
+    debug_assert!((1..=64).contains(&n));
+
+    let peq = T::peq1(source);
+    let last_bit = 1u64 << (n - 1);
+    let mut pv: u64 = u64::MAX;
+    let mut mv: u64 = 0;
+    let mut score = n as i64;
+
+    let mut col_pv = vec![0u64; m];
+    let mut col_mv = vec![0u64; m];
+
+    // First-minimum scan, replicated exactly: min starts at n + m with
+    // match_end = m, then column 0 (cost n, always an improvement) is
+    // considered before any scanned column.
+    let mut min_distance = (n + m) as i64;
+    let mut match_end = m;
+    if min_distance > n as i64 {
+        min_distance = n as i64;
+        match_end = 0;
+    }
+
+    for j in 1..=m {
+        let eq = T::peq1_get(&peq, target[j - 1]);
+        let xv = eq | mv;
+        let xh = (((eq & pv).wrapping_add(pv)) ^ pv) | eq;
+        let mut ph = mv | !(xh | pv);
+        let mut mh = pv & xh;
+
+        if ph & last_bit != 0 {
+            score += 1;
+        }
+        if mh & last_bit != 0 {
+            score -= 1;
+        }
+
+        // Search boundary: carry-in 0 (row 0 free), vs `| 1` in distance mode.
+        ph <<= 1;
+        mh <<= 1;
+        pv = mh | !(xv | ph);
+        mv = ph & xv;
+
+        col_pv[j - 1] = pv;
+        col_mv[j - 1] = mv;
+
+        if min_distance > score {
+            min_distance = score;
+            match_end = j;
+        }
+    }
+
+    SearchColumns {
+        col_pv,
+        col_mv,
+        blocks: 1,
+        match_end,
+        min_distance,
+    }
+}
+
+/// Multi-word (`n > 64`) search forward pass: [`bit_vector_distance_blocks`]'s
+/// Hyyrö block kernel with the search boundary (`hp_carry_in` starts each
+/// column at `false` instead of `true` — row 0 is free) and a per-column
+/// store of the `Pv`/`Mv` block vectors.
+///
+/// Callable for any `n ≥ 1` (with one block the formulation degenerates to
+/// the single-word one) — kept so the tests can pit the two shapes against
+/// each other on the shared domain, exactly as the OSA kernels do.
+fn search_forward_blocks<T: BitPeq>(source: &[T], target: &[T]) -> SearchColumns {
+    const WORD: usize = 64;
+    let n = source.len();
+    let m = target.len();
+    debug_assert!(n >= 1);
+
+    let blocks = n.div_ceil(WORD);
+    let last_block = blocks - 1;
+    let last_bit = 1u64 << ((n - 1) % WORD);
+
+    let peq = T::peqn(source, blocks);
+    let zeros = vec![0u64; blocks];
+
+    let mut pv = vec![u64::MAX; blocks];
+    let mut mv = vec![0u64; blocks];
+    let mut score = n as i64;
+
+    let mut col_pv = vec![0u64; m * blocks];
+    let mut col_mv = vec![0u64; m * blocks];
+
+    let mut min_distance = (n + m) as i64;
+    let mut match_end = m;
+    if min_distance > n as i64 {
+        min_distance = n as i64;
+        match_end = 0;
+    }
+
+    for j in 1..=m {
+        let row = T::peqn_row(&peq, target[j - 1]).unwrap_or(&zeros);
+
+        // Search boundary: D[0][j] − D[0][j−1] = 0 (row 0 free), so the
+        // per-column horizontal carry-in is 0, not distance mode's +1.
+        let mut hp_carry_in = false;
+        let mut hn_carry_in = false;
+
+        for (b, &eq) in row.iter().enumerate() {
+            let x = eq | u64::from(hn_carry_in);
+            let d0 = ((x & pv[b]).wrapping_add(pv[b]) ^ pv[b]) | x | mv[b];
+
+            let mut hp = mv[b] | !(d0 | pv[b]);
+            let mut hn = d0 & pv[b];
+
+            let (hp_carry_out, hn_carry_out) = if b == last_block {
+                (hp & last_bit != 0, hn & last_bit != 0)
+            } else {
+                (hp & (1u64 << 63) != 0, hn & (1u64 << 63) != 0)
+            };
+            if b == last_block {
+                score += i64::from(hp_carry_out) - i64::from(hn_carry_out);
+            }
+
+            hp = (hp << 1) | u64::from(hp_carry_in);
+            hn = (hn << 1) | u64::from(hn_carry_in);
+
+            pv[b] = hn | !(d0 | hp);
+            mv[b] = hp & d0;
+
+            hp_carry_in = hp_carry_out;
+            hn_carry_in = hn_carry_out;
+        }
+
+        let base = (j - 1) * blocks;
+        col_pv[base..base + blocks].copy_from_slice(&pv);
+        col_mv[base..base + blocks].copy_from_slice(&mv);
+
+        if min_distance > score {
+            min_distance = score;
+            match_end = j;
+        }
+    }
+
+    SearchColumns {
+        col_pv,
+        col_mv,
+        blocks,
+        match_end,
+        min_distance,
+    }
+}
+
+/// Cell cost `D[r][c]` of the unit-cost search DP, recovered from the
+/// stored column deltas: a prefix popcount over the first `r` bits of
+/// column `c`'s `Pv` minus the same over `Mv` — the definition of Myers'
+/// vertical deltas (`D[i][c] − D[i−1][c] = Pv bit − Mv bit`) telescoped
+/// from `D[0][c] = 0` (search mode's free row 0). Column 0 is the plain
+/// deletion boundary `r`.
+///
+/// `count_ones` here, unlike the kernels' deliberate POPCNT avoidance
+/// elsewhere: the backtrack runs `O(n + m)` of these against the forward
+/// pass's `O(n·m/64)` column work, so even baseline-x86-64's expanded
+/// `count_ones` sequence is off the critical path.
+fn search_cell_cost(fw: &SearchColumns, r: usize, c: usize) -> i64 {
+    if r == 0 {
+        return 0;
+    }
+    if c == 0 {
+        return r as i64;
+    }
+    let base = (c - 1) * fw.blocks;
+    let pv = &fw.col_pv[base..base + fw.blocks];
+    let mv = &fw.col_mv[base..base + fw.blocks];
+    let full = r / 64;
+    let mut d = 0i64;
+    for (&p, &m_word) in pv[..full].iter().zip(&mv[..full]) {
+        d += i64::from(p.count_ones()) - i64::from(m_word.count_ones());
+    }
+    let rem = r % 64;
+    if rem > 0 {
+        let mask = (1u64 << rem) - 1;
+        d += i64::from((pv[full] & mask).count_ones()) - i64::from((mv[full] & mask).count_ones());
+    }
+    d
 }
 
 /// `String.prototype.slice` semantics for a unit slice.
@@ -1399,6 +2362,39 @@ mod tests {
     }
 
     #[test]
+    fn utf8_affix_pretrim_matches_the_utf16_oracle() {
+        let opts = Options::default();
+        let mut cases = Vec::new();
+
+        let base = "аб😀中".repeat(100);
+        let mut changed: Vec<char> = base.chars().collect();
+        changed[200] = 'ж';
+        cases.push((base.clone(), changed.into_iter().collect::<String>()));
+        cases.push((base.clone(), base));
+
+        // These pairs share UTF-8 continuation bytes inside their differing
+        // final scalar. A byte-only trim would create invalid slices; the
+        // pretrim must retreat to a char boundary before UTF-16 encoding.
+        cases.push((
+            format!("{}é", "x".repeat(65)),
+            format!("{}©", "x".repeat(65)),
+        ));
+        cases.push((
+            format!("{}😀", "д".repeat(40)),
+            format!("{}😁", "д".repeat(40)),
+        ));
+
+        for (source, target) in cases {
+            let actual = levenshtein(&source, &target, &opts);
+            let expected = dispatch(&source, &target, |ops| match ops {
+                Operands::Bytes(s, t) => plain_rows(s, t, &opts),
+                Operands::Units(s, t) => plain_rows(s, t, &opts),
+            });
+            assert_eq!(actual, expected, "{source:?} -> {target:?}");
+        }
+    }
+
+    #[test]
     fn bit_vector_fast_path_only_applies_to_unit_cost() {
         // Weighted costs must never take the bit-vector path -- it has no
         // formulation for them. Confirms the two dispatch paths still agree
@@ -1410,6 +2406,118 @@ mod tests {
         };
         assert_eq!(levenshtein("abc", "ab", &weighted), 1.0); // one deletion, cost 1
         assert_eq!(levenshtein("ab", "abc", &weighted), 2.0); // one insertion, cost 2
+    }
+
+    #[test]
+    fn one_row_weighted_matches_two_row_oracle_bit_for_bit() {
+        // The rolling-row rewrite is an allocation/layout optimization only.
+        // Keep the retired two-row recurrence as an independent test oracle,
+        // including rectangular, empty and UTF-16 inputs and unusual costs
+        // whose IEEE-754 evaluation order is observable.
+        let options = [
+            Options::default(),
+            Options {
+                insertion_cost: 0.5,
+                deletion_cost: 1.5,
+                substitution_cost: 0.75,
+                ..Options::default()
+            },
+            Options {
+                insertion_cost: 0.0,
+                deletion_cost: 0.0,
+                substitution_cost: 0.0,
+                ..Options::default()
+            },
+            Options {
+                insertion_cost: -1.0,
+                deletion_cost: -0.5,
+                substitution_cost: 2.0,
+                ..Options::default()
+            },
+            Options {
+                insertion_cost: f64::INFINITY,
+                deletion_cost: 1.0,
+                substitution_cost: 0.25,
+                ..Options::default()
+            },
+            Options {
+                insertion_cost: f64::NAN,
+                deletion_cost: 1.0,
+                substitution_cost: 0.25,
+                ..Options::default()
+            },
+        ];
+        let pairs = [
+            ("", ""),
+            ("", "a😀b"),
+            ("a😀b", ""),
+            ("a", "abcdefghijklmnopqrstuvwxyz"),
+            ("abcdefghijklmnopqrstuvwxyz", "a"),
+            ("kitten", "sitting"),
+            ("Москва", "Масква"),
+            ("😀😃😄", "😃😄😁"),
+        ];
+
+        for opts in options {
+            for (source, target) in pairs {
+                let (actual, expected) = dispatch(source, target, |ops| match ops {
+                    Operands::Bytes(s, t) => {
+                        (plain_rows(s, t, &opts), plain_rows_two_oracle(s, t, &opts))
+                    }
+                    Operands::Units(s, t) => {
+                        (plain_rows(s, t, &opts), plain_rows_two_oracle(s, t, &opts))
+                    }
+                });
+                if expected.is_nan() {
+                    assert!(actual.is_nan(), "{source:?} -> {target:?}, {opts:?}");
+                } else {
+                    assert_eq!(
+                        actual.to_bits(),
+                        expected.to_bits(),
+                        "{source:?} -> {target:?}, {opts:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_plain_distance_matches_the_row_recurrence_bit_for_bit() {
+        // `distance_impl` handles these before UTF-16 materialization. The
+        // repeated additions (rather than `len as f64 * cost`) intentionally
+        // retain the scalar recurrence's rounding and special-value behavior.
+        for cost in [0.0, -0.0, 0.1, -0.5, f64::INFINITY, f64::NAN] {
+            let insert = Options {
+                insertion_cost: cost,
+                ..Options::default()
+            };
+            let expected_insert = dispatch("", "a😀b", |ops| match ops {
+                Operands::Bytes(s, t) => plain_rows_two_oracle(s, t, &insert),
+                Operands::Units(s, t) => plain_rows_two_oracle(s, t, &insert),
+            });
+            let actual_insert = levenshtein("", "a😀b", &insert);
+
+            let delete = Options {
+                deletion_cost: cost,
+                ..Options::default()
+            };
+            let expected_delete = dispatch("a😀b", "", |ops| match ops {
+                Operands::Bytes(s, t) => plain_rows_two_oracle(s, t, &delete),
+                Operands::Units(s, t) => plain_rows_two_oracle(s, t, &delete),
+            });
+            let actual_delete = levenshtein("a😀b", "", &delete);
+
+            for (actual, expected) in [
+                (actual_insert, expected_insert),
+                (actual_delete, expected_delete),
+            ] {
+                if expected.is_nan() {
+                    assert!(actual.is_nan());
+                } else {
+                    assert_eq!(actual.to_bits(), expected.to_bits());
+                }
+            }
+        }
     }
 
     /// Random ASCII bytes drawn from a small alphabet, as a direct `Vec<u8>`
@@ -1455,6 +2563,36 @@ mod tests {
                         "mismatch for len {a_len} vs len {b_len}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn bit_vector_blocks_skips_absent_prefix_without_changing_state() {
+        let opts = Options::default();
+        for pattern_len in [65usize, 129, 257] {
+            let shorter = vec![b'z'; pattern_len];
+            for prefix_len in [0usize, 1, 63, 64, 65, 127, 128, 300, 1_000] {
+                let mut longer = vec![b'a'; prefix_len];
+                longer.push(b'z');
+                longer.extend_from_slice(b"bbb");
+                assert_eq!(
+                    bit_vector_distance_blocks(&shorter, &longer),
+                    plain_rows(&shorter, &longer, &opts),
+                    "pattern={pattern_len}, absent prefix={prefix_len}"
+                );
+            }
+
+            // Exercise the all-disjoint return with both operand length
+            // orders; the public dispatcher normally supplies the longer
+            // target, while the kernel itself remains robust in direct tests.
+            for target_len in [1usize, pattern_len, pattern_len * 2] {
+                let longer = vec![b'a'; target_len];
+                assert_eq!(
+                    bit_vector_distance_blocks(&shorter, &longer),
+                    plain_rows(&shorter, &longer, &opts),
+                    "disjoint pattern={pattern_len}, target={target_len}"
+                );
             }
         }
     }
@@ -2904,6 +4042,451 @@ mod tests {
                     damerau_unrestricted_unit::<u8, u32>(&a, &b),
                     "cell-width mismatch at {a_len}x{b_len}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn damerau_byte_tiers_agree_with_full_matrix_at_boundaries() {
+        // The three byte kernels and their dispatch thresholds (8, 128),
+        // exercised right at and across each boundary against the pinned
+        // full-matrix oracle, in both argument orders (the recurrence is
+        // asymmetric, so both orders are load-bearing).
+        let mut rng = Xorshift64(0x71E5_71E5_71E5);
+        let opts = Options::default();
+        let sizes = [
+            (7usize, 7usize),
+            (8, 8),
+            (8, 9),
+            (9, 8),
+            (9, 9),
+            (8, 200),
+            (127, 128),
+            (128, 128),
+            (128, 129),
+            (129, 129),
+            (129, 40),
+            (160, 160),
+            (200, 130),
+        ];
+        for &(a_len, b_len) in &sizes {
+            for _ in 0..6 {
+                let a = random_string(&mut rng, a_len);
+                let b = random_string(&mut rng, b_len);
+                let expected = oracle_unrestricted(&a, &b);
+                assert_eq!(
+                    damerau_levenshtein(&a, &b, &opts),
+                    expected,
+                    "mismatch at {a_len}x{b_len}"
+                );
+                assert_eq!(
+                    damerau_levenshtein(&b, &a, &opts),
+                    oracle_unrestricted(&b, &a),
+                    "reverse mismatch at {b_len}x{a_len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn damerau_byte_tiers_agree_with_each_other_on_shared_domains() {
+        // The three tier kernels are independently-shaped implementations
+        // of one recurrence; wherever their domains overlap they must agree
+        // exactly, called directly (not through dispatch).
+        let mut rng = Xorshift64(0x3B1D_3B1D_3B1D);
+        for _ in 0..300 {
+            let a_len = 1 + rng.next_range(8);
+            let b_len = 1 + rng.next_range(8);
+            let a = random_units(&mut rng, a_len);
+            let b = random_units(&mut rng, b_len);
+            let small = damerau_unit_small(&a, &b);
+            let mid = damerau_unit_mid(&a, &b);
+            let large = damerau_unit_large(&a, &b);
+            let generic = damerau_unrestricted_unit::<u8, u16>(&a, &b);
+            assert_eq!(small, mid, "small/mid at {a_len}x{b_len}");
+            assert_eq!(mid, large, "mid/large at {a_len}x{b_len}");
+            assert_eq!(large, generic, "large/generic at {a_len}x{b_len}");
+        }
+        for _ in 0..100 {
+            let a_len = 9 + rng.next_range(120);
+            let b_len = 9 + rng.next_range(120);
+            let a = random_units(&mut rng, a_len);
+            let b = random_units(&mut rng, b_len);
+            assert_eq!(
+                damerau_unit_mid(&a, &b),
+                damerau_unit_large(&a, &b),
+                "mid/large at {a_len}x{b_len}"
+            );
+            assert_eq!(
+                damerau_unit_large(&a, &b),
+                damerau_unrestricted_unit::<u8, u16>(&a, &b),
+                "large/generic at {a_len}x{b_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn damerau_byte_tiers_handle_quirks_and_degenerate_shapes() {
+        // The pinned-recurrence quirk fixtures forced through each tier by
+        // direct call (they are all small, so dispatch alone would only
+        // exercise the stack kernel), plus degenerate shapes.
+        for (a, b, want) in [
+            ("bb", "abbb", 1.0),
+            ("abbb", "bb", 2.0),
+            ("dfcb", "bdffc", 2.0),
+            ("aabcbbb", "cabbccaab", 3.0),
+            ("ca", "abc", 2.0),
+        ] {
+            let ab = a.as_bytes();
+            let bb = b.as_bytes();
+            // The stack kernel's contract is both operands <= 8 units; the
+            // seven-by-nine fixture is out of its dispatch domain.
+            if ab.len() <= 8 && bb.len() <= 8 {
+                assert_eq!(damerau_unit_small(ab, bb), want, "small {a:?}");
+            }
+            assert_eq!(damerau_unit_mid(ab, bb), want, "mid {a:?}");
+            assert_eq!(damerau_unit_large(ab, bb), want, "large {a:?}");
+        }
+        // Single-symbol seas and disjoint alphabets across tiers.
+        let opts = Options::default();
+        for len in [8usize, 9, 60, 129, 200] {
+            let aa = "a".repeat(len);
+            let ab: String = "ab".chars().cycle().take(len).collect();
+            let zz = "z".repeat(len + 3);
+            assert_eq!(
+                damerau_levenshtein(&aa, &ab, &opts),
+                oracle_unrestricted(&aa, &ab)
+            );
+            assert_eq!(
+                damerau_levenshtein(&aa, &zz, &opts),
+                oracle_unrestricted(&aa, &zz)
+            );
+        }
+    }
+
+    // -- Bit-parallel search battery ----------------------------------------
+
+    /// The full-matrix search forced end-to-end — `search_full_matrix`
+    /// through `dispatch`, assembled into a `SearchResult` exactly as
+    /// `search_impl` does — bypassing `search_generic`'s fast-path gate
+    /// entirely. The oracle every `search_bits` test below compares full
+    /// `SearchResult`s (substring string, `f64` distance bits, signed
+    /// offset) against.
+    fn oracle_search(a: &str, b: &str, opts: &Options, damerau: bool) -> SearchResult {
+        dispatch(a, b, |ops| match ops {
+            Operands::Bytes(s, t) => {
+                let (start, end, dist) = search_full_matrix(s, t, opts, damerau);
+                SearchResult {
+                    substring: String::from_utf8_lossy(slice_units(t, start, end)).into_owned(),
+                    distance: dist,
+                    offset: start,
+                }
+            }
+            Operands::Units(s, t) => {
+                let (start, end, dist) = search_full_matrix(s, t, opts, damerau);
+                SearchResult {
+                    substring: String::from_utf16_lossy(slice_units(t, start, end)),
+                    distance: dist,
+                    offset: start,
+                }
+            }
+        })
+    }
+
+    /// A narrow-alphabet random ASCII string: small alphabets force dense
+    /// match structure — many equally-cheap alignments — which is exactly
+    /// what stresses the pinned first-minimum and backtrack tie-breaking.
+    fn search_rand(rng: &mut SplitMix64, len: usize, alphabet: usize) -> String {
+        (0..len)
+            .map(|_| (b'a' + rng.next_range(alphabet) as u8) as char)
+            .collect()
+    }
+
+    /// Embeds a lightly-mutated copy of `needle` into `haystack` at a random
+    /// position, forcing a real near-match (and, with narrow alphabets,
+    /// frequent exact ties between competing end positions).
+    fn embed_near_match(
+        rng: &mut SplitMix64,
+        needle: &str,
+        haystack: &mut String,
+        alphabet: usize,
+    ) {
+        let n = needle.len();
+        let m = haystack.len();
+        if m <= n {
+            return;
+        }
+        let pos = rng.next_range(m - n);
+        let mut copy = needle.to_owned().into_bytes();
+        for _ in 0..rng.next_range(3) {
+            let i = rng.next_range(copy.len());
+            copy[i] = b'a' + rng.next_range(alphabet) as u8;
+        }
+        haystack.replace_range(pos..pos + n, std::str::from_utf8(&copy).unwrap());
+    }
+
+    #[test]
+    fn search_bits_agrees_with_full_matrix_on_random_ascii() {
+        // The correctness-defining differential for the search fast path:
+        // full-`SearchResult` equality against the full-matrix oracle across
+        // randomized corpora. Half the haystacks carry an embedded mutated
+        // copy of the needle so real matches and ties occur constantly
+        // rather than by luck; needle lengths cross both the single-word
+        // boundary (63..=66) and the two-block boundary (127..=130).
+        let mut rng = SplitMix64(0x5EA2_C4B1_D00D_0001);
+        let opts = Options::default();
+        for case in 0..3000usize {
+            let alphabet = [2usize, 3, 4, 26][rng.next_range(4)];
+            let n = 1 + rng.next_range(if case % 5 == 0 { 200 } else { 90 });
+            let m = 1 + rng.next_range(220);
+            let s = search_rand(&mut rng, n, alphabet);
+            let mut t = search_rand(&mut rng, m, alphabet);
+            if rng.next_range(2) == 0 {
+                embed_near_match(&mut rng, &s, &mut t, alphabet);
+            }
+            let got = levenshtein_search(&s, &t, &opts);
+            let want = oracle_search(&s, &t, &opts, false);
+            assert_eq!(got, want, "search mismatch: s={s:?} t={t:?}");
+        }
+    }
+
+    #[test]
+    fn search_bits_boundary_needle_lengths_agree() {
+        // The word/blocks dispatch boundary (64) and the one/two-block
+        // boundary (128) swept explicitly rather than left to the random
+        // corpus, with embedded near-matches at every combination.
+        let mut rng = SplitMix64(0x5EA2_C4B1_D00D_0002);
+        let opts = Options::default();
+        for &n in &[1usize, 2, 63, 64, 65, 66, 127, 128, 129, 130] {
+            for &m in &[1usize, 64, 65, 129, 200] {
+                for _ in 0..6 {
+                    let s = search_rand(&mut rng, n, 3);
+                    let mut t = search_rand(&mut rng, m, 3);
+                    embed_near_match(&mut rng, &s, &mut t, 3);
+                    let got = levenshtein_search(&s, &t, &opts);
+                    let want = oracle_search(&s, &t, &opts, false);
+                    assert_eq!(got, want, "boundary mismatch n={n} m={m}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_bits_agrees_on_utf16_input() {
+        // The same differential through the `Operands::Units` (u16) path:
+        // Cyrillic (BMP, one unit per char) and astral characters (two
+        // units, exercising surrogate-width slicing in the assembled
+        // substring). The u16 kernels share every line with the u8 ones
+        // except the FxHashMap Peq, so this pins the table plumbing.
+        let mut rng = SplitMix64(0x5EA2_C4B1_D00D_0003);
+        let opts = Options::default();
+        const CYRILLIC: &[char] = &['а', 'б', 'в', 'г'];
+        for _ in 0..600 {
+            let n = 1 + rng.next_range(120);
+            let m = 1 + rng.next_range(140);
+            let s: String = (0..n)
+                .map(|_| CYRILLIC[rng.next_range(CYRILLIC.len())])
+                .collect();
+            let t: String = (0..m)
+                .map(|_| CYRILLIC[rng.next_range(CYRILLIC.len())])
+                .collect();
+            let got = levenshtein_search(&s, &t, &opts);
+            let want = oracle_search(&s, &t, &opts, false);
+            assert_eq!(got, want, "u16 search mismatch: s={s:?} t={t:?}");
+        }
+        // Astral needles and haystacks: unit lengths cross the word
+        // boundary at half the character count.
+        for _ in 0..200 {
+            let s_units = 2 + rng.next_range(100);
+            let t_units = 2 + rng.next_range(140);
+            let s = random_unicode_wide(&mut rng, s_units);
+            let t = random_unicode_wide(&mut rng, t_units);
+            let got = levenshtein_search(&s, &t, &opts);
+            let want = oracle_search(&s, &t, &opts, false);
+            assert_eq!(got, want, "astral search mismatch: s={s:?} t={t:?}");
+        }
+    }
+
+    #[test]
+    fn search_cell_costs_match_the_full_matrix() {
+        // The recovery identity `D[r][c] = prefix-popcount(Pv) −
+        // prefix-popcount(Mv)` checked cell-by-cell against the full search
+        // matrix — exhaustively for single-word patterns (which also pins
+        // the `pv = u64::MAX` junk-bit claim), at random cells for
+        // multi-word ones, and always including the r = 64 / r = 65 prefix
+        // rows where the mask arithmetic changes words.
+        let mut rng = SplitMix64(0x5EA2_C4B1_D00D_0004);
+        let opts = Options::default();
+        for _ in 0..150 {
+            let n = 1 + rng.next_range(150);
+            let m = 1 + rng.next_range(150);
+            let s = search_rand(&mut rng, n, 3).into_bytes();
+            let t = search_rand(&mut rng, m, 3).into_bytes();
+            let mat = full_matrix(&s, &t, &opts, false, true);
+            let fw = if n <= 64 {
+                search_forward_word(&s, &t)
+            } else {
+                search_forward_blocks(&s, &t)
+            };
+            if n <= 64 {
+                for r in 0..=n {
+                    for c in 0..=m {
+                        assert_eq!(
+                            search_cell_cost(&fw, r, c) as f64,
+                            mat.cost_at(r, c),
+                            "cell ({r},{c}) n={n} m={m}"
+                        );
+                    }
+                }
+            } else {
+                for _ in 0..60 {
+                    let r = rng.next_range(n + 1);
+                    let c = rng.next_range(m + 1);
+                    assert_eq!(
+                        search_cell_cost(&fw, r, c) as f64,
+                        mat.cost_at(r, c),
+                        "cell ({r},{c}) n={n} m={m}"
+                    );
+                }
+                for r in [64usize, 65, n] {
+                    for c in [1usize, m / 2, m] {
+                        assert_eq!(
+                            search_cell_cost(&fw, r, c) as f64,
+                            mat.cost_at(r, c),
+                            "word-boundary cell ({r},{c}) n={n} m={m}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_word_and_blocks_agree_on_the_shared_domain() {
+        // `search_forward_blocks` is valid for any n >= 1, so pit it
+        // directly against the single-word shape everywhere both apply —
+        // block-carry threading is exactly what a naive reapplication of
+        // the word formula would get wrong, so agreement with the proven
+        // single-word path is load-bearing evidence (the same argument
+        // `bit_vector_blocks_agrees_with_bit_vector_distance_at_the_boundary`
+        // makes for distance mode).
+        let mut rng = SplitMix64(0x5EA2_C4B1_D00D_0005);
+        for &n in &[1usize, 7, 32, 63, 64] {
+            for _ in 0..8 {
+                let m = 1 + rng.next_range(120);
+                let s = search_rand(&mut rng, n, 3).into_bytes();
+                let t = search_rand(&mut rng, m, 3).into_bytes();
+                let word = search_forward_word(&s, &t);
+                let blocks = search_forward_blocks(&s, &t);
+                assert_eq!(word.match_end, blocks.match_end, "match_end n={n} m={m}");
+                assert_eq!(
+                    word.min_distance, blocks.min_distance,
+                    "min_distance n={n} m={m}"
+                );
+                for r in 0..=n {
+                    for c in 0..=m {
+                        assert_eq!(
+                            search_cell_cost(&word, r, c),
+                            search_cell_cost(&blocks, r, c),
+                            "cell ({r},{c}) n={n} m={m}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_tie_breaking_pinned_examples() {
+        // Degenerate repeated-symbol inputs where *every* end position ties:
+        // the first-minimum scan and the insert-first backtrack order are
+        // the only things determining the answer, so any tie-break drift
+        // diverges here first. Expected values pinned from the full-matrix
+        // oracle (and stable: they are the reference's own semantics).
+        let opts = Options::default();
+        for (s, t) in [
+            ("aaa", "aaaaaa"),
+            ("aa", "aa"),
+            ("ab", "ababab"),
+            ("aba", "bab"),
+            ("ca", "abc"),
+            ("b", "aaa"),
+        ] {
+            let got = levenshtein_search(s, t, &opts);
+            let want = oracle_search(s, t, &opts, false);
+            assert_eq!(got, want, "tie-break mismatch for {s:?} in {t:?}");
+        }
+        // The zero-distance prefix tie: "aaa" occurs at offsets 0..=3 in
+        // "aaaaaa"; the first minimum keeps the earliest end (column 3),
+        // and the backtrack walks pure matches to offset 0.
+        let r = levenshtein_search("aaa", "aaaaaa", &opts);
+        assert_eq!(
+            (r.substring.as_str(), r.distance, r.offset),
+            ("aaa", 0.0, 0)
+        );
+    }
+
+    #[test]
+    fn search_weighted_damerau_and_empty_operands_keep_the_matrix_path() {
+        // The gate's exclusions, each checked to still produce the original
+        // answers. Weighted costs: no bit-vector formulation exists.
+        let weighted = Options {
+            substitution_cost: 0.5,
+            ..Options::default()
+        };
+        let got = levenshtein_search("kitten", "sitting", &weighted);
+        let want = oracle_search("kitten", "sitting", &weighted, false);
+        assert_eq!(got, want);
+
+        // Damerau search: transposition parents depend on `last_row_map`
+        // state, unrecoverable from cell costs — must never take the fast
+        // path even under unit costs. "ca" in "abc" distinguishes the two:
+        // the unrestricted transposition changes both distance and
+        // backtrace.
+        let opts = Options::default();
+        for (s, t) in [("ca", "abc"), ("ab", "xxbaxx"), ("abcd", "acbd")] {
+            let got = damerau_levenshtein_search(s, t, &opts);
+            let want = oracle_search(s, t, &opts, true);
+            assert_eq!(got, want, "damerau search mismatch for {s:?} in {t:?}");
+        }
+
+        // Empty operands: excluded from the fast path so the kernels can
+        // assume a non-empty pattern; answers come from the matrix path.
+        for (s, t) in [("", "abc"), ("abc", ""), ("", "")] {
+            let got = levenshtein_search(s, t, &opts);
+            let want = oracle_search(s, t, &opts, false);
+            assert_eq!(got, want, "empty-operand mismatch for {s:?} in {t:?}");
+        }
+        assert_eq!(levenshtein_search("", "abc", &opts).distance, 0.0);
+        assert_eq!(levenshtein_search("abc", "", &opts).distance, 3.0);
+    }
+
+    #[test]
+    fn search_bench_corpus_pairs_agree() {
+        // The pinned benchmark corpus — the exact inputs the competitive
+        // numbers are measured on — must produce identical `SearchResult`s
+        // through the fast path, up to and including the 1024-unit pairs
+        // (16 blocks, the largest column count any in-repo measurement
+        // exercises). Skipped silently only if the generated data file is
+        // absent (it is checked in, so absence means a partial checkout).
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .join("benches/data/distance-pairs.json");
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            eprintln!("skipping: {} not generated", path.display());
+            return;
+        };
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid bench data");
+        let opts = Options::default();
+        for key in ["ascii", "cyrillic"] {
+            for (size, pair) in json["pairs"][key].as_object().expect("pair map") {
+                let a = pair[0].as_str().unwrap();
+                let b = pair[1].as_str().unwrap();
+                let got = levenshtein_search(a, b, &opts);
+                let want = oracle_search(a, b, &opts, false);
+                assert_eq!(got, want, "bench pair {key}/{size}");
             }
         }
     }

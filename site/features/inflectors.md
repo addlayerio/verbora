@@ -2,16 +2,15 @@
 
 `verbora-inflectors` turns a word into another form of itself: `octopus` into
 `octopi`, `parenthesis` into `parentheses`, `cheval` into `chevaux`, `go` into
-`goes`, and `23` into `23rd`. Its behavior is pinned by Verbora's own
-regression suite, and the four inflectors that share the same underlying
-engine keep their quirks on purpose, down to `pluralize("A")` returning
-`"AS"`.
+`goes`, and `23` into `23rd`. Every rule and every edge case — down to
+`pluralize("A")` returning `"AS"` — is pinned by the regression suite, so output is
+exact and stable rather than approximate.
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> All <strong>6</strong> inflector APIs are
 documented and test-pinned, tables included.
-<code>cargo test -p verbora-inflectors</code> runs <strong>50</strong> unit
-tests and <strong>10</strong> doctests.
+<code>cargo test -p verbora-inflectors</code> runs <strong>50</strong> unit tests
+and <strong>10</strong> doctests.
 </div>
 
 ## The six public types
@@ -26,45 +25,40 @@ tests and <strong>10</strong> doctests.
 | `CountInflectorFr` | French | Ordinal suffixes (`1er`, everything else `e`) |
 
 The first four share one engine and one API shape — they all implement
-[`SingularPluralInflector`](#the-singularpluralinflector-trait). The two
-`Count*` types share nothing with them: they are stateless, so every method is
-an associated function, and there is no instance to construct.
+[`SingularPluralInflector`](#the-singularpluralinflector-trait). The two `Count*`
+types share nothing with them: they are stateless, so every method is an associated
+function and there is no instance to construct.
 
 <div class="callout callout-warn">
 <strong>Careful.</strong> <code>PresentVerbInflector</code>'s method names are
 inverted relative to the noun inflectors:
 <code>singularize("go")</code> is <code>"goes"</code> (the third-person
 <em>singular</em> verb) and <code>pluralize("goes")</code> is <code>"go"</code>.
+The names describe the <em>subject's</em> number, not the word's.
 </div>
 
 ## When to use it
 
 - Normalising a term index or a search query so `cats` and `cat` collide.
-- Generating human-readable text: pluralising a label to match a count, or
-  writing `3rd` instead of `3`.
-- Needing exact, deterministic inflection output rather than an
-  approximation. This is the case the crate is built for; if you only need
-  *approximately correct* English plurals, several of the behaviours
-  documented below will look like bugs, because they are — deliberately
-  preserved quirks, not oversights.
+- Generating human-readable text: pluralising a label to match a count, or writing
+  `3rd` instead of `3`.
+- Needing exact, deterministic inflection output rather than an approximation. If
+  you only need *approximately correct* English plurals, several of the behaviours
+  documented below will look like bugs. They are specified, not accidental.
 
 ## When not to use it
 
-- **Stemming or lemmatisation.** Inflection is generative (`child` → `children`);
-  a stemmer is reductive and merges forms an inflector would not.
-  `verbora_core::Stemmer` is a trait with no implementations in this workspace
-  yet — see [Core](../features/core.md).
-- **Phrases and sentences.** Every rule is anchored on the end of the whole
-  input string, so `pluralize("dog house")` is `"dog houses"` but
-  `pluralize("hot dog")` is `"hot dogs"` and `pluralize("mother in law")` is
-  `"mother in laws"`. Tokenize first — see
-  [Tokenizers](../features/tokenizers.md).
-- **Languages other than English, French and Japanese.** There is no generic
-  rule engine exposed for a new language; you can add rules to an existing
-  instance, but not register a new inflector type.
-- **Case-insensitive matching.** Inflectors *restore* the input's case onto
-  their output, which means the case quirks in
-  [Unicode and language notes](#unicode-and-language-notes) apply. If you want a
+- **Stemming or lemmatisation.** Inflection is generative (`child` → `children`); a
+  stemmer is reductive and merges forms an inflector would not. See
+  [Stemmers](../features/stemmers.md).
+- **Phrases and sentences.** Every rule is anchored on the end of the whole input
+  string, so `pluralize("mother in law")` is `"mother in laws"`. Tokenize first —
+  see [Tokenizers](../features/tokenizers.md).
+- **Languages other than English, French and Japanese.** You can add rules to an
+  existing instance, but not register a new inflector type.
+- **Case-insensitive matching.** Inflectors *restore* the input's case onto their
+  output, so the case behaviour in
+  [Case restoration](#four-behaviours-worth-knowing) applies. For a
   case-folded index, normalise first — see
   [Normalizers](../features/normalizers.md).
 
@@ -86,209 +80,87 @@ fn main() {
 }
 ```
 
-`new()` is cheap. The rule tables — every compiled regex, both irregular maps
-and the invariant list — are built once per process behind a `LazyLock` and
-shared by every instance, so constructing an inflector copies a couple of
-pointers and allocates nothing until you add a rule — even for a table as
-large as French's 744-entry invariant array.
+`new()` is cheap. The rule tables — every compiled regex, both irregular maps and
+the invariant list — are built once per process behind a `LazyLock` and shared by
+every instance, so constructing an inflector copies a couple of pointers and
+allocates nothing until you add a rule. `NounInflectorFr::new()` costs the same as
+`NounInflector::new()` despite French's 744-entry invariant list.
 
 ## Choosing the right API
 
-Three independent decisions: owned result or caller buffer; concrete type or
-trait; and for ordinals, whole string or bare suffix.
+### Nouns and verbs
 
-### Decision tree
+| API | Returns | Result allocation | Buffer reuse | Best for |
+|---|---|:--:|:--:|---|
+| `pluralize` / `singularize` | `Result<String, EmptyToken>` | one `String` | ❌ | one-off calls, readable code |
+| `pluralize_into` / `singularize_into` | `Result<(), EmptyToken>` | none — appends to yours | ✅ | loops over a corpus |
+| `SingularPluralInflector` (trait) | the same four methods | as above | as above | generic or dynamically dispatched code |
 
-```text
-I need to inflect a word
-│
-├── Nouns or verbs
-│   │
-│   ├── One call, or a few
-│   │      └── pluralize() / singularize()      → Result<String, EmptyToken>
-│   │
-│   ├── A corpus, in a loop, and I keep a buffer around
-│   │      └── pluralize_into() / singularize_into()  → appends to your String
-│   │
-│   └── My function must work for several languages
-│          └── take `&impl SingularPluralInflector`,
-│             or store `Box<dyn SingularPluralInflector>`
-│
-└── Ordinals
-    │
-    ├── I want the whole thing ("23rd")
-    │      └── nth(i64) / nth_f64(f64) / nth_str(&str)   → String
-    │
-    └── I want only the suffix ("rd"), and I am formatting anyway
-           └── nth_form(i64) / nth_form_f64(f64) / nth_form_str(&str)
-              → &'static str, allocates nothing
-```
+There is no batch API and no parallel API — see [Concurrency](#concurrency).
 
-### Comparison table — nouns and verbs
+### Ordinals
 
-| API | Returns | Result allocation | Buffer reuse | Batch | Parallel | Best for |
-|---|---|:--:|:--:|:--:|:--:|---|
-| `pluralize` / `singularize` | `Result<String, EmptyToken>` | one `String` | ❌ | ❌ | ❌ | one-off calls, readable code |
-| `pluralize_into` / `singularize_into` | `Result<(), EmptyToken>` | none — appends to yours | ✅ | ❌ | ❌ | loops over a corpus |
-| `SingularPluralInflector` (trait) | the same four methods | as above | as above | ❌ | ❌ | generic or dynamically dispatched code |
-
-There is no batch API and no parallel API. See
-[Allocation behaviour](#allocation-behaviour) for what `_into` does and does not
-remove, and [Parallelism](../performance/parallelism.md) for running the
-inflectors across threads yourself.
-
-### Comparison table — ordinals
-
-| API | Argument | Returns | Allocations | Behavior |
+| API | Argument | Returns | Allocations | Behaviour |
 |---|---|---|---|---|
 | `nth_form(i64)` | `i64` | `&'static str` | none | Ordinal suffix only, from an integer |
 | `nth(i64)` | `i64` | `String` | one, `with_capacity(24)` | Number plus suffix; exact across the full `i64` range |
 | `nth_form_f64(f64)` | `f64` | `&'static str` | none | Ordinal suffix only, from a float; `NaN`/`±Infinity` included |
-| `nth_f64(f64)` | `f64` | `String` | result plus a short-lived formatting buffer | Number plus suffix, with `nth_f64`'s own float layout (see below) |
+| `nth_f64(f64)` | `f64` | `String` | result plus a short-lived formatting buffer | Number plus suffix, with `nth_f64`'s own float layout |
 | `nth_form_str(&str)` | `&str` | `&'static str` | none | Ordinal suffix only, from a string coerced to a number |
-| `nth_str(&str)` | `&str` | `String` | one, `with_capacity(len + 2)` | Input echoed verbatim with a suffix appended, e.g. `"11"` → `"11th"` |
+| `nth_str(&str)` | `&str` | `String` | one, `with_capacity(len + 2)` | Input echoed verbatim with a suffix appended |
 
-`CountInflectorFr` exposes the same six names with the same shapes; only the
-rule differs (see [`CountInflectorFr`](#countinflectorfr)).
+`CountInflectorFr` exposes the same six names with the same shapes; only the rule
+differs (see [`CountInflectorFr`](#countinflectorfr)).
 
----
-
-### `pluralize()` / `singularize()`
-
-<a class="badge badge-owned" href="../performance/allocation">OWNED</a>
-<span class="badge badge-fallible">FALLIBLE</span>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v">Owned <code>String</code> in a <code>Result</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>String</code> for the result (<code>with_capacity(token.len() + 4)</code>), plus whatever the winning stage costs — see below</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">No — use <code>_into</code></span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Ordinary calls; anything not in a tight loop</span></div>
-</div>
-
-The default choice.
-
-```rust
-use verbora_inflectors::NounInflector;
-
-fn main() {
-    let inflector = NounInflector::new();
-    assert_eq!(inflector.pluralize("radius").unwrap(), "radii");
-    assert_eq!(inflector.singularize("radii").unwrap(), "radius");
-
-    // The empty token is the one input that fails.
-    assert!(inflector.pluralize("").is_err());
-    assert_eq!(
-        inflector.pluralize("").unwrap_err().to_string(),
-        "cannot inflect the empty token"
-    );
-}
-```
-
-The methods take `&self`: an inflector is only mutable through `add_plural`,
-`add_singular` and `add_irregular`, so you can share one instance freely.
-
-### `pluralize_into()` / `singularize_into()`
-
-<a class="badge badge-reuse" href="../performance/buffer-reuse">BUFFER REUSE</a>
-<span class="badge badge-fallible">FALLIBLE</span>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><strong>Appended</strong> to your <code>&amp;mut String</code>; returns <code>Result&lt;(), EmptyToken&gt;</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">None for the result once the buffer has capacity; the winning stage may still allocate one intermediate <code>String</code></span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">Yes — the buffer is never cleared for you</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Millions of words through one buffer</span></div>
-</div>
+### `pluralize_into` and the buffer
 
 <div class="callout callout-warn">
-<strong>Careful.</strong> <code>pluralize_into</code> <em>appends</em>. It does
-not clear <code>out</code>. That is deliberate — it is what lets you build one
-joined output without an intermediate <code>Vec&lt;String&gt;</code> — but it
-means a scratch-buffer loop must call <code>out.clear()</code> itself.
+<strong>Careful.</strong> <code>pluralize_into</code> <em>appends</em>. It does not
+clear <code>out</code>. That is deliberate — it is what lets you build one joined
+output without an intermediate <code>Vec&lt;String&gt;</code> — but it means a
+scratch-buffer loop must call <code>out.clear()</code> itself.
 </div>
 
-The scratch-buffer pattern, where the buffer's capacity is reused and the
-contents are not:
-
 ```rust
 use verbora_inflectors::NounInflector;
 
 fn main() {
     let inflector = NounInflector::new();
-    let corpus = ["hacker", "party", "child", "deer"];
 
+    // Scratch-buffer pattern: capacity is reused, contents are not.
     let mut scratch = String::with_capacity(32);
-    let mut lengths = Vec::new();
-    for word in corpus {
+    for word in ["hacker", "party", "child", "deer"] {
         scratch.clear(); // `_into` appends: clearing is YOUR job
         inflector.pluralize_into(word, &mut scratch).unwrap();
-        // `scratch` is now the plural; index it, hash it, write it to a sink…
-        lengths.push(scratch.len());
     }
-    assert_eq!(lengths, [7, 7, 8, 4]);
-}
-```
+    assert_eq!(scratch, "deer");
 
-The accumulator pattern, where appending is the point:
-
-```rust
-use verbora_inflectors::NounInflector;
-
-fn main() {
-    let inflector = NounInflector::new();
+    // Accumulator pattern: appending is the point.
     let mut line = String::with_capacity(64);
-    for (i, word) in ["box", "party", "deer"].into_iter().enumerate() {
-        if i > 0 {
-            line.push(' ');
-        }
+    for word in ["box", "party", "deer"] {
         inflector.pluralize_into(word, &mut line).unwrap();
     }
-    assert_eq!(line, "boxes parties deer");
-}
-```
+    assert_eq!(line, "boxespartiesdeer");
 
-On `EmptyToken` the buffer is left exactly as it was — nothing partial is ever
-appended, so a failed call cannot corrupt an accumulator:
-
-```rust
-use verbora_inflectors::NounInflector;
-
-fn main() {
-    let inflector = NounInflector::new();
-    let mut buf = String::from("<");
-    inflector.pluralize_into("hacker", &mut buf).unwrap();
-    assert_eq!(buf, "<hackers");
-
-    assert!(inflector.pluralize_into("", &mut buf).is_err());
-    assert_eq!(buf, "<hackers"); // untouched
+    // On `EmptyToken` the buffer is left exactly as it was: nothing partial is
+    // ever appended, so a failed call cannot corrupt an accumulator.
+    assert!(inflector.pluralize_into("", &mut line).is_err());
+    assert_eq!(line, "boxespartiesdeer");
 }
 ```
 
 `pluralize()` is literally `pluralize_into()` with a fresh
 `String::with_capacity(token.len() + 4)` in front of it, so the two can never
-disagree about a result. See
-[Iterator vs `_into`](../performance/iterator-vs-into.md) for the general shape
-of this trade-off across Verbora, and
-[Buffer reuse](../performance/buffer-reuse.md) for the pattern itself.
+disagree about a result. All four methods take `&self` — an inflector is only
+mutable through `add_plural`, `add_singular` and `add_irregular` — so one instance
+can be shared freely.
 
 ### The `SingularPluralInflector` trait
 
 Implemented by `NounInflector`, `NounInflectorFr`, `NounInflectorJa` and
-`PresentVerbInflector`. Each type also carries all seven methods inherently, so
-you only need the trait when your code must not name one concrete inflector.
-
-Two reasons to reach for it:
-
-- **Static generics** — one function that works for any language, monomorphised
-  per instantiation.
-- **Dynamic dispatch** — the trait is object safe, so a pipeline can choose its
-  inflector from configuration at run time. (The test suite itself stores
-  `Box<dyn SingularPluralInflector>` for exactly this reason.)
+`PresentVerbInflector`. Each type also carries all seven methods inherently, so you
+only need the trait when your code must not name one concrete inflector — either
+for static generics, or for dynamic dispatch, since the trait is object safe.
 
 ```rust
 use verbora_inflectors::{NounInflector, NounInflectorFr, SingularPluralInflector};
@@ -315,29 +187,16 @@ fn main() {
 }
 ```
 
-The trait carries `pluralize`, `singularize`, `pluralize_into`,
-`singularize_into`, `add_plural`, `add_singular` and `add_irregular`. It does
-**not** carry `new()`, so a generic constructor is not available; construct the
-concrete type and then erase it. The `Count*` types are not part of this trait.
+The trait carries `pluralize`, `singularize`, `pluralize_into`, `singularize_into`,
+`add_plural`, `add_singular` and `add_irregular`. It does **not** carry `new()`, so
+construct the concrete type and then erase it. The `Count*` types are not part of
+it.
 
 ### `CountInflector`
 
-<a class="badge badge-alloc" href="../performance/allocation">ALLOCATION-FREE</a>
-— the `nth_form*` half only; `nth*` allocates one `String`.
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager; stateless associated functions</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>&amp;'static str</code> from <code>nth_form*</code>, owned <code>String</code> from <code>nth*</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v"><code>nth_form*</code>: none. <code>nth</code>/<code>nth_str</code>: one <code>String</code>. <code>nth_f64</code>: the result plus one short-lived formatting buffer</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A — use <code>nth_form*</code> with <code>write!</code> into your own buffer</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Ordinal labels in generated text</span></div>
-</div>
-
 Three argument kinds, because coercing a string to a number and formatting an
-integer are different operations, and Rust has no single signature that can
-express integers, floats and strings at once:
+integer are different operations, and Rust has no single signature covering
+integers, floats and strings at once.
 
 ```rust
 use verbora_inflectors::CountInflector;
@@ -358,97 +217,65 @@ fn main() {
 }
 ```
 
-Three behaviours worth knowing before you pick an entry point:
+Three behaviours worth knowing before picking an entry point:
 
-- **Negative ordinals are always `th`.** The suffix comes from `i % 10`
-  using Rust's `%` — a remainder, not a modulo — so `-21 % 10` is `-1`,
-  which matches none of the `st`/`nd`/`rd` cases and falls through to `th`.
-  `rem_euclid` would give a different, wrong answer.
-- **`nth_f64` uses its own float-formatting rules, not Rust's `Display`.**
-  It switches to exponential form outside `1e-7 … 1e21` and spells the
-  specials `NaN`, `Infinity`, `-Infinity` — where Rust's `{}` would print
+- **Negative ordinals are always `th`.** The suffix comes from `i % 10` using
+  Rust's `%` — a remainder, not a modulo — so `-21 % 10` is `-1`, which matches
+  none of the `st`/`nd`/`rd` cases.
+- **`nth_f64` uses its own float-formatting rules, not Rust's `Display`.** It
+  switches to exponential form outside `1e-7 … 1e21` and spells the specials `NaN`,
+  `Infinity`, `-Infinity`, where Rust's `{}` would print
   `1000000000000000000000` and `inf`.
-- **`nth_str` echoes its argument.** Only the *suffix* is derived from the
-  string's coerced numeric value: `nth_str("abc")` is `"abcth"` because
-  `"abc"` coerces to `NaN`.
+- **`nth_str` echoes its argument.** Only the *suffix* is derived from the string's
+  coerced numeric value: `nth_str("abc")` is `"abcth"` because `"abc"` coerces to
+  `NaN`.
 
-#### `nth_form*` versus `nth*`: the real trade-off
-
-`nth_form*` returns a `&'static str` that is one of exactly four values —
-`"st"`, `"nd"`, `"rd"`, `"th"` — and allocates nothing at all. `nth*` allocates
-a `String` and gives you the number and the suffix already joined. If you are
-building output with `write!` anyway, the `String` from `nth` is pure waste:
-
-```rust
-use std::fmt::Write;
-
-use verbora_inflectors::CountInflector;
-
-fn main() {
-    let mut line = String::new();
-    for i in 1..=3i64 {
-        // One buffer, no per-item String.
-        write!(line, "{i}{} ", CountInflector::nth_form(i)).unwrap();
-    }
-    assert_eq!(line, "1st 2nd 3rd ");
-}
-```
-
-Reach for `nth*` when the ordinal is the whole value you want; reach for
-`nth_form*` when it is one field in a larger string. Which is faster in your
-workload is
-[not yet benchmarked](../benchmarks/index.md) beyond the criterion group in
-`crates/verbora-inflectors/benches/inflectors.rs`, which measures `nth/i64`,
-`nth_form/i64`, `nth_f64`, `nth_str` and `fr/nth/i64` separately — but the
-allocation counts above are read straight from the source and are not in doubt.
-
-#### `i64` exactness versus `f64` rounding
+`nth_form*` returns a `&'static str` that is one of exactly four values and
+allocates nothing; `nth*` allocates a `String` with the number and suffix already
+joined. If you are building output with `write!` anyway, the `String` from `nth` is
+pure waste — reach for `nth*` when the ordinal is the whole value you want, and
+`nth_form*` when it is one field in a larger string.
 
 `nth` takes an `i64` and is exact across its entire range. `nth_f64` takes an
-`f64`, whose 53-bit mantissa silently rounds any integer past 2⁵³−1 —
-`nth_f64` is there when you deliberately want that rounding:
-
-```rust
-use verbora_inflectors::CountInflector;
-
-fn main() {
-    let n = 9_007_199_254_740_993i64; // 2^53 + 1
-    assert_eq!(CountInflector::nth(n), "9007199254740993rd");
-    // f64 cannot represent that value exactly; nth_f64 rounds it down.
-    assert_eq!(CountInflector::nth_f64(n as f64), "9007199254740992nd");
-}
-```
+`f64`, whose 53-bit mantissa silently rounds any integer past 2⁵³−1, and exists for
+callers who deliberately want that rounding:
 
 ### `CountInflectorFr`
 
 French has one rule — `1er`, everything else `e` — implemented with **strict
-equality** rather than numeric coercion, so nothing is arithmetically
-coerced. That makes the three entry points disagree in a way the English
-ones do not:
+equality** rather than numeric coercion. That makes the entry points disagree in a
+way the English ones do not: `CountInflector::nth_str("1")` is `"1st"` while
+`CountInflectorFr::nth_str("1")` is `"1e"`, because English derives its suffix by
+numeric coercion and French by exact string equality.
 
 ```rust
-use verbora_inflectors::CountInflectorFr;
+use std::fmt::Write;
+
+use verbora_inflectors::{CountInflector, CountInflectorFr};
 
 fn main() {
+    // One buffer, no per-item String.
+    let mut line = String::new();
+    for i in 1..=3i64 {
+        write!(line, "{i}{} ", CountInflector::nth_form(i)).unwrap();
+    }
+    assert_eq!(line, "1st 2nd 3rd ");
+
+    let n = 9_007_199_254_740_993i64; // 2^53 + 1
+    assert_eq!(CountInflector::nth(n), "9007199254740993rd");
+    assert_eq!(CountInflector::nth_f64(n as f64), "9007199254740992nd");
+
     assert_eq!(CountInflectorFr::nth(1), "1er");
-    assert_eq!(CountInflectorFr::nth(2), "2e");
-    // The Roman numeral is also accepted, by exact string comparison.
+    // The Roman numeral is accepted, by exact string comparison — and only
+    // that one string: "1" is not "I", and "i" is not "I".
     assert_eq!(CountInflectorFr::nth_str("I"), "Ier");
-    // …and only that one string: "1" is not "I", and "i" is not "I".
     assert_eq!(CountInflectorFr::nth_str("1"), "1e");
 }
 ```
 
-So `CountInflector::nth_str("1")` is `"1st"` while
-`CountInflectorFr::nth_str("1")` is `"1e"`. This is deliberate: English
-derives its suffix by numeric coercion, French by exact string equality, and
-the two rules simply answer differently for the same input.
+## Extending the rules at run time
 
-## Advanced usage
-
-### Extending the rules at run time
-
-Callers can add rules to a live inflector. Three entry points, all `&mut self`:
+Three entry points, all `&mut self`:
 
 | Method | Adds | Consulted |
 |---|---|---|
@@ -468,13 +295,11 @@ fn main() {
     assert_eq!(inflector.pluralize("code").unwrap(), "codez");
     assert_eq!(inflector.singularize("warez").unwrap(), "ware");
     assert_eq!(inflector.pluralize("gizmo").unwrap(), "gizmoi");
-    assert_eq!(inflector.singularize("gizmoi").unwrap(), "gizmo");
     // Every built-in rule still applies to everything else.
     assert_eq!(inflector.pluralize("bus").unwrap(), "buses");
 
     // Additions are strictly per-instance.
-    let fresh = NounInflector::new();
-    assert_eq!(fresh.pluralize("code").unwrap(), "codes");
+    assert_eq!(NounInflector::new().pluralize("code").unwrap(), "codes");
 }
 ```
 
@@ -482,75 +307,46 @@ Four properties of the priority order, all load-bearing:
 
 1. **Caller rules run first**, ahead of the invariant list *and* the irregular
    table. A rule for `deer` beats `deer`'s invariance.
-2. **Insertion order decides between caller rules** — the earliest match wins,
-   and later rules never run.
+2. **Insertion order decides between caller rules** — the earliest match wins, and
+   later rules never run.
 3. **Additions are per-instance.** Two `NounInflector`s never see each other's
    rules; only the immutable built-in tables are shared.
-4. **`add_irregular` lowercases both arguments** and writes both directions with
-   a plain overwrite, so re-registering an existing plural replaces its
-   singular. (This is why `PresentVerbInflector` — which registers
-   `('am','are')` and then `('is','are')` — singularises `are` to `is`, not
-   to `am`.)
+4. **`add_irregular` lowercases both arguments** and writes both directions with a
+   plain overwrite, so re-registering an existing plural replaces its singular.
+   (This is why `PresentVerbInflector` — which registers `('am','are')` and then
+   `('is','are')` — singularises `are` to `is`, not to `am`.)
 
-```rust
-use verbora_inflectors::{NounInflector, Rule};
-
-fn main() {
-    let mut inflector = NounInflector::new();
-    // "deer" is on the invariant list, "child" is in the irregular table.
-    inflector.add_plural(Rule::from_pattern("deer", true, "deerz").unwrap());
-    inflector.add_singular(Rule::from_pattern("child", true, "childx").unwrap());
-    assert_eq!(inflector.pluralize("deer").unwrap(), "deerz");
-    assert_eq!(inflector.singularize("children").unwrap(), "childxren");
-
-    // Earliest rule wins; the result is then re-cased from the ORIGINAL token,
-    // which for a lowercase token means the whole result is lowercased.
-    let mut ordered = NounInflector::new();
-    ordered.add_plural(Rule::from_pattern("o", true, "FIRST").unwrap());
-    ordered.add_plural(Rule::from_pattern("o", true, "SECOND").unwrap());
-    assert_eq!(ordered.pluralize("dog").unwrap(), "dfirstg");
-}
-```
-
-That last assertion is worth staring at: the rule is unanchored, so it matches
-the `o` inside `dog`; only the first match is rewritten; and case restoration is
-computed from `"dog"`, which selects `lowercaseify` and lowercases `FIRST`.
+Caller rules are unanchored unless you anchor them, rewrite only the first match,
+and are then re-cased from the *original* token — all three at once produce results
+worth staring at. With `add_plural(Rule::from_pattern("o", true, "FIRST"))`,
+`pluralize("dog")` is `"dfirstg"`.
 
 ### `Rule::from_pattern` versus `Rule::new`
 
-`Rule::from_pattern(source, ignore_case, replacement)` is the primary
-constructor. `source` is a regex pattern string and `ignore_case` is a
-case-insensitivity flag; the pattern is translated to `regex`-crate syntax
-under the hood with its own, deliberately controlled semantics (see
-[the `pattern` module](#the-pattern-module) below). It returns
-`Result<Rule, PatternError>`.
+`Rule::from_pattern(source, ignore_case, replacement)` is the primary constructor:
+`source` is a regex pattern string, translated to `regex`-crate syntax under the
+hood with Verbora's own semantics (see
+[the `case` and `pattern` modules](#the-case-and-pattern-modules)).
+It returns `Result<Rule, PatternError>`.
 
 `Rule::new(regex::Regex, replacement)` is the escape hatch: it takes an
-already-compiled Rust regex and therefore uses the `regex` crate's own semantics
-(Unicode simple case folding, `.` excluding only `\n`). It is infallible, but it
-requires a `regex` dependency in *your* crate at a version compatible with the
-one Verbora links, and it opts you out of the established behaviour. Prefer
+already-compiled Rust regex and therefore uses the `regex` crate's own semantics.
+It is infallible, but it requires a `regex` dependency in *your* crate at a
+compatible version, and it opts you out of this crate's semantics. Prefer
 `from_pattern`.
 
-The replacement template in both cases uses the same syntax the engine
-speaks throughout the crate: `$1`, `$&`, `` $` ``, `$'`, `$$`, `$<name>`. It
-is not the `regex` crate's syntax — a rule reads `"$1s"` as group 1 followed
-by the letter `s`, whereas `Captures::expand` would read it as a group
-*named* `1s` and substitute nothing.
+The replacement template in both cases uses this crate's own syntax: `$1`, `$&`,
+`` $` ``, `$'`, `$$`, `$<name>`. It is **not** the `regex` crate's syntax — a rule
+reads `"$1s"` as group 1 followed by the letter `s`, whereas `Captures::expand`
+would read it as a group *named* `1s`. `Rule` also exposes
+`apply(&self, token: &str) -> Option<String>` for testing a rule in isolation,
+where `Some("")` means "matched, and rewrote the token to nothing" — a distinct
+answer from `None`. `Rule` is `Debug` but not `Clone`; to give two inflectors the
+same rule, build it twice.
 
-`Rule` also exposes `apply(&self, token: &str) -> Option<String>` if you want to
-test a rule in isolation. `Some("")` means "matched, and rewrote the token to
-nothing" — a distinct answer from `None`, for the reason in
-[detail 1 below](#four-internal-details-worth-knowing). `Rule`
-is `Debug` but not `Clone`; to give two inflectors the same rule, build it
-twice.
+### The `case` and `pattern` modules
 
-### The `case` module
-
-`restore_case` and `CaseMode` are public because they are useful on their own:
-they implement the UTF-16-indexed case-restoration decision described in
-[detail 2](#four-internal-details-worth-knowing), and nothing else in the
-Rust ecosystem reproduces that indexing.
+Both are public because they are useful on their own.
 
 | Item | Signature | Notes |
 |---|---|---|
@@ -558,60 +354,31 @@ Rust ecosystem reproduces that indexing.
 | `CaseMode` | `enum { Lower, Capitalize, Upper }` | `Copy`, `Eq`, `Debug` |
 | `CaseMode::apply` | `fn(self, &str) -> String` | allocates `with_capacity(s.len() + 2)` |
 | `CaseMode::apply_into` | `fn(self, &str, &mut String)` | **appends**, like the inflectors' `_into` |
+| `pattern::compile` | `fn(&str, bool) -> Result<Regex, PatternError>` | Verbora's semantics baked in |
+| `pattern::translate` | `fn(&str, bool) -> Result<String, PatternError>` | the rewritten pattern source |
 
-```rust
-use verbora_inflectors::{CaseMode, restore_case};
+`translate` rewrites a pattern into `regex`-crate syntax with Verbora's semantics
+baked in — `.` becomes an explicit negated class and every case-insensitive literal
+becomes an explicit character class from a fixed case-folding table, so the output
+never sets `(?i)` and the `regex` crate's own folding tables never participate.
+Supported: literals, `.`, `^`, `$`, `|`, quantifiers, groups (`(`, `(?:`,
+`(?<name>`), character classes with ranges and negation, and the escapes
+`\d \D \w \W \s \S \b \B \0 \n \r \t \v \f \xHH \uHHHH \u{…}` plus escaped
+punctuation. **Deliberately rejected**, because a silent mistranslation would be
+worse than an error: lookahead, lookbehind, backreferences and `\p{…}`.
 
-fn main() {
-    assert_eq!(restore_case("word"), Some(CaseMode::Lower));
-    assert_eq!(restore_case("Word"), Some(CaseMode::Capitalize));
-    assert_eq!(restore_case("WORD"), Some(CaseMode::Upper));
-    assert_eq!(restore_case("👍"), Some(CaseMode::Capitalize)); // two code units
-    assert_eq!(restore_case("1"), Some(CaseMode::Upper));       // caseless, one unit
-    assert_eq!(restore_case(""), None);
+## Four behaviours worth knowing
 
-    assert_eq!(CaseMode::Capitalize.apply("abc"), "Abc");
-
-    let mut out = String::from("[");
-    CaseMode::Upper.apply_into("abc", &mut out);
-    out.push(']');
-    assert_eq!(out, "[ABC]");
-}
-```
-
-### The `pattern` module
-
-`pattern::compile(source, ignore_case) -> Result<Regex, PatternError>` and
-`pattern::translate(source, ignore_case) -> Result<String, PatternError>` are
-public too. `translate` rewrites a pattern into `regex`-crate syntax with
-Verbora's own semantics baked in — `.` becomes an explicit negated class and
-every case-insensitive literal becomes an explicit character class computed
-from a fixed case-folding table, so the output never sets `(?i)` and the
-`regex` crate's own folding tables never participate. Use it directly if you
-need that same guarantee for patterns of your own.
-
-Supported subset: literals, `.`, `^`, `$`, `|`, quantifiers (`*` `+` `?`
-`{n,m}` and lazy forms), groups (`(`, `(?:`, `(?<name>`), character classes with
-ranges and negation, and the escapes `\d \D \w \W \s \S \b \B \0 \n \r \t \v \f
-\xHH \uHHHH \u{…}` plus escaped punctuation. **Deliberately rejected**, because
-a silent mistranslation would be worse than an error: lookahead, lookbehind,
-backreferences and `\p{…}`.
-
-## Four internal details worth knowing
-
-Everything interesting about this crate follows from one four-stage fallback
-chain: caller rules, then the invariant ("ambiguous") list, then the
-irregular table, then the built-in regular rules, then the token unchanged —
-each stage tried in order, and the first one to produce a usable result
-wins. Case restoration is computed from the *original* token and applied to
-whichever stage won.
+Everything interesting about this crate follows from one fallback chain: caller
+rules, then the invariant ("ambiguous") list, then the irregular table, then the
+built-in regular rules, then the token unchanged — each stage tried in order, first
+usable result wins. Case restoration is computed from the *original* token and
+applied to whichever stage won.
 
 ### 1. An empty rewrite counts as no match
 
 A stage that genuinely matches but rewrites the token to the empty string is
-discarded, and the chain falls through — ultimately to the *unchanged*
-token. Modeling each stage as a plain `Option<String>` and accepting
-`Some("")` as a match gets every one of these wrong:
+discarded, and the chain falls through — ultimately to the *unchanged* token.
 
 | Call | Rule that fires | Result |
 |---|---|---|
@@ -620,32 +387,17 @@ token. Modeling each stage as a plain `Option<String>` and accepting
 | `NounInflectorFr::singularize("S")` | `/(.*)s$/i → '$1'` | `"S"` |
 | `pluralize("cat")` after `add_plural(^cat$ → "")` | the caller's rule | `"cats"` |
 
-```rust
-use verbora_inflectors::{NounInflector, PresentVerbInflector, Rule};
-
-fn main() {
-    let verbs = PresentVerbInflector::new();
-    assert_eq!(verbs.pluralize("Es").unwrap(), "Es");
-    assert_eq!(verbs.pluralize("s").unwrap(), "s");
-
-    // Your own rules are subject to the same fallthrough.
-    let mut nouns = NounInflector::new();
-    nouns.add_plural(Rule::from_pattern("^cat$", true, "").unwrap());
-    assert_eq!(nouns.pluralize("cat").unwrap(), "cats");
-}
-```
-
-This is why `Rule::apply` keeps "matched" and "produced something usable" as
-separate signals: every stage is filtered with `!s.is_empty()` afterwards.
+Your own rules are subject to the same fallthrough, which is why `Rule::apply`
+keeps "matched" and "produced something usable" as separate signals: every stage is
+filtered with `!s.is_empty()` afterwards.
 
 ### 2. Case restoration indexes UTF-16 code units
 
 <span class="badge badge-utf16">UTF-16</span>
 
-`restore_case` decides how to re-case the eventual result by inspecting the
-original token's **first two UTF-16 code units**, not its first two
-characters, with a round-trip case comparison rather than a character-class
-query:
+`restore_case` decides how to re-case the result by inspecting the original token's
+**first two UTF-16 code units**, not its first two characters, with a round-trip
+case comparison rather than a character-class query:
 
 ```text
 if first_unit == first_unit.uppercased():
@@ -654,22 +406,17 @@ if first_unit == first_unit.uppercased():
 else: Lower
 ```
 
-Three consequences fall out of testing code units instead of characters, and
-a round-trip comparison instead of a character class:
-
 ```rust
 use verbora_inflectors::NounInflector;
 
 fn main() {
     let nouns = NounInflector::new();
     // "👍" is TWO code units, both case-invariant → Capitalize → "👍s".
-    // Iterating `chars()` instead sees one character, finds no second code
-    // unit, and would produce "👍S".
+    // Iterating `chars()` instead would find no second unit and produce "👍S".
     assert_eq!(nouns.pluralize("👍").unwrap(), "👍s");
     // "A" is one unit with no second code unit → Upper.
     assert_eq!(nouns.pluralize("A").unwrap(), "AS");
-    // Digits are neither upper nor lower, but a digit's uppercased form is
-    // itself, so the round-trip test still passes.
+    // A digit's uppercased form is itself, so the round-trip test passes.
     assert_eq!(nouns.pluralize("1").unwrap(), "1S");
     assert_eq!(nouns.pluralize("12").unwrap(), "12s");
     // "ß".to_uppercase() is "SS", which is not "ß" → Lower.
@@ -684,9 +431,6 @@ Reaching for `char::is_uppercase` gets `"1"`, `"👍"` and `"ß"` wrong; iterati
 `chars()` gets `"👍"` wrong.
 
 ### 3. Patterns use Verbora's own regex semantics
-
-Compiling these pattern sources directly with `regex::Regex`'s default
-Unicode semantics would silently change what they match:
 
 | Construct | Verbora's rule semantics | `regex` crate default |
 |---|---|---|
@@ -710,55 +454,27 @@ fn main() {
 }
 ```
 
-The fix is not per-rule patching: `pattern::translate` rewrites every pattern so
-`(?i)` is never enabled and the `regex` crate's own folding tables never
-participate at all.
-
 ### 4. One rule needs a negative lookahead
 
 The English plural table contains `/^(?!talis|.*hu)(.*)man$/i → '$1men'`. The
-`regex` crate cannot express a lookahead, so this single rule is hand-written,
-term by term, and matched directly against the token instead of through the
-shared pattern-translation path:
+`regex` crate cannot express a lookahead, so this single rule is hand-written and
+matched directly against the token rather than through the shared translation path.
+`hu` anywhere in the token, or a leading `talis`, declines the rule and the `(.*)`
+catch-all appends `s` instead; `.*` is greedy and `$` anchors, so the *last* `man`
+is the one consumed.
 
 ```rust
 use verbora_inflectors::NounInflector;
 
 fn main() {
     let nouns = NounInflector::new();
-    assert_eq!(nouns.pluralize("man").unwrap(), "men");
     assert_eq!(nouns.pluralize("workman").unwrap(), "workmen");
-    // `hu` anywhere in the token declines the rule; the `(.*)` catch-all
-    // then appends `s`.
     assert_eq!(nouns.pluralize("human").unwrap(), "humans");
-    // …and so does a leading "talis".
     assert_eq!(nouns.pluralize("talisman").unwrap(), "talismans");
-    // `.*` is greedy and `$` anchors, so the LAST "man" is consumed.
     assert_eq!(nouns.pluralize("manman").unwrap(), "manmen");
     assert_eq!(nouns.pluralize("xtalisman").unwrap(), "xtalismen");
 }
 ```
-
-## API design notes
-
-A few of the API's less obvious choices, documented in full at the top of
-`crates/verbora-inflectors/src/lib.rs`:
-
-- **The empty token is rejected, not silently accepted.** Every inflection
-  method returns `Err(EmptyToken)` for `""` rather than producing an empty
-  string — see [Error handling](#error-handling).
-- **`nth(i64)` is exact across the full `i64` range.** `nth_f64` is the
-  entry point for callers who deliberately want `f64`-precision rounding —
-  see [`i64` exactness versus `f64` rounding](#i64-exactness-versus-f64-rounding).
-- **Caller-added rules rewrite only the first match.** There is no
-  "rewrite every match" mode; every `Rule` behaves as a single substitution.
-- **`addForm` and `FormSet` are not part of the public API.** Everything
-  they would be used for — registering an irregular pair, or adding a
-  rewrite rule — is reachable through `add_irregular` and `Rule` instead.
-- **Rule tables are built once per process, not once per instance.** They
-  live behind a `LazyLock` and are shared by every inflector of a given
-  kind; only caller-added rules are held per-instance, and that separation
-  is pinned by the regression suite.
 
 ## Error handling
 
@@ -766,13 +482,16 @@ Two error types, both `Debug + Display + std::error::Error`.
 
 | Error | Raised by | Meaning |
 |---|---|---|
-| `EmptyToken` | `pluralize`, `singularize`, `pluralize_into`, `singularize_into` | the token was `""`. Unit struct, `Copy + Eq + Default`; `Display` is `cannot inflect the empty token` |
+| `EmptyToken` | `pluralize`, `singularize`, and their `_into` forms | the token was `""`. Unit struct, `Copy + Eq + Default`; `Display` is `cannot inflect the empty token` |
 | `PatternError` | `Rule::from_pattern`, `pattern::compile`, `pattern::translate` | the pattern used an unsupported construct, or the translated pattern was rejected by the `regex` crate. `.message()` returns the reason |
 
-`EmptyToken` is the only failure an inflection call can produce — every
-non-empty token yields a result, because the last stage of the chain returns the
-token unchanged. In a pipeline, `filter_map(|w| inflector.pluralize(w).ok())` is
-usually what you want; use `?` when an empty token indicates a bug upstream.
+`EmptyToken` is the only failure an inflection call can produce — every non-empty
+token yields a result, because the last stage of the chain returns the token
+unchanged. In a pipeline, `filter_map(|w| inflector.pluralize(w).ok())` is usually
+what you want; use `?` when an empty token indicates a bug upstream. A
+`PatternError` from `Rule::from_pattern` is the *good* outcome for an unsupported
+construct: the alternative would be a pattern that compiles and quietly matches
+something else.
 
 ```rust
 use verbora_inflectors::Rule;
@@ -786,11 +505,7 @@ fn main() {
 }
 ```
 
-Note that `Rule::from_pattern` returning `Err` is the *good* outcome for an
-unsupported construct: the alternative would be a pattern that compiles and
-quietly matches something else.
-
-## Performance characteristics
+## Performance and allocation
 
 The interesting axis is not input size — tokens are words — but **which stage
 resolves the call**:
@@ -800,126 +515,56 @@ resolves the call**:
 | Caller rules | one regex attempt per added rule, always, before anything else | any token, once you have added rules |
 | Invariant list | one binary search over a sorted `&'static [&str]` | `deer`, `fish`, `rhinocéros` |
 | Irregular table | a failed binary search, then another over the irregular pairs | `child`, `mouse`, `foot` |
-| Regular rules | a dozen or so translated regexes, first match wins — twelve for English `pluralize`, fourteen for English `singularize` | `party`, `church`, `workman` |
+| Regular rules | a dozen or so translated regexes, first match wins — twelve for English `pluralize`, fourteen for `singularize` | `party`, `church`, `workman` |
 | Fallthrough | all of the above, then the token unchanged | English `singularize("hacker")` |
 
 English `pluralize` has a `(.*)` catch-all as its last regular rule, so it never
-reaches the true fallthrough; English `singularize` ends at `s$`, so it often
-does.
+reaches the true fallthrough; English `singularize` ends at `s$`, so it often does.
 
-Construction is flat and language-independent: the shared `LazyLock` tables
-mean `NounInflectorFr::new()` costs the same as `NounInflector::new()`, even
-though French's invariant list alone holds 744 entries across ten regexes —
-construction after the first call is a couple of pointer copies regardless.
+Per call, nothing allocates until a rule actually rewrites the token: `restore_case`
+returns a `Copy` enum, lowercasing borrows when the token is already lowercase
+ASCII, invariant-list and irregular-table hits borrow, and a regular rule that does
+not match never allocates capture slots. A rule that *does* match allocates one
+`String`, and `pluralize` adds one more for the result — so `_into` removes the
+**result** allocation and lets you keep capacity across a corpus, but does not make
+the call allocation-free. English `pluralize` allocates two `String`s per word and
+`pluralize_into` one. A freshly constructed inflector holds no heap allocation of
+its own.
 
-The criterion suite in `crates/verbora-inflectors/benches/inflectors.rs` is
-organised along exactly these axes — `noun-en/by-path` (ambiguous / irregular /
-regular / fallback / case-shapes), `by-language`, `noun-en/bulk` (which compares
-`pluralize` against `pluralize_into` over the shared 4,000-word corpus),
-`construct`, `custom-rules` and `count`.
-
-> No measured inflector numbers are published yet — the only published
-> head-to-head comparisons in this repository so far are the 26
-> `verbora-distance` benchmarks against a widely-used JavaScript NLP
-> library, in `docs/PERFORMANCE.md`. See
-> [Benchmarks](../benchmarks/index.md).
-
-## Allocation behaviour
-
-Read from the source, per call:
-
-| Step | Allocates |
-|---|---|
-| `restore_case(token)` | nothing — returns a `Copy` enum |
-| lowercasing the token | nothing when the token is already lowercase ASCII (returns `Cow::Borrowed`); one `String` when it contains an ASCII uppercase letter or any non-ASCII character |
-| invariant-list hit | nothing — borrows the lowercased token |
-| irregular-table hit | nothing — borrows a `&'static str` |
-| a regular rule that **does not** match | nothing; group-reading rules run `is_match` before `captures`, so a miss never allocates capture slots |
-| a regular rule that **does** match | one `String` for the rewritten token, plus a capture-slot vector when the replacement template actually reads `$1`/`$<name>` |
-| writing the result | `pluralize`: one `String::with_capacity(token.len() + 4)`. `pluralize_into`: nothing, unless your buffer must grow |
-
-So `_into` removes the **result** allocation and lets you keep capacity across a
-corpus; it does not make the call allocation-free, because the winning rule
-still builds its rewritten token. That is a real saving on the common path —
-English `pluralize` allocates two `String`s per word and `pluralize_into`
-allocates one — but it is not zero.
-
-`add_plural` / `add_singular` push onto a per-instance `Vec<Rule>`;
-`add_irregular` pushes two owned `(String, String)` pairs. A freshly constructed
-inflector holds no heap allocation of its own.
-
-For ordinals, `nth_form*` allocates nothing at all, `nth` and `nth_str` allocate
-exactly one `String`, and `nth_f64` allocates the result plus a short-lived
-buffer from the shortest-round-trip float formatting (one more again for
-negatives, which recurse). See [Allocation](../performance/allocation.md).
+No inflector results are published yet; see [Benchmarks](../benchmarks/index.md).
 
 ## Concurrency
 
-`verbora-inflectors` ships **no `par_*` API** — a `par_*` candidate was
-evaluated and rejected: per-word cost measured at ~360 ns, comparable to
-`rayon`'s own dispatch overhead, so a naive `par_iter` over words would likely
-lose to its own scheduling cost. (Thirteen other Verbora crates do ship a
-`par_*_batch` API where the per-item cost cleared that bar — see
-[Parallelism](../performance/parallelism.md).) What there is: inflectors are
-`Send + Sync` (their state is `&'static` tables plus owned `Vec`s), and
-`pluralize`/`singularize` take `&self` and are pure, so sharing one instance
-across threads is sound and you can parallelise yourself. Each worker should own
-its own `_into` buffer.
+`verbora-inflectors` ships **no `par_*` API**: per-word cost measures at ~360 ns,
+comparable to `rayon`'s own dispatch overhead, so a naive `par_iter` over words
+would mostly measure its own scheduling. (Thirteen other Verbora crates do ship a
+`par_*_batch` where the per-item cost cleared that bar — see
+[Parallelism](../performance/parallelism.md).)
 
-```rust
-use verbora_inflectors::NounInflector;
-
-fn main() {
-    let inflector = NounInflector::new();
-    let words = ["party", "child", "deer", "box"];
-
-    let plurals: Vec<String> = std::thread::scope(|scope| {
-        let handles: Vec<_> = words
-            .chunks(2)
-            .map(|chunk| {
-                let inflector = &inflector;
-                scope.spawn(move || {
-                    let mut out = Vec::new();
-                    let mut buf = String::new();
-                    for word in chunk {
-                        buf.clear();
-                        inflector.pluralize_into(word, &mut buf).unwrap();
-                        out.push(buf.clone());
-                    }
-                    out
-                })
-            })
-            .collect();
-        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
-    });
-
-    assert_eq!(plurals, ["parties", "children", "deer", "boxes"]);
-}
-```
-
-The same shape works with `rayon::par_iter` in your own crate. Adding rules
-needs `&mut self`, so do all `add_*` calls before sharing the instance. See
-[Parallelism](../performance/parallelism.md).
+Inflectors are `Send + Sync` — their state is `&'static` tables plus owned `Vec`s —
+and `pluralize`/`singularize` take `&self` and are pure, so sharing one instance
+across threads is sound and you can parallelise yourself with `rayon` or
+`std::thread::scope` in your own crate. Give each worker its own `_into` buffer, and
+do all `add_*` calls (which need `&mut self`) before sharing the instance.
 
 ## Unicode and language notes
 
 - **Case restoration is UTF-16-shaped**, as described in
-  [detail 2](#four-internal-details-worth-knowing). This is the single most
-  surprising behaviour in the crate.
-- **Case mapping is the full Unicode one**, including the context-sensitive
-  Greek final-sigma rule.
-- **Pattern case folding uses a fixed, deliberately-chosen table**, not
-  Unicode simple case folding, so `ſ`, `K`, `ı` and `ß` do not fold the way
-  the `regex` crate's default Unicode mode would.
+  [behaviour 2](#four-behaviours-worth-knowing). This is the single
+  most surprising behaviour in the crate.
+- **Case mapping is the full Unicode one**, including the context-sensitive Greek
+  final-sigma rule.
+- **Pattern case folding uses a fixed, deliberately-chosen table**, not Unicode
+  simple case folding, so `ſ`, `K`, `ı` and `ß` do not fold the way the `regex`
+  crate's default Unicode mode would.
 - **French** carries 744 invariant nouns (mostly `-s`, `-x`, `-z` endings) plus
   irregulars such as `œil` → `yeux` and `bijou` → `bijoux`.
-- **Japanese** does not normally mark number. `pluralize` appends `たち` to
-  anything via a single `^(.+)$` rule; twelve nouns instead reduplicate
-  (`人` → `人人`); `友達` and relatives are on the invariant list. `singularize`
-  has five rules: `たち`, `達` and `等` are stripped *unless* the stem is on a
-  per-suffix exception list of words that only look plural (`かたち` "shape",
-  `配達` "delivery"), while `共`/`ども` and `方`/`がた` are stripped only for an
-  explicit allowlist of stems (`野郎共` → `野郎`, `先生方` → `先生`).
+- **Japanese** does not normally mark number. `pluralize` appends `たち` to anything
+  via a single `^(.+)$` rule; twelve nouns instead reduplicate (`人` → `人人`), and
+  `友達` and relatives are on the invariant list. `singularize` strips `たち`, `達`
+  and `等` *unless* the stem is on a per-suffix exception list of words that only
+  look plural (`かたち` "shape", `配達` "delivery"), and strips `共`/`ども` and
+  `方`/`がた` only for an explicit allowlist of stems.
 
 ```rust
 use verbora_inflectors::NounInflectorJa;
@@ -936,131 +581,71 @@ fn main() {
 
 ## Common mistakes
 
-**Forgetting that `_into` appends.**
-
-```rust
-use verbora_inflectors::NounInflector;
-
-fn main() {
-    let inflector = NounInflector::new();
-    let mut buf = String::new();
-    inflector.pluralize_into("cat", &mut buf).unwrap();
-    inflector.pluralize_into("dog", &mut buf).unwrap();
-    assert_eq!(buf, "catsdogs"); // not "dogs"
-}
-```
-
-Call `buf.clear()` between items when you want a scratch buffer.
+**Forgetting that `_into` appends.** Two calls into the same buffer give
+`"catsdogs"`, not `"dogs"`. Call `buf.clear()` between items when you want a scratch
+buffer.
 
 **Assuming verbs read like nouns.** `PresentVerbInflector::singularize("go")` is
-`"goes"`, not `"go"`. The names describe the *subject's* number, not the word's.
+`"goes"`.
 
 **Passing a phrase.** Rules anchor on the end of the whole string, so
 `pluralize("hot dog")` is `"hot dogs"` (right, by luck) and
 `pluralize("mother in law")` is `"mother in laws"` (wrong). Tokenize first.
 
-**Expecting the empty string back for the empty token.** It is an `Err`, by
-design — see [Error handling](#error-handling).
+**Expecting the empty string back for the empty token.** It is an `Err`, by design.
 
-**Writing `Regex::new` where you meant `Rule::from_pattern`.** `Rule::new`
-opts you out of Verbora's own pattern semantics — `.` and case-insensitive
-matching will both behave differently, and the difference only shows up on
-inputs containing line terminators or characters like `ſ`.
+**Writing `Regex::new` where you meant `Rule::from_pattern`.** `Rule::new` opts you
+out of Verbora's pattern semantics — `.` and case-insensitive matching both behave
+differently, and the difference only shows up on inputs containing line terminators
+or characters like `ſ`.
 
-**Using the `regex` crate's replacement syntax.** The replacement template
-has its own syntax (see
-[`Rule::from_pattern` versus `Rule::new`](#rule-from-pattern-versus-rule-new)).
-`"$1s"` means "group 1, then the letter s"; `"${1}s"` is not special here, and
-`"$0"` is a literal `$0`, not the whole match (`$&` is).
+**Using the `regex` crate's replacement syntax.** `"$1s"` here means "group 1, then
+the letter s"; `"${1}s"` is not special, and `"$0"` is a literal `$0` (`$&` is the
+whole match).
 
-**Adding a rule and expecting it everywhere.** Additions are per-instance and
-are consulted before every built-in table — including the invariant list, which
-means one broad rule can shadow a lot of correct behaviour. Anchor your
-patterns.
+**Adding a rule and expecting it everywhere.** Additions are per-instance and are
+consulted before every built-in table — including the invariant list — so one broad
+rule can shadow a lot of correct behaviour. Anchor your patterns.
 
 ## Related
 
-- [Choosing an API](../choosing/index.md) — the cross-subsystem version of the
-  decision tree above.
 - [Buffer reuse](../performance/buffer-reuse.md) and
-  [Iterator vs `_into`](../performance/iterator-vs-into.md) — `pluralize_into`
-  is one of the few genuine `_into` pairs in the workspace.
-- [Allocation](../performance/allocation.md),
-  [Performance](../performance/index.md),
-  [Parallelism](../performance/parallelism.md).
-- [Tokenizers](../features/tokenizers.md) — split text into the words an
-  inflector expects.
-- [Normalizers](../features/normalizers.md) — case folding and diacritic
-  handling, which inflection does *not* do for you.
-- [Core](../features/core.md) — the `Stemmer` and `Tokenizer` traits.
-- [Recipes](../recipes/index.md), [Benchmarks](../benchmarks/index.md).
+  [Iterator vs `_into`](../performance/iterator-vs-into.md) — `pluralize_into` is
+  one of the few genuine `_into` pairs in the workspace
+- [Allocation](../performance/allocation.md) · [Performance](../performance/index.md) ·
+  [Parallelism](../performance/parallelism.md)
+- [Tokenizers](../features/tokenizers.md) — split text into the words an inflector
+  expects · [Normalizers](../features/normalizers.md) — the case folding and
+  diacritic handling inflection does *not* do for you
+- [Stemmers](../features/stemmers.md) — the reductive direction ·
+  [Core](../features/core.md) — the `Stemmer` and `Tokenizer` traits
+- [Choosing an API](../choosing/index.md) · [Recipes](../recipes/index.md) ·
+  [Benchmarks](../benchmarks/index.md)
 
 ## API reference
 
-### Types
-
-```text
-verbora_inflectors
-├── NounInflector            ├── NounInflectorFr
-├── NounInflectorJa          ├── PresentVerbInflector
-├── CountInflector           ├── CountInflectorFr
-├── SingularPluralInflector  (trait, object safe)
-├── Rule                     ├── CaseMode
-├── EmptyToken               ├── PatternError
-├── restore_case             (fn)
-├── case                     (module: CaseMode, restore_case)
-└── pattern                  (module: compile, translate, PatternError)
+```bash
+cargo doc -p verbora-inflectors --no-deps --open
 ```
 
-### `NounInflector`, `NounInflectorFr`, `NounInflectorJa`, `PresentVerbInflector`
-
-Identical surfaces; each also implements `Default` and `Debug`.
+`NounInflector`, `NounInflectorFr`, `NounInflectorJa` and `PresentVerbInflector`
+have identical surfaces, and each also implements `Default` and `Debug`:
 
 | Method | Signature |
 |---|---|
 | `new` | `fn() -> Self` |
-| `pluralize` | `fn(&self, token: &str) -> Result<String, EmptyToken>` |
-| `singularize` | `fn(&self, token: &str) -> Result<String, EmptyToken>` |
-| `pluralize_into` | `fn(&self, token: &str, out: &mut String) -> Result<(), EmptyToken>` (appends) |
-| `singularize_into` | `fn(&self, token: &str, out: &mut String) -> Result<(), EmptyToken>` (appends) |
-| `add_plural` | `fn(&mut self, rule: Rule)` |
-| `add_singular` | `fn(&mut self, rule: Rule)` |
+| `pluralize` / `singularize` | `fn(&self, token: &str) -> Result<String, EmptyToken>` |
+| `pluralize_into` / `singularize_into` | `fn(&self, token: &str, out: &mut String) -> Result<(), EmptyToken>` (appends) |
+| `add_plural` / `add_singular` | `fn(&mut self, rule: Rule)` |
 | `add_irregular` | `fn(&mut self, singular: &str, plural: &str)` |
 
-### `SingularPluralInflector`
+`SingularPluralInflector` carries the same seven methods minus `new`.
+`CountInflector` and `CountInflectorFr` are unit structs whose six methods
+(`nth`, `nth_form`, `nth_f64`, `nth_form_f64`, `nth_str`, `nth_form_str`) are all
+associated functions. `Rule` exposes `from_pattern`, `new` and `apply`; the `case`
+module exposes `restore_case` and `CaseMode`; the `pattern` module exposes
+`compile`, `translate` and `PatternError`. `restore_case`, `CaseMode` and
+`PatternError` are also re-exported at the crate root.
 
-The same seven methods minus `new`. Implemented by all four types above.
-
-### `CountInflector` / `CountInflectorFr`
-
-Unit structs; all methods are associated functions.
-
-| Method | Signature |
-|---|---|
-| `nth` | `fn(i: i64) -> String` |
-| `nth_form` | `fn(i: i64) -> &'static str` |
-| `nth_f64` | `fn(x: f64) -> String` |
-| `nth_form_f64` | `fn(x: f64) -> &'static str` |
-| `nth_str` | `fn(s: &str) -> String` |
-| `nth_form_str` | `fn(s: &str) -> &'static str` |
-
-### `Rule`
-
-| Method | Signature |
-|---|---|
-| `from_js` | `fn(source: &str, ignore_case: bool, replacement: impl Into<String>) -> Result<Rule, PatternError>` |
-| `new` | `fn(pattern: regex::Regex, replacement: impl Into<String>) -> Rule` |
-| `apply` | `fn(&self, token: &str) -> Option<String>` — `Some("")` means "matched, rewrote to nothing" |
-
-### `case`
-
-`restore_case(&str) -> Option<CaseMode>`; `CaseMode::{Lower, Capitalize, Upper}`
-with `apply(self, &str) -> String` and `apply_into(self, &str, &mut String)`
-(appends). `restore_case` and `CaseMode` are also re-exported at the crate root.
-
-### `pattern`
-
-`compile(&str, bool) -> Result<regex::Regex, PatternError>`;
-`translate(&str, bool) -> Result<String, PatternError>`;
-`PatternError::message(&self) -> &str`. `PatternError` is re-exported at the
-crate root.
+Source: `crates/verbora-inflectors/src/`. Benchmarks:
+`crates/verbora-inflectors/benches/inflectors.rs`.

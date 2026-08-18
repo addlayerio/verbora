@@ -174,7 +174,7 @@ use verbora_spellcheck::{FuzzyIndexBuilder, Spellcheck};
 
 /// Corpus sizes, in words — identical to
 /// `crates/verbora-spellcheck/benches/spellcheck.rs`'s own `CORPUS_SIZES`.
-const CORPUS_SIZES: [usize; 4] = [100, 1_000, 10_000, 20_000];
+const CORPUS_SIZES: [usize; 8] = [100, 300, 1_000, 3_000, 5_000, 10_000, 15_000, 20_000];
 
 /// Reads the shared word list. Fails loudly, matching every sibling bench
 /// that reads this same file.

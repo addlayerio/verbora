@@ -439,6 +439,8 @@ fn match_into<'a>(pattern: &Pattern, text: &'a str, out: &mut Vec<Option<&'a str
 pub struct WordClass;
 
 impl CharClass for WordClass {
+    const ASCII_LUT: Option<[u64; 2]> = crate::scan::ascii_lut!(classes::is_word_word);
+
     #[inline]
     fn is_word(c: char) -> bool {
         classes::is_word_word(c)
@@ -491,7 +493,15 @@ impl WordTokenizer {
 
     /// Collects every token. `None` is the reference's `null`.
     pub fn tokenize<'a>(&self, text: &'a str) -> Option<Vec<&'a str>> {
-        Some(self.tokens(text)?.collect())
+        let tokens = self.tokens(text)?;
+        // Splitting mode: `WordRuns::size_hint` has a lower bound of zero, so
+        // a bare `collect` grows through the 4/8/16… malloc chain — ~25% of a
+        // small document's cost. Prose averages one token per ~6 bytes;
+        // `len / 8 + 2` reserves once without over-allocating. Matching mode
+        // yields at most one token, so it reserves exactly that.
+        let mut out = Vec::with_capacity(if self.gaps { text.len() / 8 + 2 } else { 1 });
+        out.extend(tokens);
+        Some(out)
     }
 
     /// Appends tokens to `out`, returning `false` where the reference returned
@@ -536,6 +546,8 @@ impl<'a> Iterator for WordTokens<'a> {
 pub struct FinnishClass;
 
 impl CharClass for FinnishClass {
+    const ASCII_LUT: Option<[u64; 2]> = crate::scan::ascii_lut!(classes::is_word_fi);
+
     #[inline]
     fn is_word(c: char) -> bool {
         classes::is_word_fi(c)
@@ -946,6 +958,22 @@ mod tests {
         let t = WordTokenizer::matching();
         assert_eq!(t.tokenize("abc def"), Some(vec![" "]));
         assert_eq!(t.tokenize("abcdef"), None);
+    }
+
+    /// `WordTokenizer::tokenize` reserves capacity up front but must collect
+    /// exactly what its iterator yields, in both modes.
+    #[test]
+    fn word_tokenizer_tokenize_matches_the_iterator() {
+        let long = "пример text with мир 123 ".repeat(400);
+        for s in ["", " ", "abcdef", "a b", "Ёж", &long] {
+            for t in [WordTokenizer::new(), WordTokenizer::matching()] {
+                assert_eq!(
+                    t.tokenize(s),
+                    t.tokens(s).map(Iterator::collect::<Vec<_>>),
+                    "mode {t:?} on {s:?}"
+                );
+            }
+        }
     }
 
     #[test]

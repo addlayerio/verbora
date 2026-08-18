@@ -58,6 +58,19 @@
 //!   own instruction not to hide a weak adoption signal just because a crate
 //!   cleared the bar on algorithmic grounds.
 //!
+//! A later coverage-doubling round added **no new matrix rows** — it widened
+//! the measurement grid over the rows already justified above: [`SIZES`] and
+//! [`SENTENCE_COUNTS`] each grew from four points to eight (the original
+//! four preserved unchanged, so existing figures stay comparable — see each
+//! constant's own doc comment), and one input-*shape* group was added,
+//! `sentence_tokenization_boundary_density` (same `SentenceTokenizer` row,
+//! same four implementations, fixed word budget, words-per-sentence swept
+//! 3→24 — see [`bench_sentence_tokenization_boundary_density`]'s doc comment
+//! for why boundary density reveals a cost axis document *size* cannot).
+//! Every new input is derived from the same shared `words.json` corpus by
+//! the same `document`/`sentence_prose` builders and stays inside the same
+//! narrowed domains documented below.
+//!
 //! `WordPunctTokenizer` and `TreebankWordTokenizer` are **not** benchmarked
 //! here: the matrix records `NO FAIR COMPETITOR FOUND` for both on the Rust
 //! side (§1.1) — every candidate either does less work (drops punctuation)
@@ -133,10 +146,16 @@ use verbora_tokenizers::{
     AggressiveTokenizer, Pattern, RegexpTokenizer, SentenceTokenizer, Tokenize, WordTokenizer,
 };
 
-/// Document sizes, in words — identical to
-/// `crates/verbora-tokenizers/benches/tokenizers.rs`'s `scaling` group, so
-/// figures line up across both files even though they run independently.
-const SIZES: [usize; 4] = [16, 128, 1024, 8192];
+/// Document sizes, in words — a superset of
+/// `crates/verbora-tokenizers/benches/tokenizers.rs`'s `scaling` grid
+/// (`[16, 128, 1024, 8192]`): those four original sizes are preserved
+/// unchanged so figures still line up across both files even though they run
+/// independently. The coverage-doubling round then halves each original ×8
+/// gap with a geometric midpoint (64, 512, 4096) and extends the top by one
+/// step (32768 — the 20 000-word shared corpus simply cycles, exactly as
+/// [`document`] already does for every size), so scaling kinks between the
+/// original points are observable rather than interpolated.
+const SIZES: [usize; 8] = [16, 64, 128, 512, 1024, 4096, 8192, 32768];
 
 /// Reads the shared word list, failing loudly if it has not been generated.
 fn words() -> Vec<String> {
@@ -350,8 +369,10 @@ fn bench_aggressive_tokenization_en(c: &mut Criterion) {
 
 /// Sentence counts for `sentence_prose`, scaled similarly to `SIZES` above
 /// but in sentences rather than words (each sentence here is a fixed 6
-/// words).
-const SENTENCE_COUNTS: [usize; 4] = [4, 32, 256, 2048];
+/// words). Like [`SIZES`], the coverage-doubling round kept the original
+/// four counts (`[4, 32, 256, 2048]`) unchanged and halved each ×8 gap with
+/// a geometric midpoint (16, 128, 1024) plus one larger step (8192).
+const SENTENCE_COUNTS: [usize; 8] = [4, 16, 32, 128, 256, 1024, 2048, 8192];
 
 /// Words per sentence `sentence_prose` builds with, fixed across every size
 /// in [`SENTENCE_COUNTS`] so only the sentence *count* scales.
@@ -392,12 +413,63 @@ fn bench_sentence_tokenization(c: &mut Criterion) {
     g.finish();
 }
 
+/// Words-per-sentence shapes for the boundary-density group below: from
+/// boundary-dense three-word sentences to boundary-sparse 24-word ones, an
+/// 8× spread in sentence-boundary count over a near-constant byte budget.
+const DENSITY_WORDS_PER_SENTENCE: [usize; 4] = [3, 6, 12, 24];
+
+/// Total word budget held fixed across every shape in
+/// [`DENSITY_WORDS_PER_SENTENCE`] (each of 3, 6, 12 and 24 divides it), so
+/// only boundary *density* varies, never the amount of word text.
+const DENSITY_TOTAL_WORDS: usize = 1536;
+
+/// The same §1.1 `SentenceTokenizer` row and the same four implementations
+/// as [`bench_sentence_tokenization`] — an input-*shape* variant of that
+/// group, not a new matrix row. [`bench_sentence_tokenization`] scales the
+/// sentence count at a fixed 6 words per sentence, which can never separate
+/// per-byte scanning cost from per-boundary cost (Verbora's per-delimiter
+/// placeholder substitution, `segtok`'s per-span join rules); this group
+/// holds the word budget fixed at [`DENSITY_TOTAL_WORDS`] and sweeps
+/// [`DENSITY_WORDS_PER_SENTENCE`] instead, varying the boundary count 8×
+/// while the byte count stays within ~3% (`sentence_prose` draws the same
+/// [`DENSITY_TOTAL_WORDS`] words from the cycled corpus for every shape;
+/// only the `.`-plus-joining-space overhead differs, by `n_sentences - 1`
+/// bytes). The `BenchmarkId` parameter is therefore the words-per-sentence
+/// shape — the axis that varies — not the near-constant byte length. Every
+/// document stays inside the same narrowed declarative-sentence domain the
+/// module doc comment documents and `tests/tokenizers_correctness.rs`
+/// proves agreement on (including at these exact densities).
+fn bench_sentence_tokenization_boundary_density(c: &mut Criterion) {
+    let words = words();
+    let verbora = SentenceTokenizer::new();
+    let mut g = c.benchmark_group("sentence_tokenization_boundary_density");
+    for wps in DENSITY_WORDS_PER_SENTENCE {
+        let text = sentence_prose(&words, DENSITY_TOTAL_WORDS / wps, wps);
+        g.throughput(Throughput::Bytes(text.len() as u64));
+
+        g.bench_with_input(BenchmarkId::new("verbora", wps), &text, |b, d| {
+            b.iter(|| black_box(verbora.tokenize(black_box(d)).len()));
+        });
+        g.bench_with_input(BenchmarkId::new("unicode-sentences", wps), &text, |b, d| {
+            b.iter(|| black_box(black_box(d).unicode_sentences().count()));
+        });
+        g.bench_with_input(BenchmarkId::new("unicode-bounds", wps), &text, |b, d| {
+            b.iter(|| black_box(black_box(d).split_sentence_bounds().count()));
+        });
+        g.bench_with_input(BenchmarkId::new("segtok", wps), &text, |b, d| {
+            b.iter(|| black_box(split_single(black_box(d), SegmentConfig::default()).len()));
+        });
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_whitespace_tokenization,
     bench_word_tokenization,
     bench_word_tokenization_unicode_segmentation,
     bench_aggressive_tokenization_en,
-    bench_sentence_tokenization
+    bench_sentence_tokenization,
+    bench_sentence_tokenization_boundary_density
 );
 criterion_main!(benches);

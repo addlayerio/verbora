@@ -319,6 +319,11 @@ impl PorterStemmerNl {
 impl TokenizeAndStem for PorterStemmerNl {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Lower;
+    /// `stem` both reads and writes the sticky `suffix_e_removed` flag, so a
+    /// cached stem could be wrong (the same word stems differently once the
+    /// flag is set) *and* serving it would skip the state change a fresh call
+    /// makes. `tokenize_and_stem_cached` therefore ignores the cache here.
+    const PURE_STEM: bool = false;
 
     fn is_word_char(c: char) -> bool {
         classes::is_word_nl(c)

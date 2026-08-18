@@ -1,8 +1,5 @@
 import { defineConfig } from 'vitepress';
 
-// Served from GitHub Pages at /verbora/ (project page, not a custom domain).
-// If a custom domain is later pointed at this site, flip BASE to '/' and add
-// a public/CNAME the way apps/website does for kravn.ai.
 const HOSTNAME = 'https://addlayerio.github.io';
 const BASE = '/verbora/';
 
@@ -19,11 +16,22 @@ export default defineConfig({
   sitemap: { hostname: `${HOSTNAME}${BASE}` },
 
   markdown: {
-    // The "oxide" code rule (theme/custom.css) reads correctly against either
-    // Shiki theme; both are kept so the block still highlights under a forced
-    // light override.
-    theme: { light: 'github-light', dark: 'github-dark' },
+    // Warm, low-saturation Shiki themes: they sit on the oxide code grounds
+    // (theme/oxide.css §7) without fighting the rust accent.
+    theme: { light: 'vitesse-light', dark: 'vitesse-dark' },
     lineNumbers: false,
+
+    config(md) {
+      // Wrap every Markdown table in a scroll container. The wrapper owns the
+      // frame, the rounded corners and the overflow (theme/oxide.css §8), so a
+      // wide table scrolls inside its own box instead of widening the page.
+      // `renderToken` is used rather than a literal '<table>' so any attributes
+      // markdown-it attached to the token survive.
+      md.renderer.rules.table_open = (tokens, idx, options, _env, self) =>
+        '<div class="table-wrap">' + self.renderToken(tokens, idx, options);
+      md.renderer.rules.table_close = (tokens, idx, options, _env, self) =>
+        self.renderToken(tokens, idx, options) + '</div>';
+    },
   },
 
   head: [
@@ -39,9 +47,12 @@ export default defineConfig({
     ['link', { rel: 'manifest', href: `${BASE}site.webmanifest` }],
     ['meta', { name: 'apple-mobile-web-app-title', content: 'Verbora' }],
     ['meta', { name: 'application-name', content: 'Verbora' }],
-    ['meta', { name: 'msapplication-TileColor', content: '#0d0f10' }],
+    ['meta', { name: 'msapplication-TileColor', content: '#0c0e0f' }],
     ['meta', { name: 'msapplication-config', content: `${BASE}browserconfig.xml` }],
-    ['meta', { name: 'theme-color', content: '#0d0f10' }],
+    // Matches the page grounds in theme/oxide.css §2–§3, so the browser chrome
+    // continues the page instead of framing it.
+    ['meta', { name: 'theme-color', media: '(prefers-color-scheme: light)', content: '#fbfaf8' }],
+    ['meta', { name: 'theme-color', media: '(prefers-color-scheme: dark)', content: '#0c0e0f' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:site_name', content: 'Verbora' }],
     ['meta', { property: 'og:url', content: `${HOSTNAME}${BASE}` }],
@@ -51,7 +62,7 @@ export default defineConfig({
       {
         property: 'og:description',
         content:
-          'A Rust-native NLP toolkit: 105 APIs across seventeen crates, backed by a 526,341-case regression suite. Choosing the Right API is a first-class section.',
+          'Nineteen focused Rust crates for tokenizing, normalizing, stemming, string distance, phonetics, n-grams, TF-IDF, sentiment, classifiers, POS tagging and WordNet. Iterator-first APIs, measured benchmarks.',
       },
     ],
     ['meta', { property: 'og:image', content: `${HOSTNAME}${BASE}og-image.png` }],
@@ -70,7 +81,7 @@ export default defineConfig({
         programmingLanguage: 'Rust',
         codeRepository: 'https://github.com/addlayerio/verbora',
         description:
-          'A high-performance, Rust-native natural language processing toolkit, backed by a 526,341-case regression suite.',
+          'A high-performance, Rust-native natural language processing toolkit: nineteen focused crates behind one coherent, iterator-first API design.',
         license: 'https://github.com/addlayerio/verbora/blob/main/LICENSE',
       }),
     ],
@@ -154,7 +165,7 @@ function sidebarChoosing() {
         { text: 'Tokenization', link: '/choosing/tokenization' },
         { text: 'String distance', link: '/choosing/distance' },
         { text: 'N-grams', link: '/choosing/ngrams' },
-        { text: 'Every decision tree', link: '/choosing/decision-trees' },
+        { text: 'Quick answers', link: '/choosing/decision-trees' },
       ],
     },
   ];
@@ -181,8 +192,13 @@ function sidebarFeatures() {
         { text: 'TF-IDF', link: '/features/tfidf' },
         { text: 'Sentiment', link: '/features/sentiment' },
         { text: 'Classifiers', link: '/features/classifiers' },
+        { text: 'Stemmers', link: '/features/stemmers' },
+        { text: 'Spellcheck', link: '/features/spellcheck' },
+        { text: 'POS tagger', link: '/features/tagger' },
+        { text: 'Sentence analyzers', link: '/features/analyzers' },
+        { text: 'Utilities', link: '/features/util' },
         { text: 'Core vocabulary', link: '/features/core' },
-        { text: 'Roadmap', link: '/features/roadmap' },
+        { text: 'Status and scope', link: '/features/roadmap' },
       ],
     },
   ];

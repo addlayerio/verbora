@@ -85,6 +85,106 @@ const TRAIN: &[(&str, &str)] = &[
 /// vocabulary — an unambiguous case every algorithm here should agree on.
 const PROBE_TECH: &str = "rust compiler memory borrow safety cargo";
 
+/// The mirror of [`PROBE_TECH`]: held out entirely from [`TRAIN`], built only
+/// from `cooking`-class vocabulary — so the clear-cut-agreement domain is
+/// established for *both* classes, not just the one whose vocabulary happens
+/// to sort/hash first anywhere.
+const PROBE_COOKING: &str = "tomato basil simmer onion garlic sauce";
+
+/// [`TRAIN`] extended with a third class of equally non-overlapping
+/// vocabulary — the multiclass shape ([`TRAIN`] is binary) where the
+/// competitors' genuinely different multiclass strategies (Verbora's and
+/// rustlearn's one-vs-rest vs. smartcore's/linfa's joint softmax; Bayes'
+/// per-class likelihoods) could diverge in ways two classes cannot expose.
+const TRAIN3: &[(&str, &str)] = &[
+    ("rust cargo compiler borrow checker memory safety", "tech"),
+    ("cargo crate compiler rust ownership lifetimes", "tech"),
+    ("compiler rust memory safety borrow checker cargo", "tech"),
+    ("stew tomato onion garlic simmer basil oregano", "cooking"),
+    ("garlic onion basil oregano simmer tomato sauce", "cooking"),
+    ("simmer basil tomato sauce garlic pepper onion", "cooking"),
+    (
+        "goalkeeper striker midfield referee stadium tournament",
+        "sports",
+    ),
+    (
+        "striker goalkeeper tournament midfield whistle referee",
+        "sports",
+    ),
+    (
+        "referee whistle stadium goalkeeper striker scoreboard",
+        "sports",
+    ),
+];
+
+/// Held out entirely from [`TRAIN3`], built only from `sports`-class
+/// vocabulary — [`PROBE_TECH`]/[`PROBE_COOKING`]'s third sibling.
+const PROBE_SPORTS: &str = "goalkeeper referee striker stadium midfield whistle";
+
+/// Deterministic pseudo-random source, byte-for-byte identical to
+/// `benches/classifiers.rs`'s own `Lcg` — duplicated for the same
+/// cannot-import-from-a-`[[bench]]`-target reason `Vocab` above is.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 11
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+/// Every distinct token a class's training documents contain, in first-seen
+/// order (a `Vec` scan, not a `HashSet`, precisely so the order — and with it
+/// every seeded probe below — is deterministic).
+fn class_vocab(train: &[(&str, &str)], label: &str) -> Vec<String> {
+    let mut vocab: Vec<String> = Vec::new();
+    for (text, l) in train {
+        if *l == label {
+            for tok in text.split_whitespace() {
+                if !vocab.iter().any(|v| v == tok) {
+                    vocab.push(tok.to_owned());
+                }
+            }
+        }
+    }
+    vocab
+}
+
+/// A probe of `words` tokens sampled (with replacement) from one class's
+/// vocabulary — still inside the clear-cut domain (every token belongs to
+/// exactly one class), but sweeping many token mixes and repetition patterns
+/// instead of the two hand-written probes.
+fn seeded_probe(rng: &mut Lcg, vocab: &[String], words: usize) -> String {
+    (0..words)
+        .map(|_| vocab[rng.below(vocab.len())].as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Argmax over `naivebayes`' returned score map, with a deterministic
+/// label-name tie-break: `HashMap` iteration order is randomized per process,
+/// so a plain `max_by` would make a tied case flap between runs. On the
+/// clear-cut probes below a tie never actually happens (one class's scores
+/// dominate by construction); the tie-break only pins determinism down.
+fn nb_argmax(scores: &std::collections::HashMap<String, f64>) -> String {
+    scores
+        .iter()
+        .max_by(|a, b| {
+            a.1.partial_cmp(b.1)
+                .expect("scores are finite")
+                .then_with(|| a.0.cmp(b.0))
+        })
+        .map(|(label, _)| label.clone())
+        .expect("at least one label was trained")
+}
+
 fn label_ids(docs: &[(&str, &str)]) -> Vec<usize> {
     docs.iter()
         .map(|(_, l)| if *l == "tech" { 0usize } else { 1usize })
@@ -198,6 +298,131 @@ fn naivebayes_agrees_with_verbora_on_a_clear_cut_case() {
         "naivebayes should agree with Verbora on an unambiguous, \
          non-overlapping-vocabulary case, scores = {scores:?}"
     );
+}
+
+/// The mirror of [`naivebayes_agrees_with_verbora_on_a_clear_cut_case`] for
+/// the *other* binary class: an unambiguous `cooking` probe held out of
+/// [`TRAIN`]. Pins that the agreement is a property of the algorithms, not
+/// an artifact of whichever class happens to sort, hash or tie-break first.
+#[test]
+fn naivebayes_agrees_with_verbora_on_the_mirrored_clear_cut_case() {
+    let mut verbora = verbora_classifiers::BayesClassifier::new();
+    for (text, label) in TRAIN {
+        verbora.add_document(*text, label);
+    }
+    verbora.train().expect("Bayes training cannot fail");
+    assert_eq!(
+        verbora.classify(PROBE_COOKING).expect("trained classifier"),
+        "cooking",
+        "sanity: Verbora itself must get the obvious mirrored case right"
+    );
+
+    let mut nb = NaiveBayes::new();
+    for (text, label) in TRAIN {
+        nb.train(&tokenize(text), &(*label).to_string());
+    }
+    let scores = nb.classify(&tokenize(PROBE_COOKING));
+    assert_eq!(
+        nb_argmax(&scores),
+        "cooking",
+        "naivebayes should agree with Verbora on the mirrored unambiguous \
+         case, scores = {scores:?}"
+    );
+}
+
+/// The seeded-sweep generalisation of the two hand-written clear-cut probes:
+/// hundreds of probes per class, each sampled from that class's own
+/// vocabulary, so the agreement claim rests on many token mixes, lengths and
+/// repetition patterns rather than two fixed sentences.
+///
+/// Still strictly inside the clear-cut domain — every sampled token belongs
+/// to exactly one class's training vocabulary, which is what makes the
+/// expected label unambiguous for *any* reasonable classifier. Probes of a
+/// single token are included deliberately: they are the shortest input where
+/// smoothing (rather than evidence) dominates, and the one shape where a
+/// smoothing-floor difference between the two implementations would show up.
+#[test]
+fn naivebayes_and_verbora_agree_across_seeded_probes_from_each_class() {
+    let mut verbora = verbora_classifiers::BayesClassifier::new();
+    for (text, label) in TRAIN {
+        verbora.add_document(*text, label);
+    }
+    verbora.train().expect("Bayes training cannot fail");
+
+    let mut nb = NaiveBayes::new();
+    for (text, label) in TRAIN {
+        nb.train(&tokenize(text), &(*label).to_string());
+    }
+
+    let mut rng = Lcg(0x5EED_C1A5_5F1E_2000);
+    let mut checked = 0usize;
+    for label in ["tech", "cooking"] {
+        let vocab = class_vocab(TRAIN, label);
+        assert!(!vocab.is_empty(), "{label} must have a training vocabulary");
+        for words in [1usize, 2, 3, 5, 8, 13] {
+            for _ in 0..40 {
+                let probe = seeded_probe(&mut rng, &vocab, words);
+                assert_eq!(
+                    verbora.classify(&probe).expect("trained classifier"),
+                    label,
+                    "Verbora misclassified a probe built only from {label} \
+                     vocabulary: {probe:?}"
+                );
+                let scores = nb.classify(&tokenize(&probe));
+                assert_eq!(
+                    nb_argmax(&scores),
+                    label,
+                    "naivebayes disagrees with Verbora on a {label}-only \
+                     probe: {probe:?}, scores = {scores:?}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 480, "the sweep must actually run every probe");
+}
+
+/// The three-class extension of the two tests above, over [`TRAIN3`].
+///
+/// Two classes cannot expose a multiclass-strategy divergence: with one
+/// decision boundary every reasonable scheme agrees by construction. Three
+/// classes of mutually non-overlapping vocabulary can — Verbora's Bayes
+/// scores each class's likelihood independently, so this pins that the
+/// per-class scoring still ranks a held-out probe from *each* class
+/// correctly, and that `naivebayes` (whose per-token counting is a
+/// genuinely different implementation) reaches the same argmax on all
+/// three.
+#[test]
+fn naivebayes_and_verbora_agree_on_every_class_of_a_three_class_corpus() {
+    let mut verbora = verbora_classifiers::BayesClassifier::new();
+    for (text, label) in TRAIN3 {
+        verbora.add_document(*text, label);
+    }
+    verbora.train().expect("Bayes training cannot fail");
+
+    let mut nb = NaiveBayes::new();
+    for (text, label) in TRAIN3 {
+        nb.train(&tokenize(text), &(*label).to_string());
+    }
+
+    for (probe, want) in [
+        (PROBE_TECH, "tech"),
+        (PROBE_COOKING, "cooking"),
+        (PROBE_SPORTS, "sports"),
+    ] {
+        assert_eq!(
+            verbora.classify(probe).expect("trained classifier"),
+            want,
+            "sanity: Verbora must classify the held-out {want} probe correctly"
+        );
+        let scores = nb.classify(&tokenize(probe));
+        assert_eq!(
+            nb_argmax(&scores),
+            want,
+            "naivebayes should agree with Verbora on the held-out {want} \
+             probe, scores = {scores:?}"
+        );
+    }
 }
 
 /// smartcore, linfa-logistic and rustlearn all agree with Verbora's

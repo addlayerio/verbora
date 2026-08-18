@@ -32,14 +32,35 @@
 //! other's harness. Every implementation within one Criterion group here
 //! reads the exact same rotated document set.
 //!
-//! Sizes are `[4, 16, 64, 256, 1024]` documents, matching every other
-//! competitive module's convention (`scripts/collect-results.py`'s `SIZES`).
-//! Note this is a **different, larger and more numerous** document set than
-//! the in-workspace bench's own `[1, 8, 64, 256]` — this file does not need
-//! to match that bench's specific sizes, only its *derivation*, since the two
-//! benches are never joined against each other (only Verbora-here vs.
-//! Rust-competitors-here, and separately Verbora-in-workspace vs.
-//! The reference).
+//! Sizes are a densified `[4, 8, 16, 32, 64, 128, 256]` grid — the classic
+//! `[4, 16, 64, 256, 1024]` convention (`scripts/collect-results.py`'s
+//! original `SIZES`, still what the doc-comment above [`SIZES`] caps at 256
+//! and why) with the intermediate powers of two filled in, so crossover
+//! points between implementations land *between* measured sizes far less
+//! often. `collect-results.py` discovers each `(group, id)`'s sizes from the
+//! directories Criterion actually wrote (`list_sizes`), so the densified grid
+//! needs no script change. Note this is a **different, larger and more
+//! numerous** document set than the in-workspace bench's own `[1, 8, 64,
+//! 256]` — this file does not need to match that bench's specific sizes, only
+//! its *derivation*, since the two benches are never joined against each
+//! other (only Verbora-here vs. Rust-competitors-here, and separately
+//! Verbora-in-workspace vs. The reference).
+//!
+//! Two corpus **shapes**, not just one size axis (mirroring the in-workspace
+//! bench's own `few_large`/`many_small` naming for its `parallel_batch`
+//! group):
+//!
+//! - `build` — "few large": every document is a rotation of the (nearly)
+//!   whole ~163 kB article, so cost is dominated by per-byte tokenizing.
+//! - `build_many_small` — "many small": fixed-size ~200-word (~1.2 kB)
+//!   rolling-window chunks of the *same* article (byte-identical derivation
+//!   to `crates/verbora-tfidf/benches/tfidf.rs`'s own `chunked_texts`, same
+//!   `words_per_doc = 200`), so cost is dominated by per-document overhead
+//!   (interner/df-table bookkeeping for Verbora, one `Vec<Term>` push per
+//!   document for afshinm) — a real workload shape (`n` short records) the
+//!   few-large axis structurally cannot reveal, and small enough per document
+//!   that this group *can* run the full `[4 .. 1024]` grid the few-large
+//!   group must cap at 256.
 
 use std::hint::black_box;
 use std::path::Path;
@@ -59,8 +80,20 @@ use verbora_tfidf::{DocKey, DocumentInput, Terms, TfIdf};
 // razonablemente"); the in-workspace bench's own `idf_cold` group caps at
 // the same 256 for the identical reason. `results/results.json` simply has
 // no `1024` entry for this module — `scripts/collect-results.py` skips
-// missing sizes rather than erroring.
-const SIZES: [usize; 4] = [4, 16, 64, 256];
+// missing sizes rather than erroring. Densified with the intermediate
+// powers of two (see the module doc comment's "Sizes" paragraph) — the cap
+// argument bounds the top end, not the grid's resolution below it.
+const SIZES: [usize; 7] = [4, 8, 16, 32, 64, 128, 256];
+
+// The `build_many_small` group's grid: ~1.2 kB per document (200 words, see
+// [`chunked_texts`]) means even 1024 documents is only ~1.2 MB of text per
+// sample, so the full classic `[4, 16, 64, 256, 1024]` convention grid is
+// affordable here — no cap needed, unlike [`SIZES`] above. Kept at the
+// 5-point classic grid rather than the densified 7-point one deliberately:
+// this group exists to expose a *shape* contrast (per-document overhead vs.
+// per-byte throughput), and the classic grid already spans it at half the
+// wall-clock cost.
+const MANY_SMALL_SIZES: [usize; 5] = [4, 16, 64, 256, 1024];
 
 /// Byte-identical derivation to `crates/verbora-tfidf/benches/tfidf.rs`'s own
 /// `document()`.
@@ -91,6 +124,30 @@ fn rotated_texts(text: &str, n: usize) -> Vec<String> {
         .map(|i| {
             let start = (i * 7) % words.len().max(1);
             words[start..].join(" ")
+        })
+        .collect()
+}
+
+/// Byte-identical derivation to `crates/verbora-tfidf/benches/tfidf.rs`'s own
+/// `chunked_texts()` (its `many_small` shape): `n` documents of
+/// `words_per_doc` words each, a rolling window over `text`'s words (wrapping
+/// around), so every document has the same realistic fixed size and total
+/// corpus size scales linearly with `n` — unlike [`rotated_texts`], whose
+/// documents are all "almost the whole article".
+fn chunked_texts(text: &str, words_per_doc: usize, n: usize) -> Vec<String> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let len = words.len().max(1);
+    (0..n)
+        .map(|i| {
+            let start = (i * words_per_doc) % len;
+            words
+                .iter()
+                .cycle()
+                .skip(start)
+                .take(words_per_doc)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ")
         })
         .collect()
 }
@@ -144,6 +201,30 @@ fn bench_build(c: &mut Criterion) {
         });
         // No `rust_tfidf` row: it has no ingestion step (matrix confirms) —
         // nothing to benchmark here.
+    }
+    g.finish();
+}
+
+/// The "many small documents" ingestion shape — see the module doc comment's
+/// "Two corpus shapes" section for what this reveals that [`bench_build`]'s
+/// few-large rotations cannot, and [`MANY_SMALL_SIZES`]'s own comment for why
+/// this group runs the full 1024-document grid the few-large group caps.
+/// Same implementations, same fairness boundary (raw text in, built corpus
+/// out); `rust_tfidf` is absent for the identical no-ingestion-step reason.
+fn bench_build_many_small(c: &mut Criterion) {
+    let text = document();
+    let mut g = c.benchmark_group("build_many_small");
+    for n in MANY_SMALL_SIZES {
+        let docs = chunked_texts(&text, 200, n);
+        let total_bytes: u64 = docs.iter().map(|d| d.len() as u64).sum();
+        g.throughput(Throughput::Bytes(total_bytes));
+
+        g.bench_with_input(BenchmarkId::new("verbora", n), &docs, |b, docs| {
+            b.iter(|| black_box(verbora_corpus(black_box(docs))));
+        });
+        g.bench_with_input(BenchmarkId::new("afshinm", n), &docs, |b, docs| {
+            b.iter(|| black_box(afshinm_corpus(black_box(docs))));
+        });
     }
     g.finish();
 }
@@ -207,7 +288,13 @@ fn bench_tfidf(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_build, bench_idf, bench_tfidf);
+criterion_group!(
+    benches,
+    bench_build,
+    bench_build_many_small,
+    bench_idf,
+    bench_tfidf
+);
 criterion_main!(benches);
 
 // CORRECTNESS BEFORE PERFORMANCE: see `../tests/tfidf_correctness.rs`, not a

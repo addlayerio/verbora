@@ -58,6 +58,8 @@ macro_rules! class_tokenizer {
         pub struct $class;
 
         impl CharClass for $class {
+            const ASCII_LUT: Option<[u64; 2]> = crate::scan::ascii_lut!($pred);
+
             #[inline]
             fn is_word(c: char) -> bool {
                 $pred(c)
@@ -82,6 +84,21 @@ macro_rules! class_tokenizer {
             #[inline]
             fn tokens<'a>(&self, text: &'a str) -> impl Iterator<Item = &'a str> {
                 WordRuns::<$class>::new(text)
+            }
+
+            // Overridden for the reservation only — the tokens are the
+            // default's, element for element. `WordRuns::size_hint` has a
+            // lower bound of zero, so a bare `collect` grows through the
+            // 4/8/16… malloc chain, which measures as ~25% of a small
+            // document's tokenize cost. Prose averages one token per ~6
+            // bytes; `len / 8 + 2` reserves once without over-allocating.
+            // (Counting tokens exactly with a first pass was measured 2x
+            // slower — the scan costs more than the growth it avoids.)
+            #[inline]
+            fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
+                let mut out = Vec::with_capacity(text.len() / 8 + 2);
+                out.extend(self.tokens(text));
+                out
             }
         }
 
@@ -761,5 +778,20 @@ mod tests {
         let mut buf = vec!["seed"];
         t.tokenize_into("a b", &mut buf);
         assert_eq!(buf, ["seed", "a", "b"]);
+    }
+
+    /// `tokenize` is overridden for its capacity reservation only, so it must
+    /// yield exactly what collecting the iterator yields — on empty input,
+    /// separator-only input, and text on both sides of the reservation
+    /// heuristic's break-even point.
+    #[test]
+    fn tokenize_override_matches_the_iterator() {
+        let long = "lorem ipsum dolor ".repeat(500);
+        for s in ["", " ", "...", "a", "a b", "don't stop-me now/then", &long] {
+            let t = AggressiveTokenizer::new();
+            assert_eq!(t.tokenize(s), Tokenize::tokens(&t, s).collect::<Vec<_>>());
+            let t = AggressiveTokenizerRu::new();
+            assert_eq!(t.tokenize(s), Tokenize::tokens(&t, s).collect::<Vec<_>>());
+        }
     }
 }

@@ -67,15 +67,42 @@
 //! error otherwise); `FuzzyIndexBuilder::insert` accepts any order. The
 //! sort+dedup step is included *inside* the timed `fst` construction closure
 //! below, not hoisted out, matching `benches/trie.rs`'s own `build_fst`.
+//!
+//! # Measured grid
+//!
+//! Construction is measured at six corpus sizes; queries at the same six
+//! sizes × two `max_distance` values. See `CORPUS_SIZES` and `MAX_DISTANCES`
+//! below for exactly which cells are shared with the in-workspace
+//! `crates/verbora-spellcheck/benches/fuzzy_index.rs` grid, why the
+//! intermediate sizes and the distance-1 rows were added, and why higher
+//! distances are deliberately not timed.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use fst::automaton::Levenshtein;
 use fst::{IntoStreamer, Set, Streamer};
 use verbora_spellcheck::{FuzzyIndex, FuzzyIndexBuilder};
 
-/// Corpus sizes, matching `crates/verbora-spellcheck/benches/fuzzy_index.rs`'s
-/// own `CORPUS_SIZES` so the two files' numbers are directly comparable.
-const CORPUS_SIZES: [usize; 4] = [100, 1_000, 10_000, 20_000];
+/// Corpus sizes. `100`, `1_000`, `10_000` and `20_000` match
+/// `crates/verbora-spellcheck/benches/fuzzy_index.rs`'s own `CORPUS_SIZES`,
+/// so those four columns stay directly comparable across the two files;
+/// `300` and `3_000` are this file's own added intermediate points — a
+/// *double* crossover (`docs/PERFORMANCE_GAPS.md` entry 37) cannot be
+/// located from four points spaced a decade apart, so each decade gets an
+/// interior sample. Both extra sizes are plain prefixes of the same shared
+/// `words.json` word list (`distinct_words`), not new source data.
+const CORPUS_SIZES: [usize; 6] = [100, 300, 1_000, 3_000, 10_000, 20_000];
+
+/// `max_distance` values measured per corpus size in `bench_query`. `1` is
+/// the dominant real spellcheck case (a single typo) and the cheapest
+/// automaton `fst` can be asked to build; `2` is the file's original,
+/// headline configuration. Both distances sit squarely inside the
+/// NARROWED_EXACT ASCII agreement domain pinned in
+/// `tests/fst_fuzzy_correctness.rs` (which sweeps distances 0–3). Higher
+/// distances are deliberately not timed: distance 3+ automata approach
+/// `fst`'s own default state limit for long queries (see the module doc
+/// comment's size/memory caveat), which would make the comparison a
+/// robustness question, not a throughput one.
+const MAX_DISTANCES: [u32; 2] = [1, 2];
 
 fn words() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -147,7 +174,6 @@ fn bench_construction(c: &mut Criterion) {
 }
 
 fn bench_query(c: &mut Criterion) {
-    const MAX_DISTANCE: u32 = 2;
     const QUERY_COUNT: usize = 200;
 
     let mut g = c.benchmark_group("fst_fuzzy_query");
@@ -163,33 +189,44 @@ fn bench_query(c: &mut Criterion) {
 
         g.throughput(Throughput::Elements(queries.len() as u64));
 
-        g.bench_with_input(
-            BenchmarkId::new("fuzzy_index", size),
-            &queries,
-            |b, queries| {
+        for &max_distance in &MAX_DISTANCES {
+            // `max_distance == 2` keeps the file's original, unsuffixed
+            // benchmark IDs (`fuzzy_index`/`fst`) — `results/results.json`'s
+            // raw-file mapping references them, so they must stay stable;
+            // the added distance gets a `_d1` suffix instead.
+            let (fuzzy_id, fst_id) = if max_distance == 2 {
+                ("fuzzy_index".to_owned(), "fst".to_owned())
+            } else {
+                (
+                    format!("fuzzy_index_d{max_distance}"),
+                    format!("fst_d{max_distance}"),
+                )
+            };
+
+            g.bench_with_input(BenchmarkId::new(fuzzy_id, size), &queries, |b, queries| {
                 b.iter(|| {
                     let mut n = 0usize;
                     for &q in queries {
-                        n += index.neighbors(black_box(q), MAX_DISTANCE).count();
+                        n += index.neighbors(black_box(q), max_distance).count();
                     }
                     n
                 });
-            },
-        );
-        g.bench_with_input(BenchmarkId::new("fst", size), &queries, |b, queries| {
-            b.iter(|| {
-                let mut n = 0usize;
-                for &q in queries {
-                    let lev = Levenshtein::new(black_box(q), MAX_DISTANCE)
-                        .expect("automaton within the default state limit for these queries");
-                    let mut stream = fst_set.search(&lev).into_stream();
-                    while stream.next().is_some() {
-                        n += 1;
-                    }
-                }
-                n
             });
-        });
+            g.bench_with_input(BenchmarkId::new(fst_id, size), &queries, |b, queries| {
+                b.iter(|| {
+                    let mut n = 0usize;
+                    for &q in queries {
+                        let lev = Levenshtein::new(black_box(q), max_distance)
+                            .expect("automaton within the default state limit for these queries");
+                        let mut stream = fst_set.search(&lev).into_stream();
+                        while stream.next().is_some() {
+                            n += 1;
+                        }
+                    }
+                    n
+                });
+            });
+        }
     }
     g.finish();
 }

@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verbora_core::whitespace::is_whitespace;
 
 use crate::dynval::DynValue;
@@ -292,6 +292,13 @@ impl<E: Engine> Classifier<E> {
     }
 
     /// Tokenises an observation, or takes its tokens verbatim.
+    ///
+    /// TODO(perf): stem memoization — a per-classifier token→stem cache used by
+    /// `add_document`/`remove_document` — is the single largest remaining win
+    /// for `bayes_train` (Porter stemming is ~65% of it on repeated-vocabulary
+    /// corpora, and `stem_token` is pure for the default English stemmer). It
+    /// waits on a cached tokenize-and-stem entry point in `verbora-stemmers`;
+    /// the `classify` path must stay uncached because it takes `&self`.
     fn resolve(&self, observation: Observation<'_>) -> Vec<String> {
         match observation {
             Observation::Text(s) => self
@@ -403,11 +410,37 @@ impl<E: Engine> Classifier<E> {
             self.engine = E::default();
         }
         let total = self.docs.len();
-        for i in self.last_added..total {
-            let features = self.text_to_features(&self.docs[i].text);
-            self.engine.add_example(&features, &self.docs[i].label);
-            listener(TrainingEvent::TrainedWithDocument { index: i, total });
-            self.last_added += 1;
+        if self.last_added < total {
+            // The reference calls `textToFeatures` per document, which recomputes
+            // the enumeration order — an O(vocabulary) allocation and sort — for
+            // every document in the loop. But nothing inside the loop touches
+            // `features` (only `addDocument`/`removeDocument` do), so the order,
+            // and with it the whole token→slot layout, is loop-invariant.
+            // Computing both once and marking each document's tokens into a
+            // reused buffer produces byte-identical observations: a slot is 1
+            // exactly when the document contains that feature, which is the same
+            // membership test `text_to_features` runs per slot.
+            let order = self.features.enumeration_order();
+            let slot_of: FxHashMap<&str, usize> = order
+                .iter()
+                .enumerate()
+                .map(|(slot, &feature)| (feature, slot))
+                .collect();
+            let mut observation = vec![0u8; order.len()];
+            for i in self.last_added..total {
+                observation.fill(0);
+                for token in &self.docs[i].text {
+                    // A token absent from the vocabulary (never added, or
+                    // deleted by `removeDocument`) contributes nothing, exactly
+                    // as it fails `text_to_features`'s presence test.
+                    if let Some(&slot) = slot_of.get(token.as_str()) {
+                        observation[slot] = 1;
+                    }
+                }
+                self.engine.add_example(&observation, &self.docs[i].label);
+                listener(TrainingEvent::TrainedWithDocument { index: i, total });
+                self.last_added += 1;
+            }
         }
         self.engine.fit()?;
         listener(TrainingEvent::DoneTraining);

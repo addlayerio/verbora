@@ -113,7 +113,7 @@ use verbora_inflectors::{CountInflector, NounInflector};
 /// Batch sizes: `nth` calls per measured iteration. Matches `distance.rs`'s
 /// `SIZES` so `scripts/collect-results.py`'s hardcoded size set finds every
 /// directory.
-const SIZES: [usize; 5] = [4, 16, 64, 256, 1024];
+const SIZES: [usize; 9] = [4, 8, 16, 32, 64, 128, 256, 512, 1024];
 
 /// `n` non-negative integers spanning every suffix class (units, teens
 /// exception, round hundreds/thousands), cycled rather than sequential so

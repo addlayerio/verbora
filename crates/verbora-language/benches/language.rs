@@ -141,6 +141,13 @@ use criterion::{
 
 #[cfg(feature = "language-detection")]
 use verbora_language::AutoPhoneticStrategy;
+#[cfg(feature = "fast-language-detection")]
+use verbora_language::HashedLinearDetector;
+#[cfg(all(
+    feature = "fast-language-detection",
+    not(feature = "language-detection")
+))]
+use verbora_language::LanguageDetector;
 #[cfg(all(feature = "language-detection", feature = "parallel"))]
 use verbora_language::par_detect_batch;
 use verbora_language::{Language, detect_script, recommend};
@@ -377,6 +384,47 @@ fn bench_auto_end_to_end(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// G. Fast hashed-linear detection — behind `fast-language-detection`.
+// ---------------------------------------------------------------------------
+
+/// G. [`HashedLinearDetector::detect`] at four input lengths.
+///
+/// Unlike group B this group *does* include the word tier: the fast
+/// detector's short-input latency is the design target its decomposition
+/// analysis measured (whatlang's per-profile scan gives it a ~20 µs floor
+/// on a single word; the hashed-linear path has no such floor), and its
+/// word-length *behavior* is abstention or a low, `best_above`-rejectable
+/// confidence rather than a confident guess — so measuring the latency
+/// does not invite the speed-for-confidence confusion B's exclusion
+/// guards against. No accuracy claim is attached to any tier here; see
+/// `src/hashed_linear.rs`'s own doc comment for what this detector does
+/// and does not claim.
+///
+/// Only compiled with `--features fast-language-detection`.
+#[cfg(feature = "fast-language-detection")]
+fn bench_fast_language_detection(c: &mut Criterion) {
+    let long_doc = long_document();
+    let detector = HashedLinearDetector::new();
+
+    let mut g = c.benchmark_group("fast_language_detection");
+    configure(&mut g);
+
+    for (label, text) in [
+        ("word", WORD),
+        ("short_text", SHORT_TEXT),
+        ("paragraph", PARAGRAPH),
+        ("long_document", long_doc.as_str()),
+    ] {
+        g.throughput(Throughput::Bytes(text.len() as u64));
+        g.bench_with_input(BenchmarkId::from_parameter(label), &text, |b, &text| {
+            b.iter(|| detector.detect(black_box(text)));
+        });
+    }
+
+    g.finish();
+}
+
+// ---------------------------------------------------------------------------
 // F. Sequential vs. parallel batch — behind `language-detection` AND
 // `parallel`.
 // ---------------------------------------------------------------------------
@@ -459,4 +507,13 @@ criterion_group!(
     bench_par_batch
 );
 
-criterion_main!(benches);
+// G is independent of the language-detection × parallel matrix above, so
+// it gets its own group rather than doubling that matrix to eight cfg
+// combinations; when the feature is off, a no-op function stands in
+// (criterion_main! only needs a callable per group).
+#[cfg(feature = "fast-language-detection")]
+criterion_group!(fast_benches, bench_fast_language_detection);
+#[cfg(not(feature = "fast-language-detection"))]
+fn fast_benches() {}
+
+criterion_main!(benches, fast_benches);

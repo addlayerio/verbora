@@ -68,7 +68,14 @@
 //!   the dictionary lookup borrows a `&str` straight out of the candidate buffer
 //!   and the hot path allocates nothing per candidate;
 //! * de-duplicates the final result by word *index* rather than by string
-//!   comparison, again in linear time.
+//!   comparison, again in linear time;
+//! * at `max_distance <= 2` skips candidate generation entirely: a lazily
+//!   built SymSpell-style deletion index retrieves the handful of stored words
+//!   sharing a deletion sequence with the input, and the reference's exact
+//!   output order — distance grouping, frequency, *and* the generator-order
+//!   tie-break — is reconstructed from closed forms for each word's position
+//!   in the edit stream. Same bytes out, without walking the ~10⁴–10⁵
+//!   candidate strings the reference walks at distance 2.
 //!
 //! # Divergences
 //!
@@ -105,6 +112,7 @@ mod comparator_sort;
 mod deletion_index;
 mod edits;
 mod fuzzy_index;
+mod query_index;
 mod spellcheck;
 mod units;
 

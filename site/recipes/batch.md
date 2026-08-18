@@ -1,7 +1,7 @@
 # Batch corpora
 
 Many documents, offline, throughput is the metric. Index building, corpus
-statistics, bulk migration.
+statistics, bulk import.
 
 **Priorities:** memory reuse, shared setup, removing per-item allocations.
 **Non-priority:** latency of any single item.
@@ -56,27 +56,21 @@ let all = tokenizer.tokenize_batch(corpus);
 ```
 
 `verbora_core::Tokenizer::tokenize_batch` is a provided trait method whose
-default body is a plain sequential `map`: one fresh `Vec<String>` per document,
-no shared buffer, no parallelism, and **owned** `String` tokens rather than the
-borrowed `&str` that `Tokenize::tokenize` gives you. Nothing in the workspace
-overrides it. It allocates strictly more than the loop above.
-
-It exists so that generic code over the trait can say "process all of these", and
-so an implementation can improve it later without changing callers. Today, write
-the loop.
+default body is a sequential `map`: one fresh `Vec<String>` per document, no
+shared buffer, no parallelism, and **owned** `String` tokens rather than the
+borrowed `&str` that `Tokenize::tokenize` gives you. Nothing overrides it, so it
+allocates strictly more than the loop above. It exists so generic code over the
+trait can say "process all of these" — for throughput, write the loop.
 
 <div class="callout callout-note">
-<strong>Not the same trait as <code>par_tokenize_batch</code>.</strong>
-<code>verbora_core::Tokenizer</code> above is a different trait from
-<code>verbora_tokenizers::Tokenize</code>, the one <code>AggressiveTokenizer</code>
-implements and this page uses throughout. <code>Tokenize</code> does have a
-real batch primitive — <code>par_tokenize_batch</code>, behind the
-<code>parallel</code> Cargo feature — but it fans <code>tokenize()</code> out
-across threads with <code>rayon</code>, one fresh <code>Vec</code> per
-document; it doesn't reuse a buffer either, so it solves a different problem
-than this page's priorities (memory reuse, shared setup). See
-<a href="parallel-corpus">Massive parallel corpora</a> for when to reach for
-it.
+<strong>Not the same as <code>par_tokenize_batch</code>.</strong>
+<code>verbora_tokenizers::Tokenize</code> — the trait
+<code>AggressiveTokenizer</code> implements and this page uses throughout —
+does have a real batch primitive, <code>par_tokenize_batch</code>, behind the
+<code>parallel</code> Cargo feature. It fans <code>tokenize()</code> out across
+threads with <code>rayon</code>, one fresh <code>Vec</code> per document, so it
+buys throughput rather than memory reuse. See
+<a href="parallel-corpus">Massive parallel corpora</a>.
 </div>
 
 ## Accumulating instead of clearing

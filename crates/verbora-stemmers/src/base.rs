@@ -31,6 +31,8 @@
 //! document pays for only those.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 /// Which form of a token a step looks at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,24 @@ pub trait TokenizeAndStem {
     /// Which string is handed to `stem`.
     const STEM_ON: Casing;
 
+    /// Whether [`Self::stem_token`] is a pure function of its input for this
+    /// value — same token in, same stem out, with no observable state change.
+    ///
+    /// This is the gate for [`Self::tokenize_and_stem_cached`]: a cached stem
+    /// is only a valid substitute for a fresh call when the fresh call could
+    /// not have answered differently. Every stemmer in this crate is pure
+    /// except [`crate::PorterStemmerNl`], whose sticky `suffix_e_removed`
+    /// flag (a `Cell` written by step 2 and read by step 3b) makes both the
+    /// output order-dependent *and* each call a state change that skipping
+    /// would lose — it overrides this to `false`, and the cached entry point
+    /// then ignores the cache entirely.
+    ///
+    /// Implementations with interior mutability in `stem_token` must override
+    /// this to `false`. Mutation through `&mut self` *between* calls is the
+    /// cache owner's concern, not this constant's: the caller who holds the
+    /// cache must clear it when they reconfigure the stemmer it was filled by.
+    const PURE_STEM: bool = true;
+
     /// The language's word-character class.
     fn is_word_char(c: char) -> bool;
 
@@ -134,6 +154,81 @@ pub trait TokenizeAndStem {
         Self: Sized,
     {
         self.stems(text, keep_stops).collect()
+    }
+
+    /// [`Self::tokenize_and_stem`] with a caller-owned `token → stem` cache.
+    ///
+    /// Stemming dominates repeated-text workloads — the classifier crate
+    /// measured Porter `stem_token` calls at 65% of its whole Bayes training
+    /// time, with the same few hundred distinct tokens re-stemmed thousands
+    /// of times — so this entry point lets a caller that processes many
+    /// documents pay for each distinct token once. The cache is passed in
+    /// rather than held here, keeping every stemmer zero-sized and `Sync` and
+    /// leaving eviction/lifetime policy (and the hasher) to the owner.
+    ///
+    /// # Parity contract
+    ///
+    /// The token stream, stop-word filtering and gate behaviour are exactly
+    /// [`Self::tokenize_and_stem`]'s: the cache is consulted only for the
+    /// string that would have been handed to [`Self::stem_token`], *after*
+    /// the stop-word test (so mutations to the process-global stop-word lists
+    /// keep taking effect between calls) and only for tokens that pass the
+    /// gate (a gate-failing token is emitted unstemmed, never cached). Cache
+    /// entries are trusted: hand the same map to two different stemmers and
+    /// the second will happily serve the first one's stems.
+    ///
+    /// When [`Self::PURE_STEM`] is `false` the cache is ignored and this is
+    /// exactly `tokenize_and_stem` — a stale answer from an impure stemmer
+    /// would not merely be slow, it would be wrong.
+    fn tokenize_and_stem_cached<H: BuildHasher>(
+        &self,
+        text: &str,
+        keep_stops: bool,
+        cache: &mut HashMap<String, String, H>,
+    ) -> Vec<String>
+    where
+        Self: Sized,
+    {
+        if !Self::PURE_STEM {
+            return self.tokenize_and_stem(text, keep_stops);
+        }
+        let buf = Self::prepare(text);
+        let mut out = Vec::new();
+        let mut pos = 0;
+        // The same walk as `Stems::next`, with the `stem_token` call memoized.
+        while let Some((start, end)) = next_run(&buf, pos, Self::is_word_char) {
+            pos = end;
+            let raw = &buf[start..end];
+            let lowered: Option<String> =
+                if Self::FILTER_ON == Casing::Lower || Self::STEM_ON == Casing::Lower {
+                    Some(raw.to_lowercase())
+                } else {
+                    None
+                };
+            let pick = |casing: Casing| -> &str {
+                match casing {
+                    Casing::Raw => raw,
+                    Casing::Lower => lowered.as_deref().unwrap_or(raw),
+                }
+            };
+            if !keep_stops && Self::is_stop_word(pick(Self::FILTER_ON)) {
+                continue;
+            }
+            let input = pick(Self::STEM_ON);
+            out.push(if Self::gate(input) {
+                match cache.get(input) {
+                    Some(hit) => hit.clone(),
+                    None => {
+                        let stem = self.stem_token(input);
+                        cache.insert(input.to_owned(), stem.clone());
+                        stem
+                    }
+                }
+            } else {
+                input.to_owned()
+            });
+        }
+        out
     }
 
     /// Runs [`Self::tokenize_and_stem`] over many independent documents, one
@@ -278,6 +373,96 @@ mod tests {
             pos = b;
         }
         out
+    }
+
+    #[test]
+    fn cached_variant_matches_the_plain_pipeline() {
+        use crate::{PorterStemmer, PorterStemmerEs, PorterStemmerRu};
+
+        let texts = [
+            "My dog is very fun to play with",
+            "Los trabajadores nacionales trabajan rápidamente",
+            "мама мыла раму важнейшими способами",
+            "",
+            "a-b 123 😀",
+        ];
+        let mut cache = HashMap::new();
+        for text in texts {
+            for keep_stops in [false, true] {
+                let en = PorterStemmer::new();
+                assert_eq!(
+                    en.tokenize_and_stem_cached(text, keep_stops, &mut cache),
+                    en.tokenize_and_stem(text, keep_stops),
+                    "en: {text:?}"
+                );
+            }
+        }
+        // Run the same texts again so every lookup is a cache hit.
+        for text in texts {
+            let en = PorterStemmer::new();
+            assert_eq!(
+                en.tokenize_and_stem_cached(text, false, &mut cache),
+                en.tokenize_and_stem(text, false),
+                "en, warm cache: {text:?}"
+            );
+        }
+        let mut cache = HashMap::new();
+        let es = PorterStemmerEs::new();
+        assert_eq!(
+            es.tokenize_and_stem_cached(texts[1], false, &mut cache),
+            es.tokenize_and_stem(texts[1], false)
+        );
+        let mut cache = HashMap::new();
+        let ru = PorterStemmerRu::new();
+        assert_eq!(
+            ru.tokenize_and_stem_cached(texts[2], false, &mut cache),
+            ru.tokenize_and_stem(texts[2], false)
+        );
+    }
+
+    /// The cache is trusted: a pre-seeded entry is served verbatim. This pins
+    /// the documented contract (the owner is responsible for the map's
+    /// contents), which the classifier crate's memoization relies on.
+    #[test]
+    fn cache_entries_are_reused_not_recomputed() {
+        use crate::PorterStemmer;
+
+        let mut cache = HashMap::new();
+        cache.insert("running".to_owned(), "SEEDED".to_owned());
+        assert_eq!(
+            PorterStemmer::new().tokenize_and_stem_cached("running dogs", false, &mut cache),
+            ["SEEDED", "dog"]
+        );
+        // The miss was inserted for next time.
+        assert_eq!(cache.get("dogs").map(String::as_str), Some("dog"));
+    }
+
+    /// `PorterStemmerNl` is the one impure stemmer: the cached entry point
+    /// must ignore the cache — a poisoned entry changes nothing, and the
+    /// sticky-flag state advances exactly as the plain pipeline would.
+    #[test]
+    fn nl_ignores_the_cache_because_its_stem_is_impure() {
+        use crate::PorterStemmerNl;
+
+        const {
+            assert!(!<PorterStemmerNl as TokenizeAndStem>::PURE_STEM);
+        }
+        let mut cache = HashMap::new();
+        cache.insert("onaantastbar".to_owned(), "POISON".to_owned());
+        let nl = PorterStemmerNl::new();
+        // Fresh stemmer: the flag is unset, so the word is untouched — and the
+        // poisoned cache entry must NOT leak into the output.
+        assert_eq!(
+            nl.tokenize_and_stem_cached("onaantastbar", false, &mut cache),
+            ["onaantastbar"]
+        );
+        // Trip the sticky flag, then observe the state-dependent stem — the
+        // exact behaviour a cache hit would have destroyed.
+        let _ = nl.tokenize_and_stem_cached("lichte", false, &mut cache);
+        assert_eq!(
+            nl.tokenize_and_stem_cached("onaantastbar", false, &mut cache),
+            ["onaantast"]
+        );
     }
 
     #[test]

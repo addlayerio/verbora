@@ -262,7 +262,69 @@ pub mod converters {
         tables::HF_PUNCTUATION.translate(s)
     }
 
+    /// First code point of the halfwidth katakana block the dense arrays
+    /// below are indexed against: U+FF66 `ｦ`. The block runs through U+FF9F
+    /// `ﾟ`, 58 code points in all.
+    const KHF_FIRST: u32 = 0xFF66;
+
+    /// Fullwidth form of each halfwidth katakana, indexed by
+    /// `codepoint - KHF_FIRST`. Row layout is ten entries per line, so entry
+    /// `i` of line `n` is U+FF66 + 10n + i.
+    ///
+    /// These three arrays are the dense-array form of `HF_KATAKANA`: every
+    /// code point in the block is a one-char key of that table, so the
+    /// general gate-plus-binary-search scanner degenerates to an array index
+    /// here. A test (`katakana_hf_dense_arrays_match_the_table`) derives all
+    /// three arrays from `HF_KATAKANA` itself, so editing the table without
+    /// updating them cannot drift silently.
+    pub(crate) static KHF_PLAIN: [char; 58] = [
+        'ヲ', 'ァ', 'ィ', 'ゥ', 'ェ', 'ォ', 'ャ', 'ュ', 'ョ', 'ッ', // U+FF66..
+        'ー', 'ア', 'イ', 'ウ', 'エ', 'オ', 'カ', 'キ', 'ク', 'ケ', // U+FF70..
+        'コ', 'サ', 'シ', 'ス', 'セ', 'ソ', 'タ', 'チ', 'ツ', 'テ', // U+FF7A..
+        'ト', 'ナ', 'ニ', 'ヌ', 'ネ', 'ノ', 'ハ', 'ヒ', 'フ', 'ヘ', // U+FF84..
+        'ホ', 'マ', 'ミ', 'ム', 'メ', 'モ', 'ヤ', 'ユ', 'ヨ', 'ラ', // U+FF8E..
+        'リ', 'ル', 'レ', 'ロ', 'ワ', 'ン', '゛', '゜', // U+FF98..=U+FF9F
+    ];
+
+    /// Composed form when the halfwidth katakana is followed by `ﾞ`, or
+    /// `'\0'` when no such two-char key exists (the two never compose and the
+    /// mark is converted on its own). Same indexing as [`KHF_PLAIN`].
+    pub(crate) static KHF_DAKUTEN: [char; 58] = [
+        '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF66..
+        '\0', '\0', '\0', 'ヴ', '\0', '\0', 'ガ', 'ギ', 'グ', 'ゲ', // U+FF70..
+        'ゴ', 'ザ', 'ジ', 'ズ', 'ゼ', 'ゾ', 'ダ', 'ヂ', 'ヅ', 'デ', // U+FF7A..
+        'ド', '\0', '\0', '\0', '\0', '\0', 'バ', 'ビ', 'ブ', 'ベ', // U+FF84..
+        'ボ', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF8E..
+        '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF98..=U+FF9F
+    ];
+
+    /// Composed form when followed by `ﾟ` — only the five in the h-row.
+    /// Same indexing and `'\0'` convention as [`KHF_DAKUTEN`].
+    pub(crate) static KHF_HANDAKUTEN: [char; 58] = [
+        '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF66..
+        '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF70..
+        '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF7A..
+        '\0', '\0', '\0', '\0', '\0', '\0', 'パ', 'ピ', 'プ', 'ペ', // U+FF84..
+        'ポ', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF8E..
+        '\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0', // U+FF98..=U+FF9F
+    ];
+
     /// Halfwidth katakana to fullwidth, composing base + voiced mark.
+    ///
+    /// Every code point of the halfwidth block U+FF66..=U+FF9F is a one-char
+    /// key of `HF_KATAKANA`, so the general `Table` scanner — an exact bitmap
+    /// gate plus up to two binary searches per admitted character — is pure
+    /// overhead here. Instead, each block character indexes the three dense
+    /// arrays above directly, and one peeked character decides whether a
+    /// following `ﾞ`/`ﾟ` composes. Leftmost-longest is reproduced by
+    /// construction: the composed entry is non-`'\0'` exactly where the table
+    /// has a two-char key, and the plain entry is taken otherwise. Measured
+    /// ~4x faster than the table walk on halfwidth katakana prose (and ~3x
+    /// faster than the `kana-converter` crate's `HashMap`-per-char design).
+    ///
+    /// `Cow::Borrowed` is returned under exactly the table's condition: no
+    /// character in the block (every block character is a key, so presence
+    /// implies a rewrite).
     ///
     /// ```
     /// # use verbora_normalizers::ja::converters::katakana_hf;
@@ -270,7 +332,39 @@ pub mod converters {
     /// ```
     #[must_use]
     pub fn katakana_hf(s: &str) -> Cow<'_, str> {
-        tables::HF_KATAKANA.translate(s)
+        // Borrow until the first block character; none at all is the common
+        // case for text in any other script.
+        let Some((first, _)) = s
+            .char_indices()
+            .find(|&(_, c)| (c as u32).wrapping_sub(KHF_FIRST) < 58)
+        else {
+            return Cow::Borrowed(s);
+        };
+        // `s.len()` is exact for the common no-composition case (both widths
+        // are three bytes in UTF-8) and an overestimate when pairs compose.
+        let mut out = String::with_capacity(s.len());
+        out.push_str(&s[..first]);
+        let mut chars = s[first..].chars().peekable();
+        while let Some(c) = chars.next() {
+            let k = (c as u32).wrapping_sub(KHF_FIRST);
+            if k < 58 {
+                let idx = k as usize;
+                match chars.peek() {
+                    Some('ﾞ') if KHF_DAKUTEN[idx] != '\0' => {
+                        out.push(KHF_DAKUTEN[idx]);
+                        chars.next();
+                    }
+                    Some('ﾟ') if KHF_HANDAKUTEN[idx] != '\0' => {
+                        out.push(KHF_HANDAKUTEN[idx]);
+                        chars.next();
+                    }
+                    _ => out.push(KHF_PLAIN[idx]),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        Cow::Owned(out)
     }
 
     /// The composite normalization pass: stage two of [`super::normalize_ja`].
@@ -329,55 +423,39 @@ pub mod converters {
     /// [`fix_fullwidth_kana`] would actually touch — halfwidth katakana or a
     /// standalone voiced/semi-voiced mark.
     ///
-    /// A single combined pass over both tables' gates, used to skip straight
-    /// to the final shift stage of [`hiragana_to_katakana`]/
-    /// [`katakana_to_hiragana`] when neither of the first two stages has
-    /// anything to do — `docs/PERFORMANCE_GAPS.md` entry 30 measured this
-    /// exact case (pure hiragana/katakana prose, no halfwidth forms, no
-    /// orphan marks) costing two full, guaranteed-no-op walks before the one
-    /// that does real work. This is still one `O(n)` scan — it cannot make
-    /// the whole function sub-linear — but replacing two separate
-    /// [`crate::table::Table::translate`] walks (each running its own gate
-    /// check, and one of them allocating a `String` buffer up front to hold
-    /// nothing) with one combined gate-only scan is a real, measured win,
-    /// not merely a theoretical one — see [`hiragana_to_katakana`]'s own doc
-    /// comment for the numbers.
+    /// A single combined pass over both tables' gates, used by the staged
+    /// fallbacks below to skip straight to the shift stage when neither of
+    /// the first two stages has anything to do. The fast paths bail to the
+    /// staged form on a *superset* of the conditions this checks exactly —
+    /// text whose only trigger is halfwidth punctuation (U+FF61..=U+FF65,
+    /// no key starts there), or a standalone mark next to nothing voiceable
+    /// — so the check still pays for itself on the fallback path. This is
+    /// one `O(n)` scan; it cannot make the whole function sub-linear, but it
+    /// replaces two separate [`crate::table::Table::translate`] walks (each
+    /// running its own gate check, and one of them allocating a `String`
+    /// buffer up front to hold nothing) with one combined gate-only scan.
     #[inline]
     fn needs_hf_or_voiced_mark_fix(s: &str) -> bool {
         s.chars()
             .any(|c| tables::HF_KATAKANA.may_start(c) || tables::FIX_FULLWIDTH_KANA.may_start(c))
     }
 
-    /// Converts hiragana to fullwidth katakana.
+    /// The full three-stage pipeline behind [`hiragana_to_katakana`]: fold
+    /// halfwidth katakana to fullwidth, fix standalone voiced marks
+    /// (small-tsu rewrites included), then shift.
     ///
-    /// Three stages: fold halfwidth katakana to fullwidth, fix standalone voiced
-    /// marks (small-tsu rewrites included), then shift U+3041..=U+3096 up by
-    /// 0x60 and map the two iteration marks `ゝゞ` to `ヽヾ`.
+    /// [`hiragana_to_katakana`] proper is an optimistic single pass; it
+    /// bails to this staged form — on the *original* input, so the answer is
+    /// identical by construction — the moment it sees anything the first two
+    /// stages could touch. The differential tests also use this shape as the
+    /// oracle the fast path is checked against.
     ///
     /// The reference writes the shift and the two iteration marks as three
     /// separate global replaces. Fusing them is exact rather than merely
-    /// convenient: `ゝ` U+309D and `ゞ` U+309E lie outside the shifted range, and
-    /// their outputs `ヽ` U+30FD and `ヾ` U+30FE lie outside it too, so no pass
-    /// can see another's output.
-    ///
-    /// On input the first two stages are guaranteed no-ops for (no halfwidth
-    /// katakana, no standalone voiced marks — pure hiragana/katakana prose,
-    /// the shape `docs/PERFORMANCE_GAPS.md` entry 30 benchmarks), a single
-    /// combined pre-check ([`needs_hf_or_voiced_mark_fix`]) skips straight to
-    /// the shift stage instead of running both `Table::translate` walks to
-    /// confirm they find nothing. Real numbers, one development machine
-    /// (`cargo bench -p verbora-normalizers`, same benchmark entry 30 used):
-    /// `ja_hiragana_to_katakana/verbora` — a real speedup at every size
-    /// tested, not just the largest, since the pre-check itself replaces two
-    /// gate-checking passes with one rather than adding a third on top.
-    ///
-    /// ```
-    /// # use verbora_normalizers::ja::converters::hiragana_to_katakana;
-    /// assert_eq!(hiragana_to_katakana("ぁゖゝゞっなあいうえお"), "ァヶヽヾンナアイウエオ");
-    /// assert_eq!(hiragana_to_katakana("abc123 漢字 ｶ"), "abc123 漢字 カ");
-    /// ```
-    #[must_use]
-    pub fn hiragana_to_katakana(s: &str) -> Cow<'_, str> {
+    /// convenient: `ゝ` U+309D and `ゞ` U+309E lie outside the shifted range,
+    /// and their outputs `ヽ` U+30FD and `ヾ` U+30FE lie outside it too, so
+    /// no pass can see another's output.
+    fn hiragana_to_katakana_staged(s: &str) -> Cow<'_, str> {
         let out = if needs_hf_or_voiced_mark_fix(s) {
             let out = katakana_hf(s);
             map_cow(out, fix_fullwidth_kana)
@@ -394,21 +472,9 @@ pub mod converters {
         })
     }
 
-    /// Converts katakana to hiragana: the mirror of [`hiragana_to_katakana`].
-    ///
-    /// The shifted range is U+30A1..=U+30F6, so `ヷヸヹヺ` (U+30F7..=U+30FA),
-    /// `ー` U+30FC and the halfwidth forms all fall outside it and pass through.
-    ///
-    /// Same pre-check as [`hiragana_to_katakana`] and for the same reason —
-    /// see that function's own doc comment.
-    ///
-    /// ```
-    /// # use verbora_normalizers::ja::converters::katakana_to_hiragana;
-    /// assert_eq!(katakana_to_hiragana("ァヶヽヾッナアイウエオ"), "ぁゖゝゞんなあいうえお");
-    /// assert_eq!(katakana_to_hiragana("ヷヸヹヺー"), "ヷヸヹヺー");
-    /// ```
-    #[must_use]
-    pub fn katakana_to_hiragana(s: &str) -> Cow<'_, str> {
+    /// The staged pipeline behind [`katakana_to_hiragana`]; the mirror of
+    /// [`hiragana_to_katakana_staged`], see there for the shape and why.
+    fn katakana_to_hiragana_staged(s: &str) -> Cow<'_, str> {
         let out = if needs_hf_or_voiced_mark_fix(s) {
             let out = katakana_hf(s);
             map_cow(out, fix_fullwidth_kana)
@@ -423,6 +489,213 @@ pub mod converters {
                 _ => None,
             })
         })
+    }
+
+    /// Converts hiragana to fullwidth katakana.
+    ///
+    /// Semantically three stages, exactly as the reference: fold halfwidth
+    /// katakana to fullwidth, fix standalone voiced marks (small-tsu
+    /// rewrites included), then shift U+3041..=U+3096 up by 0x60 and map the
+    /// two iteration marks `ゝゞ` to `ヽヾ` (which are exactly 0x60 below
+    /// `ヽヾ` too, so they fold into the same arithmetic).
+    ///
+    /// # The optimistic single pass
+    ///
+    /// On ordinary prose the first two stages never change anything, but
+    /// confirming that used to cost two full table walks before the one pass
+    /// that does real work. Instead, this runs a single pass that shifts as
+    /// it goes — a prefix loop that allocates nothing until the first
+    /// shiftable character, then a build loop that pushes every character
+    /// into an exact-capacity `String` — while watching for the only
+    /// conditions under which stage one or two could fire:
+    ///
+    /// * any character in U+FF61..=U+FF9F (a superset of the halfwidth
+    ///   katakana keys, which all live in U+FF66..=U+FF9F);
+    /// * a standalone `゛` U+309B or `゜` U+309C (every voiced-mark key ends
+    ///   in one);
+    /// * `っ` directly before `な`..`の`, or `ッ` before `ナ`..`ノ` (the
+    ///   small-tsu keys, tracked exactly with one byte of state).
+    ///
+    /// On the first trigger the optimistic build is discarded and the staged
+    /// pipeline runs on the original input, so the result — including
+    /// whether the `Cow` borrows — is identical by construction. A test
+    /// derives the trigger set from the tables themselves, so extending
+    /// `HF_KATAKANA` or `FIX_FULLWIDTH_KANA` without widening the triggers
+    /// cannot silently break parity.
+    ///
+    /// # The measured trade-off
+    ///
+    /// Every common shape wins: pure kana, small-tsu prose with non-n-row
+    /// followers, mixed ASCII and kana are 4-6x faster than the staged
+    /// pipeline (and faster than a bare `+0x60` map, because the exact
+    /// `with_capacity` avoids the reallocation a `collect` undershoots
+    /// into); kanji-only borrows either way; an early trigger bails
+    /// immediately at staged cost. The one bounded regression is a trigger
+    /// appearing only near the *end* of otherwise pure kana: the nearly
+    /// complete build is discarded, costing up to ~1.24x the staged pipeline
+    /// (never more than one extra scan-and-build, since the pass abandons at
+    /// the first trigger).
+    ///
+    /// ```
+    /// # use verbora_normalizers::ja::converters::hiragana_to_katakana;
+    /// assert_eq!(hiragana_to_katakana("ぁゖゝゞっなあいうえお"), "ァヶヽヾンナアイウエオ");
+    /// assert_eq!(hiragana_to_katakana("abc123 漢字 ｶ"), "abc123 漢字 カ");
+    /// ```
+    #[must_use]
+    pub fn hiragana_to_katakana(s: &str) -> Cow<'_, str> {
+        // Prefix loop: trigger-checks only, no allocation, until the first
+        // shiftable character decides the output cannot be borrowed.
+        // `prev_tsu` is 1 after `っ`, 2 after `ッ`, 0 otherwise.
+        let mut prev_tsu = 0u8;
+        let mut it = s.char_indices();
+        let (start, first) = loop {
+            let Some((i, c)) = it.next() else {
+                return Cow::Borrowed(s);
+            };
+            let cp = c as u32;
+            if cp.wrapping_sub(0x3041) <= 0x55 {
+                // U+3041..=U+3096, shiftable — unless it completes a
+                // small-tsu pair, which is stage two's job.
+                if prev_tsu == 1 && cp.wrapping_sub(0x306A) <= 4 {
+                    return hiragana_to_katakana_staged(s);
+                }
+                break (i, c);
+            }
+            if cp.wrapping_sub(0x309B) <= 3 {
+                if cp <= 0x309C {
+                    return hiragana_to_katakana_staged(s); // ゛ or ゜
+                }
+                break (i, c); // ゝ or ゞ: shiftable by the same +0x60.
+            }
+            if cp.wrapping_sub(0xFF61) <= 0x3E {
+                return hiragana_to_katakana_staged(s); // halfwidth block
+            }
+            if prev_tsu == 2 && cp.wrapping_sub(0x30CA) <= 4 {
+                return hiragana_to_katakana_staged(s); // ッ + ナ..ノ
+            }
+            prev_tsu = match cp {
+                0x3063 => 1, // っ
+                0x30C3 => 2, // ッ
+                _ => 0,
+            };
+        };
+        // Build loop: push *every* character (run-copy bookkeeping measured
+        // slower than the straight-line push), still watching for triggers.
+        // Kana in and out are three bytes each, so `s.len()` is exact.
+        let mut out = String::with_capacity(s.len());
+        out.push_str(&s[..start]);
+        prev_tsu = u8::from(first == 'っ');
+        out.push(shift(first, 0x60));
+        for (_, c) in it {
+            let cp = c as u32;
+            if cp.wrapping_sub(0x3041) <= 0x55 {
+                if prev_tsu == 1 && cp.wrapping_sub(0x306A) <= 4 {
+                    return hiragana_to_katakana_staged(s);
+                }
+                prev_tsu = u8::from(cp == 0x3063);
+                out.push(shift(c, 0x60));
+                continue;
+            }
+            if cp.wrapping_sub(0x309B) <= 3 {
+                if cp <= 0x309C {
+                    return hiragana_to_katakana_staged(s);
+                }
+                prev_tsu = 0;
+                out.push(shift(c, 0x60));
+                continue;
+            }
+            if cp.wrapping_sub(0xFF61) <= 0x3E {
+                return hiragana_to_katakana_staged(s);
+            }
+            if prev_tsu == 2 && cp.wrapping_sub(0x30CA) <= 4 {
+                return hiragana_to_katakana_staged(s);
+            }
+            prev_tsu = if cp == 0x30C3 { 2 } else { 0 };
+            out.push(c);
+        }
+        Cow::Owned(out)
+    }
+
+    /// Converts katakana to hiragana: the mirror of [`hiragana_to_katakana`].
+    ///
+    /// The shifted range is U+30A1..=U+30F6, so `ヷヸヹヺ` (U+30F7..=U+30FA),
+    /// `ー` U+30FC and the halfwidth forms all fall outside it and pass through.
+    ///
+    /// Same optimistic single pass, same trigger set and same bounded
+    /// worst case as [`hiragana_to_katakana`] — see that function's own doc
+    /// comment.
+    ///
+    /// ```
+    /// # use verbora_normalizers::ja::converters::katakana_to_hiragana;
+    /// assert_eq!(katakana_to_hiragana("ァヶヽヾッナアイウエオ"), "ぁゖゝゞんなあいうえお");
+    /// assert_eq!(katakana_to_hiragana("ヷヸヹヺー"), "ヷヸヹヺー");
+    /// ```
+    #[must_use]
+    pub fn katakana_to_hiragana(s: &str) -> Cow<'_, str> {
+        let mut prev_tsu = 0u8;
+        let mut it = s.char_indices();
+        let (start, first) = loop {
+            let Some((i, c)) = it.next() else {
+                return Cow::Borrowed(s);
+            };
+            let cp = c as u32;
+            if cp.wrapping_sub(0x30A1) <= 0x55 {
+                // U+30A1..=U+30F6, shiftable — unless it completes ッ+ナ..ノ.
+                if prev_tsu == 2 && cp.wrapping_sub(0x30CA) <= 4 {
+                    return katakana_to_hiragana_staged(s);
+                }
+                break (i, c);
+            }
+            if cp.wrapping_sub(0x30FD) <= 1 {
+                break (i, c); // ヽ or ヾ: shiftable by the same -0x60.
+            }
+            if cp == 0x309B || cp == 0x309C {
+                return katakana_to_hiragana_staged(s); // ゛ or ゜
+            }
+            if cp.wrapping_sub(0xFF61) <= 0x3E {
+                return katakana_to_hiragana_staged(s); // halfwidth block
+            }
+            if prev_tsu == 1 && cp.wrapping_sub(0x306A) <= 4 {
+                return katakana_to_hiragana_staged(s); // っ + な..の
+            }
+            prev_tsu = match cp {
+                0x3063 => 1, // っ
+                0x30C3 => 2, // ッ
+                _ => 0,
+            };
+        };
+        let mut out = String::with_capacity(s.len());
+        out.push_str(&s[..start]);
+        prev_tsu = if first == 'ッ' { 2 } else { 0 };
+        out.push(shift(first, -0x60));
+        for (_, c) in it {
+            let cp = c as u32;
+            if cp.wrapping_sub(0x30A1) <= 0x55 {
+                if prev_tsu == 2 && cp.wrapping_sub(0x30CA) <= 4 {
+                    return katakana_to_hiragana_staged(s);
+                }
+                prev_tsu = if cp == 0x30C3 { 2 } else { 0 };
+                out.push(shift(c, -0x60));
+                continue;
+            }
+            if cp.wrapping_sub(0x30FD) <= 1 {
+                prev_tsu = 0;
+                out.push(shift(c, -0x60));
+                continue;
+            }
+            if cp == 0x309B || cp == 0x309C {
+                return katakana_to_hiragana_staged(s);
+            }
+            if cp.wrapping_sub(0xFF61) <= 0x3E {
+                return katakana_to_hiragana_staged(s);
+            }
+            if prev_tsu == 1 && cp.wrapping_sub(0x306A) <= 4 {
+                return katakana_to_hiragana_staged(s);
+            }
+            prev_tsu = u8::from(cp == 0x3063);
+            out.push(c);
+        }
+        Cow::Owned(out)
     }
 
     /// Shifts a kana by `delta` code points.
@@ -739,6 +1012,270 @@ mod tests {
                 hiragana_to_katakana_naive(&s),
                 "round {round}: {s:?}"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The optimistic single-pass converters and the dense-array katakana_hf
+    // vs. the table-driven pipeline as oracle
+    // -----------------------------------------------------------------------
+
+    /// The staged pipeline built from the tables alone — independent of both
+    /// the optimistic fast paths and the dense-array `katakana_hf` — so the
+    /// differential tests below check the shipped functions against the
+    /// original table-driven implementation, not against themselves.
+    fn h2k_oracle(s: &str) -> Cow<'_, str> {
+        let out = tables::HF_KATAKANA.translate(s);
+        let out = crate::table::map_cow(out, fix_fullwidth_kana);
+        crate::table::map_cow(out, |t| {
+            crate::table::map_chars(t, |c| match c {
+                'ゝ' => Some('ヽ'),
+                'ゞ' => Some('ヾ'),
+                '\u{3041}'..='\u{3096}' => char::from_u32(c as u32 + 0x60),
+                _ => None,
+            })
+        })
+    }
+
+    /// Mirror of [`h2k_oracle`] for the katakana-to-hiragana direction.
+    fn k2h_oracle(s: &str) -> Cow<'_, str> {
+        let out = tables::HF_KATAKANA.translate(s);
+        let out = crate::table::map_cow(out, fix_fullwidth_kana);
+        crate::table::map_cow(out, |t| {
+            crate::table::map_chars(t, |c| match c {
+                'ヽ' => Some('ゝ'),
+                'ヾ' => Some('ゞ'),
+                '\u{30A1}'..='\u{30F6}' => char::from_u32(c as u32 - 0x60),
+                _ => None,
+            })
+        })
+    }
+
+    /// Asserts all three rewritten converters agree with their table-driven
+    /// oracles on `input`: byte-exact output *and* the same `Cow` kind, since
+    /// whether the input is borrowed back is observable behaviour.
+    fn assert_parity(input: &str) {
+        let checks = [
+            (
+                "hiragana_to_katakana",
+                h2k_oracle(input),
+                hiragana_to_katakana(input),
+            ),
+            (
+                "katakana_to_hiragana",
+                k2h_oracle(input),
+                katakana_to_hiragana(input),
+            ),
+            (
+                "katakana_hf",
+                tables::HF_KATAKANA.translate(input),
+                katakana_hf(input),
+            ),
+        ];
+        for (name, oracle, fast) in checks {
+            assert_eq!(fast, oracle, "{name} value for {input:?}");
+            assert_eq!(
+                matches!(fast, Cow::Borrowed(_)),
+                matches!(oracle, Cow::Borrowed(_)),
+                "{name} Cow kind for {input:?}"
+            );
+        }
+    }
+
+    /// A character can slip past the fast paths' trigger constants only if
+    /// the tables gain a key those constants do not cover — which would be a
+    /// silent parity break, not a compile error. This derives the required
+    /// trigger set from the tables and asserts the constants are a superset,
+    /// in the same spirit as the gate-exactness assertions in
+    /// `tables_are_sorted_and_within_the_bmp`.
+    #[test]
+    fn fast_path_trigger_set_is_a_superset_of_the_tables() {
+        // Mirrors of the constants in `hiragana_to_katakana` /
+        // `katakana_to_hiragana`.
+        let standalone = |c: char| {
+            let cp = c as u32;
+            cp.wrapping_sub(0xFF61) <= 0x3E || cp == 0x309B || cp == 0x309C
+        };
+        let pair = |a: char, b: char| {
+            (a == 'っ' && ('な'..='の').contains(&b)) || (a == 'ッ' && ('ナ'..='ノ').contains(&b))
+        };
+        // Stage one fires only when an `HF_KATAKANA` key is present, so every
+        // character of every key must itself be a standalone trigger.
+        for &(k, _) in tables::HF_KATAKANA.one {
+            assert!(standalone(k), "{k:?} escapes the trigger set");
+        }
+        for &(k, _) in tables::HF_KATAKANA.two {
+            assert!(
+                standalone(k[0]) && standalone(k[1]),
+                "{k:?} escapes the trigger set"
+            );
+        }
+        // Stage two has only two-char keys, and each must either end in a
+        // mark (its mere presence anywhere triggers the fallback) or be one
+        // of the small-tsu pairs the fast paths track exactly by adjacency.
+        assert!(tables::FIX_FULLWIDTH_KANA.one.is_empty());
+        for &(k, _) in tables::FIX_FULLWIDTH_KANA.two {
+            assert!(
+                standalone(k[1]) || pair(k[0], k[1]),
+                "{k:?} escapes the trigger set"
+            );
+        }
+    }
+
+    /// The dense arrays must stay exactly derivable from `HF_KATAKANA`:
+    /// one-char keys are the contiguous block U+FF66..=U+FF9F with one-char
+    /// replacements, and the composed entries exist precisely where the
+    /// table has a two-char key.
+    #[test]
+    fn katakana_hf_dense_arrays_are_derived_from_the_table() {
+        assert_eq!(tables::HF_KATAKANA.one.len(), 58);
+        for (i, &(k, v)) in tables::HF_KATAKANA.one.iter().enumerate() {
+            assert_eq!(k as u32, 0xFF66 + i as u32, "one-char keys must be dense");
+            let mut chars = v.chars();
+            assert_eq!((chars.next(), chars.next()), (Some(KHF_PLAIN[i]), None));
+        }
+        let mut dakuten = ['\0'; 58];
+        let mut handakuten = ['\0'; 58];
+        for &(k, v) in tables::HF_KATAKANA.two {
+            let idx = (k[0] as u32 - 0xFF66) as usize;
+            let mut chars = v.chars();
+            let composed = chars.next().expect("composed replacement is non-empty");
+            assert_eq!(chars.next(), None, "composed replacements are single chars");
+            match k[1] {
+                'ﾞ' => dakuten[idx] = composed,
+                'ﾟ' => handakuten[idx] = composed,
+                other => panic!("unexpected second key char {other:?}"),
+            }
+        }
+        assert_eq!(dakuten, KHF_DAKUTEN);
+        assert_eq!(handakuten, KHF_HANDAKUTEN);
+    }
+
+    #[test]
+    fn fast_paths_match_the_table_oracle_on_fixtures() {
+        let mut cases: Vec<String> = [
+            "",
+            "ぁゖゝゞっなあいうえお",
+            "abc123 漢字 ｶ",
+            "ァヶヽヾッナアイウエオ",
+            "ヷヸヹヺー",
+            "ゕゖ",
+            "ゔ",
+            "カタカナ",
+            "かたかな",
+            "ー",
+            "ゟ",
+            "ヿ",
+            "こんにちは",
+            "ｳﾞｶﾞﾊﾟｰﾞﾟ",
+            "ｼﾝｸﾞﾙﾊﾞｲﾄｶﾅ",
+            "か゛き゛",
+            "まっなか",
+            "っな",
+            "ッナ",
+            "っ",
+            "ッ",
+            "゛",
+            "゜",
+            "ﾞ",
+            "ﾟﾟﾞ",
+            "ｦﾞﾜﾞ",
+            "Москва",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        // The bench pangrams, and the bounded worst case the doc comment
+        // records: a trigger appearing only at the very end of otherwise
+        // pure kana, which discards a nearly complete optimistic build.
+        let iroha_hira = "いろはにほへとちりぬるをわかよたれそつねならむうゐのおくやまけふこえてあさきゆめみしゑひもせす";
+        let iroha_kata = "イロハニホヘトチリヌルヲワカヨタレソツネナラムウヰノオクヤマケフコエテアサキユメミシヱヒモセス";
+        cases.push(iroha_hira.repeat(2));
+        cases.push(iroha_kata.repeat(2));
+        cases.push("ｼﾝｸﾞﾙﾊﾞｲﾄｶﾅｶﾀｶﾅｶﾞｷﾞｸﾞｹﾞｺﾞｻﾞｼﾞｽﾞｾﾞｿﾞ".repeat(2));
+        cases.push(format!("{}゛", iroha_hira.repeat(4)));
+        cases.push(format!("{}ｶ", iroha_kata.repeat(4)));
+        cases.push(format!("{}っな", iroha_hira.repeat(4)));
+        for s in &cases {
+            assert_parity(s);
+        }
+    }
+
+    #[test]
+    fn fast_paths_match_the_table_oracle_randomized() {
+        struct Xorshift(u64);
+        impl Xorshift {
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn next_range(&mut self, bound: usize) -> usize {
+                (self.next_u64() % bound as u64) as usize
+            }
+        }
+
+        // Deliberately rich in edge cases: hiragana incl. っ/ゝ/ゞ and the
+        // n-row, katakana incl. ッ/ヽ/ヾ and the n-row, both shift-range
+        // boundaries and their outside neighbours, the standalone spacing
+        // marks AND the combining ones (which must pass through), halfwidth
+        // katakana incl. ﾞ/ﾟ and the pair-less ｦ/ﾜ, halfwidth punctuation
+        // (U+FF61..=U+FF65 — triggers that are not keys), ASCII, kanji and
+        // astral.
+        const ALPHABET: &[char] = &[
+            'あ', 'い', 'か', 'は', 'ひ', 'ほ', 'っ', 'つ', 'な', 'に', 'の', 'ん', 'ゝ', 'ゞ',
+            'ゔ', '\u{3041}', '\u{3096}', '\u{3040}', '\u{3097}', 'ゟ', 'ア', 'カ', 'ハ', 'ッ',
+            'ツ', 'ナ', 'ノ', 'ン', 'ヽ', 'ヾ', 'ヴ', '\u{30A1}', '\u{30F6}', '\u{30F7}',
+            '\u{30FA}', '\u{30FB}', '\u{30FC}', 'ヿ', '゛', '゜', '\u{3099}', '\u{309A}', 'ｱ', 'ｳ',
+            'ｶ', 'ﾊ', 'ﾎ', 'ｦ', 'ﾜ', 'ﾝ', 'ﾞ', 'ﾟ', 'ｧ', 'ｯ', 'ｰ', '｡', '｢', '｣', '､', '･', 'a', 'Z',
+            '1', ' ', '.', '漢', '字', '中', '😀', 'é', 'Ω',
+        ];
+
+        let mut rng = Xorshift(0x1234_5678_9ABC_DEF1);
+        for _ in 0..6_000 {
+            let len = rng.next_range(24);
+            let s: String = (0..len)
+                .map(|_| ALPHABET[rng.next_range(ALPHABET.len())])
+                .collect();
+            assert_parity(&s);
+        }
+        // Second seed, longer strings — crosses the with_capacity and
+        // discarded-build paths that short strings cannot reach.
+        let mut rng = Xorshift(0xFEED_FACE_CAFE_BEEF);
+        for _ in 0..1_500 {
+            let len = 24 + rng.next_range(200);
+            let s: String = (0..len)
+                .map(|_| ALPHABET[rng.next_range(ALPHABET.len())])
+                .collect();
+            assert_parity(&s);
+        }
+    }
+
+    /// Every code point in the kana blocks and around the halfwidth block,
+    /// alone and next to every pair-relevant leader and follower — the
+    /// exhaustive form of the boundary conditions the fast paths encode as
+    /// `wrapping_sub` range compares.
+    #[test]
+    fn fast_paths_match_the_table_oracle_on_exhaustive_block_sweep() {
+        let followers = [
+            '゛', '゜', 'な', 'の', 'に', 'ナ', 'ノ', 'ﾞ', 'ﾟ', 'あ', 'ア', 'a',
+        ];
+        let leaders = ['っ', 'ッ', 'つ', 'ツ', 'ゝ', 'ヽ', 'ｳ', 'ﾊ', 'a'];
+        for cp in (0x3000u32..=0x3100).chain(0xFF5F..=0xFFA0) {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            assert_parity(&c.to_string());
+            for f in followers {
+                assert_parity(&format!("{c}{f}"));
+            }
+            for l in leaders {
+                assert_parity(&format!("{l}{c}"));
+            }
+            assert_parity(&format!("あ{c}ア{c}ｱ"));
         }
     }
 }

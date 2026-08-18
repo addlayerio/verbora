@@ -171,7 +171,7 @@ use verbora_stemmers::{
 /// Batch sizes: words stemmed per measured iteration, cycled from the
 /// language's word list. Matches `distance.rs`'s `SIZES` so
 /// `scripts/collect-results.py`'s hardcoded size set finds every directory.
-const SIZES: [usize; 5] = [4, 16, 64, 256, 1024];
+const SIZES: [usize; 9] = [4, 8, 16, 32, 64, 128, 256, 512, 1024];
 
 /// Reads `benches/data/stemmer-words.json`, failing loudly if it is missing.
 fn load_words() -> serde_json::Value {

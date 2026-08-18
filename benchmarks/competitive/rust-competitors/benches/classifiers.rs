@@ -114,6 +114,31 @@
 //! descent to convergence (see this file's own "Logistic Regression
 //! competitors" section above).
 //!
+//! ## Grids and probe shapes
+//!
+//! [`SIZES`] is the classic `[4, 16, 64, 256, 1024]` competitive-module
+//! convention (`scripts/collect-results.py`'s original `SIZES`) densified
+//! with the intermediate powers of two — `collect-results.py` discovers each
+//! `(group, id)`'s sizes from the directories Criterion actually wrote
+//! (`list_sizes`), so no script change is needed. [`LOGISTIC_SIZES`] is
+//! densified the same way *within* its established `16`-document ceiling
+//! (see the "Logistic Regression competitors" section above for why that
+//! ceiling exists; densifying below it does not touch that reasoning).
+//!
+//! The two `*_predict` groups each measure **two probe shapes**, not one
+//! fixed probe: `seen` (a training document verbatim — every token is in
+//! every model's vocabulary) and `half_oov` (the same document with every
+//! other token replaced by a never-trained `unseenN` token — see
+//! [`half_oov_probe`]). The out-of-vocabulary path is a genuinely different
+//! code path on every side (Verbora tokenizes and scores only known
+//! features; [`Vocab::row`] drops unknown tokens before the matrix models
+//! ever see them; `naivebayes` skips a nowhere-seen attribute entirely, its
+//! `calculate_attr_prob`'s `(None, false) => None` arm), so a single all-seen
+//! probe structurally cannot reveal its cost. Criterion ids become
+//! `bayes_predict/<impl>/<shape>` — `collect-results.py`'s `list_sizes`
+//! discovers the shape names as non-numeric "sizes", which its `_size_key`
+//! ordering already supports.
+//!
 //! ## Accuracy and correctness
 //!
 //! A real accuracy comparison needs real signal, which shape-only data does
@@ -141,11 +166,16 @@ use smartcore::linear::logistic_regression::LogisticRegression;
 use smartcore::naive_bayes::multinomial::MultinomialNB;
 use verbora_classifiers::{BayesClassifier, LogisticRegressionClassifier};
 
-const SIZES: [usize; 5] = [4, 16, 64, 256, 1024];
+/// The classic convention grid densified with intermediate powers of two —
+/// see the module doc comment's "Grids and probe shapes" section.
+const SIZES: [usize; 9] = [4, 8, 16, 32, 64, 128, 256, 512, 1024];
 /// Corpus sizes for the Logistic Regression group — see the module doc
 /// comment's "Logistic Regression competitors" section for why these are so
-/// much smaller than [`SIZES`].
-const LOGISTIC_SIZES: [usize; 3] = [4, 8, 16];
+/// much smaller than [`SIZES`] (the `16` ceiling is the in-workspace bench's
+/// own established tractability bound for gradient descent to convergence,
+/// deliberately not raised here), and its "Grids and probe shapes" section
+/// for the densification below that ceiling.
+const LOGISTIC_SIZES: [usize; 5] = [4, 6, 8, 12, 16];
 
 /// Deterministic pseudo-random source, byte-for-byte identical to
 /// `crates/verbora-classifiers/benches/classifiers.rs`'s own `Lcg`.
@@ -193,6 +223,27 @@ fn logistic_corpus(count: usize) -> Vec<(String, String)> {
 /// preprocessing — see the module doc comment's `naivebayes` bullet.
 fn tokenize(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// The `half_oov` probe shape: `seen` with every other token replaced by an
+/// `unseenN` token no model was ever trained on ([`corpus`] only ever emits
+/// `token<K>` words, so `unseen<N>` can never collide with trained
+/// vocabulary). Same token count as the `seen` probe, so the two shapes
+/// differ only in how much of the probe survives each side's
+/// vocabulary/attribute lookup — see the module doc comment's "Grids and
+/// probe shapes" section.
+fn half_oov_probe(seen: &str) -> String {
+    seen.split_whitespace()
+        .enumerate()
+        .map(|(i, tok)| {
+            if i % 2 == 0 {
+                format!("unseen{i}")
+            } else {
+                tok.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The smartcore/linfa adapter: a whitespace-split, lowercased vocabulary and
@@ -318,9 +369,12 @@ fn bench_predict(c: &mut Criterion) {
     // Fixed corpus, same shape as the in-workspace bench's own
     // `classification` group (`corpus(64, 12, 400, 6)`) — training happens
     // once, outside the timed region, matching that every model here is
-    // already-trained before `classify`/`predict` is called.
+    // already-trained before `classify`/`predict` is called. Two probe
+    // shapes per implementation — see the module doc comment's "Grids and
+    // probe shapes" section.
     let data = corpus(64, 12, 400, 6);
-    let probe = data[0].0.clone();
+    let seen = data[0].0.clone();
+    let probes = [("seen", seen.clone()), ("half_oov", half_oov_probe(&seen))];
 
     let mut verbora = BayesClassifier::new();
     for (text, label) in &data {
@@ -336,42 +390,45 @@ fn bench_predict(c: &mut Criterion) {
     let y_linfa = label_ids(&data);
     let sm_model = MultinomialNB::fit(&x, &y, Default::default()).expect("fits");
 
+    let mut nb = NaiveBayes::new();
+    for (text, label) in &data {
+        nb.train(&tokenize(text), label);
+    }
+
     let mut g = c.benchmark_group("bayes_predict");
-    g.bench_function("verbora", |b| {
-        b.iter(|| black_box(verbora.classify(black_box(probe.as_str())).unwrap()));
-    });
-    g.bench_function("smartcore", |b| {
-        b.iter(|| {
-            let row = vocab.row(black_box(probe.as_str()));
-            let xt = DenseMatrix::<u32>::from_2d_array(&[row.as_slice()]).expect("one row");
-            black_box(sm_model.predict(&xt).expect("predicts"))
+    for (shape, probe) in &probes {
+        g.bench_with_input(BenchmarkId::new("verbora", shape), probe, |b, probe| {
+            b.iter(|| black_box(verbora.classify(black_box(probe.as_str())).unwrap()));
         });
-    });
-    g.bench_function("linfa_bayes", |b| {
-        use linfa::prelude::*;
-        use linfa_bayes::MultinomialNbParams;
-        let flat: Vec<f64> = rows.iter().flatten().map(|&v| f64::from(v)).collect();
-        let x = Array2::from_shape_vec((rows.len(), vocab.len()), flat).expect("rectangular");
-        let y_arr = ndarray::Array1::from(y_linfa.clone());
-        let ds = DatasetView::new(x.view(), y_arr.view());
-        let model = MultinomialNbParams::new().fit(&ds).expect("fits");
-        b.iter(|| {
-            let row = vocab.row(black_box(probe.as_str()));
-            let xt = Array2::from_shape_vec(
-                (1, vocab.len()),
-                row.iter().map(|&v| f64::from(v)).collect(),
-            )
-            .expect("one row");
-            black_box(model.predict(&xt))
+        g.bench_with_input(BenchmarkId::new("smartcore", shape), probe, |b, probe| {
+            b.iter(|| {
+                let row = vocab.row(black_box(probe.as_str()));
+                let xt = DenseMatrix::<u32>::from_2d_array(&[row.as_slice()]).expect("one row");
+                black_box(sm_model.predict(&xt).expect("predicts"))
+            });
         });
-    });
-    g.bench_function("naivebayes", |b| {
-        let mut nb = NaiveBayes::new();
-        for (text, label) in &data {
-            nb.train(&tokenize(text), label);
-        }
-        b.iter(|| black_box(nb.classify(&tokenize(black_box(probe.as_str())))));
-    });
+        g.bench_with_input(BenchmarkId::new("linfa_bayes", shape), probe, |b, probe| {
+            use linfa::prelude::*;
+            use linfa_bayes::MultinomialNbParams;
+            let flat: Vec<f64> = rows.iter().flatten().map(|&v| f64::from(v)).collect();
+            let x = Array2::from_shape_vec((rows.len(), vocab.len()), flat).expect("rectangular");
+            let y_arr = ndarray::Array1::from(y_linfa.clone());
+            let ds = DatasetView::new(x.view(), y_arr.view());
+            let model = MultinomialNbParams::new().fit(&ds).expect("fits");
+            b.iter(|| {
+                let row = vocab.row(black_box(probe.as_str()));
+                let xt = Array2::from_shape_vec(
+                    (1, vocab.len()),
+                    row.iter().map(|&v| f64::from(v)).collect(),
+                )
+                .expect("one row");
+                black_box(model.predict(&xt))
+            });
+        });
+        g.bench_with_input(BenchmarkId::new("naivebayes", shape), probe, |b, probe| {
+            b.iter(|| black_box(nb.classify(&tokenize(black_box(probe.as_str())))));
+        });
+    }
     g.finish();
 }
 
@@ -456,9 +513,12 @@ fn bench_logistic_train(c: &mut Criterion) {
 fn bench_logistic_predict(c: &mut Criterion) {
     // Fixed corpus, the same shape [`LOGISTIC_SIZES`]'s largest size uses —
     // training happens once, outside the timed region, matching every model
-    // here already being trained before `classify`/`predict` is called.
+    // here already being trained before `classify`/`predict` is called. Two
+    // probe shapes per implementation — see the module doc comment's "Grids
+    // and probe shapes" section.
     let data = logistic_corpus(16);
-    let probe = data[0].0.clone();
+    let seen = data[0].0.clone();
+    let probes = [("seen", seen.clone()), ("half_oov", half_oov_probe(&seen))];
 
     let mut verbora = LogisticRegressionClassifier::new();
     for (text, label) in &data {
@@ -476,51 +536,58 @@ fn bench_logistic_predict(c: &mut Criterion) {
     let sm_model = LogisticRegression::fit(&x, &y, Default::default()).expect("fits");
 
     let mut g = c.benchmark_group("logistic_predict");
-    g.bench_function("verbora", |b| {
-        b.iter(|| black_box(verbora.classify(black_box(probe.as_str())).unwrap()));
-    });
-    g.bench_function("smartcore", |b| {
-        b.iter(|| {
-            let row = vocab.row(black_box(probe.as_str()));
-            let row_f64: Vec<f64> = row.iter().map(|&v| f64::from(v)).collect();
-            let xt = DenseMatrix::<f64>::from_2d_array(&[row_f64.as_slice()]).expect("one row");
-            black_box(sm_model.predict(&xt).expect("predicts"))
+    for (shape, probe) in &probes {
+        g.bench_with_input(BenchmarkId::new("verbora", shape), probe, |b, probe| {
+            b.iter(|| black_box(verbora.classify(black_box(probe.as_str())).unwrap()));
         });
-    });
-    g.bench_function("linfa_logistic", |b| {
-        use linfa::prelude::*;
-        use linfa_logistic::MultiLogisticRegression;
-        let flat: Vec<f64> = rows.iter().flatten().map(|&v| f64::from(v)).collect();
-        let x = Array2::from_shape_vec((rows.len(), vocab.len()), flat).expect("rectangular");
-        let y_arr = ndarray::Array1::from(y_linfa.clone());
-        let ds = DatasetView::new(x.view(), y_arr.view());
-        let model = MultiLogisticRegression::default().fit(&ds).expect("fits");
-        b.iter(|| {
-            let row = vocab.row(black_box(probe.as_str()));
-            let xt = Array2::from_shape_vec(
-                (1, vocab.len()),
-                row.iter().map(|&v| f64::from(v)).collect(),
-            )
-            .expect("one row");
-            black_box(model.predict(&xt))
+        g.bench_with_input(BenchmarkId::new("smartcore", shape), probe, |b, probe| {
+            b.iter(|| {
+                let row = vocab.row(black_box(probe.as_str()));
+                let row_f64: Vec<f64> = row.iter().map(|&v| f64::from(v)).collect();
+                let xt = DenseMatrix::<f64>::from_2d_array(&[row_f64.as_slice()]).expect("one row");
+                black_box(sm_model.predict(&xt).expect("predicts"))
+            });
         });
-    });
-    g.bench_function("rustlearn", |b| {
-        use rustlearn::linear_models::sgdclassifier::Hyperparameters;
-        use rustlearn::prelude::*;
-        let rows_f32 = counts_to_f32(&rows);
-        let x_train = Array::from(&rows_f32);
-        let y: Vec<f32> = y_linfa.iter().map(|&v| v as f32).collect();
-        let y_train = Array::from(y);
-        let mut model = Hyperparameters::new(vocab.len()).one_vs_rest();
-        model.fit(&x_train, &y_train).expect("fits");
-        b.iter(|| {
-            let row = vocab.row(black_box(probe.as_str()));
-            let row_f32: Vec<f32> = row.iter().map(|&v| v as f32).collect();
-            let xt = Array::from(&vec![row_f32]);
-            black_box(model.predict(&xt).expect("predicts"))
+        g.bench_with_input(
+            BenchmarkId::new("linfa_logistic", shape),
+            probe,
+            |b, probe| {
+                use linfa::prelude::*;
+                use linfa_logistic::MultiLogisticRegression;
+                let flat: Vec<f64> = rows.iter().flatten().map(|&v| f64::from(v)).collect();
+                let x =
+                    Array2::from_shape_vec((rows.len(), vocab.len()), flat).expect("rectangular");
+                let y_arr = ndarray::Array1::from(y_linfa.clone());
+                let ds = DatasetView::new(x.view(), y_arr.view());
+                let model = MultiLogisticRegression::default().fit(&ds).expect("fits");
+                b.iter(|| {
+                    let row = vocab.row(black_box(probe.as_str()));
+                    let xt = Array2::from_shape_vec(
+                        (1, vocab.len()),
+                        row.iter().map(|&v| f64::from(v)).collect(),
+                    )
+                    .expect("one row");
+                    black_box(model.predict(&xt))
+                });
+            },
+        );
+        g.bench_with_input(BenchmarkId::new("rustlearn", shape), probe, |b, probe| {
+            use rustlearn::linear_models::sgdclassifier::Hyperparameters;
+            use rustlearn::prelude::*;
+            let rows_f32 = counts_to_f32(&rows);
+            let x_train = Array::from(&rows_f32);
+            let y: Vec<f32> = y_linfa.iter().map(|&v| v as f32).collect();
+            let y_train = Array::from(y);
+            let mut model = Hyperparameters::new(vocab.len()).one_vs_rest();
+            model.fit(&x_train, &y_train).expect("fits");
+            b.iter(|| {
+                let row = vocab.row(black_box(probe.as_str()));
+                let row_f32: Vec<f32> = row.iter().map(|&v| v as f32).collect();
+                let xt = Array::from(&vec![row_f32]);
+                black_box(model.predict(&xt).expect("predicts"))
+            });
         });
-    });
+    }
     g.finish();
 }
 

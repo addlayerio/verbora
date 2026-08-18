@@ -1,8 +1,9 @@
 # String distance results
 
-26 benchmarks, `verbora-distance` against a widely-used JavaScript NLP
-library (v8.1.1) on identical inputs. **Median speedup 23.4×**, range
-**1.4×–3307.4×**.
+Historical paired snapshot: 26 benchmarks, `verbora-distance` against a
+widely-used JavaScript NLP library (v8.1.1) on identical inputs. **Median
+speedup 23.4×**, range **1.4×–3307.4×**. The current Verbora-only shape suite
+is reported separately below rather than being mixed into this paired result.
 
 <div class="callout callout-good">
 <strong>The Levenshtein-family and Jaro–Winkler rows below run on
@@ -55,6 +56,38 @@ compute the same values.
 | `hamming/256` | 599.7 ns | 72.7 ns | **8.2×** |
 | `hamming/1024` | 2.16 µs | 275.3 ns | **7.8×** |
 
+## Current Levenshtein shape suite
+
+The paired table above is a version-pinned JavaScript comparison. The cases
+below are deliberately **not** folded into its median: they exercise new
+Verbora-only shapes for which this repository has not run an equivalent
+JavaScript workload. They are Criterion median estimates from the current
+working tree on an Intel i9-14900KF, rustc 1.97.1, release profile. Reproduce
+them with:
+
+```bash
+cargo bench -p verbora-distance --bench distance -- 'levenshtein_shapes|levenshtein_weighted'
+```
+
+| Benchmark | Input shape | Verbora |
+|---|---|--:|
+| `levenshtein_shapes/near/1024` | ASCII, one central substitution | 0.35 µs |
+| `levenshtein_shapes/near_unicode/1024` | Cyrillic, one central substitution | 0.50 µs |
+| `levenshtein_shapes/empty_ascii/1024` | empty → 1024 ASCII units | 8.8 ns |
+| `levenshtein_shapes/empty_unicode/1024` | empty → 1024 Cyrillic units | 0.39 µs |
+| `levenshtein_shapes/disjoint/1024` | two disjoint ASCII alphabets | 1.18 µs |
+| `levenshtein_shapes/late_overlap/65x10000` | first shared unit near the end | 2.55 µs |
+| `levenshtein_weighted/16` | substitution cost 0.5 | 0.33 µs |
+| `levenshtein_weighted/64` | substitution cost 0.5 | 6.18 µs |
+| `levenshtein_weighted/256` | substitution cost 0.5 | 131.8 µs |
+| `levenshtein_weighted/rectangular/16x1024` | substitution cost 0.5 | 39.5 µs |
+
+The unit-cost rows demonstrate exact fast paths, not a weaker distance:
+common UTF-8/UTF-16 affixes are removed before Myers runs, all-disjoint
+alphabets return directly, and a leading non-matching run initializes the
+same Myers state without scanning it twice. Weighted inputs deliberately use
+the scalar rolling-row recurrence, which preserves arbitrary option costs.
+
 ## Where the Levenshtein win comes from
 
 The JavaScript library always materialises a full `(n+1)×(m+1)` matrix of
@@ -69,7 +102,7 @@ fastest data structure:
 | Mode | Working set | Why |
 |---|---|---|
 | distance, no Damerau, unit cost | **bit-vector** (one `u64` word per 64 units of the shorter operand) | Myers'/Hyyrö's bit-parallel algorithm computes the same answer in `O(nm/64)` bitwise operations rather than `O(nm)` scalar cell updates; the pattern-preprocessing table is a flat array on the byte path (no hashing), and the single-word path covers operands of 1–64 units — see [the competitive benchmarks page](competitive.md#levenshtein) for the full story |
-| distance, no Damerau (fallback, weighted costs) | **2 rows** | a cell needs only `up`, `left`, `diag` |
+| distance, no Damerau (fallback, weighted costs) | **1 row** | each cell needs only `up`, `left`, `diag` |
 | distance, restricted Damerau, unit cost | **bit-vector** (word + block) | Hyyrö's 2003 transposition extension of Myers computes OSA in the same `O(nm/64)` bitwise style |
 | distance, restricted Damerau (fallback, weighted costs) | **3 rows** | transposition reaches row − 2 |
 | distance, unrestricted Damerau | **2 rows + per-symbol row snapshots** | transposition reaches an arbitrary earlier row, so the kernel snapshots each symbol's last matching row into an arena (integer cells: `u16` while the combined length fits, `u32` beyond) instead of materialising the cost + parent matrices |

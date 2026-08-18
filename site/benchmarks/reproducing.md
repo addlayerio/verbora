@@ -1,7 +1,7 @@
 # Reproducing the benchmarks
 
-Everything on the [results page](distance.md) can be regenerated from a clean
-checkout. If a number here cannot be reproduced, that is a bug.
+Every number in this section can be regenerated from a clean checkout. If one
+cannot be reproduced, that is a bug.
 
 ## Prerequisites
 
@@ -33,16 +33,14 @@ benches/data/distance-pairs.json   the string pairs the metrics compare
 No harness generates its own inputs, so none can be tuned to a distribution
 that flatters it.
 
-## 2. The Rust side
+## 2. Run a crate's own benchmarks
 
 ```bash
 cargo bench -p verbora-distance
 ```
 
 Criterion writes HTML reports to `target/criterion/` and stores a baseline it
-will compare against on the next run.
-
-Other crates:
+compares against on the next run. The other benched crates:
 
 ```bash
 cargo bench -p verbora-inflectors
@@ -53,9 +51,9 @@ cargo bench -p verbora-tokenizers
 cargo bench -p verbora-trie
 ```
 
-## 3. The competitive suite
+## 3. Run the competitive suite
 
-Head-to-head against pinned third-party Rust crates, with its own structured
+Head-to-head against the pinned third-party crates, with its own structured
 results:
 
 ```bash
@@ -63,11 +61,37 @@ results:
 ./scripts/competitive-benchmarks.sh distance     # one module
 ```
 
-It writes `benchmarks/competitive/results/results.json` (structured summary),
-`results/raw/` (Criterion's own estimates, so the summary can be re-derived)
-and `results/metadata.json` (machine and toolchain attribution).
+It writes:
 
-## Profiles
+```text
+benchmarks/competitive/results/results.json      structured summary
+benchmarks/competitive/results/raw/              Criterion's own estimates
+benchmarks/competitive/results/metadata.json     machine and toolchain
+```
+
+The raw estimates are kept so the summary can be re-derived rather than taken on
+trust.
+
+## Comparing two runs
+
+Criterion compares against its stored baseline automatically and reports
+"Performance has improved" or "has regressed" per benchmark. To name a baseline
+explicitly:
+
+```bash
+cargo bench -p verbora-distance -- --save-baseline before
+# ... make a change ...
+cargo bench -p verbora-distance -- --baseline before
+```
+
+This is how [the Jaro–Winkler
+fix](distance.md#a-measured-regression-and-its-fix) was confirmed. Small
+movements between runs are noise and are not gated in CI; material changes to
+tokenizer throughput, stemming, Levenshtein, TF-IDF, WordNet lookup, classifier
+prediction and sentiment analysis are recorded with the benchmark result and the
+commit that caused them.
+
+## Profiling
 
 The `bench` profile inherits `release` and adds debug symbols, so `perf` and
 `samply` resolve frames:
@@ -84,27 +108,13 @@ For maximum runtime speed at a significant compile-time cost:
 cargo bench --profile release-max -p verbora-distance
 ```
 
-The published table uses the ordinary `release` settings (`opt-level = 3`,
-`lto = "thin"`, `codegen-units = 16`), because that is what most users build.
-
-## Comparing two of your own runs
-
-Criterion compares against its stored baseline automatically. To name a baseline
-explicitly:
-
-```bash
-cargo bench -p verbora-distance -- --save-baseline before
-# ... make a change ...
-cargo bench -p verbora-distance -- --baseline before
-```
-
-It will report "Performance has improved" or "has regressed" per benchmark. That
-is how the Jaro–Winkler fix was confirmed.
+Published tables use the ordinary `release` settings (`opt-level = 3`,
+`lto = "thin"`, `codegen-units = 16`), because that is what most people build.
 
 ## Before you trust a result
 
-**Re-run the test suite.** A benchmark that computes something cheaper is not a
-benchmark:
+**Re-run the test suite.** A benchmark whose faster side computes something
+cheaper is not a benchmark:
 
 ```bash
 cargo test --workspace
@@ -118,11 +128,12 @@ sudo cpupower frequency-set --governor performance
 ```
 
 **Run it more than once.** Criterion's confidence intervals tell you whether a
-difference is real. Small movements are noise.
+difference is real.
 
-**Check the input sizes.** A 53.8× ratio at four characters and a 3307.7× ratio
-at 1024 are both true statements about the same function. Quoting either alone
-is misleading.
+**Check the input size.** A ratio measured on four-character strings and a ratio
+measured on 1024-character strings are both true statements about the same
+function, and they can differ by orders of magnitude. Quoting either alone is
+misleading.
 
 ## Adding a benchmark
 
@@ -130,10 +141,8 @@ is misleading.
 2. If a competitor exists, add it to
    `benchmarks/competitive/rust-competitors/benches/<name>.rs` and register the
    module in `scripts/competitive-benchmarks.sh`'s `MODULE_SPECS`.
-3. If new inputs are needed, generate them in `tools/bench-data/generate.py` so
+3. If new inputs are needed, generate them in `tools/bench-data/generate.py`, so
    every harness reads the same bytes.
-4. Run it, and put the table in `docs/PERFORMANCE.md` **and** on this site —
-   with the hardware, toolchain versions and commands.
-
-See [Documentation is part of the code](../reference/docs-are-code.md) for why
-step 4 is not optional.
+4. Run it, and publish the reviewed result with the hardware, the toolchain
+   versions and the commands — see
+   [Documentation is part of the code](../reference/docs-are-code.md).

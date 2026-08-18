@@ -1,32 +1,22 @@
 # Why there is more than one API
 
-Open `verbora-tokenizers` and you will find three ways to split a string:
+`verbora-tokenizers` offers three ways to split a string:
 
 ```rust  ignore
-tokenizer.tokenize(text)
-tokenizer.tokens(text)
-tokenizer.tokenize_into(text, &mut buffer)
+tokenizer.tokenize(text)                     // a Vec you own
+tokenizer.tokens(text)                       // an iterator
+tokenizer.tokenize_into(text, &mut buffer)   // appended into memory you keep
 ```
 
-A reasonable first reaction is suspicion. Three functions that do the same thing
-usually means two of them are mistakes, or that the library could not decide.
-Neither is true here, and this section exists so you never have to guess which
-one you want.
+They are not competing implementations. Each tokenizer has exactly one
+implementation of its behaviour; these are three ways of moving its output to
+you, and they differ only in who owns the memory. Same result, every time.
 
-## The editorial rule
-
-This project holds itself to one rule about API surface, written into its
-`AGENTS.md`:
-
-> Whenever Verbora exposes more than one API for the same conceptual operation,
-> the documentation **must** explain why each variant exists and when you should
-> choose it. If a real difference cannot be explained, the second API should not
-> exist.
-
-So every group of similar-looking functions on this site comes with: what each
-one does, when to use it, when *not* to, whether it allocates, whether it is
-lazy, whether it can reuse memory, and — when the difference is a performance
-difference — what evidence supports the recommendation.
+This section tells you which one to pick — here and everywhere else Verbora
+offers a choice. Every group of similar-looking functions on this site comes
+with the same information: what each one does, when to use it, when not to,
+whether it allocates, whether it is lazy, and — when the difference is a
+performance difference — what measurement supports the recommendation.
 
 ## The one thing to internalise
 
@@ -50,35 +40,7 @@ The variants exist because these workloads have genuinely different bottlenecks:
 | Documents don't fit in memory | Peak memory | `tokens()` |
 | 16 idle cores | Wall clock | A crate's own `par_*_batch`, or `rayon` at your call site |
 
-## What Verbora does *not* have
-
-Being explicit about absence is part of the same rule. As of this version:
-
-<div class="callout callout-warn">
-<strong>Most of Verbora's API is sequential-only by design.</strong> Thirteen
-crates ship a curated, opt-in <code>par_*</code> batch function behind a
-<code>parallel</code> Cargo feature — never on by default, never a second
-implementation, each one added because a real benchmark showed a real win.
-Everything else has no <code>par_*</code> function and no internal thread
-pool; this site shows you how to write it at your own call site with your own
-<code>rayon</code> dependency and explains when it actually pays. See
-<a href="../performance/parallelism">Parallelism</a> for the full table.
-</div>
-
-- **Batch APIs are minimal.** `verbora_core::Tokenizer::tokenize_batch` and
-  `verbora_core::Stemmer::stem_batch` exist as provided trait methods with
-  sequential default bodies. No other crate has a batch entry point.
-- **`_into` variants are rare.** Only tokenizers (`tokenize_into`,
-  `tokenize_borrowed_into`), inflectors (`pluralize_into`, `singularize_into`),
-  the `Stemmer` trait (`stem_into`) and `CaseMode::apply_into` have one. Distance,
-  phonetics, normalizers and n-grams do not.
-- **No scratch-buffer API.** There is no `levenshtein_with_scratch`. The
-  Levenshtein family allocates its own working rows per call.
-
-Where an absence is inconvenient, the relevant page shows the call-site
-workaround rather than pretending an API exists.
-
-## How to use this section
+## Where to start
 
 <div class="cards">
 
@@ -89,7 +51,7 @@ workaround rather than pretending an API exists.
 
 <a class="card" href="tokenization">
 <span class="card-title">Tokenization →</span>
-<span class="card-desc">The canonical worked example. Pipeline diagrams, a full comparison table, a decision tree, and one example per variant.</span>
+<span class="card-desc">The canonical worked example: a full comparison table, a decision table, and one runnable example per variant.</span>
 </a>
 
 <a class="card" href="distance">
@@ -103,8 +65,8 @@ workaround rather than pretending an API exists.
 </a>
 
 <a class="card" href="decision-trees">
-<span class="card-title">Every decision tree →</span>
-<span class="card-desc">All the trees on one page, for when you know what you need and just want the answer.</span>
+<span class="card-title">Quick answers →</span>
+<span class="card-desc">Every choice on the site condensed into one page of tables, for when you know what you need and just want the answer.</span>
 </a>
 
 <a class="card" href="../performance/">
@@ -115,19 +77,43 @@ workaround rather than pretending an API exists.
 </div>
 
 Subsystems with only one sensible API — phonetics, normalizers, inflectors,
-tries — carry their "Choosing the right API" section on their own feature page
-rather than here, because the choice there is usually *which type* rather than
-*which call shape*.
+tries — carry their "Choosing the right API" section on their own feature page,
+because the choice there is usually *which type* rather than *which call shape*.
 
-## A worked example of the reasoning
+## What Verbora does not have
 
-Suppose you are writing a spell-check suggestion endpoint. Per request, you have
-one misspelled word and a dictionary of 100,000 candidates, and you want the ten
-closest by edit distance.
+Knowing the absences saves you the search:
 
-The naive read of this site's advice — "use the fast API" — would send you
-looking for `levenshtein_batch`. It does not exist, and even if it did it would
-not be the biggest win available. The actual reasoning goes:
+<div class="callout callout-warn">
+<strong>Most of Verbora's API is sequential by design.</strong> Thirteen
+crates ship a curated, opt-in <code>par_*_batch</code> function behind a
+<code>parallel</code> Cargo feature — never on by default, never a second
+implementation, each one added because a benchmark showed a real win.
+Everything else has no <code>par_*</code> function and no internal thread
+pool; this site shows you how to write it at your own call site with your own
+<code>rayon</code> dependency and explains when it actually pays. See
+<a href="../performance/parallelism">Parallelism</a> for the full table.
+</div>
+
+- **Batch APIs are minimal.** `verbora_core::Tokenizer::tokenize_batch` and
+  `verbora_core::Stemmer::stem_batch` are provided trait methods with sequential
+  default bodies. No other crate has a batch entry point.
+- **`_into` variants are rare.** Only tokenizers (`tokenize_into`,
+  `tokenize_borrowed_into`), inflectors (`pluralize_into`, `singularize_into`),
+  the `Stemmer` trait (`stem_into`) and `CaseMode::apply_into` have one. Distance,
+  phonetics, normalizers and n-grams do not.
+- **No scratch-buffer API.** There is no `levenshtein_with_scratch`. The
+  Levenshtein family builds its own working state per call.
+
+Where an absence is inconvenient, the relevant page shows the call-site
+workaround rather than pretending an API exists.
+
+## Getting the order right
+
+Suppose you are writing a spell-check suggestion endpoint: one misspelled word
+per request, a dictionary of 100,000 candidates, and you want the ten closest by
+edit distance. The instinct is to look for `levenshtein_batch`. It does not
+exist — and it would not be the biggest win available anyway.
 
 1. **Cut the candidate set first.** 100,000 Levenshtein calls to return ten
    results is the wrong shape regardless of how fast each call is. A
@@ -136,12 +122,12 @@ not be the biggest win available. The actual reasoning goes:
    orders of magnitude, and *that* is the optimisation that matters.
 2. **Then pick the metric.** For typos, `levenshtein`; for names,
    `jaro_winkler`, which weights a common prefix. See
-   [Choosing a distance metric](distance.md).
-3. **Then worry about the call shape.** Hoist `Options` out of the loop, keep the
-   input `&str`s ASCII where you can so the byte fast path applies, and only then
-   reach for `verbora-distance`'s own `par_levenshtein_batch` (behind its
-   `parallel` feature) or `rayon` at your call site.
+   [Choosing a distance API](distance.md).
+3. **Then pick the call shape.** Hoist `Options` out of the loop, keep inputs
+   ASCII where you can so the byte fast path applies, and only then reach for
+   `verbora-distance`'s own `par_levenshtein_batch` (behind its `parallel`
+   feature) or `rayon` at your call site.
 
-Getting the *order* right is the point. This section is organised to make step 3
-easy so you can spend your attention on steps 1 and 2 — see
-[Recipes by workload](../recipes/index.md) for that half of the problem.
+This section is organised to make step 3 easy, so you can spend your attention
+on steps 1 and 2 — see [Recipes by workload](../recipes/index.md) for that half
+of the problem.

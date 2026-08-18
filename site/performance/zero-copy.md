@@ -148,31 +148,31 @@ Being honest about the other direction:
   restricted Damerau alike), rows or per-symbol row snapshots in the weighted
   and unrestricted-Damerau modes.
 
-## What this buys, measured
+## What the fast path is worth
 
-The one place with published cross-language numbers is `verbora-distance`, where
-the gap tracks allocation pressure almost exactly:
+`verbora-distance` is where the effect is published, and it shows up as the gap
+between the borrowed-`&[u8]` path and the promoted-`Vec<u16>` path on identical
+input lengths:
 
-| Benchmark | Speedup | Why |
-|---|--:|---|
-| `levenshtein/ascii/1024` | 3307.7× | a widely-used JavaScript NLP library's ~1M heap-allocated cells; Verbora's bit-vector algorithm needs one `u64` word per 64 units of input, not rows |
-| `dice/1024` | 7.5× | `(u16, u16)` hash keys instead of a `String` per bigram |
-| `hamming/4` | 1.4× | almost no allocation to remove — both sides just compare |
+| Benchmark | Representation | Time |
+|---|---|--:|
+| `levenshtein/ascii/16` | borrowed `&[u8]` | 41.8 ns |
+| `levenshtein/cyrillic/16` | promoted `Vec<u16>` | 266.4 ns |
+| `levenshtein/ascii/256` | borrowed `&[u8]` | 2.13 µs |
+| `levenshtein/cyrillic/256` | promoted `Vec<u16>` | 3.97 µs |
 
-The small number is as informative as the large one. Where there is nothing to
-save, there is no win, and the table says so.
+The promotion is a fixed cost paid once per operand, so its share shrinks as the
+comparison grows: the promoted path costs 6.4× the borrowed one at 16 units but
+only 1.9× at 256. Exact UTF-16 semantics are free on ASCII text, and stay under
+four microseconds even on a 256-unit non-ASCII comparison.
 
-The largest number's mechanism is not two rows instead of a whole matrix: a
-Myers/Hyyrö bit-vector algorithm answers plain, unit-cost Levenshtein calls
-with a handful of `u64` words instead of any row at all — the same "smallest
-structure that can answer the question" instinct behind every other
-technique on this page, taken further. See [the distance
-benchmarks](../benchmarks/distance.md) for the full 26-row table and how the
-algorithm was verified.
+Where there is nothing to copy in the first place, there is nothing to save:
+`hamming` on ASCII is a single scan that allocates nothing at all — 6.6 ns at
+four units, 275.3 ns at 1024.
 
 ## Related
 
 - [Allocation behaviour](allocation.md) — the per-API reference.
 - [Normalizers](../features/normalizers.md) — the `Cow` story in full.
-- [Benchmarks: string distance](../benchmarks/distance.md) — the full 26-row
-  table, including the bit-vector Levenshtein mechanism.
+- [Benchmarks: string distance](../benchmarks/distance.md) — the full results
+  table, including the bit-vector Levenshtein kernels.

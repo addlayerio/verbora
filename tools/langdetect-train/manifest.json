@@ -1,0 +1,286 @@
+{
+  "abstain_margins": {
+    "cyrillic": 0.8066737651824951,
+    "latin": 0.7344217300415039
+  },
+  "dimension": 4096,
+  "heldout_accuracy": {
+    "cyrillic": [
+      {
+        "correct": 4907,
+        "iso639_1": "ru",
+        "total": 5000
+      },
+      {
+        "correct": 4891,
+        "iso639_1": "uk",
+        "total": 5000
+      }
+    ],
+    "latin": [
+      {
+        "correct": 4970,
+        "iso639_1": "en",
+        "total": 5000
+      },
+      {
+        "correct": 4823,
+        "iso639_1": "es",
+        "total": 5000
+      },
+      {
+        "correct": 4750,
+        "iso639_1": "pt",
+        "total": 5000
+      },
+      {
+        "correct": 4946,
+        "iso639_1": "it",
+        "total": 5000
+      },
+      {
+        "correct": 4961,
+        "iso639_1": "fr",
+        "total": 5000
+      },
+      {
+        "correct": 4973,
+        "iso639_1": "de",
+        "total": 5000
+      },
+      {
+        "correct": 4976,
+        "iso639_1": "nl",
+        "total": 5000
+      },
+      {
+        "correct": 4985,
+        "iso639_1": "pl",
+        "total": 5000
+      },
+      {
+        "correct": 2806,
+        "iso639_1": "id",
+        "total": 2818
+      },
+      {
+        "correct": 3235,
+        "iso639_1": "vi",
+        "total": 3241
+      },
+      {
+        "correct": 1752,
+        "iso639_1": "no",
+        "total": 1810
+      },
+      {
+        "correct": 4902,
+        "iso639_1": "sv",
+        "total": 5000
+      },
+      {
+        "correct": 4984,
+        "iso639_1": "fi",
+        "total": 5000
+      },
+      {
+        "correct": 757,
+        "iso639_1": "gl",
+        "total": 820
+      },
+      {
+        "correct": 1064,
+        "iso639_1": "ca",
+        "total": 1096
+      },
+      {
+        "correct": 638,
+        "iso639_1": "eu",
+        "total": 643
+      }
+    ]
+  },
+  "hyperparams": {
+    "epochs": 8,
+    "lr0": 0.5,
+    "lr_decay": 0.6499999761581421,
+    "samples_per_class_per_epoch": 25000,
+    "seed": "0x5EEDC0DE20260818"
+  },
+  "prepare": {
+    "corpus": "Tatoeba per-language exports (https://tatoeba.org, CC-BY 2.0 FR)",
+    "filters": {
+      "dedup": "exact string",
+      "heldout_cap": 5000,
+      "max_chars": 400,
+      "script_filter": "detect_script(text) must equal the language's script",
+      "split": "every 10th kept sentence held out",
+      "train_cap": 120000
+    },
+    "languages": [
+      {
+        "heldout": 5000,
+        "iso639_1": "en",
+        "kept_after_filters": 125000,
+        "raw_lines": 125000,
+        "source_file": "eng_sentences.tsv.bz2",
+        "source_sha256": "2ce5e947c688d1be268db771711a32a50d23ac683625686c0ad1b5ba7ff3ee31",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "es",
+        "kept_after_filters": 125000,
+        "raw_lines": 125030,
+        "source_file": "spa_sentences.tsv.bz2",
+        "source_sha256": "8343d30882a47377a7e4eaf3227fd42a8783224987f08c5278af9603c8309450",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "pt",
+        "kept_after_filters": 125000,
+        "raw_lines": 125021,
+        "source_file": "por_sentences.tsv.bz2",
+        "source_sha256": "3014fba0beadc8efc2d7dcd9e0aaf9ec7cc574f0d4162aca72ac86a87b74b66c",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "it",
+        "kept_after_filters": 125000,
+        "raw_lines": 125010,
+        "source_file": "ita_sentences.tsv.bz2",
+        "source_sha256": "5062950098f90cf15c579580c1d9a23ff54c1619c6c1760ff62172f32055c52e",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "fr",
+        "kept_after_filters": 125000,
+        "raw_lines": 125050,
+        "source_file": "fra_sentences.tsv.bz2",
+        "source_sha256": "a0722e4c48d36f81163454c362ef8da1097ac98dd4fc2505bdd9f4055827f734",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "de",
+        "kept_after_filters": 125000,
+        "raw_lines": 125045,
+        "source_file": "deu_sentences.tsv.bz2",
+        "source_sha256": "d36236d8264e610c51801707f0b0a95a702ebabe518063fa61f843d37180badb",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "nl",
+        "kept_after_filters": 125000,
+        "raw_lines": 125031,
+        "source_file": "nld_sentences.tsv.bz2",
+        "source_sha256": "aba861bd7e6a0d8754d2275c8f3ddca2e2f1dbabb9960823baaa4ae8c8cd4720",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "pl",
+        "kept_after_filters": 125000,
+        "raw_lines": 125006,
+        "source_file": "pol_sentences.tsv.bz2",
+        "source_sha256": "fd78c12f8191b06352a025c9948ffceb7e70cd72871542cde31fd378d84464fd",
+        "train": 120000
+      },
+      {
+        "heldout": 2818,
+        "iso639_1": "id",
+        "kept_after_filters": 28186,
+        "raw_lines": 28192,
+        "source_file": "ind_sentences.tsv.bz2",
+        "source_sha256": "ea0ad3241cf8c6377e109f1e617790c3399bdef372b3608e6c3937a6a7e3b702",
+        "train": 25368
+      },
+      {
+        "heldout": 3241,
+        "iso639_1": "vi",
+        "kept_after_filters": 32419,
+        "raw_lines": 32430,
+        "source_file": "vie_sentences.tsv.bz2",
+        "source_sha256": "26f38116fe4ee91ad99e96f96afd5549c6132cbaef3e7a8e1d004dda9618ee04",
+        "train": 29178
+      },
+      {
+        "heldout": 1810,
+        "iso639_1": "no",
+        "kept_after_filters": 18108,
+        "raw_lines": 18114,
+        "source_file": "nob_sentences.tsv.bz2",
+        "source_sha256": "c6c90abd2f0a70f1ec65f038b06d6966f520c73291d4ee64c4a14afb28961155",
+        "train": 16298
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "sv",
+        "kept_after_filters": 56820,
+        "raw_lines": 56821,
+        "source_file": "swe_sentences.tsv.bz2",
+        "source_sha256": "3151bd82dfc0ad7242c72342c169c697b011364e8c8b411c23315fb5d52aa5db",
+        "train": 51820
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "fi",
+        "kept_after_filters": 125000,
+        "raw_lines": 125031,
+        "source_file": "fin_sentences.tsv.bz2",
+        "source_sha256": "fbaa298ac99cd072ee837a1b117169810111a411d8c906a8e94aa0bff78b247a",
+        "train": 120000
+      },
+      {
+        "heldout": 820,
+        "iso639_1": "gl",
+        "kept_after_filters": 8207,
+        "raw_lines": 8212,
+        "source_file": "glg_sentences.tsv.bz2",
+        "source_sha256": "7346dd64e1a4624c424b6c2d9205874466096666fcc50d56d6f8b04fc1cf3095",
+        "train": 7387
+      },
+      {
+        "heldout": 1096,
+        "iso639_1": "ca",
+        "kept_after_filters": 10960,
+        "raw_lines": 10961,
+        "source_file": "cat_sentences.tsv.bz2",
+        "source_sha256": "9c1f0dcd6ac651bb295a53620dae21535039de872dc2cae1f8e944c27ae73ee7",
+        "train": 9864
+      },
+      {
+        "heldout": 643,
+        "iso639_1": "eu",
+        "kept_after_filters": 6432,
+        "raw_lines": 6432,
+        "source_file": "eus_sentences.tsv.bz2",
+        "source_sha256": "6f2d550f5b0406fa4db433355d686bbe94ab0449e7840df423c2298878670abf",
+        "train": 5789
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "ru",
+        "kept_after_filters": 125000,
+        "raw_lines": 125043,
+        "source_file": "rus_sentences.tsv.bz2",
+        "source_sha256": "df4d70277467ab96f3919366158345add9b9396a45410c31689cce61c8152fcf",
+        "train": 120000
+      },
+      {
+        "heldout": 5000,
+        "iso639_1": "uk",
+        "kept_after_filters": 125000,
+        "raw_lines": 125011,
+        "source_file": "ukr_sentences.tsv.bz2",
+        "source_sha256": "87b1b8385230fb17102f6024af44e6bbcb1eeb2e8f01cb6f05f9aa23016bf939",
+        "train": 120000
+      }
+    ]
+  },
+  "tool": "langdetect-train 0.1.0"
+}

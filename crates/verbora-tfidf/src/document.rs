@@ -40,37 +40,316 @@ pub const PROTO_PROPERTY: &str = "__proto__";
 // Interner
 // ---------------------------------------------------------------------------
 
+/// Intrinsic flag: the term names an `Object.prototype` method, so issue
+/// #119's zero-before-count rule applies to it.
+pub(crate) const TERM_PROTO_METHOD: u8 = 1;
+/// Intrinsic flag: the term is spelled `__key` and mutates the document key.
+pub(crate) const TERM_KEY_PROPERTY: u8 = 1 << 1;
+/// Intrinsic flag: the term is spelled `__proto__` and is silently dropped.
+pub(crate) const TERM_PROTO_PROPERTY: u8 = 1 << 2;
+
+/// Classifies a term by spelling alone.
+///
+/// These are the three per-token tests [`BuiltDocument::observe`] performs
+/// that depend only on the term's text, never on mutable global state — which
+/// is what lets the ingest fast path evaluate them once per *distinct* term
+/// and cache the result in the interner's tables. The stop-word test is
+/// deliberately excluded: the stop-word list is process-global and mutable,
+/// so that answer is re-resolved per document instead (see `fast_build`).
+fn term_flags(term: &str) -> u8 {
+    if term == KEY_PROPERTY {
+        return TERM_KEY_PROPERTY;
+    }
+    if term == PROTO_PROPERTY {
+        return TERM_PROTO_PROPERTY;
+    }
+    if crate::value::OBJECT_PROTOTYPE_METHODS.contains(&term) {
+        return TERM_PROTO_METHOD;
+    }
+    0
+}
+
+/// One slot of the short-term table: the token's own bytes are the key.
+#[derive(Debug, Clone, Copy, Default)]
+struct ShortSlot {
+    /// The token's bytes, little-endian, zero-padded to eight.
+    key: u64,
+    /// Byte length (0..=8). `(key, len)` identifies the token *exactly*:
+    /// `key` fixes the first `len` bytes and zero-pads the rest, so two
+    /// distinct tokens can never collide and no verifying byte comparison is
+    /// needed on a hit.
+    len: u8,
+    /// The term's [`term_flags`].
+    flags: u8,
+    /// Id plus one; `0` marks an empty slot.
+    id1: u32,
+}
+
+/// One slot of the long-term table, verified by byte comparison on probe.
+#[derive(Debug, Clone, Copy, Default)]
+struct LongSlot {
+    /// FxHash of the term's bytes.
+    hash: u64,
+    /// The term's [`term_flags`].
+    flags: u8,
+    /// Id plus one; `0` marks an empty slot.
+    id1: u32,
+}
+
 /// Maps term text to a compact id, shared by every document in one corpus.
 ///
 /// Query terms are deliberately *not* interned: [`Self::lookup`] answers
 /// without inserting, so probing a corpus with a million distinct queries
 /// cannot grow the table.
-#[derive(Debug, Default, Clone)]
+///
+/// # Representation
+///
+/// Ingestion calls [`Self::intern`] once per *token* — tens of thousands of
+/// times for a large document — so the table is shaped around that call
+/// rather than around generality:
+///
+/// * A term of at most eight bytes (the overwhelming majority of natural-
+///   language tokens) is keyed by its bytes packed into a little-endian
+///   `u64` plus its length. The pair *is* the term, so a probe is one
+///   multiply and one 16-byte slot compare: no string hashing, no `memcmp`,
+///   no pointer chase to the heap.
+/// * A longer term goes through an FxHash-keyed table whose hits are
+///   verified by byte comparison against the stored name, exactly as a
+///   `HashMap` would.
+///
+/// Both tables are open-addressed with linear probing at a load factor of at
+/// most one half. Each slot also caches the term's intrinsic [`term_flags`],
+/// so the ingest fast path learns everything spelling-dependent about a
+/// token from the same probe that resolves its id — see `fast_build` for why
+/// that matters.
+#[derive(Debug, Clone)]
 pub struct Interner {
-    ids: FxHashMap<Arc<str>, TermId>,
-    names: Vec<Arc<str>>,
+    names: Vec<Box<str>>,
+    short: Vec<ShortSlot>,
+    short_mask: usize,
+    short_len: usize,
+    long: Vec<LongSlot>,
+    long_mask: usize,
+    long_len: usize,
+}
+
+impl Default for Interner {
+    /// Starts with small pre-sized tables (~1.3 KiB) so the hot probe loops
+    /// never have to branch on emptiness.
+    fn default() -> Self {
+        Self {
+            names: Vec::new(),
+            short: vec![ShortSlot::default(); Self::SHORT_CAPACITY],
+            short_mask: Self::SHORT_CAPACITY - 1,
+            short_len: 0,
+            long: vec![LongSlot::default(); Self::LONG_CAPACITY],
+            long_mask: Self::LONG_CAPACITY - 1,
+            long_len: 0,
+        }
+    }
 }
 
 impl Interner {
+    /// Initial short-table capacity; must be a power of two.
+    const SHORT_CAPACITY: usize = 64;
+    /// Initial long-table capacity; must be a power of two.
+    const LONG_CAPACITY: usize = 16;
+
+    /// Packs at most eight bytes into the short-table key: the bytes
+    /// little-endian, zero-padded to eight.
+    #[inline]
+    pub(crate) fn pack_short(bytes: &[u8]) -> u64 {
+        debug_assert!(bytes.len() <= 8);
+        let mut buf = [0u8; 8];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        u64::from_le_bytes(buf)
+    }
+
+    /// Table index hash for a short key: one XOR and one multiply. The key
+    /// already *is* the token, so no byte iteration happens at all.
+    #[inline(always)]
+    fn short_index(key: u64, len: usize) -> usize {
+        let h = (key ^ ((len as u64) << 56).rotate_left(17)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        (h >> 32) as usize
+    }
+
+    /// FxHash of a long term's bytes. This is a private table, so exact
+    /// identity with `FxHashMap`'s string hashing is irrelevant; collisions
+    /// are resolved by the byte comparison in [`Self::intern_long`].
+    #[inline]
+    fn long_hash(bytes: &[u8]) -> u64 {
+        use std::hash::Hasher;
+        let mut h = rustc_hash::FxHasher::default();
+        h.write(bytes);
+        h.finish()
+    }
+
+    /// Allocates the next id. Ids are dense and their assignment order is
+    /// observable through [`BuiltDocument::entries`], so both fast and slow
+    /// ingest paths must intern every token in encounter order.
+    fn next_id(&self) -> TermId {
+        let id = TermId::try_from(self.names.len()).expect("more than u32::MAX distinct terms");
+        // `id + 1` must also fit: the tables store ids offset by one so `0`
+        // can mark an empty slot.
+        assert!(id < TermId::MAX, "more than u32::MAX distinct terms");
+        id
+    }
+
     /// Returns the id for `term`, allocating one if it is new.
     ///
     /// # Panics
     ///
-    /// Panics if more than `u32::MAX` distinct terms are interned.
+    /// Panics if more than `u32::MAX - 1` distinct terms are interned.
     pub fn intern(&mut self, term: &str) -> TermId {
-        if let Some(id) = self.ids.get(term) {
-            return *id;
+        if term.len() <= 8 {
+            self.intern_short(Self::pack_short(term.as_bytes()), term.len())
+                .0
+        } else {
+            self.intern_long(term).0
         }
-        let id = TermId::try_from(self.names.len()).expect("more than u32::MAX distinct terms");
-        let owned: Arc<str> = Arc::from(term);
-        self.names.push(Arc::clone(&owned));
-        self.ids.insert(owned, id);
-        id
+    }
+
+    /// Interns a term of at most eight bytes by its packed key, returning its
+    /// id and its [`term_flags`].
+    ///
+    /// `key` must be [`Self::pack_short`] of exactly `len` bytes that form
+    /// complete UTF-8 sequences (any `&str` subslice on char boundaries
+    /// qualifies) — the insert path reconstructs the term's text from the key
+    /// alone.
+    #[inline]
+    pub(crate) fn intern_short(&mut self, key: u64, len: usize) -> (TermId, u8) {
+        let mut i = Self::short_index(key, len) & self.short_mask;
+        loop {
+            let slot = self.short[i];
+            if slot.id1 == 0 {
+                return self.insert_short(i, key, len);
+            }
+            if slot.key == key && usize::from(slot.len) == len {
+                return (slot.id1 - 1, slot.flags);
+            }
+            i = (i + 1) & self.short_mask;
+        }
+    }
+
+    #[cold]
+    fn insert_short(&mut self, i: usize, key: u64, len: usize) -> (TermId, u8) {
+        let bytes = key.to_le_bytes();
+        let term =
+            std::str::from_utf8(&bytes[..len]).expect("short keys are packed from &str slices");
+        let flags = term_flags(term);
+        let id = self.next_id();
+        self.names.push(Box::from(term));
+        self.short[i] = ShortSlot {
+            key,
+            len: len as u8,
+            flags,
+            id1: id + 1,
+        };
+        self.short_len += 1;
+        if self.short_len * 2 > self.short.len() {
+            self.grow_short();
+        }
+        (id, flags)
+    }
+
+    #[cold]
+    fn grow_short(&mut self) {
+        let new_len = self.short.len() * 2;
+        let mask = new_len - 1;
+        let mut table = vec![ShortSlot::default(); new_len];
+        for slot in self.short.iter().filter(|s| s.id1 != 0) {
+            let mut i = Self::short_index(slot.key, usize::from(slot.len)) & mask;
+            while table[i].id1 != 0 {
+                i = (i + 1) & mask;
+            }
+            table[i] = *slot;
+        }
+        self.short = table;
+        self.short_mask = mask;
+    }
+
+    /// Interns a term longer than eight bytes, returning its id and its
+    /// [`term_flags`].
+    pub(crate) fn intern_long(&mut self, term: &str) -> (TermId, u8) {
+        let hash = Self::long_hash(term.as_bytes());
+        let mut i = (hash as usize) & self.long_mask;
+        loop {
+            let slot = self.long[i];
+            if slot.id1 == 0 {
+                return self.insert_long(i, hash, term);
+            }
+            if slot.hash == hash
+                && self.names[(slot.id1 - 1) as usize].as_bytes() == term.as_bytes()
+            {
+                return (slot.id1 - 1, slot.flags);
+            }
+            i = (i + 1) & self.long_mask;
+        }
+    }
+
+    #[cold]
+    fn insert_long(&mut self, i: usize, hash: u64, term: &str) -> (TermId, u8) {
+        let flags = term_flags(term);
+        let id = self.next_id();
+        self.names.push(Box::from(term));
+        self.long[i] = LongSlot {
+            hash,
+            flags,
+            id1: id + 1,
+        };
+        self.long_len += 1;
+        if self.long_len * 2 > self.long.len() {
+            self.grow_long();
+        }
+        (id, flags)
+    }
+
+    #[cold]
+    fn grow_long(&mut self) {
+        let new_len = self.long.len() * 2;
+        let mask = new_len - 1;
+        let mut table = vec![LongSlot::default(); new_len];
+        for slot in self.long.iter().filter(|s| s.id1 != 0) {
+            let mut i = (slot.hash as usize) & mask;
+            while table[i].id1 != 0 {
+                i = (i + 1) & mask;
+            }
+            table[i] = *slot;
+        }
+        self.long = table;
+        self.long_mask = mask;
     }
 
     /// Returns the id for `term` if it has been interned.
     pub fn lookup(&self, term: &str) -> Option<TermId> {
-        self.ids.get(term).copied()
+        if term.len() <= 8 {
+            let key = Self::pack_short(term.as_bytes());
+            let mut i = Self::short_index(key, term.len()) & self.short_mask;
+            loop {
+                let slot = self.short[i];
+                if slot.id1 == 0 {
+                    return None;
+                }
+                if slot.key == key && usize::from(slot.len) == term.len() {
+                    return Some(slot.id1 - 1);
+                }
+                i = (i + 1) & self.short_mask;
+            }
+        }
+        let hash = Self::long_hash(term.as_bytes());
+        let mut i = (hash as usize) & self.long_mask;
+        loop {
+            let slot = self.long[i];
+            if slot.id1 == 0 {
+                return None;
+            }
+            if slot.hash == hash
+                && self.names[(slot.id1 - 1) as usize].as_bytes() == term.as_bytes()
+            {
+                return Some(slot.id1 - 1);
+            }
+            i = (i + 1) & self.long_mask;
+        }
     }
 
     /// Returns the text behind an id.
@@ -221,6 +500,28 @@ impl BuiltDocument {
             key,
             entries: Vec::new(),
             index: FxHashMap::default(),
+        }
+    }
+
+    /// Assembles a document the `fast_build` path produced.
+    ///
+    /// `entries` must be in insertion order with at most one entry per id —
+    /// exactly what a sequence of [`Self::observe`] calls builds; the
+    /// differential tests in `tfidf.rs` hold the fast path to that. The hash
+    /// index is derived here, once per document, instead of once per token.
+    pub(crate) fn from_parts(key: DocKey, entries: Vec<(TermId, f64)>) -> Self {
+        let mut index: FxHashMap<TermId, u32> =
+            FxHashMap::with_capacity_and_hasher(entries.len(), Default::default());
+        for (i, (id, _)) in entries.iter().enumerate() {
+            index.insert(
+                *id,
+                u32::try_from(i).expect("documents hold < u32::MAX terms"),
+            );
+        }
+        Self {
+            key,
+            entries,
+            index,
         }
     }
 
@@ -641,5 +942,87 @@ mod tests {
         let id = interner.intern("toString");
         doc.observe(id, "toString", true, &interner);
         assert_eq!(doc.count(id), Some(0.0));
+    }
+
+    // -- interner ------------------------------------------------------------
+
+    #[test]
+    fn interner_ids_are_dense_and_stable() {
+        let mut i = Interner::default();
+        let a = i.intern("alpha");
+        let b = i.intern("beta");
+        let c = i.intern("a-term-longer-than-eight-bytes");
+        assert_eq!([a, b, c], [0, 1, 2]);
+        // Re-interning answers the same id without allocating a new one.
+        assert_eq!(i.intern("beta"), b);
+        assert_eq!(i.intern("a-term-longer-than-eight-bytes"), c);
+        assert_eq!(i.lookup("alpha"), Some(a));
+        assert_eq!(i.lookup("absent"), None);
+        assert_eq!(i.lookup("absent-but-longer-than-eight"), None);
+        assert_eq!(i.name(c), "a-term-longer-than-eight-bytes");
+    }
+
+    #[test]
+    fn interner_distinguishes_padding_from_content() {
+        // The short table pads keys with zero bytes, so a term that *ends* in
+        // real NUL bytes must still be distinct from its trimmed spelling.
+        let mut i = Interner::default();
+        let plain = i.intern("a");
+        let nul = i.intern("a\0");
+        let empty = i.intern("");
+        let just_nul = i.intern("\0");
+        assert_eq!(4, [plain, nul, empty, just_nul].len());
+        assert_ne!(plain, nul);
+        assert_ne!(empty, just_nul);
+        assert_eq!(i.lookup("a\0"), Some(nul));
+        assert_eq!(i.lookup(""), Some(empty));
+        assert_eq!(i.name(nul), "a\0");
+    }
+
+    #[test]
+    fn interner_short_long_boundary() {
+        let mut i = Interner::default();
+        let eight = i.intern("exactly8");
+        let nine = i.intern("exactly8b");
+        assert_ne!(eight, nine);
+        assert_eq!(i.lookup("exactly8"), Some(eight));
+        assert_eq!(i.lookup("exactly8b"), Some(nine));
+        assert_eq!(i.name(eight), "exactly8");
+        assert_eq!(i.name(nine), "exactly8b");
+    }
+
+    #[test]
+    fn interner_growth_preserves_ids() {
+        // Enough distinct terms to force several rehashes of both tables.
+        let mut i = Interner::default();
+        let short: Vec<String> = (0..500).map(|n| format!("s{n}")).collect();
+        let long: Vec<String> = (0..500).map(|n| format!("long-term-number-{n}")).collect();
+        let mut ids = Vec::new();
+        for (s, l) in short.iter().zip(&long) {
+            ids.push(i.intern(s));
+            ids.push(i.intern(l));
+        }
+        for ((s, l), pair) in short.iter().zip(&long).zip(ids.chunks(2)) {
+            assert_eq!(i.lookup(s), Some(pair[0]), "{s} moved");
+            assert_eq!(i.lookup(l), Some(pair[1]), "{l} moved");
+            assert_eq!(i.name(pair[0]), s.as_str());
+            assert_eq!(i.name(pair[1]), l.as_str());
+        }
+        // Ids stayed dense and in first-encounter order.
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..1000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn interner_handles_non_ascii_terms() {
+        let mut i = Interner::default();
+        // "ёлка" is 8 bytes in UTF-8 (short table); "Ленинград" is long.
+        let a = i.intern("ёлка");
+        let b = i.intern("ленинград");
+        assert_eq!(i.lookup("ёлка"), Some(a));
+        assert_eq!(i.lookup("ленинград"), Some(b));
+        assert_eq!(i.name(a), "ёлка");
+        assert_eq!(i.name(b), "ленинград");
     }
 }

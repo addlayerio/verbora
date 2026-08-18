@@ -30,15 +30,32 @@
 //! two-character suffix. Both shipped call sites pass one character, so the
 //! behaviour coincides — but a port that reads them as whole suffixes has
 //! changed the algorithm.
+//!
+//! # How `stem` reads its regions
+//!
+//! The reference keeps `r1txt`/`r2txt`/`rvtxt` snapshots and refreshes them by
+//! hand after every cut. This port computes each suffix test directly on the
+//! current buffer, with the region expressed as the `lb` limit of one
+//! [`crate::among`] binary search (`docs/PERFORMANCE_GAPS.md` entry 34) —
+//! equivalent everywhere the reference's snapshot was fresh, which is every
+//! read site except one: step 2b's `âmes` branch tests the **pre-deletion**
+//! RV for the `e` that precedes the suffix, and that one pre-cut fact is
+//! captured before the cut (marked at the call site). French is a
+//! longest-match language throughout, which is `find_among`'s native
+//! semantics — no table-ordering caveat applies. The pre-conversion
+//! implementation, snapshots and all, is kept in this module's tests as the
+//! byte-exactness oracle.
 
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
 use verbora_tokenizers::classes;
 
+use crate::among::AmongTable;
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_fr;
 use crate::stopwords::{self, Language};
-use crate::units::{at, ends_with, longest_suffix, slen, text, u, units};
+use crate::units::{at, ends_with, longest_suffix, text, text_lowercase, u, units};
 
 /// The French Snowball stemmer.
 ///
@@ -82,22 +99,70 @@ fn vowel_at(w: &[u16], i: usize) -> bool {
     at(w, i).is_some_and(is_vowel)
 }
 
-#[inline]
-fn from(w: &[u16], at: usize) -> &[u16] {
-    &w[at.min(w.len())..]
-}
-
 /// Removes `n` code units from the end and appends `tail`.
 fn cut(w: &mut Vec<u16>, n: usize, tail: &str) {
     w.truncate(w.len().saturating_sub(n));
     w.extend(tail.encode_utf16());
 }
 
-/// `endsin(token, letterBefore + suffix)` without building a temporary string.
-fn ends_with_prefixed(w: &[u16], before: u16, suffix: &str) -> bool {
-    let n = slen(suffix);
-    w.len() > n && w[w.len() - n - 1] == before && ends_with(w, suffix)
+/// The sorted search tables, built once from the rule tables below.
+struct FrTables {
+    ance: AmongTable,
+    icatrice: AmongTable,
+    atrice: AmongTable,
+    logie: AmongTable,
+    usion: AmongTable,
+    ence: AmongTable,
+    issement: AmongTable,
+    ativement: AmongTable,
+    ivement: AmongTable,
+    eusement: AmongTable,
+    ablement: AmongTable,
+    ierement: AmongTable,
+    ement: AmongTable,
+    icite: AmongTable,
+    abilite: AmongTable,
+    ite: AmongTable,
+    icatif: AmongTable,
+    atif: AmongTable,
+    if_ive: AmongTable,
+    euse: AmongTable,
+    ment: AmongTable,
+    step2a: AmongTable,
+    step2b_e: AmongTable,
+    step2b_a: AmongTable,
+    ier: AmongTable,
+    undouble: AmongTable,
 }
+
+static TABLES: LazyLock<FrTables> = LazyLock::new(|| FrTables {
+    ance: AmongTable::build(STEP1_ANCE),
+    icatrice: AmongTable::build(ICATRICE),
+    atrice: AmongTable::build(ATRICE),
+    logie: AmongTable::build(&["logie", "logies"]),
+    usion: AmongTable::build(&["usion", "ution", "usions", "utions"]),
+    ence: AmongTable::build(&["ence", "ences"]),
+    issement: AmongTable::build(&["issement", "issements"]),
+    ativement: AmongTable::build(&["ativement", "ativements"]),
+    ivement: AmongTable::build(&["ivement", "ivements"]),
+    eusement: AmongTable::build(&["eusement", "eusements"]),
+    ablement: AmongTable::build(&["ablement", "ablements", "iqUement", "iqUements"]),
+    ierement: AmongTable::build(&["ièrement", "ièrements", "Ièrement", "Ièrements"]),
+    ement: AmongTable::build(&["ement", "ements"]),
+    icite: AmongTable::build(&["icité", "icités"]),
+    abilite: AmongTable::build(&["abilité", "abilités"]),
+    ite: AmongTable::build(&["ité", "ités"]),
+    icatif: AmongTable::build(ICATIF),
+    atif: AmongTable::build(ATIF),
+    if_ive: AmongTable::build(&["if", "ive", "ifs", "ives"]),
+    euse: AmongTable::build(&["euse", "euses"]),
+    ment: AmongTable::build(&["ment", "ments"]),
+    step2a: AmongTable::build(STEP2A),
+    step2b_e: AmongTable::build(STEP2B_E),
+    step2b_a: AmongTable::build(STEP2B_A),
+    ier: AmongTable::build(&["ier", "ière", "Ier", "Ière"]),
+    undouble: AmongTable::build(&["enn", "onn", "ett", "ell", "eill"]),
+});
 
 impl PorterStemmerFr {
     /// Creates the stemmer. It is stateless and zero-sized.
@@ -196,206 +261,237 @@ impl PorterStemmerFr {
         clippy::too_many_lines,
         reason = "the else-if chains ARE the specification; splitting them hides the order"
     )]
-    #[expect(
-        unused_assignments,
-        reason = "the reference refreshes r1/r2/rv after every cut, and this port \
-                  mirrors that uniformly. Several of those refreshes are dead — the \
-                  branch they sit in is the last one that can fire — but dropping \
-                  only the dead ones would make the surviving refreshes look \
-                  deliberate rather than mechanical, and a future rule reordering \
-                  would then silently read a stale region."
-    )]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
+        let tb = &*TABLES;
         let mut t = Self::prelude_units(&units(&token.to_lowercase()));
         if t.len() == 1 {
             return Cow::Owned(text(&t));
         }
         let regs = Self::regions_units(&t);
-        // `r1txt` is a borrowed slice of `t`, not an owned snapshot:
-        // `longest_suffix` returns `Option<&'s str>` borrowed from the
-        // *suffix list* argument, never from `word`, so the borrow of `t`
-        // needed to call it ends the moment the call returns -- well before
-        // any branch below mutates `t` via `cut`. r1txt is read only inside
-        // Step 1's single if-else-if chain (mutually exclusive branches) and
-        // is never read again afterwards, so no read of it needs to survive
-        // past a `cut` call on a reachable path.
-        //
-        // `r2txt` and `rvtxt` stay owned `Vec<u16>` snapshots, unlike
-        // r1txt, because both are read again *after* Step 1's chain ends --
-        // in Step 2a, Step 2b and Step 4, which are separate, sequential `if`
-        // statements rather than mutually-exclusive branches of one chain.
-        // The borrow checker must assume every one of those blocks can run
-        // in sequence (even though at the value level at most one actually
-        // mutates `t` before the next read), so a borrow taken once and
-        // reused across that sequence does not typecheck: `cut(&mut t, ...)`
-        // in an earlier block conflicts with a later block's read of the
-        // same borrow. (Verified by attempting exactly this conversion for
-        // r2txt: it fails to compile with E0502 at the Step 2b "ions" read,
-        // because Step 2a's `cut` sits between the borrow's creation after
-        // Step 1 and that read.) `rvtxt` additionally has a same-branch case
-        // that rules it out on its own: step 2b's `ment` (STEP2B_A) branch
-        // reads the PRE-mutation `rvtxt` *after* calling `cut(&mut t, ...)`
-        // in that same branch -- see the comment at that call site.
-        let mut r1txt = from(&t, regs.r1);
-        let mut r2txt = from(&t, regs.r2).to_vec();
-        let mut rvtxt = from(&t, regs.rv).to_vec();
         let before_step1 = t.clone();
         let mut do_step2a = false;
 
         // --- Step 1 --------------------------------------------------------
-        if let Some(s) = longest_suffix(&r2txt, STEP1_ANCE) {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) = longest_suffix(&t, ICATRICE) {
-            if longest_suffix(&r2txt, ICATRICE).is_some() {
-                cut(&mut t, slen(s), "");
-            } else {
-                cut(&mut t, slen(s), "iqU");
+        //
+        // A labeled block with one early exit per rule reproduces the
+        // reference's else-if ladder: the first rule whose search hits ends
+        // the step, even when its inner guard then declines to cut. `t` is
+        // only cut as a rule's last act, so the region limits computed here
+        // from the un-cut `t` are the reference's fresh snapshots at every
+        // read below; the two rules that cut twice recompute their limits in
+        // between, where the reference refreshed its snapshots.
+        let len = t.len();
+        let lb1 = regs.r1.min(len);
+        let lb2 = regs.r2.min(len);
+        let lbv = regs.rv.min(len);
+        'step1: {
+            let m = tb.ance.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
             }
-        } else if let Some(s) = longest_suffix(&r2txt, ATRICE) {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) = longest_suffix(&r2txt, &["logie", "logies"]) {
-            cut(&mut t, slen(s), "log");
-        } else if let Some(s) = longest_suffix(&r2txt, &["usion", "ution", "usions", "utions"]) {
-            cut(&mut t, slen(s), "u");
-        } else if let Some(s) = longest_suffix(&r2txt, &["ence", "ences"]) {
-            cut(&mut t, slen(s), "ent");
-        } else if let Some(s) = longest_suffix(r1txt, &["issement", "issements"]) {
-            let n = slen(s);
-            // The branch is taken even when the vowel test fails, so no later
-            // rule can fire — a plain `if` inside an `else if` chain.
-            if !(t.len() > n && is_vowel(t[t.len() - n - 1])) {
-                cut(&mut t, n, "");
-                r1txt = from(&t, regs.r1);
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
+            let m = tb.icatrice.longest(&t, len, 0);
+            if m > 0 {
+                if tb.icatrice.longest(&t, len, lb2) > 0 {
+                    cut(&mut t, m, "");
+                } else {
+                    cut(&mut t, m, "iqU");
+                }
+                break 'step1;
             }
-        } else if let Some(s) = longest_suffix(&r2txt, &["ativement", "ativements"]) {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) = longest_suffix(&r2txt, &["ivement", "ivements"]) {
-            cut(&mut t, slen(s), "");
-        } else if longest_suffix(&t, &["eusement", "eusements"]).is_some() {
-            if let Some(s) = longest_suffix(&r2txt, &["eusement", "eusements"]) {
-                cut(&mut t, slen(s), "");
-            } else if let Some(s) = longest_suffix(r1txt, &["eusement", "eusements"]) {
-                cut(&mut t, slen(s), "eux");
-            } else if let Some(s) = longest_suffix(&rvtxt, &["ement", "ements"]) {
-                cut(&mut t, slen(s), "");
+            let m = tb.atrice.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
             }
-        } else if let Some(s) =
-            longest_suffix(&r2txt, &["ablement", "ablements", "iqUement", "iqUements"])
-        {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) =
-            longest_suffix(&rvtxt, &["ièrement", "ièrements", "Ièrement", "Ièrements"])
-        {
-            cut(&mut t, slen(s), "i");
-        } else if let Some(s) = longest_suffix(&rvtxt, &["ement", "ements"]) {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) = longest_suffix(&t, &["icité", "icités"]) {
-            if longest_suffix(&r2txt, &["icité", "icités"]).is_some() {
-                cut(&mut t, slen(s), "");
-            } else {
-                cut(&mut t, slen(s), "iqU");
+            let m = tb.logie.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "log");
+                break 'step1;
             }
-        } else if let Some(s) = longest_suffix(&t, &["abilité", "abilités"]) {
-            if longest_suffix(&r2txt, &["abilité", "abilités"]).is_some() {
-                cut(&mut t, slen(s), "");
-            } else {
-                cut(&mut t, slen(s), "abl");
+            let m = tb.usion.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "u");
+                break 'step1;
             }
-        } else if let Some(s) = longest_suffix(&r2txt, &["ité", "ités"]) {
-            cut(&mut t, slen(s), "");
-        } else if longest_suffix(&t, ICATIF).is_some() {
-            // Two consecutive `if`s, not an if/else — both can fire.
-            if let Some(s) = longest_suffix(&r2txt, ICATIF) {
-                cut(&mut t, slen(s), "");
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
+            let m = tb.ence.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "ent");
+                break 'step1;
             }
-            if let Some(s) = longest_suffix(&r2txt, ATIF) {
-                cut(&mut t, slen(s) + 2, "iqU");
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
+            let m = tb.issement.longest(&t, len, lb1);
+            if m > 0 {
+                // The rule consumes the chain even when the vowel test
+                // declines the cut — a plain `if` inside the branch.
+                if !(len > m && is_vowel(t[len - m - 1])) {
+                    cut(&mut t, m, "");
+                }
+                break 'step1;
             }
-        } else if let Some(s) = longest_suffix(&r2txt, ATIF) {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) = longest_suffix(&r2txt, &["if", "ive", "ifs", "ives"]) {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) = longest_suffix(&t, &["eaux"]) {
-            cut(&mut t, slen(s), "eau");
-        } else if let Some(s) = longest_suffix(r1txt, &["aux"]) {
-            cut(&mut t, slen(s), "al");
-        } else if let Some(s) = longest_suffix(&r2txt, &["euse", "euses"]) {
-            cut(&mut t, slen(s), "");
-        } else if let Some(s) = longest_suffix(r1txt, &["euse", "euses"]) {
-            cut(&mut t, slen(s), "eux");
-        } else if let Some(s) = longest_suffix(&rvtxt, &["amment"]) {
-            cut(&mut t, slen(s), "ant");
-            do_step2a = true;
-        } else if let Some(s) = longest_suffix(&rvtxt, &["emment"]) {
-            cut(&mut t, slen(s), "ent");
-            do_step2a = true;
-        } else if let Some(s) = longest_suffix(&rvtxt, &["ment", "ments"]) {
-            let n = slen(s);
-            let before = if t.len() > n {
-                Some(t[t.len() - n - 1])
-            } else {
-                None
-            };
-            if let Some(b) = before
-                && is_vowel(b)
-                && ends_with_prefixed(&rvtxt, b, s)
-            {
-                cut(&mut t, n, "");
+            let m = tb.ativement.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            let m = tb.ivement.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            if tb.eusement.longest(&t, len, 0) > 0 {
+                let m = tb.eusement.longest(&t, len, lb2);
+                if m > 0 {
+                    cut(&mut t, m, "");
+                } else {
+                    let m = tb.eusement.longest(&t, len, lb1);
+                    if m > 0 {
+                        cut(&mut t, m, "eux");
+                    } else {
+                        let m = tb.ement.longest(&t, len, lbv);
+                        if m > 0 {
+                            cut(&mut t, m, "");
+                        }
+                    }
+                }
+                break 'step1;
+            }
+            let m = tb.ablement.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            let m = tb.ierement.longest(&t, len, lbv);
+            if m > 0 {
+                cut(&mut t, m, "i");
+                break 'step1;
+            }
+            let m = tb.ement.longest(&t, len, lbv);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            let m = tb.icite.longest(&t, len, 0);
+            if m > 0 {
+                if tb.icite.longest(&t, len, lb2) > 0 {
+                    cut(&mut t, m, "");
+                } else {
+                    cut(&mut t, m, "iqU");
+                }
+                break 'step1;
+            }
+            let m = tb.abilite.longest(&t, len, 0);
+            if m > 0 {
+                if tb.abilite.longest(&t, len, lb2) > 0 {
+                    cut(&mut t, m, "");
+                } else {
+                    cut(&mut t, m, "abl");
+                }
+                break 'step1;
+            }
+            let m = tb.ite.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            if tb.icatif.longest(&t, len, 0) > 0 {
+                // Two consecutive `if`s, not an if/else — both can fire.
+                let m = tb.icatif.longest(&t, len, lb2);
+                if m > 0 {
+                    cut(&mut t, m, "");
+                }
+                let len2 = t.len();
+                let m = tb.atif.longest(&t, len2, regs.r2.min(len2));
+                if m > 0 {
+                    cut(&mut t, m + 2, "iqU");
+                }
+                break 'step1;
+            }
+            let m = tb.atif.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            let m = tb.if_ive.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            if ends_with(&t, "eaux") {
+                cut(&mut t, 4, "eau");
+                break 'step1;
+            }
+            if ends_with(&t, "aux") && len - lb1 >= 3 {
+                cut(&mut t, 3, "al");
+                break 'step1;
+            }
+            let m = tb.euse.longest(&t, len, lb2);
+            if m > 0 {
+                cut(&mut t, m, "");
+                break 'step1;
+            }
+            let m = tb.euse.longest(&t, len, lb1);
+            if m > 0 {
+                cut(&mut t, m, "eux");
+                break 'step1;
+            }
+            if ends_with(&t, "amment") && len - lbv >= 6 {
+                cut(&mut t, 6, "ant");
                 do_step2a = true;
+                break 'step1;
+            }
+            if ends_with(&t, "emment") && len - lbv >= 6 {
+                cut(&mut t, 6, "ent");
+                do_step2a = true;
+                break 'step1;
+            }
+            let m = tb.ment.longest(&t, len, lbv);
+            if m > 0 {
+                // A vowel must precede, and that vowel must be inside RV.
+                if len > m && is_vowel(t[len - m - 1]) && len - lbv > m {
+                    cut(&mut t, m, "");
+                    do_step2a = true;
+                }
+                break 'step1;
             }
         }
 
-        // R1 is refreshed here in the reference too, but nothing reads it again.
-        r2txt = from(&t, regs.r2).to_vec();
-        rvtxt = from(&t, regs.rv).to_vec();
-
         // --- Step 2a -------------------------------------------------------
-        // `before_step2a == t` in the reference's own shape is "did step 2a
-        // change anything" -- step 2a has exactly one mutating call site
-        // (the `cut` below), so a `bool` flag set right there is the same
-        // fact without cloning the whole word to compare it.
         let mut step2a_done = false;
         let mut step2a_changed = false;
         if before_step1 == t || do_step2a {
             step2a_done = true;
-            if let Some(s) = longest_suffix(&rvtxt, STEP2A) {
-                let n = slen(s);
-                if t.len() > n {
-                    let b = t[t.len() - n - 1];
-                    if !is_vowel(b) && ends_with_prefixed(&rvtxt, b, s) {
-                        cut(&mut t, n, "");
-                        step2a_changed = true;
-                    }
+            let len = t.len();
+            let lbv = regs.rv.min(len);
+            let m = tb.step2a.longest(&t, len, lbv);
+            if m > 0 && len > m {
+                let b = t[len - m - 1];
+                if !is_vowel(b) && len - lbv > m {
+                    cut(&mut t, m, "");
+                    step2a_changed = true;
                 }
             }
         }
 
         // --- Step 2b -------------------------------------------------------
         if step2a_done && !step2a_changed {
-            if let Some(s) = longest_suffix(&rvtxt, STEP2B_E) {
-                cut(&mut t, slen(s), "");
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
-            } else if longest_suffix(&rvtxt, &["ions"]).is_some()
-                && longest_suffix(&r2txt, &["ions"]).is_some()
-            {
+            let len = t.len();
+            let lbv = regs.rv.min(len);
+            let m = tb.step2b_e.longest(&t, len, lbv);
+            if m > 0 {
+                cut(&mut t, m, "");
+            } else if ends_with(&t, "ions") && len - lbv >= 4 && len - regs.r2.min(len) >= 4 {
                 cut(&mut t, 4, "");
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
-            } else if let Some(s) = longest_suffix(&rvtxt, STEP2B_A) {
-                cut(&mut t, slen(s), "");
-                // `rvtxt` here is still the pre-deletion slice, deliberately.
-                if t.last() == Some(&u('e')) && ends_with_prefixed(&rvtxt, u('e'), s) {
-                    t.truncate(t.len() - 1);
+            } else {
+                let m = tb.step2b_a.longest(&t, len, lbv);
+                if m > 0 {
+                    // The `e` test below reads the PRE-deletion RV,
+                    // deliberately — capture its length before the cut.
+                    let rv_len_before = len - lbv;
+                    cut(&mut t, m, "");
+                    if t.last() == Some(&u('e')) && rv_len_before > m {
+                        t.truncate(t.len() - 1);
+                    }
                 }
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
             }
         }
 
@@ -423,43 +519,49 @@ impl PorterStemmerFr {
                 })
             {
                 t.truncate(t.len() - 1);
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
             }
-            if longest_suffix(&r2txt, &["ion"]).is_some() {
-                let before = if t.len() >= 4 {
-                    Some(t[t.len() - 4])
-                } else {
-                    None
-                };
-                if before.is_some_and(|c| c == u('s') || c == u('t')) {
-                    cut(&mut t, 3, "");
-                    r2txt = from(&t, regs.r2).to_vec();
-                    rvtxt = from(&t, regs.rv).to_vec();
+            {
+                let len = t.len();
+                if ends_with(&t, "ion") && len - regs.r2.min(len) >= 3 {
+                    let before = if len >= 4 { Some(t[len - 4]) } else { None };
+                    if before.is_some_and(|c| c == u('s') || c == u('t')) {
+                        cut(&mut t, 3, "");
+                    }
                 }
             }
-            if let Some(s) = longest_suffix(&rvtxt, &["ier", "ière", "Ier", "Ière"]) {
-                cut(&mut t, slen(s), "i");
-                r2txt = from(&t, regs.r2).to_vec();
-                rvtxt = from(&t, regs.rv).to_vec();
+            {
+                let len = t.len();
+                let lbv = regs.rv.min(len);
+                let m = tb.ier.longest(&t, len, lbv);
+                if m > 0 {
+                    cut(&mut t, m, "i");
+                }
             }
             // `endsinArr(rvtxt, 'e')`: a STRING, iterated as its characters.
-            if ends_with(&rvtxt, "e") {
-                t.truncate(t.len().saturating_sub(1));
-                rvtxt = from(&t, regs.rv).to_vec();
+            {
+                let len = t.len();
+                let lbv = regs.rv.min(len);
+                if len > lbv && t[len - 1] == u('e') {
+                    t.truncate(len - 1);
+                }
             }
-            if ends_with(&rvtxt, "ë") {
-                // `token.slice(token.length - 3, -1)`: a start argument below
-                // zero is treated as an offset from the end, not clamped, so for
-                // a token shorter than three units this can never be "gu".
-                if t.len() >= 3 && ends_with(&t[t.len() - 3..t.len() - 1], "gu") {
-                    t.truncate(t.len() - 1);
+            {
+                let len = t.len();
+                let lbv = regs.rv.min(len);
+                if len > lbv && t[len - 1] == u('ë') {
+                    // `token.slice(token.length - 3, -1)`: a start argument
+                    // below zero is treated as an offset from the end, not
+                    // clamped, so for a token shorter than three units this
+                    // can never be "gu".
+                    if len >= 3 && t[len - 3] == u('g') && t[len - 2] == u('u') {
+                        t.truncate(len - 1);
+                    }
                 }
             }
         }
 
         // --- Step 5: undouble ----------------------------------------------
-        if longest_suffix(&t, &["enn", "onn", "ett", "ell", "eill"]).is_some() {
+        if tb.undouble.longest(&t, t.len(), 0) > 0 {
             t.truncate(t.len() - 1);
         }
 
@@ -476,7 +578,7 @@ impl PorterStemmerFr {
             }
         }
 
-        Cow::Owned(text(&t).to_lowercase())
+        Cow::Owned(text_lowercase(&mut t))
     }
 }
 
@@ -634,5 +736,433 @@ mod tests {
         assert_eq!(s("😀"), "😀");
         assert_eq!(s("日本語"), "日本語");
         assert_eq!(s("123"), "123");
+    }
+
+    // -----------------------------------------------------------------------
+    // Differential oracle: the pre-find_among implementation, verbatim —
+    // owned `r2txt`/`rvtxt` snapshots, hand refreshes and all.
+    // -----------------------------------------------------------------------
+    mod oracle {
+        use super::super::*;
+        use crate::units::{longest_suffix, slen};
+
+        fn from(w: &[u16], at: usize) -> &[u16] {
+            &w[at.min(w.len())..]
+        }
+
+        /// `endsin(token, letterBefore + suffix)` without building a string.
+        fn ends_with_prefixed(w: &[u16], before: u16, suffix: &str) -> bool {
+            let n = slen(suffix);
+            w.len() > n && w[w.len() - n - 1] == before && ends_with(w, suffix)
+        }
+
+        #[expect(clippy::too_many_lines, reason = "verbatim copy of the reference port")]
+        #[expect(
+            unused_assignments,
+            reason = "the reference refreshes r1/r2/rv after every cut and this copy \
+                      mirrors that uniformly, dead refreshes included"
+        )]
+        pub(super) fn stem(token: &str) -> String {
+            let mut t = PorterStemmerFr::prelude_units(&units(&token.to_lowercase()));
+            if t.len() == 1 {
+                return text(&t);
+            }
+            let regs = PorterStemmerFr::regions_units(&t);
+            let mut r1txt = from(&t, regs.r1);
+            let mut r2txt = from(&t, regs.r2).to_vec();
+            let mut rvtxt = from(&t, regs.rv).to_vec();
+            let before_step1 = t.clone();
+            let mut do_step2a = false;
+
+            // --- Step 1 ----------------------------------------------------
+            if let Some(sfx) = longest_suffix(&r2txt, STEP1_ANCE) {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) = longest_suffix(&t, ICATRICE) {
+                if longest_suffix(&r2txt, ICATRICE).is_some() {
+                    cut(&mut t, slen(sfx), "");
+                } else {
+                    cut(&mut t, slen(sfx), "iqU");
+                }
+            } else if let Some(sfx) = longest_suffix(&r2txt, ATRICE) {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) = longest_suffix(&r2txt, &["logie", "logies"]) {
+                cut(&mut t, slen(sfx), "log");
+            } else if let Some(sfx) =
+                longest_suffix(&r2txt, &["usion", "ution", "usions", "utions"])
+            {
+                cut(&mut t, slen(sfx), "u");
+            } else if let Some(sfx) = longest_suffix(&r2txt, &["ence", "ences"]) {
+                cut(&mut t, slen(sfx), "ent");
+            } else if let Some(sfx) = longest_suffix(r1txt, &["issement", "issements"]) {
+                let n = slen(sfx);
+                if !(t.len() > n && is_vowel(t[t.len() - n - 1])) {
+                    cut(&mut t, n, "");
+                    r1txt = from(&t, regs.r1);
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                }
+            } else if let Some(sfx) = longest_suffix(&r2txt, &["ativement", "ativements"]) {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) = longest_suffix(&r2txt, &["ivement", "ivements"]) {
+                cut(&mut t, slen(sfx), "");
+            } else if longest_suffix(&t, &["eusement", "eusements"]).is_some() {
+                if let Some(sfx) = longest_suffix(&r2txt, &["eusement", "eusements"]) {
+                    cut(&mut t, slen(sfx), "");
+                } else if let Some(sfx) = longest_suffix(r1txt, &["eusement", "eusements"]) {
+                    cut(&mut t, slen(sfx), "eux");
+                } else if let Some(sfx) = longest_suffix(&rvtxt, &["ement", "ements"]) {
+                    cut(&mut t, slen(sfx), "");
+                }
+            } else if let Some(sfx) =
+                longest_suffix(&r2txt, &["ablement", "ablements", "iqUement", "iqUements"])
+            {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) =
+                longest_suffix(&rvtxt, &["ièrement", "ièrements", "Ièrement", "Ièrements"])
+            {
+                cut(&mut t, slen(sfx), "i");
+            } else if let Some(sfx) = longest_suffix(&rvtxt, &["ement", "ements"]) {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) = longest_suffix(&t, &["icité", "icités"]) {
+                if longest_suffix(&r2txt, &["icité", "icités"]).is_some() {
+                    cut(&mut t, slen(sfx), "");
+                } else {
+                    cut(&mut t, slen(sfx), "iqU");
+                }
+            } else if let Some(sfx) = longest_suffix(&t, &["abilité", "abilités"]) {
+                if longest_suffix(&r2txt, &["abilité", "abilités"]).is_some() {
+                    cut(&mut t, slen(sfx), "");
+                } else {
+                    cut(&mut t, slen(sfx), "abl");
+                }
+            } else if let Some(sfx) = longest_suffix(&r2txt, &["ité", "ités"]) {
+                cut(&mut t, slen(sfx), "");
+            } else if longest_suffix(&t, ICATIF).is_some() {
+                if let Some(sfx) = longest_suffix(&r2txt, ICATIF) {
+                    cut(&mut t, slen(sfx), "");
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                }
+                if let Some(sfx) = longest_suffix(&r2txt, ATIF) {
+                    cut(&mut t, slen(sfx) + 2, "iqU");
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                }
+            } else if let Some(sfx) = longest_suffix(&r2txt, ATIF) {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) = longest_suffix(&r2txt, &["if", "ive", "ifs", "ives"]) {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) = longest_suffix(&t, &["eaux"]) {
+                cut(&mut t, slen(sfx), "eau");
+            } else if let Some(sfx) = longest_suffix(r1txt, &["aux"]) {
+                cut(&mut t, slen(sfx), "al");
+            } else if let Some(sfx) = longest_suffix(&r2txt, &["euse", "euses"]) {
+                cut(&mut t, slen(sfx), "");
+            } else if let Some(sfx) = longest_suffix(r1txt, &["euse", "euses"]) {
+                cut(&mut t, slen(sfx), "eux");
+            } else if let Some(sfx) = longest_suffix(&rvtxt, &["amment"]) {
+                cut(&mut t, slen(sfx), "ant");
+                do_step2a = true;
+            } else if let Some(sfx) = longest_suffix(&rvtxt, &["emment"]) {
+                cut(&mut t, slen(sfx), "ent");
+                do_step2a = true;
+            } else if let Some(sfx) = longest_suffix(&rvtxt, &["ment", "ments"]) {
+                let n = slen(sfx);
+                let before = if t.len() > n {
+                    Some(t[t.len() - n - 1])
+                } else {
+                    None
+                };
+                if let Some(b) = before
+                    && is_vowel(b)
+                    && ends_with_prefixed(&rvtxt, b, sfx)
+                {
+                    cut(&mut t, n, "");
+                    do_step2a = true;
+                }
+            }
+
+            r2txt = from(&t, regs.r2).to_vec();
+            rvtxt = from(&t, regs.rv).to_vec();
+
+            // --- Step 2a ---------------------------------------------------
+            let mut step2a_done = false;
+            let mut step2a_changed = false;
+            if before_step1 == t || do_step2a {
+                step2a_done = true;
+                if let Some(sfx) = longest_suffix(&rvtxt, STEP2A) {
+                    let n = slen(sfx);
+                    if t.len() > n {
+                        let b = t[t.len() - n - 1];
+                        if !is_vowel(b) && ends_with_prefixed(&rvtxt, b, sfx) {
+                            cut(&mut t, n, "");
+                            step2a_changed = true;
+                        }
+                    }
+                }
+            }
+
+            // --- Step 2b ---------------------------------------------------
+            if step2a_done && !step2a_changed {
+                if let Some(sfx) = longest_suffix(&rvtxt, STEP2B_E) {
+                    cut(&mut t, slen(sfx), "");
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                } else if longest_suffix(&rvtxt, &["ions"]).is_some()
+                    && longest_suffix(&r2txt, &["ions"]).is_some()
+                {
+                    cut(&mut t, 4, "");
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                } else if let Some(sfx) = longest_suffix(&rvtxt, STEP2B_A) {
+                    cut(&mut t, slen(sfx), "");
+                    // `rvtxt` here is still the pre-deletion slice, deliberately.
+                    if t.last() == Some(&u('e')) && ends_with_prefixed(&rvtxt, u('e'), sfx) {
+                        t.truncate(t.len() - 1);
+                    }
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                }
+            }
+
+            if t != before_step1 {
+                // --- Step 3 ------------------------------------------------
+                if t.last() == Some(&u('Y')) {
+                    let n = t.len();
+                    t[n - 1] = u('i');
+                }
+                if t.last() == Some(&u('ç')) {
+                    let n = t.len();
+                    t[n - 1] = u('c');
+                }
+            } else {
+                // --- Step 4: residual --------------------------------------
+                let last = t.last().copied();
+                let second_last = if t.len() >= 2 {
+                    Some(t[t.len() - 2])
+                } else {
+                    None
+                };
+                if last == Some(u('s'))
+                    && !second_last.is_some_and(|c| {
+                        matches!(c, x if x == u('a') || x == u('i') || x == u('o') || x == u('u') || x == u('è') || x == u('s'))
+                    })
+                {
+                    t.truncate(t.len() - 1);
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                }
+                if longest_suffix(&r2txt, &["ion"]).is_some() {
+                    let before = if t.len() >= 4 {
+                        Some(t[t.len() - 4])
+                    } else {
+                        None
+                    };
+                    if before.is_some_and(|c| c == u('s') || c == u('t')) {
+                        cut(&mut t, 3, "");
+                        r2txt = from(&t, regs.r2).to_vec();
+                        rvtxt = from(&t, regs.rv).to_vec();
+                    }
+                }
+                if let Some(sfx) = longest_suffix(&rvtxt, &["ier", "ière", "Ier", "Ière"]) {
+                    cut(&mut t, slen(sfx), "i");
+                    r2txt = from(&t, regs.r2).to_vec();
+                    rvtxt = from(&t, regs.rv).to_vec();
+                }
+                if ends_with(&rvtxt, "e") {
+                    t.truncate(t.len().saturating_sub(1));
+                    rvtxt = from(&t, regs.rv).to_vec();
+                }
+                if ends_with(&rvtxt, "ë")
+                    && t.len() >= 3
+                    && ends_with(&t[t.len() - 3..t.len() - 1], "gu")
+                {
+                    t.truncate(t.len() - 1);
+                }
+            }
+
+            // --- Step 5: undouble ------------------------------------------
+            if longest_suffix(&t, &["enn", "onn", "ett", "ell", "eill"]).is_some() {
+                t.truncate(t.len() - 1);
+            }
+
+            // --- Step 6: un-accent the final é/è ---------------------------
+            let mut i = t.len().saturating_sub(1);
+            while i > 0 {
+                if !is_vowel(t[i]) {
+                    i -= 1;
+                } else if i != t.len() - 1 && (t[i] == u('é') || t[i] == u('è')) {
+                    t[i] = u('e');
+                    break;
+                } else {
+                    break;
+                }
+            }
+
+            text(&t).to_lowercase()
+        }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// French stems crossed with real table suffixes (stacked up to two
+    /// deep), the prelude's semivowel triggers (`y`, `qu`, vowel runs), the
+    /// `par`/`col`/`tap` RV prefixes, and case/astral/CJK noise.
+    fn random_word(rng: &mut Rng) -> String {
+        const ALPHA: &[char] = &[
+            'a', 'b', 'c', 'd', 'e', 'f', 'g', 'i', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't',
+            'u', 'v', 'y', 'z', 'é', 'è', 'ê', 'ë', 'â', 'î', 'ï', 'û', 'ç',
+        ];
+        const PREFIXES: &[&str] = &["", "", "", "par", "col", "tap", "y", "qu"];
+        const SUFFIXES: &[&str] = &[
+            "ance",
+            "iqUe",
+            "ique",
+            "isme",
+            "able",
+            "iste",
+            "eux",
+            "icatrice",
+            "ications",
+            "atrice",
+            "ateurs",
+            "logie",
+            "usion",
+            "utions",
+            "ence",
+            "issement",
+            "ativement",
+            "ivement",
+            "eusement",
+            "ablement",
+            "ièrement",
+            "ement",
+            "icité",
+            "abilité",
+            "ité",
+            "icatif",
+            "atives",
+            "if",
+            "ives",
+            "eaux",
+            "aux",
+            "euse",
+            "euses",
+            "amment",
+            "emment",
+            "ment",
+            "ments",
+            "îmes",
+            "issaIent",
+            "irions",
+            "is",
+            "it",
+            "ie",
+            "ir",
+            "èrent",
+            "er",
+            "eraIent",
+            "erions",
+            "ez",
+            "iez",
+            "âmes",
+            "aIent",
+            "assions",
+            "ant",
+            "as",
+            "a",
+            "ai",
+            "ions",
+            "ion",
+            "ier",
+            "ière",
+            "e",
+            "ë",
+            "guë",
+            "enne",
+            "onne",
+            "ette",
+            "elle",
+            "eille",
+            "s",
+            "és",
+            "ée",
+        ];
+        let mut s = String::from(PREFIXES[rng.below(PREFIXES.len())]);
+        for _ in 0..rng.below(7) {
+            s.push(ALPHA[rng.below(ALPHA.len())]);
+        }
+        if rng.below(10) < 7 {
+            s.push_str(SUFFIXES[rng.below(SUFFIXES.len())]);
+            if rng.below(4) == 0 {
+                s.push_str(SUFFIXES[rng.below(SUFFIXES.len())]);
+            }
+        }
+        match rng.below(40) {
+            0 => s = s.to_uppercase(),
+            1 => s.push('😀'),
+            2 => s.insert(0, '日'),
+            3 => s.push_str("123"),
+            _ => {}
+        }
+        s
+    }
+
+    #[test]
+    fn differential_against_the_linear_scan_oracle() {
+        let stemmer = PorterStemmerFr::new();
+        let check = |input: &str| {
+            assert_eq!(
+                stemmer.stem(input).as_ref(),
+                oracle::stem(input),
+                "stem({input:?})"
+            );
+        };
+        for w in crate::test_support::bench_words("fr") {
+            check(&w);
+        }
+        for w in [
+            "",
+            "a",
+            "é",
+            "yeux",
+            "quand",
+            "ennuie",
+            "ÊTRE",
+            "volerait",
+            "publicité",
+            "pitoyable",
+            "saisissement",
+            "premièrement",
+            "trouverions",
+            "voyiez",
+            "aiguë",
+            "guë",
+            "assions",
+            "instruments",
+            "tempérament",
+            "eusement",
+            "fameusement",
+        ] {
+            check(w);
+        }
+        let mut rng = Rng(0xF12A_9C0B_55AA_33CC);
+        for _ in 0..60_000 {
+            let w = random_word(&mut rng);
+            check(&w);
+        }
     }
 }

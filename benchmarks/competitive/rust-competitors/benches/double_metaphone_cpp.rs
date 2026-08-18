@@ -23,13 +23,19 @@
 //! ported from the reference implementation this crate's family targets)
 //! and pixelglow's C++11 rewrite of Lawrence Philips' original C, both
 //! returning a (primary key, secondary key) pair from one word.
-//! `tests/double_metaphone_cpp_correctness.rs` verifies the two produce
-//! byte-identical output across every one of the 653 real English surnames
-//! in `benches/data/names.json` — the same dataset
-//! `crates/verbora-phonetics/benches/phonetics.rs` and this crate's own
-//! `benches/phonetics.rs` already use for phonetic-encoder benchmarks — and
-//! confirms Verbora's default 32-character output cap never fires on this
-//! domain, so the one real API difference between the two (Verbora caps by
+//! `tests/double_metaphone_cpp_correctness.rs` pins the real, measured
+//! result: **`Partial`, not byte-exact** — 584 of the 653 real English
+//! surnames in `benches/data/names.json` (89.4%) agree exactly, the same
+//! dataset `crates/verbora-phonetics/benches/phonetics.rs` and this crate's
+//! own `benches/phonetics.rs` already use for phonetic-encoder benchmarks.
+//! The confirmed, dominant divergence is a single rule difference in the
+//! trailing-`S`-after-`[AI]` handling (see that test file's own module doc
+//! comment for the full, source-cited account) — not a bug on either side,
+//! and it does not disqualify the throughput comparison below: both sides
+//! do the same *shape* of work, one left-to-right scan producing a
+//! (primary, secondary) key pair. The correctness test also confirms
+//! Verbora's default 32-character output cap never fires on this domain,
+//! so the one real API difference between the two (Verbora caps by
 //! default, the vendored library never does) never actually shows up in
 //! the compared output.
 //!

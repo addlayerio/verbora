@@ -1,33 +1,20 @@
 # Beider-Morse Phonetic Matching
 
-The four encoders in [Phonetics](phonetics.md) are each tuned for one
-language's — mostly English's — orthography. None of them solve the problem
-a genealogical name index actually has: the *same* historical family name
-plausibly has several "correct" spellings depending on which country's
-conventions transcribed it. A name carried from Russia through Poland to
-Germany accumulates several distinct, all-legitimate spellings, not one.
-`BeiderMorse` solves that: it encodes a name into every plausible spelling
-across up to 18 languages at once (or restricted to one, if you already know
-it), rather than a single language-specific key.
+The encoders in [Phonetics](phonetics.md) each key on one language's
+orthography. `BeiderMorse` solves a different problem: the *same* historical
+family name plausibly has several correct spellings, depending on which
+country's conventions transcribed it. A name carried from Russia through
+Poland to Germany accumulates several distinct, all-legitimate spellings, not
+one.
 
-<div class="callout callout-note">
-<strong>Verbora-native design.</strong>
-<code>BeiderMorse</code>'s correctness was established during development
-against a disposable, non-dependency build of <code>rphonetic</code> (a
-mature Rust implementation of the same underlying algorithm) reading the
-identical rule-file corpus this crate embeds. See
-<a href="#correctness-and-a-known-edge-case">Correctness and a known edge
-case</a> below for what that verification covered, the two real bugs it
-caught, and the one still-open discrepancy it didn't resolve. See
-<a href="phonetics">Phonetics</a> for the four tested encoders this
-extension sits alongside.
-</div>
+`BeiderMorse` encodes a name into every plausible spelling across up to 18
+languages at once — or restricted to one language, when you already know it —
+rather than into a single language-specific key.
 
 ## When to use it
 
-- **Matching historical or immigrant family names** across the spelling
-  drift that crossing a language boundary introduces — the textbook use case
-  this algorithm was designed for.
+- **Matching historical or immigrant family names** across the spelling drift
+  that crossing a language boundary introduces.
 - **Building a genealogical or name-matching search index** where recall
   across plausible transliterations matters more than a single canonical
   spelling.
@@ -38,20 +25,18 @@ extension sits alongside.
 
 ## When not to use it
 
-- **Ordinary same-language fuzzy matching.** If every name in your dataset
-  is already in one language/orthography, [`Metaphone`](phonetics.md) or
-  [`SoundEx`](phonetics.md) is cheaper and simpler — Beider-Morse's value is
-  specifically cross-language spelling drift.
-- **A search engine.** `encode`/`encode_language` generate candidate
-  spellings; they do not rank them, apply an edit-distance threshold, or
-  accept a query language — the same boundary
-  [`PhoneticIndex::neighbors`](phonetic-index.md) draws. Composing with
-  [`verbora-distance`](https://docs.rs/verbora-distance) for ranking is left
-  to the call site.
-- **Indexing at `PhoneticIndex` scale, today.** `BeiderMorseCode`'s
-  variable-length output doesn't fit `PhoneticIndex`'s `PhoneticEncoder`
-  trait (built around one-or-two fixed codes per entry) — composing the two
-  is a real, open question, not implemented yet.
+- **Ordinary same-language fuzzy matching.** If every name in your dataset is
+  already in one orthography, [`Metaphone` or `SoundEx`](phonetics.md) is
+  cheaper and simpler. Beider-Morse's value is specifically cross-language
+  spelling drift.
+- **Ranking.** `encode`/`encode_language` generate candidate spellings; they
+  do not rank them or apply an edit-distance threshold — the same boundary
+  [`PhoneticIndex::neighbors`](phonetic-index.md) draws. Compose with
+  [`verbora-distance`](https://docs.rs/verbora-distance) at the call site for
+  scoring.
+- **Indexing with `PhoneticIndex`.** `BeiderMorseCode`'s variable-length
+  output does not fit `PhoneticIndex`'s `PhoneticEncoder` trait, which is
+  built around one or two fixed codes per entry.
 
 ## Quick example
 
@@ -82,7 +67,7 @@ Two independent axes, plus an optional third override:
 | | Purpose |
 |---|---|
 | `NameType` | Which family-naming convention's rule tables to draw from — `Generic` (18 languages: the default, general-purpose choice), `Ashkenazi` (10, tuned for Ashkenazi Jewish naming conventions), `Sephardic` (5, tuned for Sephardic Jewish naming conventions) |
-| `RuleType` | How wide a net the final refinement pass casts — `Approx` (the default: widest net across plausible historical/cross-language spelling drift) or `Exact` (a narrower pass, closer to "how the name reads today," smaller candidate sets) |
+| `RuleType` | How wide a net the final refinement pass casts — `Approx` (the default: widest net across plausible cross-language spelling drift) or `Exact` (a narrower pass, closer to "how the name reads today," smaller candidate sets) |
 | Language | `encode()` guesses it from the spelling; `encode_language(word, "french")` restricts to one explicitly, skipping the guess entirely |
 
 ```rust
@@ -107,37 +92,31 @@ fn main() {
 
 ### Language auto-detection
 
-`encode()` runs a full regex sweep over the word's own spelling before doing
-any rule-table work — the same heuristic layer every Beider-Morse
-implementation uses, included in this crate rather than skipped. A confident
-single-language guess (`"Renault"` → French) loads that language's own rule
-file and starts every candidate phoneme pre-filtered to it; an ambiguous
-guess falls back to the `"any"` file with the (possibly still narrowed)
-guessed language set as the starting point. This is a real, measurable cost
-— see [Performance characteristics](#performance-characteristics) — which is
-exactly why `encode_language` exists as an escape hatch for callers who
-already know the answer.
+`encode()` sweeps the word's own spelling before doing any rule-table work. A
+confident single-language guess (`"Renault"` → French) loads that language's
+own rule file and starts every candidate phoneme pre-filtered to it; an
+ambiguous guess falls back to the `"any"` file with the (possibly still
+narrowed) guessed language set as the starting point. That sweep is a real,
+measurable cost — see [Performance characteristics](#performance-characteristics)
+— which is why `encode_language` exists for callers who already know the
+answer.
 
 ### Prefixes and multi-word names
 
-Two shapes real names take that a plain per-character rule sweep would get
-wrong are handled explicitly:
+Two shapes real names take are handled explicitly, rather than left to a plain
+per-character rule sweep:
 
-- **A leading apostrophe or name prefix** (`"d'Angelo"`, `"van Gogh"`, `"de
-  la Cruz"` — the last only for `NameType::Generic`) splits the name into
+- **A leading apostrophe or name prefix** (`"d'Angelo"`, `"van Gogh"`, `"de la
+  Cruz"` — the last only for `NameType::Generic`) splits the name into
   `(without-the-prefix)-(with-the-prefix-fused-on)`, each half re-encoded
-  independently. `BeiderMorseCode::spellings` holds exactly one
-  already-composed string for this case, not independent candidates — see
-  the type's own doc comment.
-- **A name with more than one word** is, by default (`concat: true` — every
-  Beider-Morse implementation's own real default, despite what its own doc
-  comment claims; confirmed against the constructor source), fused into one
-  lookup: `"Jean Paul"` is encoded as the single string `"jean paul"`,
-  producing one cross-product candidate set spanning both words. Calling
+  independently. `BeiderMorseCode::spellings` then holds exactly one
+  already-composed string, not independent candidates.
+- **A name with more than one word** is fused into one lookup by default
+  (`concat: true`): `"Jean Paul"` is encoded as the single string `"jean
+  paul"`, producing one cross-product candidate set spanning both words.
   [`with_concat(false)`](https://docs.rs/verbora-phonetics/latest/verbora_phonetics/struct.BeiderMorse.html#method.with_concat)
-  instead encodes each word independently and hyphen-joins the results —
-  useful when a middle name might be present on one side of a match and
-  absent on the other.
+  encodes each word independently and hyphen-joins the results — useful when a
+  middle name might be present on one side of a match and absent on the other.
 
 ```rust
 use verbora_phonetics::{BeiderMorse, NameType, RuleType};
@@ -163,82 +142,59 @@ fn main() {
 
 ## Performance characteristics
 
-Real numbers, one development machine, `cargo bench -p verbora-phonetics
---bench beider_morse` (16-surname batches; treat exact figures as
-machine-dependent, orders of magnitude as the reproducible part). Full
-methodology in the bench file's own module doc comment, and the complete
-aspect-by-aspect review in `docs/PERFORMANCE_MATRIX.md`'s "Beider-Morse
-Phonetic Matching" section.
+Measured with `cargo bench -p verbora-phonetics --bench beider_morse` on one
+development machine, over 16-surname batches. Treat the exact figures as
+machine-dependent and the orders of magnitude as the reproducible part.
 
-| Comparison | Result |
+| Choice | Cost per 16-name batch |
 |---|---|
-| `encode` (guesses the language) vs. `encode_language` (already known) | ~104 µs vs. ~48 µs per 16-name batch — knowing the language ahead of time is roughly **2.2× cheaper** |
-| `RuleType::Approx` vs. `Exact` | ~104 µs vs. ~71 µs — `Exact`'s narrower final pass is measurably cheaper, not just a smaller *result* |
-| Multi-word `concat: true` (fused) vs. `false` (split, hyphen-joined) | ~104 µs vs. ~86 µs |
+| `encode` (guesses the language) | ~104 µs |
+| `encode_language` (language already known) | ~48 µs — roughly **2.2× cheaper** |
+| `RuleType::Approx` | ~104 µs |
+| `RuleType::Exact` | ~71 µs — the narrower final pass is cheaper to *run*, not just smaller in its result |
+| Multi-word, `concat: true` (fused) | ~104 µs |
+| Multi-word, `concat: false` (split, hyphen-joined) | ~86 µs |
 
-The one genuinely surprising result, published rather than smoothed over:
-`NameType::Ashkenazi` (10 languages) measured **slower** than `Generic` (18
-languages) on the same 16-surname list, and `Sephardic` (5 languages)
-measured fastest of the three — the opposite of "fewer languages is
-faster." The list used is Romance/Slavic/Greek-biased (picked to suit
-`Generic`); under Ashkenazi's own narrower language pool, most of those
-names guess ambiguously rather than to one confident language, falling back
-to the wider `"any"` rule file and producing a *larger* candidate set than
-Generic's own mostly-singleton guesses do. The real cost driver, confirmed
-by this benchmark, is guess confidence and resulting candidate-set size —
-not raw language count.
+**Language count is not the cost driver; guess confidence is.**
+`NameType::Ashkenazi` (10 languages) measures *slower* than `Generic` (18
+languages) on the same 16-surname list, and `Sephardic` (5 languages) measures
+fastest of the three. Under Ashkenazi's narrower language pool most of those
+names guess ambiguously rather than resolving to one confident language, so
+they fall back to the wider `"any"` rule file and produce a *larger* candidate
+set than Generic's mostly-singleton guesses do. Candidate-set size is what you
+pay for.
 
 ### Input length
 
 `encode`/`encode_language` cap the normalized input at 512 characters
 (silently truncating anything longer) and skip prefix-splitting above 128
-characters, falling through to ordinary multi-word handling instead. No
-real name comes close to either limit — this exists because an independent
-audit found that a *repeated* Generic name prefix (`"de de de ... cruz"`)
-recursed once per repetition, each level costing roughly as much as the
-original input: ~3,000 characters of repeated prefix cost 14+ seconds
-before this cap existed. See
-[Correctness and a known edge case](#correctness-and-a-known-edge-case)
-below for the rest of what that audit found.
+characters, falling through to ordinary multi-word handling instead. No real
+name comes close to either limit; the caps exist to bound a pathological input
+— a repeated name prefix such as `"de de de ... cruz"` — whose splitting cost
+would otherwise compound once per repetition.
 
-## Correctness and a known edge case
+## Known edge case
 
-Every other Verbora-native extension in this workspace has something to
-lean on for verification (`PhoneticIndex` reuses this crate's own
-tested encoders; [Language](language.md) benchmarks against real
-competitor crates). Beider-Morse has neither, so correctness was
-established during development against a disposable build of `rphonetic`
-reading the identical rule-file corpus this crate embeds — chosen
-specifically to isolate engine-algorithm correctness from rule-corpus
-correctness, since both implementations read the same underlying data. That
-process caught two real bugs before landing (a compound language tag like
-`gv[portuguese+spanish]` being silently dropped instead of resolved, and the
-Rules pass wrongly passing an unmatched character through instead of
-skipping it) and then swept 106 Generic surnames (96.2% exact match), 10
-Ashkenazi and 10 Sephardic surnames (100%), `RuleType::Exact` on 12 names
-(100%), 16 explicit single-language calls (100%), and 5 prefix/multi-word
-names (4/5). A follow-up independent audit of the finished module then
-found and fixed one real blocker (the repeated-prefix cost above) plus
-several minor doc/test gaps — see `AGENTS.md`'s Beider-Morse section for
-the full findings list.
-
-The remaining mismatches all cluster around one still-open edge case: names
-ending in a bare word-final consonant cluster like `-poulos` or `-gh`
-(`"Angelopoulos"`, `"Balogh"`, `"van Gogh"`). Traced by hand through the
-actual rule files without finding an attributable bug on Verbora's own side
-— recorded here rather than silently accepted, per this workspace's
-"measure and disclose, don't smooth over" discipline. If your dataset leans
-heavily on names with that ending, verify your own results before relying on
-exact agreement with other Beider-Morse implementations.
+Names ending in a bare word-final consonant cluster such as `-poulos` or `-gh`
+(`"Angelopoulos"`, `"Balogh"`, `"van Gogh"`) are this encoder's weakest area:
+the rule files resolve those endings less confidently than the rest of the
+corpus. Everything else — including compound language tags, the rule pass, the
+prefix split and all three `NameType`s — is pinned by the crate's own test
+suite. If your dataset leans heavily on names with that ending, verify the
+candidate sets you get before relying on them.
 
 ## Licensing
 
 The 127 embedded rule files (`crates/verbora-phonetics/data/beider-morse/`)
-are Apache-2.0-licensed data from Apache Commons Codec — itself a Java
-re-implementation of Alexander Beider and Stephen P. Morse's original,
-GPL-3.0-licensed PHP reference. Verbora copies from the Apache-2.0 chain
-only, never touches the GPL-3.0 PHP source, and preserves every file's own
-license header plus a top-level `NOTICE.md` recording the full provenance
-chain. The engine and parser reading that data
+are Apache-2.0-licensed data, sourced exclusively from the Apache-2.0
+provenance chain. Every file keeps its own license header, and a top-level
+`NOTICE.md` records that chain in full. The engine and parser reading the data
 (`crates/verbora-phonetics/src/beider_morse/{engine,rule,lang}.rs`) are
 Verbora's own MIT-licensed Rust.
+
+## Related
+
+- [Phonetics](phonetics.md) — the single-key encoders this one sits alongside.
+- [Phonetic neighbors](phonetic-index.md) — dictionary-wide lookup for the
+  fixed-code encoders.
+- [String distance](distance.md) — the scoring step that ranks candidates.

@@ -6,7 +6,7 @@
 //!
 //! # Why every rewrite is hand-written
 //!
-//! Not one of the twenty-two stages goes through a regular expression engine
+//! Not one of the twenty-one stages goes through a regular expression engine
 //! here, and three of them *could not*:
 //!
 //! * [`Metaphone::dedup`] uses `/([^c])\1/g`, a **backreference**, which the
@@ -24,8 +24,8 @@
 
 use crate::pipe::Pipe;
 use crate::units::{
-    Unit, clamp_take, coerce_or_default, eq_ascii_slice, is_trim_unit, to_utf16, trim_units,
-    uppercase_utf16, utf16_to_lowercase,
+    Unit, clamp_take, coerce_or_default, eq_ascii_slice, is_trim_unit, trim_units, uppercase_utf16,
+    utf16_to_lowercase,
 };
 
 /// Original Metaphone.
@@ -79,22 +79,30 @@ impl Metaphone {
     /// budget of three. Do not assert an upper bound on the length here.
     #[must_use]
     pub fn process_with(&self, token: &str, max_length: Option<f64>) -> String {
+        // ASCII tokens: byte-wise case folding equals Unicode lowercasing, so
+        // the pooled pipeline folds straight into reused scratch — the
+        // returned `String` is the call's only allocation. Non-ASCII tokens
+        // keep the full Unicode fold first (which can itself produce ASCII,
+        // e.g. the Kelvin sign — that rare case still reaches the ASCII
+        // pipeline below, exactly as before).
+        if token.is_ascii() {
+            return pipeline_ascii_pooled(token, max_length, |window| {
+                let mut out = window.to_vec();
+                out.make_ascii_uppercase();
+                String::from_utf8(out).expect("ASCII in, ASCII out")
+            });
+        }
         let lower = utf16_to_lowercase(token);
         if lower.is_ascii() {
-            // An owned lowercase copy (mixed-case input) is handed to the
-            // pipeline as its first scratch buffer; a borrowed one (already
-            // lowercase) keeps the zero-allocation entry.
-            let mut out = match lower {
-                std::borrow::Cow::Borrowed(s) => pipeline(s.as_bytes(), max_length),
-                std::borrow::Cow::Owned(s) => pipeline_owned(s.into_bytes(), max_length),
-            };
-            out.make_ascii_uppercase();
-            String::from_utf8(out).expect("ASCII in, ASCII out")
-        } else {
-            let units: Vec<u16> = lower.encode_utf16().collect();
-            let out = uppercase_utf16(&pipeline_owned(units, max_length));
-            String::from_utf16_lossy(&out)
+            return pipeline_ascii_pooled(&lower, max_length, |window| {
+                let mut out = window.to_vec();
+                out.make_ascii_uppercase();
+                String::from_utf8(out).expect("ASCII in, ASCII out")
+            });
         }
+        let units: Vec<u16> = lower.encode_utf16().collect();
+        let out = uppercase_utf16(&pipeline_owned(units, max_length));
+        String::from_utf16_lossy(&out)
     }
 
     /// Like [`Self::process_with`], but returns UTF-16 code units.
@@ -106,18 +114,25 @@ impl Metaphone {
     /// exact sequence.
     #[must_use]
     pub fn process_utf16(&self, token: &str, max_length: Option<f64>) -> Vec<u16> {
+        if token.is_ascii() {
+            return pipeline_ascii_pooled(token, max_length, |window| {
+                window
+                    .iter()
+                    .map(|&b| u16::from(b.to_ascii_uppercase()))
+                    .collect()
+            });
+        }
         let lower = utf16_to_lowercase(token);
         if lower.is_ascii() {
-            let mut out = match lower {
-                std::borrow::Cow::Borrowed(s) => pipeline(s.as_bytes(), max_length),
-                std::borrow::Cow::Owned(s) => pipeline_owned(s.into_bytes(), max_length),
-            };
-            out.make_ascii_uppercase();
-            to_utf16(&out)
-        } else {
-            let units: Vec<u16> = lower.encode_utf16().collect();
-            uppercase_utf16(&pipeline_owned(units, max_length))
+            return pipeline_ascii_pooled(&lower, max_length, |window| {
+                window
+                    .iter()
+                    .map(|&b| u16::from(b.to_ascii_uppercase()))
+                    .collect()
+            });
         }
+        let units: Vec<u16> = lower.encode_utf16().collect();
+        uppercase_utf16(&pipeline_owned(units, max_length))
     }
 
     /// Whether two strings share a Metaphone code, at the default length.
@@ -490,17 +505,15 @@ fn letter_mask<U: Unit>(units: &[U]) -> u32 {
     mask
 }
 
-/// Which buffer currently holds the pipeline text.
+/// Which scratch buffer currently holds the pipeline text.
 enum Held {
-    /// The caller's input slice — nothing has been rewritten yet.
-    Input,
     /// Scratch buffer A.
     A,
     /// Scratch buffer B.
     B,
 }
 
-/// The skip-aware replacement for [`Pipe`] inside [`pipeline`].
+/// The skip-aware replacement for [`Pipe`] inside [`run_pipeline`].
 ///
 /// Holds the text as a `start..end` **window** over either the borrowed input
 /// or one of two lazily-allocated scratch buffers. Anchored deletions
@@ -509,12 +522,13 @@ enum Held {
 /// fires pays for a rewrite pass, and the letter mask is rebuilt from the
 /// result so later gates stay a superset of the letters present.
 struct Driver<'a, U> {
-    /// The borrowed pipeline input.
-    input: &'a [U],
-    /// Scratch buffer A, allocated on the first rewrite.
-    a: Vec<U>,
-    /// Scratch buffer B, allocated on the second rewrite.
-    b: Vec<U>,
+    /// Scratch buffer A (borrowed so callers can pool it across calls —
+    /// the ASCII entry points reuse a thread-local pair, cutting per-call
+    /// allocator traffic to the one output string; seeded with the
+    /// lowercased input, so `held` starts at [`Held::A`]).
+    a: &'a mut Vec<U>,
+    /// Scratch buffer B.
+    b: &'a mut Vec<U>,
     /// Which of the three buffers holds the current text.
     held: Held,
     /// Window start into the held buffer.
@@ -529,22 +543,9 @@ struct Driver<'a, U> {
 
 impl<'a, U: Unit> Driver<'a, U> {
     /// Starts a pipeline over `input` with its precomputed letter mask.
-    fn new(input: &'a [U], mask: u32) -> Self {
-        Self {
-            input,
-            a: Vec::new(),
-            b: Vec::new(),
-            held: Held::Input,
-            start: 0,
-            end: input.len(),
-            mask,
-        }
-    }
-
     /// The current text window.
     fn cur(&self) -> &[U] {
         match self.held {
-            Held::Input => &self.input[self.start..self.end],
             Held::A => &self.a[self.start..self.end],
             Held::B => &self.b[self.start..self.end],
         }
@@ -572,19 +573,11 @@ impl<'a, U: Unit> Driver<'a, U> {
     /// stage, whose output no later gate reads.
     fn apply_last(&mut self, rule: fn(&[U], &mut Vec<U>)) {
         match self.held {
-            Held::Input => {
-                let src = &self.input[self.start..self.end];
-                self.a.clear();
-                self.a.reserve(src.len() + 8);
-                rule(src, &mut self.a);
-                self.held = Held::A;
-                self.end = self.a.len();
-            }
             Held::A => {
                 let src = &self.a[self.start..self.end];
                 self.b.clear();
                 self.b.reserve(src.len() + 8);
-                rule(src, &mut self.b);
+                rule(src, self.b);
                 self.held = Held::B;
                 self.end = self.b.len();
             }
@@ -592,7 +585,7 @@ impl<'a, U: Unit> Driver<'a, U> {
                 let src = &self.b[self.start..self.end];
                 self.a.clear();
                 self.a.reserve(src.len() + 8);
-                rule(src, &mut self.a);
+                rule(src, self.a);
                 self.held = Held::A;
                 self.end = self.a.len();
             }
@@ -614,20 +607,21 @@ impl<'a, U: Unit> Driver<'a, U> {
         self.end -= trail;
     }
 
-    /// The final text, reusing the held buffer when there is one.
-    fn finish(self) -> Vec<U> {
-        /// Cuts `v` down to `start..end` in place.
-        fn window_into<U: Unit>(mut v: Vec<U>, start: usize, end: usize) -> Vec<U> {
-            v.truncate(end);
-            if start > 0 {
-                v.drain(..start);
-            }
-            v
-        }
-        match self.held {
-            Held::Input => self.input[self.start..self.end].to_vec(),
-            Held::A => window_into(self.a, self.start, self.end),
-            Held::B => window_into(self.b, self.start, self.end),
+    /// The final text window. Borrowed — callers copy it into their own
+    /// output (uppercasing on the way, which they all did anyway), so the
+    /// pooled scratch never leaves the driver.
+    fn finish(self) -> &'a [U] {
+        let Self {
+            a,
+            b,
+            held,
+            start,
+            end,
+            ..
+        } = self;
+        match held {
+            Held::A => &a[start..end],
+            Held::B => &b[start..end],
         }
     }
 }
@@ -737,6 +731,68 @@ fn seek_drop_before_consonant<U: Unit>(units: &[U], c: u8) -> bool {
     (0..n).any(|i| units[i].eq_ascii(c) && (i + 1 == n || !is_vowel(units[i + 1])))
 }
 
+thread_local! {
+    /// Per-thread scratch pair for the ASCII pipeline. Reusing these across
+    /// calls cuts per-call allocator traffic to the one returned `String` —
+    /// measured as roughly a quarter of the whole per-name cost on the
+    /// competitive benchmark's mixed-name batches. Safe plain `RefCell`
+    /// reuse: the rules never call back into `process*`, so the borrow is
+    /// never re-entered, and each rayon worker gets its own pair.
+    static ASCII_SCRATCH: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// The ASCII pipeline over pooled scratch: lowercases `token` directly into
+/// scratch A (no intermediate `String`), runs the rule sequence, and hands
+/// the final window to `emit`, which builds the caller's owned output —
+/// the single allocation the call makes in steady state.
+fn pipeline_ascii_pooled<R>(
+    token: &str,
+    max_length: Option<f64>,
+    emit: impl FnOnce(&[u8]) -> R,
+) -> R {
+    debug_assert!(token.is_ascii());
+    ASCII_SCRATCH.with(|cell| {
+        let scratch = &mut *cell.borrow_mut();
+        let (a, b) = (&mut scratch.0, &mut scratch.1);
+        a.clear();
+        a.extend(token.bytes().map(|x| x.to_ascii_lowercase()));
+        let (mask, has_dup_pair) = scan_letters(a);
+        let end = a.len();
+        let d = Driver {
+            a,
+            b,
+            held: Held::A,
+            start: 0,
+            end,
+            mask,
+        };
+        emit(run_pipeline(d, has_dup_pair, max_length))
+    })
+}
+
+/// [`pipeline`] over an owned, already-lowercased buffer: the buffer becomes
+/// the driver's first scratch instead of being borrowed, so the case-folding
+/// allocation the caller already paid doubles as the first rewrite target —
+/// one allocation fewer per call than lowercase-then-borrow, with the
+/// identical rule sequence (the driver never re-reads its original input
+/// once a rewrite has fired, so seeding scratch A is observationally the
+/// same as borrowing).
+fn pipeline_owned<U: Unit>(mut lower: Vec<U>, max_length: Option<f64>) -> Vec<U> {
+    let (mask, has_dup_pair) = scan_letters(&lower);
+    let end = lower.len();
+    let mut b = Vec::new();
+    let d = Driver {
+        a: &mut lower,
+        b: &mut b,
+        held: Held::A,
+        start: 0,
+        end,
+        mask,
+    };
+    run_pipeline(d, has_dup_pair, max_length).to_vec()
+}
+
 /// The full 21-stage pipeline plus truncation, over one unit width.
 ///
 /// Computes byte-for-byte what [`pipeline_reference`] computes — the parity
@@ -782,38 +838,11 @@ fn seek_drop_before_consonant<U: Unit>(units: &[U], c: u8) -> bool {
 /// [`r_final`] therefore applies all three maps inside stage 21's single scan.
 ///
 /// Truncation is unchanged: `substring(0, maxLengthNew)` after all stages.
-fn pipeline<U: Unit>(lower: &[U], max_length: Option<f64>) -> Vec<U> {
-    let (mask, has_dup_pair) = scan_letters(lower);
-    run_pipeline(Driver::new(lower, mask), has_dup_pair, max_length)
-}
-
-/// [`pipeline`] over an owned, already-lowercased buffer: the buffer becomes
-/// the driver's first scratch instead of being borrowed, so the case-folding
-/// allocation the caller already paid doubles as the first rewrite target —
-/// one allocation fewer per call than lowercase-then-borrow, with the
-/// identical rule sequence (the driver never re-reads its original input
-/// once a rewrite has fired, so seeding scratch A is observationally the
-/// same as borrowing).
-fn pipeline_owned<U: Unit>(lower: Vec<U>, max_length: Option<f64>) -> Vec<U> {
-    let (mask, has_dup_pair) = scan_letters(&lower);
-    let end = lower.len();
-    let d = Driver {
-        input: &[],
-        a: lower,
-        b: Vec::new(),
-        held: Held::A,
-        start: 0,
-        end,
-        mask,
-    };
-    run_pipeline(d, has_dup_pair, max_length)
-}
-
-fn run_pipeline<U: Unit>(
-    mut d: Driver<'_, U>,
+fn run_pipeline<'a, U: Unit>(
+    mut d: Driver<'a, U>,
     has_dup_pair: bool,
     max_length: Option<f64>,
-) -> Vec<U> {
+) -> &'a [U] {
     let max = coerce_or_default(max_length, 32.0);
 
     // 1 dedup — `has_dup_pair` is its exact firing condition.
@@ -923,12 +952,11 @@ fn run_pipeline<U: Unit>(
         d.apply_last(r_final);
     }
 
-    let mut out = d.finish();
+    let out = d.finish();
     // `if (token.length >= maxLengthNew) token = token.substring(0, maxLengthNew)`
     // — the guard is redundant, since `substring` past the end is a no-op, but
     // the negative case still truncates to nothing.
-    out.truncate(clamp_take(max, out.len()));
-    out
+    &out[..clamp_take(max, out.len())]
 }
 
 /// The original stage-by-stage pipeline, kept verbatim as the parity oracle.
@@ -1888,6 +1916,7 @@ mod tests {
 
         /// `Metaphone::process_utf16`, computed through the oracle pipeline.
         fn process_utf16_reference(token: &str, max_length: Option<f64>) -> Vec<u16> {
+            use crate::units::to_utf16;
             let lower = utf16_to_lowercase(token);
             if lower.is_ascii() {
                 let mut out = pipeline_reference(lower.as_bytes(), max_length);

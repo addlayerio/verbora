@@ -1,64 +1,7 @@
 # The workspace map
 
-Verbora is one Cargo workspace. Knowing its shape makes the rest of this site
-easier to navigate, and explains why some things live where they do.
-
-## Crates
-
-```text
-crates/
-  verbora-core/            traits, Token, StopWords, whitespace helpers
-  verbora-tokenizers/      25 tokenizers, the Tokenize trait
-  verbora-distance/        Levenshtein, Damerau, Jaro–Winkler, Dice, Hamming
-  verbora-phonetics/       SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff
-  verbora-ngrams/          n-gram windows, frequency stats, Chinese n-grams
-  verbora-normalizers/     diacritics, English contractions, Japanese width/kana
-  verbora-inflectors/      pluralise/singularise, ordinals (en / fr / ja)
-  verbora-trie/            prefix tree
-  verbora-transliterators/ Japanese kana → romaji, five-phase pipeline
-  verbora-wordnet/         lexical database, synsets, relation traversal
-  verbora-tfidf/           term interning, incremental idf cache
-  verbora-sentiment/       14 lexicons across 10 languages, sticky negation
-  verbora-classifiers/     Bayes, logistic regression, MaxEnt + GIS
-  verbora-examples/        the code printed on this site    (dev-only, not published)
-
-  verbora-analyzers/       sentence analysis   ┐
-  verbora-util/            stop words, graphs  │  implemented, tested,
-  verbora-spellcheck/      Norvig correction   ├─ no feature page yet
-  verbora-stemmers/        Porter × 13, Lancaster, ja, id
-  verbora-tagger/          Brill POS tagger, trainer, tester ┘  (see roadmap)
-```
-
-All 105 public APIs are implemented and tested — the split
-above is about documentation coverage, not code completeness. See the
-[roadmap](../features/roadmap.md) for the five crates still missing a feature
-page.
-
-The dependency graph is deliberately shallow, and acyclic apart from the one
-place a subsystem's own dependency tree calls another (phonetics tokenizes
-internally for `tokenize_and_phoneticize`; the transliterator's Japanese-only
-sibling shares the normalizer tables rather than duplicating them):
-
-```text
-verbora-core ──┬── verbora-tokenizers ── regex
-               ├── verbora-distance ──── rustc-hash
-               ├── verbora-phonetics ─── regex, verbora-tokenizers
-               ├── verbora-inflectors ── regex
-               ├── verbora-ngrams
-               ├── verbora-tfidf ─────── verbora-tokenizers, rustc-hash
-               └── verbora-classifiers ─ verbora-stemmers
-
-verbora-normalizers      (no dependencies at all)
-verbora-trie ─────────── smallvec
-verbora-transliterators ─ verbora-normalizers
-verbora-wordnet ───────── verbora-core, memchr
-verbora-sentiment ─────── verbora-stemmers, rustc-hash
-```
-
-`verbora-core` depends on nothing outside `std`. Leaf crates can therefore be
-used in isolation without dragging in data assets or a regex engine they do not
-need — `verbora-normalizers` in particular has an empty `[dependencies]` section
-with a comment explaining, per omitted crate, why it is absent.
+Verbora is one Cargo workspace of 19 production crates. Knowing its shape makes
+the rest of this site easier to navigate.
 
 ## What each crate is for
 
@@ -77,53 +20,59 @@ with a comment explaining, per omitted crate, why it is absent.
 | [`verbora-tfidf`](../features/tfidf.md) | `TfIdf`, `DocumentInput`, `Interner`, `Encoding` |
 | [`verbora-sentiment`](../features/sentiment.md) | `SentimentAnalyzer`, `VocabularyKind`, `Contributions` |
 | [`verbora-classifiers`](../features/classifiers.md) | `BayesClassifier`, `LogisticRegressionClassifier`, `MaxEntClassifier` |
+| [`verbora-stemmers`](../features/stemmers.md) | Porter/Snowball language stemmers, Lancaster, Japanese and Indonesian |
+| [`verbora-spellcheck`](../features/spellcheck.md) | `Spellcheck`, `FuzzyIndex`, `DeletionIndex`, lazy edits |
+| [`verbora-tagger`](../features/tagger.md) | `BrillPosTagger`, lexicons, rules, trainer and tester |
+| [`verbora-analyzers`](../features/analyzers.md) | `SentenceAnalyzer`, `TaggedWord`, `SenType` |
+| [`verbora-language`](../features/language.md) | script detection, optional language detectors, phonetic recommendations |
+| [`verbora-util`](../features/util.md) | abbreviations, stop words, graphs, path trees and storage backends |
 
-**526,341 recorded cases in total**, across 791 suites, every one of them
-machine-generated rather than transcribed by hand. See
-the [roadmap](../features/roadmap.md).
+## The dependency graph
 
-## Supporting directories
+Deliberately shallow and acyclic. Two crates reach sideways on purpose:
+`verbora-phonetics` tokenizes internally for `tokenize_and_phoneticize`, and
+`verbora-transliterators` shares the normalizer's kana tables rather than
+duplicating them.
 
 ```text
-docs/
-  COMPETITIVE_BENCHMARKS.md   the competitor matrix and the dossier behind it
-  PERFORMANCE_GAPS.md         every measured gap, with its cause and verdict
-  PERFORMANCE_MATRIX.md       per-crate optimisation review status
-  design/                     design notes per subsystem
-site/                         this site (VitePress)
-tools/
-  bench-data/                 generates the inputs every harness reads
-benches/data/                 those generated inputs
-benchmarks/competitive/       head-to-head suite vs. pinned third-party crates
-  rust-competitors/           the benches, correctness tests and memory report
-  manifests/                  pinned competitor versions and selection notes
-  results/                    structured summary, raw estimates, machine metadata
-  scripts/                    result collection and machine attribution
+verbora-core ──┬── verbora-tokenizers ── regex
+               ├── verbora-distance ──── rustc-hash
+               ├── verbora-phonetics ─── regex, verbora-tokenizers
+               ├── verbora-inflectors ── regex
+               ├── verbora-ngrams ────── rustc-hash
+               ├── verbora-tfidf ─────── verbora-tokenizers, rustc-hash, serde
+               └── verbora-classifiers ─ verbora-stemmers, rustc-hash
+
+verbora-normalizers      (no dependencies at all)
+verbora-trie ─────────── smallvec
+verbora-transliterators ─ verbora-normalizers
+verbora-wordnet ───────── verbora-core, memchr
+verbora-sentiment ─────── verbora-stemmers, rustc-hash
 ```
 
-## A crate you will not depend on
+`verbora-core` depends on nothing outside `std`. A leaf crate can therefore be
+used in isolation without dragging in data assets or a regex engine it does not
+need — `verbora-normalizers` in particular ships an empty `[dependencies]`
+section.
 
-**`verbora-examples`** exists so that the code on this site is real. Every
-non-trivial snippet you see here is extracted by `site/check-snippets.py`
-into a generated example in that package and compiled *and run* against the
-actual crates. A snippet that stops compiling, or whose assertions stop
-holding, fails the build — see
+## The rest of the repository
+
+```text
+site/                     this site (VitePress)
+docs/                     internal engineering and design notes
+tools/bench-data/         generates the inputs every benchmark harness reads
+benches/data/             those generated inputs
+benchmarks/competitive/   head-to-head suite against pinned third-party crates
+crates/verbora-examples/  compiled documentation snippets (dev-only)
+```
+
+`verbora-examples` is not a crate you depend on: it exists so that the code on
+this site is real. Every non-trivial snippet here is extracted into a generated
+example in that package and compiled *and run* against the actual crates — see
 [Documentation is part of the code](../reference/docs-are-code.md).
-
-## Where the recorded behaviour lives
-
-The recorded behaviour was captured once and is
-checked in as data — every rule table, stop-word list, character class and
-model weight under each crate's own `src/data/` is machine-derived, never
-transcribed by hand. Every one of those recordings is replayed and checked
-by the workspace's own test suite:
-
-```bash
-cargo test --workspace
-```
 
 ## Next
 
-- [Cargo features](cargo-features.md) — all one of them.
-- [Features overview](../features/index.md) — what is implemented and what is not,
-  and how recorded behaviour is replayed.
+- [Cargo features](cargo-features.md) — the four opt-ins and what they cost.
+- [Features overview](../features/index.md) — what each subsystem does and when
+  to reach for it.

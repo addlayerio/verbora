@@ -1,300 +1,741 @@
 /* ==========================================================================
-   Verbora — "oxide" theme (VitePress)
+   Verbora — "oxide" theme for VitePress
    --------------------------------------------------------------------------
-   Dark-first. The palette is iron and oxidised steel: near-black grounds, a
-   rust accent, copper for secondary emphasis, warm off-white type.
+   One design system: tokens first, then the VitePress variable wiring, then
+   the site's own components. Light and dark are both defined explicitly —
+   VitePress puts `.dark` on <html>, so neither mode is a derived afterthought.
 
-   Every foreground/background pair used for text meets WCAG AA (>= 4.5:1)
-   against its own ground; the values are noted next to each declaration where
-   the margin is not obvious. Ported from the mdBook build's theme/oxide.css —
-   same palette and component catalogue, retargeted at VitePress's own
-   variables and its light/`.dark` toggle instead of mdBook's five named
-   themes.
+   Text foreground/background pairs meet WCAG AA (>= 4.5:1) on their own
+   ground; the ratio is noted where it is not obvious.
+
+   Fonts are self-hosted: Inter ships with VitePress, Cookie (§12) from this
+   directory. No page makes a third-party request to render itself.
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   1. Palette
+   1. Design tokens — scale, shape, elevation, motion
    -------------------------------------------------------------------------- */
 
 :root {
-    /* Grounds */
-    --ox-bg-0: #0d0f10; /* page */
-    --ox-bg-1: #151819; /* sidebar, cards */
-    --ox-bg-2: #1c2022; /* code, table headers */
-    --ox-bg-3: #23282a; /* hover, borders-as-fills */
+    /* Vertical rhythm. Every margin below comes from this scale. */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 24px;
+    --sp-6: 32px;
+    --sp-7: 48px;
+    --sp-8: 64px;
+    --sp-9: 96px;
 
-    /* Oxide */
-    --ox-rust-700: #8f3208;
-    --ox-rust-600: #b7410e;
-    --ox-rust-500: #c65d2e;
-    --ox-rust-400: #d2693c;
-    --ox-copper: #b87333;
-    --ox-copper-bright: #d99a5b;
+    /* Shape */
+    --r-xs: 4px;
+    --r-sm: 6px;
+    --r-md: 10px;
+    --r-lg: 14px;
+    --r-xl: 20px;
+    --r-2xl: 28px;
+    --r-pill: 999px;
 
-    /* Type */
-    --ox-fg: #e7e2dc;
-    --ox-fg-muted: #a8a29b;
-    --ox-fg-faint: #7e7973;
+    /* Reading measure for body copy */
+    --measure: 72ch;
 
-    /* Lines */
-    --ox-line: #2a2f31;
-    --ox-line-strong: #3a4144;
+    /* Motion */
+    --ease: cubic-bezier(0.32, 0.72, 0, 1);
+    --dur-1: 120ms;
+    --dur-2: 200ms;
+    --dur-3: 320ms;
 
-    /* Semantic accents (dark ground) */
-    --ox-good: #7fb069;
-    --ox-warn: #d9a441;
-    --ox-info: #6fa8b8;
+    /* Micro-caps label, used by every kicker on the site */
+    --label-size: 0.6875rem;
+    --label-tracking: 0.12em;
 }
 
 /* --------------------------------------------------------------------------
-   2. Wire the palette into VitePress's own variables
-   --------------------------------------------------------------------------
-   VitePress is light-mode-first at :root, with `.dark` added to <html> for
-   dark mode. Both directions are defined explicitly rather than relying on
-   `prefers-color-scheme`, matching VitePress's own toggle behaviour.
+   2. Palette — light (default)
    -------------------------------------------------------------------------- */
 
-/* Light (default) ---------------------------------------------------------- */
-
 :root {
-    --vp-c-bg: #f5f2ee;
-    --vp-c-bg-alt: #ece7e0;
-    --vp-c-bg-elv: #fffdfa;
-    --vp-c-bg-soft: #e3ddd5;
+    /* Grounds: warm neutrals, not grey. */
+    --vp-c-bg: #fbfaf8;
+    --vp-c-bg-alt: #f3f0eb;
+    --vp-c-bg-elv: #ffffff;
+    --vp-c-bg-soft: #efebe4;
 
-    --vp-c-text-1: #1c2022;
-    --vp-c-text-2: #423e38;
-    --vp-c-text-3: #7d766d;
+    --vp-c-text-1: #171a1c; /* 15.9:1 */
+    --vp-c-text-2: #4c4740; /* 8.4:1  */
+    --vp-c-text-3: #766f66; /* 4.7:1  */
 
-    --vp-c-border: #ddd6ce;
-    --vp-c-divider: #ddd6ce;
-    --vp-c-gutter: #ddd6ce;
+    --vp-c-border: #e5e0d8;
+    --vp-c-divider: #e9e4dd;
+    --vp-c-gutter: #e5e0d8;
 
-    --vp-c-brand-1: #8f3208; /* 7.2:1 on --vp-c-bg */
+    --vp-c-brand-1: #a53c0d; /* 6.2:1 on --vp-c-bg */
     --vp-c-brand-2: #b7410e;
     --vp-c-brand-3: #c65d2e;
-    --vp-c-brand-soft: rgba(183, 65, 14, 0.14);
+    --vp-c-brand-soft: rgb(183 65 14 / 0.12);
 
-    --vp-code-bg: #e3ddd5;
-    --vp-code-color: #8a4b16;
+    /* Channels, for alpha compositing without color-mix. */
+    --ox-bg-rgb: 251 250 248;
+    --ox-elv-rgb: 255 255 255;
+    --ox-fg-rgb: 23 26 28;
+    --ox-accent-rgb: 165 60 13;
 
+    /* Component aliases used throughout §6–§12 */
+    --c-bg: var(--vp-c-bg);
+    --c-surface: var(--vp-c-bg-elv);
+    --c-surface-2: var(--vp-c-bg-soft);
+    --c-line: var(--vp-c-border);
+    --c-line-strong: #cec7bc;
+    --c-fg: var(--vp-c-text-1);
+    --c-muted: var(--vp-c-text-2);
+    --c-faint: var(--vp-c-text-3);
+    --c-accent: var(--vp-c-brand-1);
+    --c-copper: #8a5116; /* 6.4:1 */
+    --c-good: #3d6b2a; /* 5.6:1 */
+    --c-warn: #7a5709; /* 5.7:1 */
+    --c-info: #2c6274; /* 5.6:1 */
+
+    /* Elevation: two layers — a hairline lift and a soft cast shadow. */
+    --shadow-1: 0 1px 2px rgb(28 22 16 / 0.05), 0 1px 1px rgb(28 22 16 / 0.03);
+    --shadow-2: 0 1px 2px rgb(28 22 16 / 0.05), 0 10px 24px -14px rgb(28 22 16 / 0.28);
+    --shadow-3: 0 2px 4px rgb(28 22 16 / 0.05), 0 26px 54px -26px rgb(28 22 16 / 0.34);
+    --shadow-accent: 0 18px 40px -22px rgb(var(--ox-accent-rgb) / 0.55);
+
+    /* Page wash: two faint oxide blooms, one per corner. */
+    --ox-wash:
+        radial-gradient(900px 460px at 88% -14%, rgb(var(--ox-accent-rgb) / 0.09), transparent 62%),
+        radial-gradient(720px 380px at -10% 18%, rgb(138 81 22 / 0.06), transparent 60%);
+}
+
+/* --------------------------------------------------------------------------
+   3. Palette — dark
+   -------------------------------------------------------------------------- */
+
+.dark {
+    --vp-c-bg: #0c0e0f;
+    --vp-c-bg-alt: #121516;
+    --vp-c-bg-elv: #16191b;
+    --vp-c-bg-soft: #1b1f21;
+
+    --vp-c-text-1: #e9e4dd; /* 14.6:1 */
+    --vp-c-text-2: #b4aea6; /* 8.2:1  */
+    --vp-c-text-3: #8a847b; /* 4.9:1  */
+
+    --vp-c-border: #262b2d;
+    --vp-c-divider: #222729;
+    --vp-c-gutter: #262b2d;
+
+    --vp-c-brand-1: #e2733f; /* 5.9:1 on --vp-c-bg */
+    --vp-c-brand-2: #d2693c;
+    --vp-c-brand-3: #b7410e;
+    --vp-c-brand-soft: rgb(210 105 60 / 0.18);
+
+    --ox-bg-rgb: 12 14 15;
+    --ox-elv-rgb: 22 25 27;
+    --ox-fg-rgb: 233 228 221;
+    --ox-accent-rgb: 226 115 63;
+
+    --c-surface: var(--vp-c-bg-elv);
+    --c-surface-2: var(--vp-c-bg-soft);
+    --c-line-strong: #3a4144;
+    --c-copper: #d9a05f; /* 8.3:1 */
+    --c-good: #7fb069; /* 7.2:1 */
+    --c-warn: #dfae52; /* 8.7:1 */
+    --c-info: #74b0c1; /* 8.1:1 */
+
+    /* On a near-black ground a cast shadow reads as nothing; the lift comes
+       from a hairline top highlight plus a deeper, wider shadow. */
+    --shadow-1: 0 1px 0 rgb(255 255 255 / 0.03), 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-2: 0 1px 0 rgb(255 255 255 / 0.035), 0 14px 30px -18px rgb(0 0 0 / 0.8);
+    --shadow-3: 0 1px 0 rgb(255 255 255 / 0.04), 0 32px 64px -30px rgb(0 0 0 / 0.9);
+    --shadow-accent: 0 22px 48px -26px rgb(var(--ox-accent-rgb) / 0.45);
+
+    --ox-wash:
+        radial-gradient(900px 460px at 88% -14%, rgb(var(--ox-accent-rgb) / 0.1), transparent 62%),
+        radial-gradient(720px 380px at -10% 18%, rgb(111 168 184 / 0.045), transparent 60%);
+}
+
+/* --------------------------------------------------------------------------
+   4. VitePress wiring — chrome, code, buttons, hero gradient
+   -------------------------------------------------------------------------- */
+
+:root {
+    --vp-font-family-base: 'Inter', ui-sans-serif, system-ui, -apple-system,
+        'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    --vp-font-family-mono: ui-monospace, 'SFMono-Regular', 'SF Mono', 'Menlo',
+        'Consolas', 'Liberation Mono', monospace;
+
+    --vp-sidebar-bg-color: var(--vp-c-bg-alt);
+    --vp-nav-bg-color: transparent;
+    --vp-layout-max-width: 1480px;
+
+    /* Inline code */
+    --vp-code-bg: var(--vp-c-bg-soft);
+    --vp-code-color: var(--c-copper);
+    --vp-code-font-size: 0.86em;
+    --vp-code-line-height: 1.66;
+
+    /* Code blocks */
+    --vp-code-block-bg: var(--vp-c-bg-alt);
+    --vp-code-block-color: var(--vp-c-text-1);
+    --vp-code-lang-color: var(--vp-c-text-3);
+    --vp-code-copy-code-bg: var(--vp-c-bg-elv);
+    --vp-code-copy-code-hover-bg: var(--vp-c-bg-soft);
+
+    --vp-button-brand-border: transparent;
     --vp-button-brand-bg: var(--vp-c-brand-1);
     --vp-button-brand-hover-bg: var(--vp-c-brand-2);
     --vp-button-brand-active-bg: var(--vp-c-brand-1);
     --vp-button-brand-text: #fffdfa;
     --vp-button-brand-hover-text: #fffdfa;
 
-    /* Local aliases used by the component classes below (.perf, .badge-*, …) */
-    --c-bg: var(--vp-c-bg);
-    --c-surface: var(--vp-c-bg-alt);
-    --c-surface-2: var(--vp-c-bg-soft);
-    --c-line: var(--vp-c-border);
-    --c-line-strong: #c9c1b8;
-    --c-fg: var(--vp-c-text-1);
-    --c-muted: var(--vp-c-text-2);
-    --c-accent: var(--vp-c-brand-1);
-    --c-copper: #8a5a1e;
-    --c-good: #3f6b2c;
-    --c-warn: #78570d; /* 4.9:1 on --c-surface-2 */
-    --c-info: #2f6273;
-}
-
-/* Dark ---------------------------------------------------------------------- */
-
-.dark {
-    --vp-c-bg: var(--ox-bg-0);
-    --vp-c-bg-alt: var(--ox-bg-1);
-    --vp-c-bg-elv: var(--ox-bg-1);
-    --vp-c-bg-soft: var(--ox-bg-2);
-
-    --vp-c-text-1: var(--ox-fg);
-    --vp-c-text-2: #c9c4bd;
-    --vp-c-text-3: var(--ox-fg-faint);
-
-    --vp-c-border: var(--ox-line);
-    --vp-c-divider: var(--ox-line);
-    --vp-c-gutter: var(--ox-line);
-
-    --vp-c-brand-1: var(--ox-rust-400); /* 5.3:1 on --vp-c-bg */
-    --vp-c-brand-2: var(--ox-rust-500);
-    --vp-c-brand-3: var(--ox-rust-600);
-    --vp-c-brand-soft: rgba(183, 65, 14, 0.22);
-
-    --vp-code-bg: var(--ox-bg-2);
-    --vp-code-color: var(--ox-copper-bright);
-
-    --vp-button-brand-bg: var(--ox-rust-600);
-    --vp-button-brand-hover-bg: var(--ox-rust-500);
-    --vp-button-brand-active-bg: var(--ox-rust-700);
-    --vp-button-brand-text: var(--ox-fg);
-    --vp-button-brand-hover-text: var(--ox-fg);
-
-    --c-bg: var(--vp-c-bg);
-    --c-surface: var(--ox-bg-1);
-    --c-surface-2: var(--ox-bg-2);
-    --c-line: var(--ox-line);
-    --c-line-strong: var(--ox-line-strong);
-    --c-fg: var(--ox-fg);
-    --c-muted: var(--ox-fg-muted);
-    --c-accent: var(--ox-rust-400);
-    --c-copper: var(--ox-copper-bright);
-    --c-good: var(--ox-good);
-    --c-warn: var(--ox-warn);
-    --c-info: var(--ox-info);
-}
-
-/* Sidebar / nav chrome, both modes */
-:root {
-    --vp-sidebar-bg-color: var(--vp-c-bg-alt);
-    --vp-nav-bg-color: var(--vp-c-bg);
-}
-
-/* Hero gradient text, matched to the mdBook build's h1 treatment */
-:root {
+    /* Gradient used by the home hero wordmark */
     --vp-home-hero-name-color: transparent;
     --vp-home-hero-name-background: linear-gradient(
-        100deg,
-        var(--ox-copper-bright),
-        var(--ox-rust-400) 55%,
-        var(--ox-rust-600)
+        104deg,
+        var(--c-copper),
+        var(--vp-c-brand-2) 52%,
+        var(--vp-c-brand-1)
+    );
+}
+
+.dark {
+    --vp-code-block-bg: #101314;
+    --vp-code-block-color: var(--vp-c-text-1);
+    --vp-button-brand-bg: var(--vp-c-brand-3);
+    --vp-button-brand-hover-bg: var(--vp-c-brand-2);
+    --vp-button-brand-text: #fff8f3;
+    --vp-button-brand-hover-text: #fff8f3;
+    --vp-home-hero-name-background: linear-gradient(
+        104deg,
+        var(--c-copper),
+        var(--vp-c-brand-1) 55%,
+        var(--vp-c-brand-2)
     );
 }
 
 /* --------------------------------------------------------------------------
-   3. Code blocks — the oxide accent rule
+   5. Shell — page ground, nav, sidebar, aside, footer, layout widths
    -------------------------------------------------------------------------- */
 
-.vp-doc div[class*='language-'] {
-    border: 1px solid var(--c-line);
-    border-radius: 6px;
+html {
+    scroll-behavior: smooth;
+    scroll-padding-top: calc(var(--vp-nav-height) + var(--sp-5));
+}
+
+body {
+    background-color: var(--vp-c-bg);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: 'cv02' 1, 'cv03' 1, 'cv04' 1, 'cv11' 1;
+}
+
+/* The page wash is a viewport-fixed decorative layer, not a background on the
+   (arbitrarily tall) layout element — percentage gradient stops on a 10,000px
+   column land nowhere useful. `position: relative` with `z-index: auto` does
+   not open a stacking context, so the -1 layer stays behind the content and
+   in front of the body ground. */
+.Layout {
     position: relative;
+    background: transparent;
 }
 
-.vp-doc div[class*='language-']::before {
+.Layout::before {
     content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 2px;
-    background: linear-gradient(to bottom, var(--ox-rust-600), var(--ox-copper));
-    opacity: 0.55;
-    border-radius: 6px 0 0 6px;
-    z-index: 1;
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: var(--ox-wash);
 }
 
-/* ASCII diagrams and decision trees: a plain-text fence, no language rule, just
-   a neutral marker so it still reads as a "block" without implying code. */
-.vp-doc div.language-text::before {
-    background: var(--c-line-strong);
-    opacity: 0.8;
+/* Nav: glass over the wash rather than an opaque bar. `--vp-nav-bg-color` is
+   transparent (§4) so the bar, its title block and its content body all let
+   this through. VitePress's own divider stops at the sidebar edge; one
+   full-width hairline here replaces it. */
+.VPNav {
+    background: rgb(var(--ox-bg-rgb) / 0.8);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border-bottom: 1px solid var(--vp-c-divider);
 }
 
-.vp-doc div.language-text pre,
-.vp-doc div.language-text code {
-    color: var(--c-muted);
-    line-height: 1.4;
+.VPNavBar .divider-line {
+    background-color: transparent !important;
+}
+
+.VPNavBarTitle .title {
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}
+
+.VPNavBarMenuLink,
+.VPNavBarMenuGroup .button {
+    font-size: 0.845rem;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+.VPNavBarSearch .DocSearch-Button {
+    border-radius: var(--r-pill);
+    border: 1px solid var(--vp-c-border);
+    background: rgb(var(--ox-elv-rgb) / 0.6);
+    transition: border-color var(--dur-2) var(--ease);
+}
+
+.VPNavBarSearch .DocSearch-Button:hover {
+    border-color: var(--c-line-strong);
+    box-shadow: none;
+}
+
+/* Opaque enough to work as a mobile drawer over live content, still lifted off
+   the page ground by the blur. */
+.VPSidebar {
+    background: rgb(var(--ox-bg-rgb) / 0.94) !important;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-right: 1px solid var(--vp-c-divider);
+}
+
+.VPSidebarItem.level-0 > .item > .text {
+    font-size: var(--label-size);
+    font-weight: 700;
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    color: var(--c-faint);
+}
+
+.VPSidebarItem .link .text {
+    font-size: 0.815rem;
+    line-height: 1.45;
+    transition: color var(--dur-1) var(--ease);
+}
+
+.VPSidebarItem.is-active > .item > .link > .text {
+    color: var(--vp-c-brand-1);
+    font-weight: 650;
+}
+
+/* Outline (right aside) */
+.VPDocOutlineItem a.outline-link {
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.VPDocAsideOutline .outline-title {
+    font-size: var(--label-size);
+    font-weight: 700;
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    color: var(--c-faint);
+}
+
+.VPDocFooter,
+.VPFooter {
+    border-top: 1px solid var(--vp-c-divider);
+}
+
+.VPDocFooter .prev-next .pager-link {
+    border-radius: var(--r-lg);
+    border: 1px solid var(--vp-c-border);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-1);
+    transition:
+        border-color var(--dur-2) var(--ease),
+        box-shadow var(--dur-2) var(--ease),
+        transform var(--dur-2) var(--ease);
+}
+
+.VPDocFooter .prev-next .pager-link:hover {
+    border-color: var(--vp-c-brand-1);
+    box-shadow: var(--shadow-2);
+    transform: translateY(-2px);
+}
+
+/* Content widths. VitePress caps the no-sidebar column at 992/752px and the
+   with-aside text column at 688px; both are set in scoped styles, so these
+   overrides carry an extra class to win on specificity rather than order. */
+.Layout .VPContent .VPDoc:not(.has-sidebar) .container {
+    max-width: 1240px;
+}
+
+.Layout .VPContent .VPDoc:not(.has-sidebar) .content {
+    max-width: 100%;
+}
+
+.Layout .VPContent .VPDoc.has-aside .content-container {
+    max-width: 780px; /* ~72ch at the body size below */
+}
+
+.VPDoc .content {
+    padding-bottom: var(--sp-9);
 }
 
 /* --------------------------------------------------------------------------
-   4. Component — API badges
+   6. Typography and prose
+   -------------------------------------------------------------------------- */
+
+.vp-doc {
+    font-size: 17px;
+    line-height: 1.72;
+    color: var(--vp-c-text-1);
+}
+
+.vp-doc p,
+.vp-doc ul,
+.vp-doc ol,
+.vp-doc blockquote,
+.vp-doc dl {
+    max-width: var(--measure);
+}
+
+.vp-doc p {
+    margin: var(--sp-4) 0;
+}
+
+.vp-doc li + li {
+    margin-top: var(--sp-2);
+}
+
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4 {
+    color: var(--vp-c-text-1);
+    text-wrap: balance;
+}
+
+.vp-doc h1 {
+    max-width: 22ch;
+    margin: 0 0 var(--sp-5);
+    font-size: clamp(2.25rem, 1.55rem + 2.6vw, 3.25rem);
+    font-weight: 700;
+    letter-spacing: -0.032em;
+    line-height: 1.06;
+}
+
+.vp-doc h2 {
+    margin: var(--sp-8) 0 var(--sp-4);
+    padding-top: var(--sp-6);
+    border-top: 1px solid var(--vp-c-divider);
+    font-size: clamp(1.5rem, 1.25rem + 0.9vw, 1.9rem);
+    font-weight: 650;
+    letter-spacing: -0.021em;
+    line-height: 1.22;
+}
+
+.vp-doc h3 {
+    margin: var(--sp-7) 0 var(--sp-3);
+    font-size: 1.235rem;
+    font-weight: 650;
+    letter-spacing: -0.013em;
+    line-height: 1.35;
+}
+
+.vp-doc h4 {
+    margin: var(--sp-6) 0 var(--sp-2);
+    font-size: 1.03rem;
+    font-weight: 650;
+    letter-spacing: -0.008em;
+}
+
+/* The lead paragraph: the one directly after the page title. Keyed to `h1 + p`
+   rather than `:first-of-type` so a page whose title sits inside a component
+   (the home hero) does not promote an unrelated paragraph. */
+.vp-doc > h1 + p {
+    max-width: 66ch;
+    color: var(--vp-c-text-2);
+    font-size: 1.14em;
+    line-height: 1.6;
+    letter-spacing: -0.006em;
+}
+
+.vp-doc .header-anchor {
+    color: var(--c-faint);
+    font-weight: 400;
+    transition: opacity var(--dur-1) var(--ease);
+}
+
+.vp-doc a {
+    font-weight: 500;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 0.18em;
+    text-decoration-color: rgb(var(--ox-accent-rgb) / 0.42);
+    transition: color var(--dur-1) var(--ease), text-decoration-color var(--dur-1) var(--ease);
+}
+
+.vp-doc a:hover {
+    text-decoration-color: currentColor;
+}
+
+.vp-doc strong {
+    font-weight: 650;
+    color: var(--vp-c-text-1);
+}
+
+.vp-doc hr {
+    margin: var(--sp-8) 0;
+    border-top: 1px solid var(--vp-c-divider);
+}
+
+.vp-doc blockquote {
+    margin: var(--sp-5) 0;
+    padding: var(--sp-4) var(--sp-5);
+    border-left: 3px solid var(--vp-c-brand-1);
+    border-radius: 0 var(--r-md) var(--r-md) 0;
+    background: rgb(var(--ox-accent-rgb) / 0.05);
+    color: var(--vp-c-text-2);
+}
+
+.vp-doc blockquote > p {
+    margin: 0;
+}
+
+/* Figures typeset with lining, tabular digits so columns of numbers align. */
+.vp-doc table,
+.perf,
+.capmap-meta,
+.hero-signals {
+    font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   7. Code
+   -------------------------------------------------------------------------- */
+
+.vp-doc :not(pre) > code {
+    border-radius: var(--r-xs);
+    padding: 0.16em 0.36em;
+    font-weight: 500;
+}
+
+.vp-doc div[class*='language-'] {
+    position: relative;
+    margin: var(--sp-5) 0;
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-1);
+    overflow: hidden;
+}
+
+.vp-doc div[class*='language-'] pre {
+    padding: var(--sp-5) 0;
+}
+
+.vp-doc [class*='language-'] code {
+    padding: 0 var(--sp-5);
+    font-size: 0.855em;
+}
+
+/* Language chip, top-right. VitePress fades it out under the copy button. */
+.vp-doc div[class*='language-'] > span.lang {
+    top: 10px;
+    right: 14px;
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.vp-doc div[class*='language-'] > button.copy {
+    top: 8px;
+    right: 8px;
+    border-radius: var(--r-sm);
+}
+
+/* A plain-text fence is a diagram or a decision tree, not code: neutral type,
+   no chip, tighter leading. */
+.vp-doc div.language-text pre,
+.vp-doc div.language-text code {
+    color: var(--vp-c-text-2);
+    line-height: 1.45;
+}
+
+.vp-doc div.language-text {
+    background: var(--c-surface);
+}
+
+.vp-doc div.language-text > span.lang {
+    display: none;
+}
+
+/* --------------------------------------------------------------------------
+   8. Tables
+   --------------------------------------------------------------------------
+   Every Markdown table is wrapped in `.table-wrap` by the renderer rule in
+   .vitepress/config.ts. The wrapper owns the frame and the scrolling, so a
+   wide table scrolls inside its own box and never widens the page.
+   -------------------------------------------------------------------------- */
+
+.table-wrap {
+    margin: var(--sp-5) 0;
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-lg);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-1);
+    overflow: auto;
+    overscroll-behavior-x: contain;
+}
+
+.vp-doc .table-wrap > table {
+    display: table;
+    width: 100%;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    border-collapse: separate;
+    border-spacing: 0;
+    overflow: visible;
+}
+
+.vp-doc .table-wrap th,
+.vp-doc .table-wrap td {
+    border: 0;
+    border-bottom: 1px solid var(--vp-c-divider);
+    padding: var(--sp-3) var(--sp-4);
+    line-height: 1.55;
+    vertical-align: top;
+}
+
+.vp-doc .table-wrap td {
+    font-size: 0.875rem;
+    color: var(--vp-c-text-1);
+    overflow-wrap: break-word;
+}
+
+.vp-doc .table-wrap th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--vp-c-bg-soft);
+    border-bottom: 1px solid var(--c-line-strong);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--vp-c-text-2);
+    white-space: nowrap;
+}
+
+.vp-doc .table-wrap tr:last-child td {
+    border-bottom: 0;
+}
+
+.vp-doc .table-wrap tbody tr {
+    background: transparent;
+    transition: background-color var(--dur-1) var(--ease);
+}
+
+.vp-doc .table-wrap tbody tr:nth-child(2n) {
+    background: rgb(var(--ox-fg-rgb) / 0.025);
+}
+
+.vp-doc .table-wrap tbody tr:hover {
+    background: rgb(var(--ox-accent-rgb) / 0.055);
+}
+
+/* Cells hold signatures: keep a short identifier whole, but let a long one
+   wrap rather than push the whole table into a horizontal scroll. */
+.vp-doc .table-wrap td code {
+    white-space: normal;
+    overflow-wrap: break-word;
+}
+
+/* A long table becomes its own scroll region with the header pinned. Desktop
+   only: nested vertical scrolling on touch is worse than a long page. */
+@media (min-width: 960px) {
+    .table-wrap {
+        max-height: 82vh;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   9. Component — API badges
    -------------------------------------------------------------------------- */
 
 .badge {
     display: inline-block;
     font-family: var(--vp-font-family-mono);
-    font-size: 0.64rem;
+    font-size: 0.645rem;
     font-weight: 700;
-    letter-spacing: 0.09em;
+    letter-spacing: 0.08em;
     line-height: 1;
-    padding: 0.32em 0.55em;
-    margin: 0 0.25em 0.25em 0;
-    border-radius: 3px;
+    padding: 0.38em 0.62em;
+    margin: 0 0.25em 0.3em 0;
+    border-radius: var(--r-pill);
     border: 1px solid;
     text-decoration: none !important;
     white-space: nowrap;
     vertical-align: middle;
-    transition:
-        filter 0.12s ease,
-        transform 0.12s ease;
+    transition: filter var(--dur-1) var(--ease);
 }
 
 .badge:hover {
-    filter: brightness(1.15);
+    filter: brightness(1.08);
 }
 
 .badge-lazy {
     color: #1f5f5e;
-    border-color: rgba(143, 188, 187, 0.4);
-    background: rgba(143, 188, 187, 0.14);
+    border-color: rgb(143 188 187 / 0.45);
+    background: rgb(143 188 187 / 0.15);
 }
 .dark .badge-lazy {
     color: #8fbcbb;
-    background: rgba(143, 188, 187, 0.1);
+    background: rgb(143 188 187 / 0.1);
 }
 
 .badge-zerocopy,
 .badge-alloc {
-    color: #3f6b2c;
-    border-color: rgba(127, 176, 105, 0.4);
-    background: rgba(127, 176, 105, 0.14);
+    color: var(--c-good);
+    border-color: rgb(127 176 105 / 0.45);
+    background: rgb(127 176 105 / 0.14);
 }
 .dark .badge-zerocopy,
 .dark .badge-alloc {
-    color: var(--ox-good);
-    background: rgba(127, 176, 105, 0.1);
+    background: rgb(127 176 105 / 0.1);
 }
 
 .badge-reuse {
-    color: #8a5a1e;
-    border-color: rgba(217, 154, 91, 0.4);
-    background: rgba(217, 154, 91, 0.16);
+    color: var(--c-copper);
+    border-color: rgb(217 154 91 / 0.45);
+    background: rgb(217 154 91 / 0.16);
 }
 .dark .badge-reuse {
-    color: var(--ox-copper-bright);
-    background: rgba(217, 154, 91, 0.1);
+    background: rgb(217 154 91 / 0.1);
 }
 
 .badge-batch {
-    color: #2f6273;
-    border-color: rgba(111, 168, 184, 0.4);
-    background: rgba(111, 168, 184, 0.14);
+    color: var(--c-info);
+    border-color: rgb(111 168 184 / 0.45);
+    background: rgb(111 168 184 / 0.14);
 }
 .dark .badge-batch {
-    color: var(--ox-info);
-    background: rgba(111, 168, 184, 0.1);
+    background: rgb(111 168 184 / 0.1);
 }
 
 .badge-owned {
-    color: #5c5750;
-    border-color: var(--c-line-strong);
-    background: rgba(127, 127, 127, 0.1);
-}
-.dark .badge-owned {
     color: var(--c-muted);
-    background: rgba(127, 127, 127, 0.08);
+    border-color: var(--c-line-strong);
+    background: rgb(127 127 127 / 0.09);
 }
 
 .badge-cow {
-    color: var(--ox-rust-700);
-    border-color: rgba(210, 105, 60, 0.45);
-    background: rgba(210, 105, 60, 0.12);
-}
-.dark .badge-cow {
-    color: var(--ox-rust-400);
-    background: rgba(210, 105, 60, 0.1);
+    color: var(--vp-c-brand-1);
+    border-color: rgb(var(--ox-accent-rgb) / 0.45);
+    background: rgb(var(--ox-accent-rgb) / 0.12);
 }
 
 .badge-utf16,
 .badge-global {
-    color: #74500f;
-    border-color: rgba(217, 164, 65, 0.5);
-    background: rgba(217, 164, 65, 0.16);
+    color: var(--c-warn);
+    border-color: rgb(217 164 65 / 0.5);
+    background: rgb(217 164 65 / 0.16);
 }
 .dark .badge-utf16,
 .dark .badge-global {
-    color: var(--c-warn);
-    background: rgba(217, 164, 65, 0.14);
+    background: rgb(217 164 65 / 0.12);
 }
 
 .badge-fallible {
@@ -303,269 +744,26 @@
     background: transparent;
 }
 
-/* --------------------------------------------------------------------------
-   5. Component — Performance characteristics card
-   -------------------------------------------------------------------------- */
-
-.perf {
-    border: 1px solid var(--c-line);
-    border-left: 3px solid var(--ox-copper);
-    border-radius: 5px;
-    background: var(--c-surface);
-    margin: 1.3em 0;
-    padding: 0.2em 0;
-    font-size: 0.9rem;
-}
-
-.perf::before {
-    content: 'Performance characteristics';
-    display: block;
-    font-family: var(--vp-font-family-mono);
-    font-size: 0.64rem;
-    font-weight: 700;
-    letter-spacing: 0.11em;
-    text-transform: uppercase;
-    color: var(--c-copper);
-    padding: 0.75em 1em 0.5em;
-}
-
-.perf-row {
-    display: flex;
-    gap: 1em;
-    padding: 0.32em 1em;
-    border-top: 1px solid var(--c-line);
-}
-
-.perf-k {
-    flex: 0 0 9.5em;
-    color: var(--c-muted);
-    font-size: 0.86em;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding-top: 0.15em;
-}
-
-.perf-v {
-    flex: 1 1 auto;
-    color: var(--c-fg);
-    min-width: 0;
-}
-
-.perf-v code {
-    white-space: normal !important;
-}
-
-@media (max-width: 620px) {
-    .perf-row {
-        flex-direction: column;
-        gap: 0.15em;
-    }
-    .perf-k {
-        flex: none;
-    }
-}
-
-/* --------------------------------------------------------------------------
-   6. Component — Callouts
-   -------------------------------------------------------------------------- */
-
-.callout {
-    border: 1px solid var(--c-line);
-    border-left: 3px solid var(--c-line-strong);
-    border-radius: 5px;
-    background: var(--c-surface);
-    padding: 0.85em 1.1em;
-    margin: 1.4em 0;
-}
-
-.callout > :first-child {
-    margin-top: 0;
-}
-.callout > :last-child {
-    margin-bottom: 0;
-}
-.callout strong:first-child {
-    color: var(--c-fg);
-}
-
-.callout-note {
-    border-left-color: var(--c-info);
-}
-.callout-note strong:first-child {
-    color: var(--c-info);
-}
-
-.callout-warn {
-    border-left-color: var(--c-warn);
-    background: rgba(217, 164, 65, 0.08);
-}
-.callout-warn strong:first-child {
-    color: var(--c-warn);
-}
-
-.callout-spec {
-    border-left-color: var(--c-accent);
-    background: rgba(198, 93, 46, 0.07);
-}
-.callout-spec strong:first-child {
-    color: var(--c-accent);
-}
-
-.callout-good {
-    border-left-color: var(--c-good);
-}
-.callout-good strong:first-child {
-    color: var(--c-good);
-}
-
-/* --------------------------------------------------------------------------
-   7. Component — Home hero and cards
-   -------------------------------------------------------------------------- */
-
-.hero {
-    margin: 0.5em 0 2.4em;
-}
-
-.hero h1 {
-    font-size: 2.6rem;
-    border-bottom: 0;
-    margin-bottom: 0.1em;
-    padding-bottom: 0;
-    background: var(--vp-home-hero-name-background);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: var(--c-accent);
-}
-
-.hero-tagline {
-    font-size: 1.22rem;
-    color: var(--c-fg);
-    margin: 0.2em 0 0.8em;
-    max-width: 44em;
-}
-
-.hero-sub {
-    color: var(--c-muted);
-    max-width: 46em;
-}
-
-.ladder {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-    gap: 0.9em;
-    margin: 1.6em 0 2em;
-}
-
-.rung {
-    border: 1px solid var(--c-line);
-    border-top: 2px solid var(--rung-accent, var(--c-line-strong));
-    border-radius: 5px;
-    background: var(--c-surface);
-    padding: 0.95em 1em 1.1em;
-    min-width: 0;
-}
-
-.rung-1 {
-    --rung-accent: var(--ox-copper);
-}
-.rung-2 {
-    --rung-accent: #3f8f8e;
-}
-.dark .rung-2 {
-    --rung-accent: #8fbcbb;
-}
-.rung-3 {
-    --rung-accent: var(--ox-rust-500);
-}
-.rung-4 {
-    --rung-accent: var(--c-info);
-}
-
-.rung h3 {
-    margin: 0 0 0.5em;
-    font-size: 0.72rem;
-    font-family: var(--vp-font-family-mono);
-    letter-spacing: 0.11em;
-    text-transform: uppercase;
-    color: var(--rung-accent);
-    border: 0;
-    padding: 0;
-}
-
-.rung div[class*='language-'] {
-    margin: 0 0 0.7em;
-    font-size: 0.86em;
-}
-
-.rung p {
-    margin: 0;
-    font-size: 0.88rem;
-    color: var(--c-muted);
-    line-height: 1.5;
-}
-
-.cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 0.9em;
-    margin: 1.5em 0 2em;
-}
-
-.card {
-    display: block;
-    border: 1px solid var(--c-line);
-    border-radius: 5px;
-    background: var(--c-surface);
-    padding: 1em 1.1em;
-    text-decoration: none !important;
-    transition:
-        border-color 0.14s ease,
-        background 0.14s ease,
-        transform 0.14s ease;
-    min-width: 0;
-}
-
-.card:hover {
-    border-color: var(--c-accent);
-    background: var(--c-surface-2);
-    transform: translateY(-1px);
-}
-
-.card-title {
-    display: block;
-    font-weight: 600;
-    color: var(--c-accent);
-    margin-bottom: 0.3em;
-}
-
-.card-desc {
-    display: block;
-    font-size: 0.88rem;
-    color: var(--c-muted);
-    line-height: 1.5;
-}
-
+/* Status pills (feature tables) */
 .status {
     display: inline-block;
     font-family: var(--vp-font-family-mono);
     font-size: 0.66rem;
     font-weight: 700;
-    letter-spacing: 0.07em;
-    padding: 0.25em 0.5em;
-    border-radius: 3px;
+    letter-spacing: 0.06em;
+    padding: 0.3em 0.6em;
+    border-radius: var(--r-pill);
     border: 1px solid;
     white-space: nowrap;
 }
 
 .status-verified {
-    color: #3f6b2c;
-    border-color: rgba(127, 176, 105, 0.45);
-    background: rgba(127, 176, 105, 0.14);
+    color: var(--c-good);
+    border-color: rgb(127 176 105 / 0.45);
+    background: rgb(127 176 105 / 0.14);
 }
 .dark .status-verified {
-    color: var(--c-good);
-    background: rgba(127, 176, 105, 0.1);
+    background: rgb(127 176 105 / 0.1);
 }
 
 .status-planned {
@@ -575,82 +773,570 @@
 }
 
 /* --------------------------------------------------------------------------
-   8. Responsive
+   10. Components — callouts and the performance card
    -------------------------------------------------------------------------- */
 
-@media (max-width: 700px) {
-    .hero h1 {
-        font-size: 2rem;
+.callout {
+    --callout-accent: var(--c-line-strong);
+    --callout-title: var(--c-fg);
+    position: relative;
+    margin: var(--sp-6) 0;
+    padding: var(--sp-4) var(--sp-5) var(--sp-4) calc(var(--sp-5) + 4px);
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-lg);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-1);
+    font-size: 0.96em;
+    line-height: 1.62;
+}
+
+.callout::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: var(--sp-3);
+    bottom: var(--sp-3);
+    width: 3px;
+    border-radius: var(--r-pill);
+    background: var(--callout-accent);
+}
+
+.callout > :first-child {
+    margin-top: 0;
+}
+
+.callout > :last-child {
+    margin-bottom: 0;
+}
+
+.callout p {
+    max-width: none;
+}
+
+.callout strong:first-child {
+    color: var(--callout-title);
+    font-weight: 700;
+}
+
+.callout-note {
+    --callout-accent: var(--c-info);
+    --callout-title: var(--c-info);
+    background: rgb(111 168 184 / 0.06);
+}
+
+.callout-warn {
+    --callout-accent: var(--c-warn);
+    --callout-title: var(--c-warn);
+    background: rgb(217 164 65 / 0.08);
+}
+
+.callout-spec {
+    --callout-accent: var(--c-accent);
+    --callout-title: var(--c-accent);
+    background: rgb(var(--ox-accent-rgb) / 0.06);
+}
+
+.callout-good {
+    --callout-accent: var(--c-good);
+    --callout-title: var(--c-good);
+    background: rgb(127 176 105 / 0.07);
+}
+
+/* Performance characteristics card: a labelled key/value block. */
+.perf {
+    margin: var(--sp-6) 0;
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-lg);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-1);
+    font-size: 0.94rem;
+    overflow: hidden;
+}
+
+.perf::before {
+    content: 'Performance characteristics';
+    display: block;
+    padding: var(--sp-3) var(--sp-5);
+    background: rgb(var(--ox-fg-rgb) / 0.025);
+    border-bottom: 1px solid var(--vp-c-divider);
+    font-family: var(--vp-font-family-mono);
+    font-size: var(--label-size);
+    font-weight: 700;
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    color: var(--c-copper);
+}
+
+.perf-row {
+    display: flex;
+    gap: var(--sp-5);
+    padding: var(--sp-3) var(--sp-5);
+}
+
+.perf-row + .perf-row {
+    border-top: 1px solid var(--vp-c-divider);
+}
+
+.perf-k {
+    flex: 0 0 10em;
+    color: var(--c-faint);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    line-height: 1.5;
+    padding-top: 0.25em;
+}
+
+.perf-v {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--c-fg);
+    line-height: 1.6;
+}
+
+.perf-v code {
+    white-space: normal !important;
+}
+
+@media (max-width: 640px) {
+    .perf-row {
+        flex-direction: column;
+        gap: var(--sp-1);
     }
-    .hero-tagline {
-        font-size: 1.05rem;
-    }
-    .ladder,
-    .cards {
-        grid-template-columns: 1fr;
+    .perf-k {
+        flex: none;
+        padding-top: 0;
     }
 }
 
 /* --------------------------------------------------------------------------
-   9. Component — Capability map
+   11. Components — home page
+   -------------------------------------------------------------------------- */
+
+/* Hero -------------------------------------------------------------------- */
+
+.hero {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    margin: var(--sp-4) 0 var(--sp-9);
+    padding: clamp(36px, 6vw, 76px) clamp(24px, 5vw, 68px);
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-2xl);
+    background:
+        radial-gradient(760px 340px at 88% -18%, rgb(var(--ox-accent-rgb) / 0.16), transparent 64%),
+        linear-gradient(150deg, var(--c-surface), var(--vp-c-bg-alt));
+    box-shadow: var(--shadow-3);
+}
+
+/* Concentric oxide rings, top-right. Decorative only. */
+.hero::before {
+    content: '';
+    position: absolute;
+    z-index: -1;
+    top: -110px;
+    right: -70px;
+    width: 300px;
+    height: 300px;
+    border: 1px solid rgb(var(--ox-accent-rgb) / 0.22);
+    border-radius: 50%;
+    box-shadow:
+        0 0 0 52px rgb(var(--ox-accent-rgb) / 0.05),
+        0 0 0 104px rgb(var(--ox-accent-rgb) / 0.03);
+}
+
+.vp-doc .hero h1 {
+    margin: 0;
+    max-width: none;
+    padding: 0;
+    border: 0;
+    font-size: clamp(3rem, 1.9rem + 5vw, 6rem);
+    font-weight: 800;
+    letter-spacing: -0.05em;
+    line-height: 0.94;
+    background: var(--vp-home-hero-name-background);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: var(--c-accent);
+}
+
+.vp-doc .hero h1 .header-anchor {
+    display: none;
+}
+
+.vp-doc .hero-tagline {
+    max-width: 30ch;
+    margin: var(--sp-5) 0 0;
+    font-size: clamp(1.35rem, 0.95rem + 1.5vw, 2.1rem);
+    font-weight: 650;
+    letter-spacing: -0.028em;
+    line-height: 1.18;
+    color: var(--vp-c-text-1);
+    text-wrap: balance;
+}
+
+.vp-doc .hero-sub {
+    max-width: 62ch;
+    margin: var(--sp-4) 0 0;
+    font-size: 1.03rem;
+    line-height: 1.66;
+    color: var(--vp-c-text-2);
+}
+
+.hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sp-3);
+    margin-top: var(--sp-6);
+}
+
+/* One filled pair for both modes: white on #b7410e is 5.6:1 either way, and
+   hover darkens to 7.5:1 rather than reversing direction per theme. The bright
+   dark-mode accent is a link colour, not a button ground — white on it is
+   3.0:1. */
+.vp-doc .hero-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.72em 1.35em;
+    border: 1px solid transparent;
+    border-radius: var(--r-pill);
+    background: #b7410e;
+    color: #ffffff;
+    font-size: 0.925rem;
+    font-weight: 650;
+    letter-spacing: -0.005em;
+    text-decoration: none !important;
+    box-shadow: var(--shadow-accent);
+    transition:
+        background-color var(--dur-2) var(--ease),
+        border-color var(--dur-2) var(--ease),
+        transform var(--dur-2) var(--ease);
+}
+
+.vp-doc .hero-btn:hover {
+    background: #8f3208;
+    color: #ffffff;
+    transform: translateY(-2px);
+}
+
+.vp-doc .hero-btn--ghost {
+    background: transparent;
+    border-color: var(--c-line-strong);
+    color: var(--vp-c-text-1);
+    box-shadow: none;
+}
+
+.vp-doc .hero-btn--ghost:hover {
+    background: rgb(var(--ox-fg-rgb) / 0.04);
+    border-color: var(--vp-c-brand-1);
+    color: var(--vp-c-brand-1);
+}
+
+/* Signal chips: value over label, one row of small stat cards. */
+.hero-signals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    gap: var(--sp-3);
+    margin-top: var(--sp-7);
+    padding-top: var(--sp-6);
+    border-top: 1px solid var(--vp-c-divider);
+    max-width: 760px;
+}
+
+.hero-signals span {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+}
+
+.hero-signals b {
+    color: var(--vp-c-text-1);
+    font-size: 1.02rem;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+}
+
+.hero-signals small {
+    color: var(--c-faint);
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+/* Paths in (HomePaths.vue) ------------------------------------------------- */
+
+.home-paths {
+    margin: 0 0 var(--sp-9);
+}
+
+.home-paths__intro {
+    max-width: 62ch;
+    margin-bottom: var(--sp-6);
+}
+
+.home-kicker {
+    margin: 0 0 var(--sp-2);
+    color: var(--vp-c-brand-1);
+    font-family: var(--vp-font-family-mono);
+    font-size: var(--label-size);
+    font-weight: 700;
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+}
+
+.vp-doc .home-paths h2 {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    font-size: clamp(1.75rem, 1.2rem + 2vw, 2.6rem);
+    font-weight: 700;
+    letter-spacing: -0.035em;
+    line-height: 1.08;
+}
+
+.vp-doc .home-paths__intro > p:last-child {
+    margin: var(--sp-3) 0 0;
+    color: var(--vp-c-text-2);
+    font-size: 1.02rem;
+}
+
+.home-paths__grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--sp-4);
+}
+
+.vp-doc .home-path {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 230px;
+    padding: var(--sp-5);
+    overflow: hidden;
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-xl);
+    background: var(--c-surface);
+    color: var(--vp-c-text-1);
+    text-decoration: none !important;
+    box-shadow: var(--shadow-1);
+    transition:
+        transform var(--dur-2) var(--ease),
+        border-color var(--dur-2) var(--ease),
+        box-shadow var(--dur-2) var(--ease);
+}
+
+.vp-doc .home-path:hover {
+    border-color: rgb(var(--ox-accent-rgb) / 0.5);
+    box-shadow: var(--shadow-2);
+    transform: translateY(-3px);
+}
+
+.home-path::after {
+    content: '';
+    position: absolute;
+    right: -40px;
+    top: -54px;
+    width: 150px;
+    height: 150px;
+    border: 1px solid rgb(var(--ox-accent-rgb) / 0.18);
+    border-radius: 50%;
+}
+
+.home-path__number {
+    color: var(--vp-c-brand-1);
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+}
+
+.vp-doc .home-path h3 {
+    margin: var(--sp-6) 0 var(--sp-2);
+    padding: 0;
+    border: 0;
+    font-size: 1.3rem;
+    font-weight: 650;
+    letter-spacing: -0.025em;
+}
+
+.vp-doc .home-path p {
+    margin: 0;
+    max-width: none;
+    color: var(--vp-c-text-2);
+    font-size: 0.94rem;
+    line-height: 1.56;
+}
+
+.home-path__link {
+    margin-top: auto;
+    padding-top: var(--sp-5);
+    color: var(--vp-c-brand-1);
+    font-size: 0.85rem;
+    font-weight: 650;
+}
+
+.home-path__link b {
+    display: inline-block;
+    margin-left: 0.4em;
+    font-size: 1.05rem;
+    transition: transform var(--dur-2) var(--ease);
+}
+
+.home-path:hover .home-path__link b {
+    transform: translateX(4px);
+}
+
+/* API-shape ladder -------------------------------------------------------- */
+
+.ladder {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
+    gap: var(--sp-4);
+    margin: var(--sp-6) 0 var(--sp-7);
+}
+
+.rung {
+    --rung-accent: var(--c-line-strong);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: var(--sp-4) var(--sp-4) var(--sp-5);
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-lg);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-1);
+}
+
+.rung-1 {
+    --rung-accent: var(--c-copper);
+}
+.rung-2 {
+    --rung-accent: #2d6b63;
+}
+.dark .rung-2 {
+    --rung-accent: #8fbcbb;
+}
+.rung-3 {
+    --rung-accent: var(--vp-c-brand-1);
+}
+.rung-4 {
+    --rung-accent: var(--c-info);
+}
+
+.vp-doc .rung h3 {
+    display: flex;
+    align-items: center;
+    gap: 0.55em;
+    margin: 0 0 var(--sp-3);
+    padding: 0;
+    border: 0;
+    font-family: var(--vp-font-family-mono);
+    font-size: var(--label-size);
+    font-weight: 700;
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    color: var(--rung-accent);
+}
+
+.vp-doc .rung h3::before {
+    content: '';
+    width: 18px;
+    height: 2px;
+    border-radius: var(--r-pill);
+    background: var(--rung-accent);
+    flex: none;
+}
+
+.vp-doc .rung div[class*='language-'] {
+    margin: 0 0 var(--sp-3);
+    border-radius: var(--r-md);
+    box-shadow: none;
+    font-size: 0.94em;
+}
+
+.vp-doc .rung div[class*='language-'] pre {
+    padding: var(--sp-3) 0;
+}
+
+.vp-doc .rung [class*='language-'] code {
+    padding: 0 var(--sp-4);
+}
+
+.vp-doc .rung p {
+    margin: auto 0 0;
+    max-width: none;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: var(--vp-c-text-2);
+}
+
+/* Link cards -------------------------------------------------------------- */
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+    gap: var(--sp-4);
+    margin: var(--sp-6) 0 var(--sp-7);
+}
+
+.vp-doc .card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    min-width: 0;
+    padding: var(--sp-5);
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-lg);
+    background: var(--c-surface);
+    box-shadow: var(--shadow-1);
+    text-decoration: none !important;
+    transition:
+        border-color var(--dur-2) var(--ease),
+        box-shadow var(--dur-2) var(--ease),
+        transform var(--dur-2) var(--ease);
+}
+
+.vp-doc .card:hover {
+    border-color: rgb(var(--ox-accent-rgb) / 0.5);
+    box-shadow: var(--shadow-2);
+    transform: translateY(-3px);
+}
+
+.card-title {
+    display: block;
+    color: var(--vp-c-brand-1);
+    font-size: 1.02rem;
+    font-weight: 650;
+    letter-spacing: -0.018em;
+}
+
+.card-desc {
+    display: block;
+    color: var(--vp-c-text-2);
+    font-size: 0.92rem;
+    line-height: 1.55;
+}
+
+/* --------------------------------------------------------------------------
+   12. Component — capability map
    --------------------------------------------------------------------------
-   The architecture diagram on the home page: one root, four capability
-   families, one toolkit — with every crate in the workspace named on a leaf.
-
-   Layout, and why it is this and not something cleverer:
-
-   * The families are a CSS **grid** of equal cards, and the leaves live
-     *inside* their card as full-width rows. The previous version floated
-     nowrap pills below each card in a three-column flex row, so any label
-     wider than the column (`Damerau–Levenshtein` in a 15em column) escaped
-     its branch and the three columns drifted out of alignment. A row inside
-     a card cannot do that: it is bounded by the card, and long text wraps.
-   * The connectors are two centred trunk lines — root → grid, grid →
-     toolkit. There are deliberately no per-column drop lines: the grid
-     reflows from four columns to two to one, and any connector drawn to a
-     specific column would dangle at the widths where that column moves.
-   * No SVG and no canvas. Every label here is real text, so it wraps to the
-     reader's font size, is selectable, is indexed by the local search, and
-     is in the accessibility tree; a canvas would be a bitmap of none of
-     those, and would need JS to redraw on the light/dark toggle.
-
-   Hover changes borders and the leaf underline only — never text colour on a
-   ground that would drop it below AA, and never opacity — so the diagram is
-   exactly as legible with hover unused as with it.
+   Root mark → four family cards → toolkit, joined by centred trunks and two
+   full-width rails. No SVG and no canvas: every label is real text, so it
+   wraps, is selectable, is indexed by search, and needs no redraw on the
+   light/dark toggle. The rails span the whole group rather than dropping into
+   each column, so nothing dangles when the grid reflows 4 → 2 → 1.
    -------------------------------------------------------------------------- */
 
 .capmap {
-    /* Per-family accent, overridden by .cap-1…4 below. Both modes are stated
-       explicitly: the mid-tone copper/teal that read well on the dark ground
-       fall to ~3:1 on the light one, so light mode gets darker variants. */
     --cap-accent: var(--c-copper);
-    margin: 2em 0 2.6em;
+    margin: var(--sp-7) 0 var(--sp-8);
 }
 
-.capmap-toolkit {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    margin: 0 auto;
-    padding: 0.6em 1.2em;
-    border: 1px solid var(--c-line-strong);
-    border-radius: 6px;
-    background: var(--c-surface-2);
-    font-family: var(--vp-font-family-mono);
-    font-size: 0.78rem;
-    font-weight: 700;
-    line-height: 1.35;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--c-fg);
-    width: fit-content;
-    max-width: 100%;
-}
-
-/* The root is the mark itself — no frame, no ground, no padding. It reads as
-   the head of the trunk on its own, so the pill treatment the other nodes use
-   would only box in a logo that already has its own silhouette. */
 .capmap-root {
     display: flex;
     justify-content: center;
@@ -659,77 +1345,77 @@
     max-width: 100%;
 }
 
-/* The mark is a square SVG with a transparent ground, so it needs an explicit
-   height (its intrinsic 1024px is not a usable box) and reads identically in
-   both themes — it carries its own palette rather than `currentColor`. */
 .capmap-logo {
     display: block;
-    height: 4.1rem;
+    height: 4rem;
     width: auto;
     margin: 0;
 }
 
-/* The trunk: a short centred rule, root → grid and grid → toolkit. */
 .capmap-trunk {
     width: 1px;
-    height: 1.5em;
+    height: var(--sp-5);
     margin: 0 auto;
-    background: var(--c-line-strong);
+    background: linear-gradient(var(--vp-c-border), var(--c-line-strong));
 }
 
-/* The rails: one rule above the grid and one below it, spanning the whole
-   group. The trunks meet them, so root and toolkit stay visibly attached to
-   the family cards at every column count — unlike a per-column drop line,
-   which dangles the moment the grid reflows. */
 .capmap-branches {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    gap: 0.8em;
-    padding: 0.9em 0;
-    border-top: 1px solid var(--c-line-strong);
-    border-bottom: 1px solid var(--c-line-strong);
+    gap: var(--sp-4);
+    padding: var(--sp-5) 0;
+    border-top: 1px solid var(--vp-c-divider);
+    border-bottom: 1px solid var(--vp-c-divider);
 }
 
 .capmap-branch {
+    position: relative;
     display: flex;
     flex-direction: column;
-    min-width: 0; /* a grid item defaults to min-content: without this, one
-                     long leaf label would widen the whole column */
-    padding: 0.85em 1em 0.75em;
-    border: 1px solid var(--c-line);
-    border-top: 2px solid var(--cap-accent);
-    border-radius: 6px;
+    min-width: 0;
+    padding: var(--sp-4) var(--sp-4) var(--sp-2);
+    border: 1px solid var(--vp-c-border);
+    border-radius: var(--r-lg);
     background: var(--c-surface);
+    box-shadow: var(--shadow-1);
+    overflow: hidden;
 }
 
-/* Family accents. Light values first, dark overrides after — same hues,
-   lightened for the near-black ground. */
+.capmap-branch::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto;
+    height: 2px;
+    background: var(--cap-accent);
+    opacity: 0.85;
+}
+
 .cap-1 {
-    --cap-accent: #8a5a1e;
+    --cap-accent: #8a5116;
 }
 .cap-2 {
-    --cap-accent: var(--ox-rust-700);
+    --cap-accent: #a53c0d;
 }
 .cap-3 {
     --cap-accent: #2d6b63;
 }
 .cap-4 {
-    --cap-accent: #2f6273;
+    --cap-accent: #2c6274;
 }
 .dark .cap-1 {
-    --cap-accent: var(--ox-copper-bright);
+    --cap-accent: #d9a05f;
 }
 .dark .cap-2 {
-    --cap-accent: var(--ox-rust-400);
+    --cap-accent: #e2733f;
 }
 .dark .cap-3 {
     --cap-accent: #8fbcbb;
 }
 .dark .cap-4 {
-    --cap-accent: var(--ox-info);
+    --cap-accent: #74b0c1;
 }
 
-.capmap-node h3 {
+.vp-doc .capmap-node h3 {
     display: flex;
     align-items: baseline;
     gap: 0.55em;
@@ -737,80 +1423,72 @@
     padding: 0;
     border: 0;
     font-family: var(--vp-font-family-mono);
-    font-size: 0.76rem;
+    font-size: 0.74rem;
     font-weight: 700;
-    letter-spacing: 0.12em;
+    letter-spacing: var(--label-tracking);
     text-transform: uppercase;
     color: var(--cap-accent);
 }
 
 .capmap-idx {
-    font-size: 0.68rem;
-    font-weight: 400;
+    font-size: 0.66rem;
+    font-weight: 500;
     letter-spacing: 0.06em;
-    color: var(--c-muted);
+    color: var(--c-faint);
 }
 
-.capmap-sub {
-    margin: 0.4em 0 0;
-    font-size: 0.8rem;
+.vp-doc .capmap-sub {
+    margin: var(--sp-2) 0 0;
+    max-width: none;
+    font-size: 0.82rem;
     line-height: 1.45;
-    color: var(--c-muted);
+    color: var(--vp-c-text-2);
 }
 
-.capmap-leaves {
-    margin: 0.8em 0 0;
+.vp-doc .capmap-leaves {
+    margin: var(--sp-3) 0 0;
     padding: 0;
+    max-width: none;
     list-style: none;
 }
 
-.capmap-leaves li {
-    /* Belt and suspenders: VitePress's own `.vp-doc li` rule sets a marker
-       with equal-or-greater specificity depending on bundle order, so
-       list-style: none on the parent <ul> alone is not reliable — set it on
-       the <li> too. */
+/* VitePress sets list markers with equal specificity depending on bundle
+   order, so `list-style: none` is repeated on the item. */
+.vp-doc .capmap-leaves li {
     list-style: none;
     display: flex;
     flex-wrap: wrap;
     align-items: baseline;
     gap: 0.2em 0.7em;
     margin: 0;
-    padding: 0.42em 0;
-    border-top: 1px solid var(--c-line);
-    font-size: 0.86rem;
-    line-height: 1.35;
+    padding: 0.5em 0;
+    border-top: 1px solid var(--vp-c-divider);
+    font-size: 0.875rem;
+    line-height: 1.4;
     color: var(--c-fg);
     overflow-wrap: anywhere;
 }
 
-/* A leaf whose crate ships but has no feature page: plain text, not a link,
-   and muted so the difference is visible before the "no page yet" marker is
-   read. */
+/* A crate that ships without a feature page: plain text, not a link. */
 .capmap-leaves li.is-pending {
     color: var(--c-muted);
 }
 
-.capmap-leaves a {
-    color: var(--c-fg);
+.vp-doc .capmap-leaves a {
+    color: var(--vp-c-text-1);
     font-weight: 500;
-    text-decoration: underline !important;
-    text-decoration-color: var(--c-line-strong) !important;
-    text-decoration-thickness: 1px;
-    text-underline-offset: 0.22em;
+    text-decoration: none !important;
 }
 
-.capmap-leaves a:hover {
+.vp-doc .capmap-leaves a:hover {
     color: var(--cap-accent);
-    text-decoration-color: var(--cap-accent) !important;
 }
 
-/* Pushed right on one line; drops below the label only when the card is too
-   narrow to hold both, which is why the row wraps rather than truncates. */
 .capmap-meta {
     margin-left: auto;
     font-family: var(--vp-font-family-mono);
-    font-size: 0.7rem;
-    color: var(--c-muted);
+    font-size: 0.69rem;
+    color: var(--c-faint);
     white-space: nowrap;
 }
 
@@ -818,54 +1496,306 @@
     font-family: var(--vp-font-family-mono);
     font-size: 0.66rem;
     letter-spacing: 0.05em;
-    color: var(--c-muted);
-    border-bottom: 1px dotted var(--c-line-strong);
+    padding: 0.15em 0.5em;
+    border-radius: var(--r-pill);
+    border: 1px solid var(--vp-c-border);
+    color: var(--c-faint);
 }
 
 .capmap-status.is-native {
     color: var(--cap-accent);
-    border-bottom-color: var(--cap-accent);
+    border-color: currentColor;
 }
 
-.capmap-base {
-    max-width: 44em;
-    margin: 1.1em auto 0;
-    font-size: 0.82rem;
+.capmap-toolkit {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 0.7em 1.3em;
+    border: 1px solid var(--c-line-strong);
+    border-radius: var(--r-pill);
+    background: var(--c-surface-2);
+    font-family: var(--vp-font-family-mono);
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1.35;
+    letter-spacing: 0.08em;
+    text-align: center;
+    text-transform: uppercase;
+    color: var(--c-fg);
+}
+
+.vp-doc .capmap-base {
+    max-width: 62ch;
+    margin: var(--sp-5) auto 0;
+    font-size: 0.86rem;
     line-height: 1.6;
     text-align: center;
-    /* Centred text left to itself strands a one-word last line. Balanced
-       where supported; an ordinary ragged wrap everywhere else. */
     text-wrap: balance;
-    color: var(--c-muted);
+    color: var(--vp-c-text-2);
 }
 
-/* A crate name broken across two lines ("verbora-" / "util") is the exact
-   sort of mid-word split this caption is too short to justify. */
 .capmap-base code {
     white-space: nowrap;
 }
 
 @media (hover: hover) and (pointer: fine) {
+    .capmap-branch {
+        transition:
+            border-color var(--dur-2) var(--ease),
+            box-shadow var(--dur-2) var(--ease);
+    }
     .capmap-branch:hover {
         border-color: var(--cap-accent);
+        box-shadow: var(--shadow-2);
     }
 }
 
-@media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
-    .capmap-branch,
-    .capmap-leaves a {
-        transition:
-            border-color 0.15s ease,
-            color 0.15s ease,
-            text-decoration-color 0.15s ease;
-    }
-}
-
-/* Two columns as soon as a card can hold a leaf row without wrapping it, and
-   never three: with four families, a three-column row would leave one card
-   stranded on a row of its own. */
 @media (min-width: 700px) {
     .capmap-branches {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1080px) {
+    .capmap-branches {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+/* --------------------------------------------------------------------------
+   13. Component — support button
+   --------------------------------------------------------------------------
+   Rendered as markup instead of buymeacoffee.com's script (see
+   BuyMeACoffee.vue). Cookie is self-hosted from this directory — 14 KB, latin
+   subset, OFL — so no page requests a third-party font.
+
+   Colour is the site's oxide accent, not the snippet's yellow. One filled pair
+   for both modes, as with the hero CTA: white on #b7410e is 5.6:1 and hover
+   darkens to #8f3208, so contrast only ever goes up.
+   -------------------------------------------------------------------------- */
+
+@font-face {
+    font-family: 'Cookie';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('./cookie-latin.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+        U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+        U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+.bmc {
+    margin-top: var(--sp-6);
+    padding-top: var(--sp-5);
+    border-top: 1px solid var(--vp-c-divider);
+}
+
+.bmc-label {
+    margin: 0 0 var(--sp-3);
+    font-family: var(--vp-font-family-mono);
+    font-size: var(--label-size);
+    font-weight: 700;
+    letter-spacing: var(--label-tracking);
+    text-transform: uppercase;
+    color: var(--c-faint);
+}
+
+.bmc-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-sizing: border-box;
+    width: 100%;
+    height: 46px;
+    padding: 0 20px;
+    border-radius: var(--r-md);
+    background-color: #b7410e; /* white on this is 5.6:1 in both modes */
+    color: #ffffff;
+    font-family: 'Cookie', 'Brush Script MT', cursive;
+    font-size: 23px;
+    font-weight: 400;
+    line-height: 1;
+    text-decoration: none;
+    box-shadow: var(--shadow-accent);
+}
+
+.bmc-btn:hover {
+    background-color: #8f3208; /* 7.5:1 */
+    color: #ffffff;
+    text-decoration: none;
+}
+
+.bmc-btn:focus-visible {
+    outline: 2px solid var(--c-fg);
+    outline-offset: 2px;
+}
+
+.bmc-btn-emoji {
+    font-family: initial;
+    font-size: 18px;
+    line-height: 1;
+    transform: translateY(-1px);
+}
+
+.bmc-btn-text {
+    white-space: nowrap;
+}
+
+.bmc-note {
+    margin: var(--sp-2) 0 0;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    color: var(--c-faint);
+}
+
+/* With no sidebar the button renders after the content, in a much wider
+   column — where a full-width bar would read as a banner. */
+.VPDoc .bmc {
+    margin-top: var(--sp-7);
+}
+
+.VPDoc .bmc-btn {
+    width: auto;
+    min-width: 210px;
+    max-width: 250px;
+}
+
+/* --------------------------------------------------------------------------
+   14. Utilities
+   -------------------------------------------------------------------------- */
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.vp-doc .footnotes {
+    margin-top: var(--sp-8);
+    padding-top: var(--sp-5);
+    border-top: 1px solid var(--vp-c-divider);
+    font-size: 0.9rem;
+    color: var(--vp-c-text-2);
+}
+
+/* --------------------------------------------------------------------------
+   15. Responsive
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 959px) {
+    .vp-doc {
+        font-size: 16.5px;
+    }
+    .vp-doc h1 {
+        max-width: none;
+    }
+    .vp-doc h2 {
+        margin-top: var(--sp-8);
+        padding-top: var(--sp-5);
+    }
+    .home-paths__grid {
+        grid-template-columns: 1fr;
+    }
+    .vp-doc .home-path {
+        min-height: 0;
+    }
+    .vp-doc .home-path h3 {
+        margin-top: var(--sp-5);
+    }
+}
+
+@media (max-width: 720px) {
+    .hero {
+        margin-inline: calc(var(--sp-2) * -1);
+        border-radius: var(--r-xl);
+    }
+    .hero::before {
+        display: none;
+    }
+    .vp-doc .hero-tagline {
+        max-width: none;
+    }
+    .hero-signals {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--sp-4) var(--sp-3);
+        margin-top: var(--sp-6);
+        padding-top: var(--sp-5);
+    }
+    .ladder,
+    .cards {
+        grid-template-columns: 1fr;
+    }
+    .vp-doc .hero-btn {
+        flex: 1 1 auto;
+        justify-content: center;
+    }
+    .table-wrap {
+        border-radius: var(--r-md);
+    }
+    .vp-doc .table-wrap th,
+    .vp-doc .table-wrap td {
+        padding: var(--sp-3);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    html {
+        scroll-behavior: auto;
+    }
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+    .vp-doc .home-path:hover,
+    .vp-doc .card:hover,
+    .vp-doc .hero-btn:hover,
+    .VPDocFooter .prev-next .pager-link:hover {
+        transform: none;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   16. Print
+   -------------------------------------------------------------------------- */
+
+@media print {
+    body {
+        background: #fff;
+    }
+    .Layout::before {
+        display: none;
+    }
+    .hero,
+    .home-path,
+    .card,
+    .callout,
+    .perf,
+    .capmap-branch,
+    .table-wrap {
+        box-shadow: none;
+    }
+    .bmc,
+    .VPSidebar,
+    .VPNav {
+        display: none !important;
+    }
+    .table-wrap {
+        max-height: none;
+        overflow: visible;
     }
 }

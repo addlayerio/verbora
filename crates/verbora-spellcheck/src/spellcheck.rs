@@ -1,10 +1,13 @@
 //! The spellchecker itself: The reference `spellcheck`.
 
+use std::sync::OnceLock;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 use verbora_trie::Trie;
 
 use crate::comparator_sort;
 use crate::edits::Edits;
+use crate::query_index::{QueryIndex, dist1_minpos, dist2_minkey};
 use crate::units::{EditUnit, to_utf16};
 
 /// The one `Object.prototype` key whose assignment is silently dropped.
@@ -107,6 +110,14 @@ pub struct Spellcheck {
     /// Entry indices in the reference's `Object.keys` order; see
     /// [`Spellcheck::frequencies`].
     key_order: Vec<u32>,
+    /// The deletion index behind the `max_distance <= 2` fast path, built on
+    /// the first such query so construction cost is unchanged. See
+    /// `crate::query_index`.
+    query_index: OnceLock<QueryIndex>,
+    /// Whether any entry's frequency is `NaN` (prototype-shadowed words).
+    /// `false` — the overwhelmingly common case — lets the fast path skip its
+    /// per-candidate `NaN` scan outright.
+    has_nan: bool,
 }
 
 impl Spellcheck {
@@ -154,8 +165,10 @@ impl Spellcheck {
             }
         }
 
+        let mut has_nan = false;
         for (entry, &count) in entries.iter_mut().zip(&counts) {
             entry.frequency = shadowed_frequency(&entry.word, count);
+            has_nan |= entry.frequency.is_nan();
         }
 
         let key_order = key_order(&entries);
@@ -164,10 +177,12 @@ impl Spellcheck {
             entries,
             index,
             key_order,
+            query_index: OnceLock::new(),
+            has_nan,
         }
     }
 
-    /// The prefix tree the membership test runs over.
+    /// The prefix tree over the word list.
     ///
     /// Exposed because the reference exposes `spellcheck.trie`, and because the
     /// trie answers prefix questions this API does not.
@@ -177,6 +192,12 @@ impl Spellcheck {
 
     /// Whether `word` is in the list, exactly and case-sensitively.
     ///
+    /// Answered from the frequency table's hash map rather than by walking the
+    /// trie — both are built from the same insertions, so they hold the exact
+    /// same word set, and the hash lookup is O(1) in the word's length where
+    /// the trie walk is a pointer chase per code point. [`Spellcheck::trie`]
+    /// remains available for prefix questions.
+    ///
     /// # Examples
     ///
     /// ```
@@ -185,11 +206,11 @@ impl Spellcheck {
     /// let sc = Spellcheck::new(["", "cat"]);
     /// assert!(sc.is_correct("cat"));
     /// assert!(!sc.is_correct("Cat"));
-    /// // An empty string in the list marks the trie's root as a word.
+    /// // An empty string in the list is a word (it marks the trie's root).
     /// assert!(sc.is_correct(""));
     /// ```
     pub fn is_correct(&self, word: &str) -> bool {
-        self.trie.contains(word)
+        self.index.contains_key(word)
     }
 
     /// The frequency the reference would use when ordering `word`.
@@ -261,10 +282,16 @@ impl Spellcheck {
     ///
     /// # Cost
     ///
-    /// There are roughly `54n + 25` strings one edit from a word of length `n`,
-    /// and each level multiplies that again: `max_distance = 2` examines
-    /// ~10<sup>4</sup>–10<sup>5</sup> candidates and `3` reaches 10<sup>6</sup>.
-    /// Norvig's figure is that 80–95% of real misspellings are one edit out.
+    /// `max_distance <= 2` — the overwhelmingly common case — is answered from
+    /// a deletion index (built lazily, once, on the first such call) that
+    /// touches only the stored words sharing a deletion sequence with `word`:
+    /// microseconds per query, independent of the ~10<sup>4</sup>–10<sup>5</sup>
+    /// candidate strings the reference examines at distance 2. The output is
+    /// byte-identical to the generate-and-filter search, which still runs for
+    /// `max_distance >= 3`, where each level multiplies the roughly `54n + 25`
+    /// one-edit candidates of a length-`n` word again — distance 3 reaches
+    /// 10<sup>6</sup>. Norvig's figure is that 80–95% of real misspellings are
+    /// one edit out.
     ///
     /// # Examples
     ///
@@ -280,12 +307,10 @@ impl Spellcheck {
     pub fn get_corrections(&self, word: &str, max_distance: u32) -> Vec<String> {
         // `if (!maxDistance) maxDistance = 1`.
         let distance = if max_distance == 0 { 1 } else { max_distance };
-        if word.is_ascii() {
-            // ASCII is closed under the edit operation — the alphabet is
-            // `a`–`z` — so this choice holds for every level.
-            self.corrections_over(word.as_bytes(), distance)
+        if distance <= 2 {
+            self.corrections_indexed(word, distance)
         } else {
-            self.corrections_over(&to_utf16(word), distance)
+            self.corrections_combinatorial(word, distance)
         }
     }
 
@@ -296,14 +321,17 @@ impl Spellcheck {
     ///
     /// [`Spellcheck`] is immutable after construction and holds nothing but
     /// owned data — a [`Trie`](verbora_trie::Trie), a `Vec<Entry>`, an
-    /// `FxHashMap` and a `Vec<u32>`, no `Rc`, `RefCell`, `Cell` or other
-    /// interior mutability anywhere in the type — so it is `Send + Sync`
-    /// automatically, and looking up many words against it has zero
-    /// coordination cost between lookups. `get_corrections` alone is
-    /// expensive: this crate's own `spellcheck_get_corrections_d2` benchmark
-    /// measures 3.9–5.5 ms for a single nine-letter word at distance 2, so a
-    /// caller correcting more than a handful of words sequentially is easily
-    /// looking at tens of milliseconds to seconds of wall time on one core.
+    /// `FxHashMap` and a `Vec<u32>`; its only interior mutability is the
+    /// `OnceLock` guarding the lazily built query index, which is itself
+    /// `Send + Sync` — so [`Spellcheck`] is `Send + Sync` automatically, and
+    /// looking up many words against it has zero coordination cost between
+    /// lookups after the one-time index build. `get_corrections` can still be
+    /// expensive per call: at `max_distance >= 3` (and in the `NaN`-frequency
+    /// corner) it runs the combinatorial search, milliseconds for a single
+    /// nine-letter word, so a caller correcting more than a handful of words
+    /// sequentially there is easily looking at tens of milliseconds to
+    /// seconds of wall time on one core — and even indexed
+    /// `max_distance <= 2` calls add up over document-sized batches.
     /// This function is exactly
     /// `words.par_iter().map(|w| self.get_corrections(w, max_distance)).collect()`
     /// — a thin fan-out over the existing sequential primitive, not a second
@@ -415,6 +443,84 @@ impl Spellcheck {
         levels: &mut Vec<Vec<Vec<u16>>>,
     ) {
         crate::edits_with_max_distance_helper(distance_counter, levels);
+    }
+
+    /// The indexed fast path for `distance <= 2` (after the 0 → 1 mapping):
+    /// retrieval from a lazily built deletion index, then exact
+    /// reconstruction of the combinatorial search's output — grouping,
+    /// frequency order and generator-order tie-break included. See
+    /// `crate::query_index` for the mechanism and the parity argument.
+    fn corrections_indexed(&self, word: &str, distance: u32) -> Vec<String> {
+        let query_index = self
+            .query_index
+            .get_or_init(|| QueryIndex::new(self.entries.iter().map(|e| &*e.word)));
+        let qu = to_utf16(word);
+        let mut candidates: Vec<u32> = Vec::new();
+        query_index.candidates(&qu, distance, &mut candidates);
+        // A NaN frequency makes the reference's comparator non-transitive and
+        // the exact permutation a property of its engine's TimSort over the
+        // full duplicate candidate stream. That pathology stays on the path
+        // that reproduces it byte for byte.
+        if self.has_nan
+            && candidates
+                .iter()
+                .any(|&i| self.entries[i as usize].frequency.is_nan())
+        {
+            return self.corrections_combinatorial(word, distance);
+        }
+
+        // (frequency, first-occurrence rank key, entry index) per level. Rank
+        // keys are unique per level — one raw stream position produces one
+        // string — so the sort is a strict total order and unstable sorting
+        // is safe.
+        let mut level1: Vec<(f64, u64, u32)> = Vec::new();
+        let mut level2: Vec<(f64, (u64, u64), u32)> = Vec::new();
+        let mut scratch: Vec<u16> = Vec::new();
+        for &i in &candidates {
+            let wu = query_index.word_units(i);
+            if let Some(pos) = dist1_minpos(&qu, wu) {
+                level1.push((self.entries[i as usize].frequency, pos, i));
+            } else if distance >= 2 {
+                if let Some(key) = dist2_minkey(&qu, wu, &mut scratch) {
+                    level2.push((self.entries[i as usize].frequency, key, i));
+                }
+            }
+        }
+        // Descending frequency, ties by ascending rank key: exactly what the
+        // reference's stable sort does to finite frequencies.
+        level1.sort_unstable_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .expect("NaN frequencies dispatch to the combinatorial path")
+                .then(a.1.cmp(&b.1))
+        });
+        level2.sort_unstable_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .expect("NaN frequencies dispatch to the combinatorial path")
+                .then(a.1.cmp(&b.1))
+        });
+        let mut out: Vec<String> = Vec::with_capacity(level1.len() + level2.len());
+        for &(_, _, i) in &level1 {
+            out.push(self.entries[i as usize].word.to_string());
+        }
+        for &(_, _, i) in &level2 {
+            out.push(self.entries[i as usize].word.to_string());
+        }
+        out
+    }
+
+    /// The generate-and-filter search, dispatched by unit representation.
+    ///
+    /// This is the whole of what `get_corrections` used to be, byte for byte:
+    /// the `distance >= 3` path, the `NaN`-frequency fallback, and the oracle
+    /// the indexed fast path is differentially tested against.
+    pub(crate) fn corrections_combinatorial(&self, word: &str, distance: u32) -> Vec<String> {
+        if word.is_ascii() {
+            // ASCII is closed under the edit operation — the alphabet is
+            // `a`–`z` — so this choice holds for every level.
+            self.corrections_over(word.as_bytes(), distance)
+        } else {
+            self.corrections_over(&to_utf16(word), distance)
+        }
     }
 
     /// The correction search, in whichever unit representation was chosen.
@@ -957,6 +1063,481 @@ mod tests {
         fn max_distance_zero_means_one() {
             let sc = Spellcheck::new(["cat"]);
             assert_parity(&sc, &["ct", "cat", "xyz"], 0);
+        }
+    }
+
+    /// Differential verification of the indexed fast path against the
+    /// combinatorial search as oracle — byte-exact `Vec<String>` equality,
+    /// ordering included. `corrections_combinatorial` *is* the pre-index
+    /// implementation of `get_corrections`, unchanged, so these tests pin the
+    /// fast path to the exact old behaviour on every input class the
+    /// prototype's 17,718-check verifier covered; trial counts are scaled
+    /// down in debug builds, where the oracle's distance-2 search is an order
+    /// of magnitude slower.
+    mod indexed_fastpath_parity {
+        use super::*;
+
+        /// What `get_corrections` was before the fast path existed, verbatim:
+        /// the falsiness mapping plus the unit-dispatched combinatorial
+        /// search.
+        fn oracle(sc: &Spellcheck, word: &str, max_distance: u32) -> Vec<String> {
+            let distance = if max_distance == 0 { 1 } else { max_distance };
+            sc.corrections_combinatorial(word, distance)
+        }
+
+        fn check(sc: &Spellcheck, word: &str, max_distance: u32) {
+            assert_eq!(
+                sc.get_corrections(word, max_distance),
+                oracle(sc, word, max_distance),
+                "query {word:?} at distance {max_distance} diverged"
+            );
+        }
+
+        /// xorshift64: deterministic, seed-pinned trials.
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next() % n as u64) as usize
+            }
+        }
+
+        /// Scales a trial count down in debug builds.
+        fn scaled(n: usize) -> usize {
+            if cfg!(debug_assertions) {
+                n.div_ceil(12)
+            } else {
+                n
+            }
+        }
+
+        /// All strings over `alphabet` of length `<= max_len`.
+        fn enumerate(alphabet: &[char], max_len: usize) -> Vec<String> {
+            let mut out = vec![String::new()];
+            let mut level = vec![String::new()];
+            for _ in 0..max_len {
+                let mut next = Vec::new();
+                for s in &level {
+                    for &c in alphabet {
+                        let mut t = s.clone();
+                        t.push(c);
+                        out.push(t.clone());
+                        next.push(t);
+                    }
+                }
+                level = next;
+            }
+            out
+        }
+
+        /// The shared benchmark word list, exactly as the benches load it.
+        fn corpus_words() -> Vec<String> {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .expect("crate is two levels below the workspace root")
+                .join("benches/data/words.json");
+            let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!(
+                    "cannot read {}: {e}\nGenerate it with: python3 tools/bench-data/generate.py",
+                    path.display()
+                )
+            });
+            let json: serde_json::Value = serde_json::from_str(&body).expect("valid bench data");
+            json["words"]
+                .as_array()
+                .expect("words array")
+                .iter()
+                .map(|w| w.as_str().expect("word is a string").to_owned())
+                .collect()
+        }
+
+        /// The benchmark's typo shape: the middle character removed.
+        fn typo(word: &str) -> String {
+            let mut chars: Vec<char> = word.chars().collect();
+            if chars.len() > 1 {
+                chars.remove(chars.len() / 2);
+            }
+            chars.into_iter().collect()
+        }
+
+        /// Applies one random generator-shaped edit to `chars`.
+        fn random_edit(chars: &mut Vec<char>, rng: &mut Rng) {
+            match rng.below(4) {
+                0 if !chars.is_empty() => {
+                    chars.remove(rng.below(chars.len()));
+                }
+                1 => {
+                    let c = (b'a' + rng.below(26) as u8) as char;
+                    chars.insert(rng.below(chars.len() + 1), c);
+                }
+                2 if !chars.is_empty() => {
+                    let i = rng.below(chars.len());
+                    chars[i] = (b'a' + rng.below(26) as u8) as char;
+                }
+                _ if chars.len() >= 2 => {
+                    let i = rng.below(chars.len() - 1);
+                    chars.swap(i, i + 1);
+                }
+                _ => {}
+            }
+        }
+
+        /// Exhaustive over a tiny alphabet: every corpus-word/query pair
+        /// shape, including transposition-only reachability, runs of equal
+        /// letters and empty strings — the class where the closed-form edge
+        /// cases live.
+        #[test]
+        fn exhaustive_small_alphabet() {
+            let corpus_words = enumerate(&['a', 'b'], 3);
+            // Duplicates for frequency variety.
+            let mut corpus: Vec<String> = corpus_words.clone();
+            corpus.extend(corpus_words.iter().filter(|w| w.len() == 2).cloned());
+            corpus.push("ab".into());
+            let sc = Spellcheck::new(&corpus);
+            let d3_max_len = if cfg!(debug_assertions) { 1 } else { 2 };
+            for q in enumerate(&['a', 'b', 'c'], 4) {
+                for d in [0u32, 1, 2] {
+                    check(&sc, &q, d);
+                }
+                // Distance 3 keeps the combinatorial path; this pins the
+                // dispatch boundary.
+                if q.len() <= d3_max_len {
+                    check(&sc, &q, 3);
+                }
+            }
+        }
+
+        /// Exhaustive with non-alphabet units mixed in: digits, punctuation
+        /// and uppercase are preserved by delete/transpose but can never be
+        /// introduced by substitute/insert.
+        #[test]
+        fn exhaustive_with_non_alphabet_units() {
+            let corpus = enumerate(&['a', 'Q', '1'], 3);
+            let sc = Spellcheck::new(&corpus);
+            for q in enumerate(&['a', 'Q', '1', 'b'], 3) {
+                for d in [1u32, 2] {
+                    check(&sc, &q, d);
+                }
+            }
+        }
+
+        /// Randomized typos over slices of the real benchmark corpus at
+        /// several sizes, distance-2-heavy, fixed seed.
+        #[test]
+        fn randomized_real_corpus() {
+            let words = corpus_words();
+            let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+            for &n in &[50usize, 500, 5000] {
+                let start = rng.below(words.len() - n);
+                let slice = &words[start..start + n];
+                let sc = Spellcheck::new(slice);
+                for trial in 0..scaled(1200) {
+                    let w = &slice[rng.below(n)];
+                    let mut chars: Vec<char> = w.chars().collect();
+                    let q: String = match trial % 6 {
+                        0 => w.clone(), // exact word
+                        1 => {
+                            if !chars.is_empty() {
+                                chars.remove(rng.below(chars.len()));
+                            }
+                            chars.into_iter().collect()
+                        }
+                        2 => {
+                            let c = (b'a' + rng.below(26) as u8) as char;
+                            chars.insert(rng.below(chars.len() + 1), c);
+                            chars.into_iter().collect()
+                        }
+                        3 => {
+                            if !chars.is_empty() {
+                                let i = rng.below(chars.len());
+                                chars[i] = (b'a' + rng.below(26) as u8) as char;
+                            }
+                            chars.into_iter().collect()
+                        }
+                        4 => {
+                            if chars.len() >= 2 {
+                                let i = rng.below(chars.len() - 1);
+                                chars.swap(i, i + 1);
+                            }
+                            if rng.below(2) == 0 && !chars.is_empty() {
+                                let i = rng.below(chars.len());
+                                chars[i] = (b'a' + rng.below(26) as u8) as char;
+                            }
+                            chars.into_iter().collect()
+                        }
+                        _ => {
+                            for _ in 0..2 {
+                                random_edit(&mut chars, &mut rng);
+                            }
+                            chars.into_iter().collect()
+                        }
+                    };
+                    let d = [0u32, 1, 2, 2, 2, 2][trial % 6];
+                    check(&sc, &q, d);
+                }
+            }
+        }
+
+        /// The benchmark corpus transliterated to Cyrillic: forces the
+        /// oracle's UTF-16 path, and mixed-script queries insert ASCII
+        /// letters into non-ASCII words.
+        #[test]
+        fn cyrillic() {
+            const RU: [char; 26] = [
+                'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'й', 'к', 'л', 'м', 'н', 'о', 'п',
+                'р', 'с', 'т', 'у', 'ф', 'х', 'ц', 'ч', 'ш', 'щ',
+            ];
+            let words = corpus_words();
+            let ru: Vec<String> = words[..800]
+                .iter()
+                .map(|w| {
+                    w.chars()
+                        .map(|c| {
+                            if c.is_ascii_lowercase() {
+                                RU[(c as usize) - ('a' as usize)]
+                            } else {
+                                c
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let sc = Spellcheck::new(&ru);
+            let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+            for trial in 0..scaled(600) {
+                let w = &ru[rng.below(ru.len())];
+                let mut chars: Vec<char> = w.chars().collect();
+                match trial % 4 {
+                    0 => {}
+                    1 => {
+                        if !chars.is_empty() {
+                            chars.remove(rng.below(chars.len()));
+                        }
+                    }
+                    2 => {
+                        // Only a–z can ever be inserted by the generator, so
+                        // mixed-script queries matter.
+                        let c = (b'a' + rng.below(26) as u8) as char;
+                        chars.insert(rng.below(chars.len() + 1), c);
+                    }
+                    _ => {
+                        if chars.len() >= 2 {
+                            let i = rng.below(chars.len() - 1);
+                            chars.swap(i, i + 1);
+                        }
+                    }
+                }
+                let q: String = chars.into_iter().collect();
+                let d = 1 + (trial % 2) as u32;
+                check(&sc, &q, d);
+            }
+        }
+
+        /// Astral pairs, mixed scripts, digits, punctuation, empty entries —
+        /// including edits that cut a surrogate pair in half and are repaired
+        /// by the second edit.
+        #[test]
+        fn unicode_edge_cases() {
+            let corpus = [
+                "a😀b",
+                "ab",
+                "a😀",
+                "😀b",
+                "😀",
+                "b😀a",
+                "",
+                "café",
+                "cafe",
+                "e.g.",
+                "123",
+                "12",
+                "don't",
+                "dont",
+                "日本語",
+                "日本",
+                "aa",
+                "a",
+                "Cat",
+                "cat",
+                "cta",
+            ];
+            let sc = Spellcheck::new(corpus);
+            let queries = [
+                "a😀b",
+                "ab",
+                "a😀",
+                "😀",
+                "aab",
+                "",
+                "a",
+                "café",
+                "caf",
+                "cafee",
+                "e.g",
+                "eg.",
+                "123",
+                "1234",
+                "12",
+                "dont",
+                "don't",
+                "日本",
+                "日本語語",
+                "cat",
+                "Cat",
+                "cta",
+                "act",
+                "tac",
+                "abc",
+                "ba",
+            ];
+            for q in queries {
+                for d in [0u32, 1, 2] {
+                    check(&sc, q, d);
+                }
+            }
+        }
+
+        /// Corpora with `NaN` frequencies (prototype-shadowed words seen
+        /// once, and `__proto__`): any query retrieving such a word must fall
+        /// back to the combinatorial path, whose TimSort permutation is the
+        /// contract there — and queries that do not retrieve one must not.
+        #[test]
+        fn prototype_shadowed_nan_dispatch() {
+            let corpus = [
+                "constructor",
+                "toString",
+                "toString",
+                "valueOf",
+                "valueOf",
+                "valueOf",
+                "__proto__",
+                "cat",
+                "cast",
+                "cot",
+                "constructoz",
+                "tostring",
+            ];
+            let sc = Spellcheck::new(corpus);
+            let queries = [
+                "constructor",
+                "constructoe",
+                "onstructor",
+                "toString",
+                "toStrinh",
+                "tostring",
+                "valueOf",
+                "valueO",
+                "__proto__",
+                "_proto__",
+                "cat",
+                "ct",
+                "cost",
+                "czt",
+            ];
+            for q in queries {
+                for d in [1u32, 2] {
+                    check(&sc, q, d);
+                }
+            }
+        }
+
+        /// 500-character words: the length extreme the crate already pins for
+        /// the combinatorial path.
+        #[test]
+        fn long_words() {
+            let long = "a".repeat(500);
+            let sc = Spellcheck::new([long.as_str(), "cat"]);
+            let almost = "a".repeat(499);
+            for q in [long.as_str(), almost.as_str(), "cat"] {
+                check(&sc, q, 1);
+            }
+        }
+
+        /// Full benchmark-corpus scale, including the competitive benchmark's
+        /// exact probe shapes and a d2-heavy random sweep.
+        #[test]
+        fn full_corpus_scale() {
+            let words = corpus_words();
+            let sc = Spellcheck::new(&words);
+            let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+
+            // The benchmark probes: the middle-deletion typo of an
+            // eight-letter and a six-letter word.
+            let word_of = |len: usize| {
+                words
+                    .iter()
+                    .find(|w| w.chars().count() == len)
+                    .expect("corpus has a word of this length")
+            };
+            let p1 = typo(word_of(8));
+            let p2 = typo(word_of(6));
+            check(&sc, &p1, 1);
+            check(&sc, &p2, 2);
+            if !cfg!(debug_assertions) {
+                check(&sc, &p1, 2);
+            }
+
+            // The batch probes (d1), with d2 versions for a prefix.
+            let batch_d2 = scaled(60);
+            for (i, w) in words.iter().take(scaled(200)).enumerate() {
+                let t = typo(w);
+                check(&sc, &t, 1);
+                if i < batch_d2 {
+                    check(&sc, &t, 2);
+                }
+            }
+
+            // Random typos across the whole corpus, d2-heavy.
+            for trial in 0..scaled(600) {
+                let w = &words[rng.below(words.len())];
+                let mut chars: Vec<char> = w.chars().collect();
+                for _ in 0..(1 + trial % 2) {
+                    random_edit(&mut chars, &mut rng);
+                }
+                let q: String = chars.into_iter().collect();
+                check(&sc, &q, 1 + (trial % 2) as u32);
+            }
+        }
+
+        /// `is_correct` now answers from the frequency table's hash map; the
+        /// trie — built from the same insertions — is the oracle, over the
+        /// full corpus plus near and far misses and the unicode/empty-string
+        /// edge cases.
+        #[test]
+        fn is_correct_agrees_with_the_trie() {
+            let words = corpus_words();
+            let sc = Spellcheck::new(&words);
+            for w in &words[..4000.min(words.len())] {
+                assert_eq!(sc.is_correct(w), sc.trie().contains(w), "{w:?}");
+                let near = typo(w);
+                assert_eq!(sc.is_correct(&near), sc.trie().contains(&near), "{near:?}");
+                let far = format!("Q{w}");
+                assert_eq!(sc.is_correct(&far), sc.trie().contains(&far), "{far:?}");
+            }
+
+            let sc = Spellcheck::new(["", "café", "Москва", "a😀b", "__proto__", "cat"]);
+            for w in [
+                "",
+                "café",
+                "cafe",
+                "Москва",
+                "a😀b",
+                "ab",
+                "__proto__",
+                "cat",
+                "Cat",
+                "ca",
+                "cats",
+                "x",
+            ] {
+                assert_eq!(sc.is_correct(w), sc.trie().contains(w), "{w:?}");
+            }
         }
     }
 }

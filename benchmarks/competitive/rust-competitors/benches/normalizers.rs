@@ -113,7 +113,7 @@ use verbora_normalizers::remove_diacritics;
 /// Repeat counts for the prose generators below (not byte lengths — see the
 /// module doc comment). Matches `distance.rs`'s `SIZES` so
 /// `scripts/collect-results.py`'s hardcoded size set finds every directory.
-const SIZES: [usize; 5] = [4, 16, 64, 256, 1024];
+const SIZES: [usize; 9] = [4, 8, 16, 32, 64, 128, 256, 512, 1024];
 
 /// English prose with no diacritics: pure rejection. Identical generator to
 /// `crates/verbora-normalizers/benches/normalizers.rs`'s `ascii_prose`.

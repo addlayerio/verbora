@@ -65,30 +65,17 @@ depends on the tokenizer:
 this is the single easiest mistake to make with these APIs.
 </div>
 
-**Appending — you clear.**
+| Method | Convention |
+|---|---|
+| `Tokenize::tokenize_into` | **appends** — you call `clear()` |
+| `verbora_core::Tokenizer::tokenize_into` | **appends** |
+| `NounInflector::pluralize_into` / `singularize_into` | **appends** |
+| `verbora_inflectors::CaseMode::apply_into` | **appends** |
+| `verbora_core::Stemmer::stem_into` | **clears first** |
 
-```rust  ignore
-Tokenize::tokenize_into(&self, text, &mut out)          // appends
-verbora_core::Tokenizer::tokenize_into(&self, text, &mut out)  // appends
-NounInflector::pluralize_into(&self, token, &mut out)   // appends
-verbora_inflectors::CaseMode::apply_into(self, s, &mut out)    // appends
-```
-
-The doc comment on `Tokenize::tokenize_into` says it plainly: *"`out` is **not**
-cleared, so a caller can accumulate across inputs or — the intended use — reuse
-one buffer's capacity across a corpus."* Both readings are supported on purpose.
-`CaseMode::apply_into`'s own doc comment agrees: *"Applies the restoration,
-**appending** to `out`."*
-
-**Clearing — it clears for you.**
-
-```rust  ignore
-verbora_core::Stemmer::stem_into(&self, token, &mut out)  // clears first
-```
-
-Why the difference? Accumulating tokens across documents is a real use case;
-accumulating stem fragments into one `String` is not — it would produce
-gibberish. The convention follows what the output type is actually for.
+Appending is the default because accumulating tokens across documents is a real
+use case. Accumulating stem fragments into one `String` is not, so `stem_into`
+clears. Each method states its convention in its own rustdoc.
 
 ## Accumulating on purpose
 
@@ -148,8 +135,11 @@ save a single allocation.
 every `clear()`, reuse saves the vector and nothing else. Prefer a tokenizer that
 yields `&str` if you have the choice.
 
-**When the work dwarfs the allocation.** `levenshtein/ascii/1024` measures 3.24 ms
-per call. Nothing about container reuse is visible next to that.
+**When the work dwarfs the allocation.** A `levenshtein/ascii/1024` call takes
+29.08 µs, and a weighted call evaluates the full scalar recurrence on top of
+that. Container reuse is not the dominant question at that scale — see the
+[shape suite](../benchmarks/distance.md#current-levenshtein-shape-suite) for how
+much the input shape matters instead.
 
 **Across threads.** A buffer is `&mut`, so it cannot be shared. Under `rayon`,
 give each worker its own — `map_init` exists exactly for this:
@@ -167,25 +157,23 @@ let counts: Vec<usize> = corpus
     .collect();
 ```
 
-None of Verbora's thirteen built-in `par_*` batch APIs (see
-[Parallelism](parallelism.md)) reuse a buffer internally — each is a thin
-`par_iter().map(...)` wrapper over the existing sequential primitive,
-deliberately, so it allocates fresh output per item same as the sequential
-call would. This `map_init` pattern is still what you reach for whenever you
-want buffer reuse *and* parallelism together, whether or not a built-in
-`par_*` exists for the underlying operation.
+The built-in [`par_*` batch APIs](parallelism.md) allocate fresh output per
+item — they are thin fan-outs over the sequential primitive, not buffer-reusing
+implementations. `map_init` is what you reach for when you want reuse *and*
+parallelism together.
 
-## Scratch buffers that do not exist
+## There is no scratch-buffer API for distance
 
-There is no `levenshtein_with_scratch`. The Levenshtein family allocates its own
-working rows on every call — two `Vec<f64>` for the plain path, three for
-restricted Damerau, a cost vector plus a parent vector for the full-matrix modes.
-Those are `O(m)` or `O(nm)` allocations you cannot currently hoist out of a loop.
+`verbora-distance` has no `levenshtein_with_scratch`. Weighted plain Levenshtein
+allocates one `Vec<f64>` row, restricted Damerau three, and the full-matrix
+search modes a cost vector plus a parent vector; unit-cost paths use bit-vectors
+and allocate no row at all. Those `O(m)` and `O(nm)` allocations cannot be
+hoisted out of a loop today.
 
-Jaro–Winkler *is* allocation-free for inputs up to 128 code units, because its
-two match-flag arrays live on the stack below that threshold. Above it, it
-allocates two `Vec<bool>`. That threshold was chosen because words are short by
-nature — see [the regression story](../benchmarks/distance.md#a-measured-regression-and-its-fix).
+Jaro–Winkler *is* allocation-free for inputs up to 128 code units: its two
+match-flag arrays live on the stack below that threshold, and only above it does
+it allocate two `Vec<bool>`. Words are short by nature, so the stack path is the
+common one.
 
 ## Related
 

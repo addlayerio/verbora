@@ -1,53 +1,41 @@
 # Tokenizers
 
-`verbora-tokenizers` splits text into tokens, twenty-five ways — sixteen
+`verbora-tokenizers` splits text into tokens, twenty-five ways: sixteen
 "aggressive" language splitters, four regex-driven ones, a Penn Treebank word
 tokenizer, a case-based splitter, a Japanese segmenter and a sentence splitter.
-Every tokenizer's output — including the places where that output is
-linguistically wrong — is pinned by this crate's own regression suite. Every
-tokenizer is built on a lazy iterator, and the convenience methods are
-defined on top of that iterator, so there is one implementation of each
-behaviour and no second copy to drift.
 
-<div class="callout callout-note">
-<strong>25 exports, 24 Rust types.</strong> The 25th export,
-<code>SentenceTokenizerNew</code>, is the same constructor as
-<code>SentenceTokenizer</code> under a second name. Verbora keeps both names —
-<code>SentenceTokenizerNew</code> is a type alias — but there is only one
-implementation behind them. Counts on this page that total the Rust type
-surface (construction cost, trait implementors) say "24 types"; counts that
-total the public API surface say "25."
-</div>
+Every tokenizer is built on a lazy iterator, and the convenience methods are
+defined on top of that iterator, so there is one implementation of each behaviour
+and no second copy to drift. Every tokenizer's output is byte-exact and pinned by
+the crate's regression suite.
 
 <div class="callout callout-spec">
-<strong>Specification status.</strong> All <strong>25</strong> tokenizer APIs
-are documented and test-pinned. Comparison is defined on UTF-16 code units
-rather than on <code>String</code>, because four of these tokenizers can split
-inside a surrogate pair.
-<code>cargo test -p verbora-tokenizers</code> runs <strong>72</strong> unit
-tests and <strong>16</strong> doctests.
+<strong>Specification status.</strong> All <strong>25</strong> tokenizer APIs are
+documented and test-pinned. They are <strong>24 Rust types</strong> —
+<code>SentenceTokenizerNew</code> is an alias for <code>SentenceTokenizer</code> —
+and equality is pinned on UTF-16 code units rather than <code>String</code>,
+because four of them can split inside a surrogate pair.
+<code>cargo test -p verbora-tokenizers</code> runs <strong>72</strong> unit tests
+and <strong>16</strong> doctests.
 </div>
 
 ## When to use it
 
-- You want a fast, allocation-light word splitter for Latin-script text and
-  `AggressiveTokenizer`'s character class is the one you want.
+- You want a fast, allocation-light word splitter for Latin-script text and one
+  of the language character classes below is the one you want.
 - You need sentence segmentation with abbreviation, URI and number protection.
 - You need Japanese word segmentation without a dictionary or a model file.
 
 ## When not to use it
 
-- **You want linguistically correct tokenization for its own sake.** These
-  reproduce a specific, quirky character-class specification exactly, bugs
-  included: `AggressiveTokenizerDe` splits `Äpfel` into `pfel`;
-  `AggressiveTokenizerId` deletes every capital letter; `CaseTokenizer`
-  appends the literal string `undefined` to some tokens. This crate keeps
-  those outcomes deliberately. If you want good German tokenization, do not
-  start here.
-- **You want Unicode-aware `\w` semantics.** This crate's `\w`, `\W`, `\b`
-  and `\d` character classes are ASCII-only. Unless a tokenizer's language
-  class specifically lists an accented letter, that letter is a *separator*:
+- **You want Unicode-aware `\w` semantics.** This crate's `\w`, `\W`, `\b` and
+  `\d` classes are ASCII-only. Unless a tokenizer's language class specifically
+  lists an accented letter, that letter is a *separator*:
   `AggressiveTokenizer::tokenize("café naïve")` is `["caf", "na", "ve"]`.
+- **You want linguistically ideal tokenization.** These implement specific,
+  quirky character-class specifications exactly — see
+  [Quirks kept on purpose](#quirks-kept-on-purpose). Those outcomes are pinned,
+  not accidents.
 - **You want subword or BPE tokenization for a neural model.** Nothing here does
   that, and nothing is planned.
 
@@ -65,33 +53,23 @@ fn main() {
 }
 ```
 
-`AggressiveTokenizer::new()` is a `const fn` and the type is zero-sized, so
-constructing one is free. Eighteen of the twenty-four types are zero-sized
-(`std::mem::size_of` says `0`); `CaseTokenizer`, `WordTokenizer` and
-`WordPunctTokenizer` carry one `bool` and `OrthographyTokenizer` two. Only
-`RegexpTokenizer` (which holds a compiled pattern, 48 bytes) and
-`SentenceTokenizer` (which holds an abbreviation list, 32 bytes) own anything on
-the heap, and only their constructors — plus `OrthographyTokenizer`'s, which
-compares a `&str` — are non-`const`.
+Construction is free: eighteen of the twenty-four types are zero-sized, four carry
+one or two `bool`s, and only `RegexpTokenizer` (a compiled pattern) and
+`SentenceTokenizer` (an abbreviation list) own anything on the heap.
 
 ## The catalogue
 
-The crate exposes twenty-five tokenizer APIs as **twenty-four Rust types**:
-`SentenceTokenizerNew` is a `pub type` alias for `SentenceTokenizer` — the
-two names construct the identical type.
-
-Three columns need reading together. **Token type** is what one token *is*.
-**`Tokenize`** is this crate's iterator trait. **`Tokenizer`** and
-**`Borrowing`** are [`verbora_core::Tokenizer`](core.md) and
-`verbora_core::BorrowingTokenizer`, the shared vocabulary other Verbora crates
-are written against.
+**Token** is what one token *is*. **`Tokenize`** is this crate's iterator trait;
+**`Tokenizer`** and **`Borrowing`** are [`verbora_core::Tokenizer`](core.md) and
+`verbora_core::BorrowingTokenizer`, the shared vocabulary other Verbora crates are
+written against.
 
 ### Aggressive / language family (16)
 
 All sixteen emit maximal runs of a per-language character class, except where
-noted. Every class is *generated* by running each language's defining
-regular expression over the whole Basic Multilingual Plane rather than
-transcribed by hand, which is how the surprises below were found.
+noted. Every class is *generated* — each language's defining regular expression is
+expanded over the whole Basic Multilingual Plane rather than transcribed by hand,
+which is why the surprises below are exact.
 
 | Type | Splits on | Token | `Tokenize` | `Tokenizer` | `Borrowing` |
 |---|---|---|:--:|:--:|:--:|
@@ -112,11 +90,10 @@ transcribed by hand, which is how the surprises below were found.
 | `AggressiveTokenizerSv` | strips `à á è é` and their uppercase forms (first occurrence only), then splits on `A-Z a-z 0-9 _ åÅäÄöÖüÜ -` | `Cow<'_, str>` | ✅ | ✅ | ❌ |
 | `AggressiveTokenizerHi` | deletes `। ॥ . ? ,`, then splits on whitespace and on anything outside Devanagari and ASCII | `Cow<'_, str>` | ✅ | ✅ | ❌ |
 
-Thirteen of these yield `&str` and implement `BorrowingTokenizer`: every token
-is a contiguous slice of your input, so tokenizing allocates nothing per token.
-The three that yield `Cow` rewrite the text before splitting, so they *can*
-borrow — and do, whenever the rewrite turned out to be a no-op — but cannot
-promise to.
+Thirteen of these yield `&str` and implement `BorrowingTokenizer`: every token is
+a contiguous slice of your input, so tokenizing allocates nothing per token. The
+three that yield `Cow` rewrite the text before splitting, so they *can* borrow —
+and do, whenever the rewrite was a no-op — but cannot promise to.
 
 ### Regex-driven family (4)
 
@@ -141,18 +118,12 @@ These four return `Option`, implement **neither** trait, and are described in
 | `SentenceTokenizerNew` | `pub type SentenceTokenizerNew = SentenceTokenizer;` | — | — | — | — |
 
 `TreebankWordTokenizer`, `CaseTokenizer` and `TokenizerJa` implement
-`verbora_core::Tokenizer` by rendering unpaired surrogates as U+FFFD, because
-that trait's contract is `Vec<String>` and a `String` cannot hold one. When
-exactness matters, use [`Tokenize::tokens`](#tokens-—-the-primitive) and handle
+`verbora_core::Tokenizer` by rendering unpaired surrogates as U+FFFD, because that
+trait's contract is `Vec<String>` and a `String` cannot hold one. When exactness
+matters, use `Tokenize::tokens` and handle
 [`Utf16Token`](#utf-16-tokens-and-unpaired-surrogates) yourself.
 
 ## Choosing the right API
-
-The full treatment, with pipeline diagrams and worked examples, lives on
-[Choosing an API: tokenization](../choosing/tokenization.md). This section is
-the summary.
-
-There are three method names on `Tokenize`, and one of them is the primitive:
 
 ```rust  ignore
 pub trait Tokenize {
@@ -171,77 +142,34 @@ pub trait Tokenize {
 }
 ```
 
-That is the whole trait, copied from `crates/verbora-tokenizers/src/lib.rs`.
-`tokenize` is `tokens().collect()` and nothing else; `tokenize_into` is
-`out.extend(tokens())` and nothing else. In particular **`tokenize_into` does
-not clear `out`** — it appends.
+That is the whole trait. `tokenize` is `tokens().collect()` and nothing else;
+`tokenize_into` is `out.extend(tokens())` and nothing else. In particular
+**`tokenize_into` does not clear `out`** — it appends.
 
-### Comparison table
+| API | Best for | Lazy | Buffer reuse | Allocations |
+|---|---|:--:|:--:|---|
+| `Tokenize::tokens` | streaming, folding, early exit | ✅ | n/a | none for the 13 slicers |
+| `Tokenize::tokenize` | one document, simplest call | ❌ | ❌ | one `Vec`, grown by doubling |
+| `Tokenize::tokenize_into` | a corpus through one buffer | ❌ | ✅ | none once the buffer is warm |
+| `Tokenize::par_tokenize_batch` | many independent documents, feature `parallel` | ❌ | ❌ | one outer `Vec`, plus whatever `tokenize` allocates per document |
+| `verbora_core::Tokenizer::tokenize` | generic code over any tokenizer | ❌ | ❌ | one `Vec` **plus one `String` per token** |
+| `verbora_core::Tokenizer::tokenize_into` | generic code, warm buffer | ❌ | ✅ (the `Vec`) | one `String` per token |
+| `verbora_core::Tokenizer::tokenize_batch` | a slice of documents, one call | ❌ | ❌ | one outer `Vec`, one inner `Vec` and one `String` per token |
+| `verbora_core::BorrowingTokenizer::tokenize_borrowed_into` | generic code, zero-copy | ❌ | ✅ | none once warm |
 
-| API | Best for | Lazy | Materialises | Buffer reuse | Allocations |
-|---|---|:--:|:--:|:--:|---|
-| `Tokenize::tokens` | streaming, folding, early exit | ✅ | ❌ | n/a | none for the 13 slicers |
-| `Tokenize::tokenize` | one document, simplest call | ❌ | ✅ | ❌ | one `Vec`, grown by doubling |
-| `Tokenize::tokenize_into` | a corpus through one buffer | ❌ | ✅ | ✅ | none once the buffer is warm |
-| `verbora_core::Tokenizer::tokenize` | generic code over any tokenizer | ❌ | ✅ | ❌ | one `Vec` **plus one `String` per token** |
-| `verbora_core::Tokenizer::tokenize_into` | generic code, warm buffer | ❌ | ✅ | ✅ (the `Vec`) | one `String` per token |
-| `verbora_core::BorrowingTokenizer::tokenize_borrowed_into` | generic code, zero-copy | ❌ | ✅ | ✅ | none once warm |
-| `verbora_core::Tokenizer::tokenize_batch` | a slice of documents, one call | ❌ | ✅ | ❌ | one outer `Vec`, one inner `Vec` and one `String` per token |
-| `Tokenize::par_tokenize_batch` | many independent documents, feature `parallel` | ❌ | ✅ | ❌ | one outer `Vec`, plus whatever `tokenize` allocates per document |
-
-### Decision tree
-
-```text
-I need to tokenize text
-│
-├── I am writing code that names a concrete tokenizer
-│   │
-│   ├── One document, and I want the tokens in a Vec
-│   │      └── Tokenize::tokenize()
-│   │
-│   ├── I consume each token once and never need them all at once
-│   │      └── Tokenize::tokens()
-│   │
-│   ├── Many documents in a loop, and I care about allocation
-│   │      └── buf.clear(); Tokenize::tokenize_into(doc, &mut buf)
-│   │
-│   └── Many independent documents, and the `parallel` feature is on
-│          └── Tokenize::par_tokenize_batch(&docs)
-│
-├── I am writing code generic over "any tokenizer"
-│   │
-│   ├── I need owned Strings
-│   │      └── verbora_core::Tokenizer
-│   │
-│   └── I can work with slices of the input
-│          └── verbora_core::BorrowingTokenizer   (13 of the 24 types)
-│
-└── I want RegexpTokenizer / WordTokenizer /
-    OrthographyTokenizer / WordPunctTokenizer
-       └── inherent tokens() / tokenize() / tokenize_into(),
-           all returning Option — see below
-```
+Name a concrete tokenizer and you get `Tokenize`; write code generic over "any
+tokenizer" and you need `verbora_core::Tokenizer` (owned `String`s) or
+`BorrowingTokenizer` (slices of the input, 13 of the 24 types). The four optional
+tokenizers implement neither and expose the same three method names inherently,
+wrapped in `Option`. The long-form version of this decision, with pipeline
+diagrams, is on [Choosing an API: tokenization](../choosing/tokenization.md).
 
 ### `tokens()` — the primitive
 
-<a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a>
-<a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>
-<a class="badge badge-alloc" href="../performance/allocation">ALLOCATION-FREE</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Lazy for 17 of the 20 <code>Tokenize</code> types; eager for Treebank, Japanese and Sentence, and on the non-ASCII path of <code>CaseTokenizer</code></span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v">Borrowed <code>&amp;str</code>, <code>Cow</code>, <code>Utf16Token</code> or <code>String</code>, per tokenizer</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">None at all for the 13 slicing tokenizers</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A — nothing is buffered</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Streaming token processing and early exit</span></div>
-</div>
-
-The three badges above describe the thirteen slicing tokenizers, which is where
-this method's advantage lives. Read the card for the exceptions: `tokens()` on
-`TreebankWordTokenizer`, `TokenizerJa` and `SentenceTokenizer` is neither lazy
-nor allocation-free, and `SentenceTokenizer`'s tokens are owned `String`s.
+Lazy for 17 of the 20 `Tokenize` types, and allocation-free for the 13 slicing
+tokenizers. The exceptions: `tokens()` on `TreebankWordTokenizer`, `TokenizerJa`
+and `SentenceTokenizer` is neither lazy nor allocation-free, and
+`SentenceTokenizer`'s tokens are owned `String`s.
 
 ```rust
 use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
@@ -251,78 +179,24 @@ fn main() {
 
     // Stops as soon as it finds a match; the rest of the document is never
     // scanned, and no `Vec` is ever built.
-    let found = t.tokens("the quick brown fox").any(|w| w == "quick");
-    assert!(found);
+    assert!(t.tokens("the quick brown fox").any(|w| w == "quick"));
 
+    // Tokens borrow the input, so they are `HashMap` keys with no `String`
+    // allocation at all.
     let long_words = t.tokens("the quick brown fox").filter(|w| w.len() > 3).count();
     assert_eq!(long_words, 2);
 }
 ```
 
-Because tokens borrow the input, they can be used as `HashMap` keys without a
-single `String` allocation:
-
-```rust
-use std::collections::HashMap;
-
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-fn main() {
-    let t = AggressiveTokenizer::new();
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for token in t.tokens("the cat the hat") {
-        *counts.entry(token).or_default() += 1;
-    }
-    assert_eq!(counts["the"], 2);
-}
-```
-
 ### `tokenize()` — the simple one
 
-<a class="badge badge-owned" href="../performance/allocation">OWNED</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Vec&lt;Self::Token&lt;'a&gt;&gt;</code> — the <em>tokens</em> may still borrow</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>Vec</code>, grown by doubling; no per-token allocation for the 13 slicers</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">One document; anything where the token list is the deliverable</span></div>
-</div>
-
-```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-fn main() {
-    let t = AggressiveTokenizer::new();
-    let tokens: Vec<&str> = t.tokenize("the quick brown fox");
-    assert_eq!(tokens.len(), 4);
-    assert_eq!(tokens[0], "the");
-}
-```
-
-The `Vec` starts empty and grows by reallocation: none of these iterators
-reports a useful `size_hint` lower bound (`WordRuns` reports `0` as its lower
-bound and a byte-count-derived upper bound; everything else uses the default
-`(0, None)`), and `Vec`'s `collect` reserves from the *lower* bound. If you know
+`Vec<Self::Token<'a>>`, one `Vec`; the *tokens* may still borrow. The `Vec` starts
+empty and grows by reallocation, because none of these iterators reports a useful
+`size_hint` lower bound and `collect` reserves from the lower bound. If you know
 roughly how many tokens to expect, `tokenize_into` with a pre-reserved buffer
-avoids the growth entirely.
+avoids the growth.
 
 ### `tokenize_into()` — the hot loop
-
-<a class="badge badge-reuse" href="../performance/buffer-reuse">BUFFER REUSE</a>
-<a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v">Appended to the caller's <code>Vec</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">None once the buffer's capacity is sufficient</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">Yes — that is the entire point</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Millions of documents through one buffer</span></div>
-</div>
 
 <div class="callout callout-warn">
 <strong>Careful.</strong> <code>tokenize_into</code> does <strong>not</strong>
@@ -347,50 +221,22 @@ fn main() {
 }
 ```
 
-Accumulating deliberately is just the same call without the `clear`:
-
-```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-fn main() {
-    let t = AggressiveTokenizer::new();
-    let mut all: Vec<&str> = Vec::new();
-    for doc in ["a b", "c d"] {
-        t.tokenize_into(doc, &mut all);
-    }
-    assert_eq!(all, ["a", "b", "c", "d"]);
-}
-```
+Accumulating deliberately is the same call without the `clear`.
 
 One lifetime constraint follows from zero-copy: `Vec<Self::Token<'a>>` ties the
-buffer to `'a`, so a buffer holding `&'a str` cannot be reused across documents
-with *different* lifetimes unless all of them outlive the loop. In the example
-above, `corpus` is an array of `&'static str`, so it works. If your documents
-come from a `String` that is dropped each iteration, either move the `Vec`
-inside the loop or switch to `verbora_core::Tokenizer::tokenize_into`, whose
-`Vec<String>` owns its contents.
+buffer to `'a`, so a buffer holding `&'a str` can only be reused across documents
+that all outlive the loop. If your documents come from a `String` dropped each
+iteration, move the `Vec` inside the loop or switch to
+`verbora_core::Tokenizer::tokenize_into`, whose `Vec<String>` owns its contents.
 
-### `verbora_core::Tokenizer` — the shared vocabulary
+### The `verbora_core` traits
 
-<a class="badge badge-owned" href="../performance/allocation">OWNED</a>
-<a class="badge badge-batch" href="../performance/batch-vs-streaming">BATCH</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Vec&lt;String&gt;</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>Vec</code> and one <code>String</code> per token</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v"><code>tokenize_into</code> reuses the <code>Vec</code>, never the <code>String</code>s</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v"><code>tokenize_batch</code>, sequential</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No — the parallel batch lives on <code>Tokenize</code>, not on this trait; see <code>par_tokenize_batch</code> below</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Code that must work with any tokenizer, or that needs owned tokens</span></div>
-</div>
-
-Twenty of the twenty-four types implement it. Use it when your code is generic
-over "some tokenizer" rather than over a named one, or when you genuinely need
-owned `String`s.
+Twenty of the twenty-four types implement `verbora_core::Tokenizer`; thirteen also
+implement `BorrowingTokenizer` (the twelve character-class variants and
+`AggressiveTokenizerFa`).
 
 ```rust
-use verbora_core::Tokenizer;
+use verbora_core::{BorrowingTokenizer, Tokenizer};
 use verbora_tokenizers::AggressiveTokenizer;
 
 fn main() {
@@ -398,81 +244,36 @@ fn main() {
     let owned: Vec<String> = Tokenizer::tokenize(&t, "the quick");
     assert_eq!(owned, ["the", "quick"]);
 
-    let docs = ["one two", "three four"];
-    let batch: Vec<Vec<String>> = t.tokenize_batch(&docs);
-    assert_eq!(batch.len(), 2);
+    let batch: Vec<Vec<String>> = t.tokenize_batch(&["one two", "three four"]);
     assert_eq!(batch[1], ["three", "four"]);
-}
-```
 
-`tokenize_batch` is a provided method whose default body is exactly:
-
-```rust  ignore
-fn tokenize_batch<S: AsRef<str>>(&self, texts: &[S]) -> Vec<Vec<String>> {
-    texts.iter().map(|t| self.tokenize(t.as_ref())).collect()
-}
-```
-
-It is a sequential `map`. No tokenizer in this crate overrides it. Its doc
-comment claims the default "reuses one output buffer's capacity across
-documents"; the code does not — it calls `tokenize` per document, and each of
-those calls allocates a fresh `Vec`. Calling it buys you a shorter line of code,
-not fewer allocations. Because `tokenize_batch` is generic, `Tokenizer` is also
-**not object-safe**: you cannot hold one behind `dyn Tokenizer`. (`verbora-ngrams`
-works around this with its own `dyn`-compatible `NGramTokenizer` trait and a
-blanket impl.)
-
-### `verbora_core::BorrowingTokenizer` — generic and zero-copy
-
-<a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>
-<a class="badge badge-reuse" href="../performance/buffer-reuse">BUFFER REUSE</a>
-
-Implemented by the thirteen tokenizers whose tokens are always contiguous
-substrings of the input: the twelve character-class variants and
-`AggressiveTokenizerFa`. It is the generic equivalent of `Tokenize` for those
-types.
-
-```rust
-use verbora_core::BorrowingTokenizer;
-use verbora_tokenizers::AggressiveTokenizer;
-
-fn main() {
-    let t = AggressiveTokenizer::new();
-
+    // Zero-copy, and generic: `tokenize_borrowed_into` appends, like every
+    // `_into` method in this crate.
     let mut buf: Vec<&str> = Vec::new();
     t.tokenize_borrowed_into("the quick brown fox", &mut buf);
     assert_eq!(buf.len(), 4);
-
-    let v: Vec<&str> = t.tokenize_borrowed("a b");
-    assert_eq!(v, ["a", "b"]);
 }
 ```
 
-`tokenize_borrowed_into` also appends rather than clearing. Every `_into` method
-in this crate and in `verbora_core`'s two tokenizer traits appends;
-`verbora_core::Stemmer::stem_into` is the exception in that crate — it clears its
-`String` first.
+`tokenize_batch` is a provided method whose body is
+`texts.iter().map(|t| self.tokenize(t.as_ref())).collect()`, and no tokenizer here
+overrides it: each document gets a fresh `Vec`. It buys a shorter line of code,
+not fewer allocations. Because it is generic, `Tokenizer` is also **not object
+safe** — you cannot hold one behind `dyn Tokenizer`. (`verbora-ngrams` works
+around that with its own `dyn`-compatible `NGramTokenizer` and a blanket impl.)
 
 ### The four optional tokenizers
 
 `RegexpTokenizer`, `WordTokenizer`, `OrthographyTokenizer` and
-`WordPunctTokenizer` implement neither `Tokenize` nor `verbora_core::Tokenizer`.
-They expose the same three method names as inherent methods, wrapped in
-`Option`.
-
-In matching mode (`gaps: false`), "no match" and "no tokens" are two
-genuinely different outcomes that a plain `Vec` cannot represent —
-`Vec::new()` would silently merge them. So:
-
-- `tokens()` returns `Option<…>` wrapping a named iterator type
-  (`WordTokens`, `OrthographyTokens`, `WordPunctTokens`, or — for
-  `RegexpTokenizer` — a plain `std::vec::IntoIter`),
-- `tokenize()` returns `Option<Vec<…>>`,
-- `tokenize_into()` returns `bool` — `false` for "no match," and in that case
-  nothing was appended.
+`WordPunctTokenizer` expose `tokens()`, `tokenize()` and `tokenize_into()` as
+inherent methods wrapped in `Option`. In matching mode (`gaps: false`), "no match"
+and "no tokens" are genuinely different outcomes that a plain `Vec` would merge,
+so `tokens()` returns `Option<…>`, `tokenize()` returns `Option<Vec<…>>`, and
+`tokenize_into()` returns `bool` — `false` meaning "no match", in which case
+nothing was appended.
 
 ```rust
-use verbora_tokenizers::WordTokenizer;
+use verbora_tokenizers::{OrthographyTokenizer, WordTokenizer};
 
 fn main() {
     let t = WordTokenizer::new();
@@ -480,48 +281,29 @@ fn main() {
         t.tokenize("She said 'hello'. Привет мир 123_456"),
         Some(vec!["She", "said", "hello", "Привет", "мир", "123_456"])
     );
-    // Splitting mode never returns `None`.
-    assert_eq!(t.tokenize(""), Some(vec![]));
+    assert_eq!(t.tokenize(""), Some(vec![]));   // splitting mode never returns None
 
     // Matching mode can: no match at all is a real, distinct outcome.
     let m = WordTokenizer::matching();
     assert_eq!(m.tokenize("abc def"), Some(vec![" "]));
     assert_eq!(m.tokenize("abcdef"), None);
-
     // If you do not care about the distinction, say so explicitly.
-    let tokens = m.tokenize("abcdef").unwrap_or_default();
-    assert!(tokens.is_empty());
+    assert!(m.tokenize("abcdef").unwrap_or_default().is_empty());
+
+    // Language matching is exact and lowercase: "FI" is not "fi", so it falls
+    // back to `WordTokenizer`, which does not know the Finnish alphabet.
+    let fi = OrthographyTokenizer::new("fi");
+    assert_eq!(fi.tokenize("Hyvää, kiitos!!  entä").unwrap(), ["Hyvää", "kiitos", "entä"]);
+    assert_eq!(OrthographyTokenizer::new("FI").tokenize("Hyvää").unwrap(), ["Hyv"]);
 }
 ```
 
 `RegexpTokenizer` adds a **second** layer of `Option`, on each token: splitting
-with capture groups interleaves the groups into the result, and a group that
-did not participate is modelled as `None`. The full return type is therefore
-`Option<Vec<Option<&str>>>`: the outer `Option` is "no match at all," the
-inner one is "this capture group did not participate."
-
-```rust
-use verbora_tokenizers::RegexpTokenizer;
-
-fn main() {
-    // `RegexpTokenizer::without_pattern()` has no pattern to split or match
-    // on, so it yields the whole input as a single token.
-    let t = RegexpTokenizer::without_pattern();
-    assert_eq!(t.tokenize("a b"), Some(vec![Some("a b")]));
-
-    let mut out: Vec<Option<&str>> = Vec::new();
-    let ok = t.tokenize_into("a b", &mut out);
-    assert!(ok);
-    assert_eq!(out, [Some("a b")]);
-}
-```
-
-With a real pattern you must construct a `Pattern`, which pairs a compiled
-`regex::Regex` with a `global` flag: a non-global pattern's match mode yields
-the full match plus any capture groups, while a global pattern's match mode
-yields every match's text and no groups at all. Building a `Pattern` requires
-the `regex` crate as a direct dependency of *your* package — Verbora does not
-re-export it, which is why the following block is not compiled by the book:
+with capture groups interleaves the groups into the result, and a group that did
+not participate is `None`. The full return type is `Option<Vec<Option<&str>>>` —
+outer "no match at all", inner "this capture group did not participate".
+Constructing a `Pattern` needs the `regex` crate as a direct dependency of *your*
+package, which is why this block is not compiled by the site:
 
 ```rust  ignore
 use verbora_tokenizers::{Pattern, RegexpTokenizer};
@@ -531,8 +313,7 @@ use regex::Regex;
 let split = RegexpTokenizer::new(Pattern::new(Regex::new(r"[^A-Za-z0-9_]+").unwrap()));
 assert_eq!(split.tokenize("hello, world"), Some(vec![Some("hello"), Some("world")]));
 
-// Capture groups are interleaved into the result, and a group that did not
-// participate is `None` here.
+// Capture groups are interleaved; a group that did not participate is `None`.
 let grouped = RegexpTokenizer::new(Pattern::new(Regex::new(r"(x)|([0-9])").unwrap()));
 assert_eq!(grouped.tokenize("a1b"), Some(vec![Some("a"), None, Some("1"), Some("b")]));
 
@@ -542,66 +323,28 @@ let matching = RegexpTokenizer::matching(Pattern::global(Regex::new("[a-z]+").un
 assert_eq!(matching.tokenize("123"), None);
 ```
 
-Two constructor options are deliberately **absent** here, because they would
-have had no observable effect:
+Two things are not configurable: empty tokens are always discarded, and
+`WordTokenizer`'s character class is fixed, so it takes no pattern argument.
+`gaps` is honoured by all four, with one wrinkle — `OrthographyTokenizer`'s
+fallback path builds a default `WordTokenizer` without forwarding `gaps`, so an
+**unknown language silently discards it**. Only `fi` is defined in the language
+table, and `OrthographyTokenizer::new` requires a `&str`, so a missing language is
+a compile error rather than a runtime surprise.
 
-- A `discard_empty` toggle: empty tokens are always discarded, unconditionally,
-  so there is no way — or reason — to switch it off.
-- A custom pattern for `WordTokenizer`: its character class is fixed, so
-  `WordTokenizer` takes no pattern argument here.
-
-`gaps` *is* honoured, by all four — with one wrinkle. `OrthographyTokenizer`'s
-fallback path constructs a default `WordTokenizer` without forwarding `gaps`
-to it, so an **unknown language silently discards `gaps`**:
-
-```rust
-use verbora_tokenizers::OrthographyTokenizer;
-
-fn main() {
-    let fi = OrthographyTokenizer::new("fi");
-    assert_eq!(
-        fi.tokenize("Hyvää, kiitos!!  entä").unwrap(),
-        ["Hyvää", "kiitos", "entä"]
-    );
-
-    // Language matching is exact and lowercase; anything else falls back to
-    // `WordTokenizer`, which does not know the Finnish alphabet.
-    let upper = OrthographyTokenizer::new("FI");
-    assert_eq!(upper.tokenize("Hyvää kiitos").unwrap(), ["Hyv", "kiitos"]);
-}
-```
-
-Only `fi` is defined in this crate's language-matcher table.
-`OrthographyTokenizer::new` requires a `&str` language argument, so
-constructing one with no language at all is a compile error, not a runtime
-failure.
-
-## Advanced usage
-
-### UTF-16 tokens and unpaired surrogates
+## UTF-16 tokens and unpaired surrogates
 
 <span class="badge badge-utf16">UTF-16</span>
 
-Four tokenizers cut text at UTF-16 **code unit** boundaries:
+Four tokenizers cut text at UTF-16 **code unit** boundaries —
+`WordPunctTokenizer`, `TreebankWordTokenizer`, `TokenizerJa` and `CaseTokenizer` —
+and `OrthographyTokenizer` joins them in *matching* mode only. That is why their
+token type is `Utf16Token` rather than `&str`.
 
-| Tokenizer | Why |
-|---|---|
-| `WordPunctTokenizer` | its pattern's bare `.` matches one code unit |
-| `TreebankWordTokenizer` | the punctuation-padding regex uses a bare `.` likewise |
-| `TokenizerJa` | TinySegmenter starts with `text.split('')` |
-| `CaseTokenizer` | it indexes `text[i]` with `i` counting code units |
-
-`OrthographyTokenizer` joins them only in *matching* mode: the Finnish matcher
-`[^A-Za-zÅåÄäÖö]` has no `+`, so it matches exactly one code unit, which for an
-astral character is the high surrogate alone. That is why its token type is
-`Utf16Token` even though splitting mode always slices the input.
-
-For an astral character such as `😀`, the two halves of the surrogate pair land
-in *separate* tokens. An unpaired surrogate is not a Unicode scalar value, so it
-cannot be held by `char`, `String` or `&str`. An implementation yielding
-`String` would have to pick one of three wrong answers: substitute U+FFFD
-(wrong content), merge the halves (wrong token *count*), or drop them (wrong
-both). Verbora returns `Utf16Token` instead:
+For an astral character such as `😀`, the two halves of the surrogate pair land in
+*separate* tokens. An unpaired surrogate is not a Unicode scalar value, so `char`,
+`String` and `&str` cannot hold it, and an implementation yielding `String` would
+have to substitute U+FFFD (wrong content), merge the halves (wrong token *count*)
+or drop them (wrong both). Verbora returns `Utf16Token` instead:
 
 ```rust  ignore
 pub enum Utf16Token<'a> {
@@ -611,7 +354,7 @@ pub enum Utf16Token<'a> {
 ```
 
 ```rust
-use verbora_tokenizers::{Utf16Token, WordPunctTokenizer};
+use verbora_tokenizers::{Tokenize, TreebankWordTokenizer, Utf16Token, WordPunctTokenizer};
 
 fn main() {
     let t = WordPunctTokenizer::new();
@@ -622,57 +365,31 @@ fn main() {
     // The emoji became two tokens, neither representable as `&str`.
     assert_eq!(tokens[1].as_str(), None);
     assert_eq!(tokens[1].to_utf16(), vec![0xd83d]);
-    assert_eq!(tokens[2].to_utf16(), vec![0xde00]);
     assert_eq!(tokens[1].to_string_lossy(), "\u{fffd}");
 
-    // Well-formed text stays borrowed and compares against `&str` directly.
-    let plain = t.tokenize("hello").unwrap();
-    assert!(plain[0].is_well_formed());
-    assert_eq!(plain[0], "hello");
+    // Getting back to strings: keep only the well-formed tokens. `as_str`
+    // borrows from the token, so collect the tokens first.
+    let treebank: Vec<Utf16Token<'_>> = TreebankWordTokenizer::new().tokenize("I'll stay home.");
+    let well_formed: Vec<&str> = treebank.iter().filter_map(|t| t.as_str()).collect();
+    assert_eq!(well_formed, ["I", "'ll", "stay", "home", "."]);
 }
 ```
 
-The representation costs nothing on ordinary text. `WordPunctTokenizer`,
+The representation costs nothing on ordinary text: `WordPunctTokenizer`,
 `OrthographyTokenizer`, `TreebankWordTokenizer` and `CaseTokenizer` (on ASCII
 input) all yield `Text(Cow::Borrowed(_))` — a slice of your input — for every
-token that is not a surrogate half. `TokenizerJa` is the exception: it builds
-each token by concatenating code units, so its tokens are always owned, astral
-input or not.
-
-Two ways to get back to strings:
-
-```rust
-use verbora_tokenizers::{Tokenize, TreebankWordTokenizer, Utf16Token};
-
-fn main() {
-    let text = "I'll stay home.";
-
-    // Option A — keep only the tokens that are real Rust strings. `as_str`
-    // borrows from the token, so the tokens have to outlive the slices.
-    let tokens: Vec<Utf16Token<'_>> = TreebankWordTokenizer::new().tokenize(text);
-    let well_formed: Vec<&str> = tokens.iter().filter_map(|t| t.as_str()).collect();
-    assert_eq!(well_formed, ["I", "'ll", "stay", "home", "."]);
-
-    // Option B — accept U+FFFD for the surrogate halves.
-    let strings: Vec<String> = TreebankWordTokenizer::new()
-        .tokens(text)
-        .map(|t| t.to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(strings, ["I", "'ll", "stay", "home", "."]);
-}
-```
-
-Option B is exactly what `verbora_core::Tokenizer::tokenize` does for
-`TreebankWordTokenizer`, `CaseTokenizer` and `TokenizerJa`, and their impls say
-so in their doc comments. `Utf16Token::to_utf16` is the lossless view, and it is
-what the test suite compares on.
+token that is not a surrogate half. `TokenizerJa` is the exception: it builds each
+token by concatenating code units, so its tokens are always owned. The other way
+back to strings is `to_string_lossy()`, accepting U+FFFD for the surrogate halves,
+which is exactly what `verbora_core::Tokenizer::tokenize` does for those three
+types. `to_utf16()` is the lossless view, and what the test suite compares on.
 
 ### `trim_edge_empties`
 
-`trim_edge_empties` pops trailing empty strings and shifts leading ones, but
-leaves *interior* empties alone. That asymmetry is load-bearing —
-`SentenceTokenizer::tokenize("   ")` is `[""]` rather than `[]` because of it —
-so it is re-exported from this crate rather than generalised:
+Pops trailing empty strings and shifts leading ones, leaving *interior* empties
+alone. That asymmetry is load-bearing — `SentenceTokenizer::tokenize("   ")` is
+`[""]` rather than `[]` because of it — so it is re-exported from this crate
+rather than generalised.
 
 ```rust
 use verbora_tokenizers::trim_edge_empties;
@@ -684,195 +401,74 @@ fn main() {
 }
 ```
 
-### Writing code generic over `Tokenize`
+## Parallelism
 
-```rust
-use verbora_tokenizers::{AggressiveTokenizer, CaseTokenizer, Tokenize};
-
-fn count_tokens<T: Tokenize>(t: &T, text: &str) -> usize {
-    t.tokens(text).count()
-}
-
-fn main() {
-    assert_eq!(count_tokens(&AggressiveTokenizer::new(), "a b c"), 3);
-    assert_eq!(count_tokens(&CaseTokenizer::new(), "a b c"), 3);
-}
-```
-
-Note that `Tokenize::Token<'a>` is a generic associated type, so a function that
-wants to *do* something with the tokens usually needs a bound such as
-`for<'a> T::Token<'a>: AsRef<str>` — which `Utf16Token` does not satisfy. If you
-need one signature that covers every tokenizer, `verbora_core::Tokenizer` and
-its `Vec<String>` is the API that was built for it.
-
-### Parallelism
-
-<a class="badge badge-batch" href="../performance/batch-vs-streaming">BATCH</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager, fanned out across a <code>rayon</code> thread pool</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Vec&lt;Vec&lt;Self::Token&lt;'a&gt;&gt;&gt;</code> — one inner <code>Vec</code> per document</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One outer <code>Vec</code> sized to <code>texts.len()</code>, plus whatever <code>tokenize</code> allocates per document</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">None — parallel workers cannot share a <code>&amp;mut Vec</code></span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">Yes — this is the batch entry point</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">Yes — feature <code>parallel</code>; per document</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Many independent documents, large enough that <code>rayon</code>'s scheduling cost is a small fraction of the total</span></div>
-</div>
-
-`verbora-tokenizers` ships one built-in parallel API: `Tokenize::par_tokenize_batch`,
-a **default trait method** behind this crate's `parallel` Cargo feature
-(`parallel = ["dep:rayon"]`, never on by default). Every one of the twenty
-implementors of `Tokenize` gets it for free — the same twenty types that
-implement `verbora_core::Tokenizer` (see the catalogue above). The four
-optional tokenizers (`RegexpTokenizer`, `WordTokenizer`, `OrthographyTokenizer`,
-`WordPunctTokenizer`) implement neither trait, so they have no
-`par_tokenize_batch`; parallelise them by hand, as shown below.
-
-The method's whole body is one line — a thin `rayon` fan-out over the existing
-sequential `tokenize`, one task per **document**, never per token. `tokens()`
-and `tokenize_into()` are untouched and remain the primitives everything else
-is built on:
+`Tokenize::par_tokenize_batch` is the one built-in parallel API: a **default trait
+method** behind this crate's `parallel` Cargo feature (`parallel = ["dep:rayon"]`,
+never on by default), so all twenty `Tokenize` implementors get it for free. Its
+whole body is `texts.par_iter().map(|text| self.tokenize(text)).collect()` — one
+task per **document**, never per token. The four optional tokenizers implement
+neither trait and so have no `par_tokenize_batch`.
 
 ```rust  ignore
-fn par_tokenize_batch<'a>(&self, texts: &[&'a str]) -> Vec<Vec<Self::Token<'a>>>
-where
-    Self: Sync,
-    Self::Token<'a>: Send,
-{
-    use rayon::prelude::*;
-    texts.par_iter().map(|text| self.tokenize(text)).collect()
-}
-```
-
-```rust  ignore
+// Needs the `parallel` feature, which this site's snippet checker builds
+// without — so this block is marked `ignore` rather than compiled. Every
+// other block on this page compiles and runs in CI.
 use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
 
 let t = AggressiveTokenizer::new();
 let docs = ["the quick brown fox", "jumps over the lazy dog"];
 let batches: Vec<Vec<&str>> = t.par_tokenize_batch(&docs);
 assert_eq!(batches[0], ["the", "quick", "brown", "fox"]);
-assert_eq!(batches[1], ["jumps", "over", "the", "lazy", "dog"]);
 ```
 
-<div class="callout callout-note">
-<strong>Note.</strong> The block above needs the <code>parallel</code> feature
-enabled on <code>verbora-tokenizers</code>, which this site's own snippet
-checker builds without, so it is marked <code>ignore</code> rather than
-compiled — every other block on this page compiles and runs in CI. See
-<a href="../performance/parallelism">Parallelism</a> for the full cross-crate
-picture, including the other twelve <code>par_*</code> APIs.
-</div>
-
-**When to reach for it.** This crate's own benchmarks put a single `tokenize`
-call over an ~8192-word document at roughly 118–120 microseconds, and a
-`rayon` task costs on the order of a microsecond to schedule, so per-document
-parallelism only pays for itself once the batch is large enough, or the
-documents are large enough, that scheduling overhead is a small fraction of
-the total. For a handful of short strings, prefer a plain
-`texts.iter().map(|t| self.tokenize(t))` loop — that is exactly what
-`par_tokenize_batch` degrades to per item, minus the parallel scheduling.
-Measure your own workload; see [Parallelism](../performance/parallelism.md)
-for the cross-crate numbers that do exist.
-
-For the four optional tokenizers, or for full control over chunking and
-buffer reuse that `par_tokenize_batch` does not expose, roll your own — every
-tokenizer here is zero-sized (or, for `RegexpTokenizer` and
-`SentenceTokenizer`, immutable), stateless and `Send + Sync`:
-
-```rust
-use std::thread;
-
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-fn main() {
-    let docs: Vec<String> = vec!["a b".into(), "c d".into()];
-    let counts: Vec<usize> = thread::scope(|s| {
-        let handles: Vec<_> = docs
-            .iter()
-            .map(|d| {
-                s.spawn(|| {
-                    // Tokenizers are zero-sized and stateless, so each thread
-                    // makes its own.
-                    AggressiveTokenizer::new().tokens(d.as_str()).count()
-                })
-            })
-            .collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    assert_eq!(counts, [2, 2]);
-}
-```
-
-With `rayon` in your own `Cargo.toml` and no Cargo feature required, the same
-shape is `docs.par_iter().map(|d| AggressiveTokenizer::new().tokenize(d))`. See
+**When it pays.** A single `tokenize` call over an ~8192-word document measures at
+roughly 118–120 µs, and a `rayon` task costs on the order of a microsecond to
+schedule, so per-document parallelism only wins once the batch or the documents
+are large enough that scheduling is a small fraction of the total. For a handful
+of short strings, a plain `texts.iter().map(…)` loop is faster. Every tokenizer
+here is stateless and `Send + Sync`, so you can also roll your own fan-out — with
+`rayon` in your own `Cargo.toml` and no Cargo feature required. See
 [Parallelism](../performance/parallelism.md).
 
-## Performance characteristics
+## Performance and allocation
 
-Asymptotically, every tokenizer here is **O(n) in the input length**, with these
-qualifications:
+Every tokenizer is **O(n) in the input length**; only the constant factor differs.
+The character-class variants are a single pass with one `matches!` per character,
+classifying ASCII bytes without decoding — the cheapest thing here.
+`CaseTokenizer` costs one byte-wise pass on ASCII and two full-string case
+conversions plus three UTF-16 encodings on anything else. `TreebankWordTokenizer`
+(up to seventeen rewrite passes), `TokenizerJa` (~46 table lookups per code unit)
+and `SentenceTokenizer` (four masking passes plus per-sentence unmasking) are the
+expensive three. `RegexpTokenizer` costs whatever your pattern costs.
 
-| Family | Work per input | Notes |
-|---|---|---|
-| 12 character-class variants | one pass, one `matches!` per character | ASCII bytes are classified without decoding |
-| `AggressiveTokenizerFa` | one `str::contains` prescan, then one pass | the prescan looks for a 14-character literal that essentially never occurs |
-| `AggressiveTokenizerNo` / `Sv` | one diacritic pass, then one scanning pass | the first pass returns `Cow::Borrowed` unchanged for ASCII input |
-| `AggressiveTokenizerHi` | one pass | copies only a token that contained a deleted character |
-| `CaseTokenizer` | one pass (ASCII) or two full-string case conversions, three UTF-16 encodings and a pass (non-ASCII) | the ASCII fast path is byte-wise |
-| `TreebankWordTokenizer` | one prescreen regex, up to 13 contraction `replace_all` passes, one padding pass, three more regex passes, then a whitespace split and a lockstep re-walk | the prescreen collapses thirteen scans into one when no contraction is present |
-| `TokenizerJa` | ~46 table lookups per code unit, 30 of them dense array indexing | weight tables are `static`, not rebuilt per instance |
-| `SentenceTokenizer` | four masking passes, one split, then one unmasking pass per sentence | unmasking short-circuits on sentences with no `&#123;&#123;` |
-| `RegexpTokenizer` | whatever your pattern costs | you supply the regex |
+Allocation stacks up from `tokens()`:
 
-Two implementation choices are worth knowing because they change the constant
-factor:
+- **Construction allocates nothing** for 22 of the 24 types. `RegexpTokenizer`
+  holds the `Regex` you built; `SentenceTokenizer::with_abbreviations` holds one
+  `Vec<String>`.
+- **`tokens()` allocates nothing** for the 13 slicing tokenizers, and nothing for
+  `CaseTokenizer` on ASCII input. `No`/`Sv`/`Hi`/`Fa` allocate only if their
+  rewrite actually fires. `TreebankWordTokenizer` allocates one scratch `String`
+  per rewrite pass that fires (up to seventeen), `TokenizerJa` several
+  input-length `Vec<u16>` plus one per token, and `SentenceTokenizer` one `String`
+  per masking phase and one per sentence.
+- **`tokenize()`** adds one `Vec`; **`tokenize_into()`** adds nothing once the
+  buffer has capacity; **`verbora_core::Tokenizer::tokenize`** adds one `String`
+  per token; **`tokenize_batch`** adds one outer `Vec` on top of that per document.
 
-- The character-class scanner is generic over a zero-sized `CharClass` type
-  rather than taking a function pointer, so each tokenizer's predicate inlines
-  into its own loop.
-- `TokenizerJa`'s weight tables are `static` data, built once rather than
-  rebuilt per instance, so construction is free and 30 of the 46 lookups per
-  character are a shift, an add and a load.
-
-Benchmarks exist (`crates/verbora-tokenizers/benches/tokenizers.rs`,
-`cargo bench -p verbora-tokenizers`) and measure three things: scaling across
-document sizes 16→8192 words, cross-language cost on one fixed document, and the
-three API shapes on identical input. **No results have been recorded yet** —
-`benches/results/` contains recorded baselines, measured against a
-widely-used JavaScript NLP library, for distance, inflectors, ngrams,
-normalizers, phonetics and trie, but not tokenizers.
-
-> Not yet benchmarked — see [Benchmarks](../benchmarks/index.md).
-
-## Allocation behaviour
-
-| Call | What is allocated |
-|---|---|
-| construction, 18 of the 24 types | nothing; they are zero-sized |
-| construction, `CaseTokenizer` / `WordTokenizer` / `WordPunctTokenizer` / `OrthographyTokenizer` | nothing; one or two `bool`s on the stack |
-| `RegexpTokenizer::new(pattern)` | nothing beyond the `Regex` you already built |
-| `SentenceTokenizer::with_abbreviations(…)` | one `Vec<String>` of abbreviations, once |
-| `tokens()` on a slicing tokenizer | nothing |
-| `tokens()` on `AggressiveTokenizerNo`/`Sv` | one `String` **only if** an accent in the table was present |
-| `tokens()` on `AggressiveTokenizerHi` | one `String` per token that contained a deleted character |
-| `tokens()` on `AggressiveTokenizerFa` | one `Vec<(usize, usize)>` **only if** the 14-character `clearText` literal is present |
-| `tokens()` on `CaseTokenizer`, ASCII input | nothing |
-| `tokens()` on `CaseTokenizer`, non-ASCII input | two `String`s (the lowercased and uppercased text) and four `Vec<u16>` (lowercase, uppercase, source, result), then one token per non-ASCII run |
-| `tokens()` on `TreebankWordTokenizer` | one scratch `String` per rewrite pass that fires — up to seventeen — plus one `Vec` of tokens |
-| `tokens()` on `TokenizerJa` | several `Vec<u16>` the length of the input during normalisation, then a segment table and a character-type table of the same order, then one `Vec<u16>` per token |
-| `tokens()` on `SentenceTokenizer` | one `String` per masking phase that fires, plus one `String` per sentence |
-| `tokenize()` | the above, plus one `Vec` |
-| `tokenize_into()` | the above, plus nothing if the buffer has capacity |
-| `verbora_core::Tokenizer::tokenize` | the above, plus one `String` per token |
-| `tokenize_batch` | the above per document, plus one outer `Vec` |
+No tokenizer benchmark results are published yet — see
+[Benchmarks](../benchmarks/index.md) for what has been measured so far. The
+Criterion suite (`crates/verbora-tokenizers/benches/tokenizers.rs`) covers scaling
+across document sizes 16→8192 words, cross-language cost on one fixed document,
+and the three API shapes on identical input.
 
 ## Unicode and language notes
 
-### Five semantics this crate implements on purpose
+### Five semantics this crate defines for itself
 
-Every one of these is a place where the obvious Rust translation, written
-naively, would silently diverge from what these tokenizers actually
-implement. They live in `verbora_tokenizers::whitespace`.
+Each is a place where Rust's own default gives a different answer from what these
+tokenizers specify. They live in `verbora_tokenizers::whitespace`.
 
 | Hazard | This crate's semantics | Rust's default | Consequence |
 |---|---|---|---|
@@ -882,41 +478,30 @@ implement. They live in `verbora_tokenizers::whitespace`.
 | `.` | refuses four line terminators | refuses only `\n` | `\r`, U+2028 and U+2029 survive as gap text in `WordPunctTokenizer` |
 | First-match string replacement | replaces the **first** match | `str::replace` replaces all | changes Norwegian and Swedish on any repeated accent |
 
-Character classes are therefore *generated*, by running each language's
-defining regular expression over the whole BMP
-(`crates/verbora-tokenizers/tools/gen_classes`), rather than transcribed.
-That is how the Russian class turned out to admit U+1C80–U+1C86 and the
-Spanish class turned out to contain `×` and `÷`.
+Character classes are *generated*, by expanding each language's defining regular
+expression over the whole BMP, rather than transcribed. That is why the Russian
+class admits U+1C80–U+1C86 and the Spanish class contains `×` and `÷`.
 
-### Bugs reproduced on purpose
+### Quirks kept on purpose
 
-Each of these is a defect this crate keeps deliberately: reproducing it
-exactly is part of what keeps this crate's output pinned and predictable,
-verified by its own regression suite rather than treated as an oversight to
-fix.
+Each of the following looks like a defect and is specified behaviour, pinned by
+the regression suite so it stays predictable across releases.
 
 ```rust
 use verbora_tokenizers::{
     AggressiveTokenizer, AggressiveTokenizerDe, AggressiveTokenizerEs, AggressiveTokenizerFa,
-    AggressiveTokenizerFr, AggressiveTokenizerHi, AggressiveTokenizerId, AggressiveTokenizerIt,
-    AggressiveTokenizerRu, AggressiveTokenizerUk, Tokenize,
+    AggressiveTokenizerHi, AggressiveTokenizerId, AggressiveTokenizerIt, AggressiveTokenizerUk,
+    Tokenize,
 };
 
 fn main() {
-    // German: the character class lists only the lowercase umlauts and has
-    // no case-insensitive flag, so `Ä`, `Ö` and `Ü` are separators.
-    assert_eq!(
-        AggressiveTokenizerDe::new().tokenize("Äpfel Öl Über weiß"),
-        ["pfel", "l", "ber", "weiß"]
-    );
+    // German lists only the lowercase umlauts, so `Ä`, `Ö`, `Ü` are separators.
+    assert_eq!(AggressiveTokenizerDe::new().tokenize("Äpfel Öl weiß"), ["pfel", "l", "weiß"]);
 
-    // Indonesian: the class `[^a-z0-9 -]` has no `i` flag, so every uppercase
-    // ASCII letter is replaced by a space.
-    assert_eq!(AggressiveTokenizerId::new().tokenize("Hello World-2 !!"), ["ello", "orld-2"]);
-    assert_eq!(AggressiveTokenizerId::new().tokenize("A B"), Vec::<&str>::new());
+    // Indonesian is lowercase-only: every uppercase ASCII letter is a separator.
+    assert_eq!(AggressiveTokenizerId::new().tokenize("Hello World-2"), ["ello", "orld-2"]);
 
-    // Spanish: no digits at all, and the raw Latin-1 ranges `á-ú` / `Á-Ú`
-    // sweep in `×` (U+00D7) and `÷` (U+00F7).
+    // Spanish has no digits at all, and its Latin-1 ranges sweep in `×` and `÷`.
     assert_eq!(AggressiveTokenizerEs::new().tokenize("123 456"), Vec::<&str>::new());
     assert_eq!(AggressiveTokenizerEs::new().tokenize("a×b÷c"), ["a×b÷c"]);
 
@@ -924,122 +509,54 @@ fn main() {
     assert_eq!(AggressiveTokenizer::new().tokenize("café naïve"), ["caf", "na", "ve"]);
 
     // Ukrainian drops `ё` from Russian's class, so it deletes the letter.
-    assert_eq!(AggressiveTokenizerRu::new().tokenize("мир ёж"), ["мир", "ёж"]);
     assert_eq!(AggressiveTokenizerUk::new().tokenize("мир ёж"), ["мир", "ж"]);
 
-    // Persian: the `clearText` regex forgot its brackets, so it is a *sequence*
-    // that matches essentially nothing and punctuation stays attached.
-    assert_eq!(
-        AggressiveTokenizerFa::new().tokenize("weiß, daß Öl ist!"),
-        ["weiß,", "daß", "Öl", "ist!"]
-    );
+    // Persian splits on whitespace only; punctuation stays attached.
+    assert_eq!(AggressiveTokenizerFa::new().tokenize("Öl ist!"), ["Öl", "ist!"]);
 
     // Hindi deletes `.` before splitting, so a token need not be a substring.
     assert_eq!(AggressiveTokenizerHi::new().tokenize("a.b"), ["ab"]);
 
-    // French's `i` flag admits uppercase accents, which German's lacks.
-    assert_eq!(AggressiveTokenizerFr::new().tokenize("ÉCOLE Œuvre"), ["ÉCOLE", "Œuvre"]);
-
-    // Italian splits on an ASCII-only `\W+` character class.
+    // Italian splits on an ASCII-only `\W+` class.
     assert_eq!(AggressiveTokenizerIt::new().tokenize("привет, мир"), Vec::<&str>::new());
 }
 ```
 
-**The `CaseTokenizer` `"undefined"` bug.** Its filtering loop runs over the
-*lowercased* string's length in UTF-16 code units, not the original text's
-length:
+The structural tokenizers have four more, all pinned:
 
-```text
-for i in 0..lower.len() { ... read text[i] ... }
-```
-
-When lowercasing *lengthens* the string — `İ` (U+0130) lowercases to two code
-units — `i` runs past the end of the original text, reading it there yields
-nothing, and the crate appends the literal nine-character string `undefined`
-at that position:
+- **`CaseTokenizer` appends the literal string `undefined`** when lowercasing
+  *lengthens* the text. Its filtering loop is bounded by the lowercased string's
+  length in UTF-16 code units, so `İ` (U+0130), which lowercases to two units,
+  runs the index past the end of the original. The mirror case (`ß` → `SS`) is
+  harmless. It also drops apostrophes unless you ask for them, and only U+0027
+  counts; uncased scripts vanish entirely.
+- **`TreebankWordTokenizer`'s final-period rule is position-dependent**
+  (`\. *(\n|$)` has no multi-line flag), so the same sentence yields `"home."`
+  mid-text and `"home", "."` at the end of the input.
+- **`SentenceTokenizer` trims at the array level** before the per-sentence trim,
+  so whitespace-only input is one empty sentence rather than none. Delimiters are
+  fixed; `.trimming(bool)` is the only option.
+- **`TokenizerJa` normalises before segmenting** (full-width to half-width,
+  half-width katakana to full-width), strips punctuation from *inside* tokens and
+  drops tokens that empty as a result.
 
 ```rust
-use verbora_tokenizers::{CaseTokenizer, Tokenize};
+use verbora_tokenizers::{
+    CaseTokenizer, SentenceTokenizer, Tokenize, TokenizerJa, TreebankWordTokenizer,
+};
 
 fn main() {
-    let t = CaseTokenizer::new();
-    assert_eq!(t.tokenize("İstanbul"), ["İstanbulundefined"]);
-
-    // The mirror case is harmless: `ß` → `SS` lengthens the *upper*case string,
-    // which does not bound the loop.
-    assert_eq!(t.tokenize("ß"), ["ß"]);
-
-    // Apostrophes are dropped unless you ask for them, and only U+0027 counts.
-    assert_eq!(t.tokenize("it's"), ["it", "s"]);
+    let c = CaseTokenizer::new();
+    assert_eq!(c.tokenize("İstanbul"), ["İstanbulundefined"]);
+    assert_eq!(c.tokenize("it's"), ["it", "s"]);
     assert_eq!(CaseTokenizer::preserving_apostrophes().tokenize("it's"), ["it's"]);
-    assert_eq!(CaseTokenizer::preserving_apostrophes().tokenize("it’s"), ["it", "s"]);
+    assert_eq!(c.tokenize("日本語"), Vec::<&str>::new());
 
-    // Uncased scripts vanish entirely.
-    assert_eq!(t.tokenize("日本語"), Vec::<&str>::new());
-}
-```
+    assert_eq!(TreebankWordTokenizer::new().tokenize("e.g. U.S.A."), ["e.g.", "U.S.A", "."]);
 
-**First-occurrence-only diacritic removal.** The Norwegian and Swedish
-diacritic-stripping pass replaces only the *first* occurrence of each of
-twenty-six accented characters, not every occurrence — a deliberate
-replace-first behaviour. Rust's `str::replace` replaces all matches by
-default, so a naive implementation would silently diverge on any text with a
-repeated accent:
-
-```rust
-use verbora_tokenizers::{AggressiveTokenizerNo, AggressiveTokenizerSv, Tokenize};
-
-fn main() {
-    // Only the first `à` is normalised; the rest remain non-word characters.
-    assert_eq!(AggressiveTokenizerNo::new().tokenize("àà ààà"), ["a"]);
-
-    // `-` is a word character in Swedish and a separator in Norwegian.
-    assert_eq!(AggressiveTokenizerSv::new().tokenize("e-post"), ["e-post"]);
-    assert_eq!(AggressiveTokenizerNo::new().tokenize("e-post"), ["e", "post"]);
-}
-```
-
-**Treebank's `Whadddya` rule.** Its contraction pattern is
-`\b(Whad)(dd)(ya)\b`, which requires the literal `Whadddya` with three `d`s,
-so it never fires on real text — `"Whaddya"`, with two `d`s, does not match.
-Fixing the extra `d` would change `tokenize("Whaddya")` from one token to
-three, which would break this crate's pinned regression fixture, so it stays
-as-is. Treebank's final-period rule is also position-dependent — `\. *(\n|$)`
-has no multi-line flag, so the same sentence yields `"home."` mid-text and
-`"home", "."` at the end of the input:
-
-```rust
-use verbora_tokenizers::{Tokenize, TreebankWordTokenizer};
-
-fn main() {
-    let t = TreebankWordTokenizer::new();
-    assert_eq!(
-        t.tokenize("If we 'all' can't go. I'll stay home."),
-        ["If", "we", "'all", "'", "ca", "n't", "go.", "I", "'ll", "stay", "home", "."]
-    );
-    assert_eq!(t.tokenize("a+b<c>d&e/f-g"), ["a+b<c>d&e/f-g"]);
-    assert_eq!(t.tokenize("e.g. U.S.A."), ["e.g.", "U.S.A", "."]);
-}
-```
-
-**`SentenceTokenizer`'s unresolved placeholders.** Masking happens in four
-phases sharing one counter, and unmasking is a single ordered pass, not a
-fixpoint. Abbreviations are masked before URIs, so a URI whose stored text
-contains `&#123;&#123;ABBREV_n}}` is never resolved — the placeholder reaches the output.
-Sentence-final periods are also swallowed by the greedy `\S+` in the URI
-pattern, and whitespace-only input is one empty sentence rather than none:
-
-```rust
-use verbora_tokenizers::{SentenceTokenizer, SentenceTokenizerNew, Tokenize};
-
-fn main() {
-    let t = SentenceTokenizer::new();
-    assert_eq!(t.tokenize("Hi. There!"), ["Hi.", "There!"]);
-
-    // Array-level trim runs before per-sentence trim, so these survive.
-    assert_eq!(t.tokenize("   "), [""]);
-    assert_eq!(t.tokenize("Trailing space. "), ["Trailing space.", ""]);
-
+    let s = SentenceTokenizer::new();
+    assert_eq!(s.tokenize("Hi. There!"), ["Hi.", "There!"]);
+    assert_eq!(s.tokenize("   "), [""]);
     // Abbreviation matching is case-insensitive and ordered.
     let abbrev = SentenceTokenizer::with_abbreviations(["Dr.", "Mr."]);
     assert_eq!(
@@ -1047,147 +564,71 @@ fn main() {
         ["Dr. Smith went home.", "He slept."]
     );
 
-    let untrimmed = SentenceTokenizer::new().trimming(false);
-    assert_eq!(
-        untrimmed.tokenize("This is a sentence. This is another sentence."),
-        ["This is a sentence.", " This is another sentence."]
-    );
-
-    // The two exported names are one type.
-    let _: SentenceTokenizer = SentenceTokenizerNew::new();
+    assert_eq!(TokenizerJa::new().tokenize("ﾊﾝｶｸ"), ["ハンカク"]);
 }
 ```
 
-`SentenceTokenizer`'s second constructor argument deserves a warning of its
-own: it looks like it should take a list of custom sentence *demarkers*, but
-it does not — passing any non-empty, truthy-looking value simply means "yes,
-trim." There is no demarker feature, so Verbora exposes `.trimming(bool)` and
-nothing else.
-
-### Japanese
-
-`TokenizerJa` is TinySegmenter 0.1 with a normalisation step (full-width to
-half-width, half-width katakana to full-width) applied first. Empty input
-returns `[]`; Rust models "no text" as `""`. It also strips punctuation from
-*inside* tokens and drops tokens that empty as a result.
-
-```rust
-use verbora_tokenizers::{Tokenize, TokenizerJa};
-
-fn main() {
-    let t = TokenizerJa::new();
-    assert_eq!(t.tokenize("日本語"), ["日本語"]);
-    assert_eq!(t.tokenize("Hello, world!"), ["Hello", "world"]);
-    assert_eq!(t.tokenize("。。。"), Vec::<&str>::new());
-    // Normalisation runs before segmentation.
-    assert_eq!(t.tokenize("ﾊﾝｶｸ"), ["ハンカク"]);
-}
-```
+The Norwegian and Swedish diacritic pass replaces only the *first* occurrence of
+each of twenty-six accented characters, so `AggressiveTokenizerNo::tokenize("àà ààà")`
+is `["a"]`. Swapping in Rust's `str::replace`, which replaces all matches, changes
+the output on any text with a repeated accent.
 
 ## Common mistakes
 
 **Importing both `tokenize` traits.** `verbora_tokenizers::Tokenize` and
 `verbora_core::Tokenizer` both have a `tokenize` method, so an unqualified call
-with both in scope is `error[E0034]: multiple applicable items in scope`:
+with both in scope is `error[E0034]`. Import only the one you need, or
+disambiguate explicitly: `Tokenize::tokenize(&t, text)` for borrowed tokens,
+`Tokenizer::tokenize(&t, text)` for owned `String`s.
 
-```rust  ignore
-use verbora_core::Tokenizer;
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-let t = AggressiveTokenizer::new();
-let v = t.tokenize("a b");   // error[E0034]
-```
-
-Import only the one you need, or disambiguate explicitly:
-
-```rust
-use verbora_core::Tokenizer as CoreTokenizer;
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-fn main() {
-    let t = AggressiveTokenizer::new();
-    let borrowed: Vec<&str> = Tokenize::tokenize(&t, "the quick");
-    let owned: Vec<String> = CoreTokenizer::tokenize(&t, "the quick");
-    assert_eq!(borrowed, ["the", "quick"]);
-    assert_eq!(owned, ["the", "quick"]);
-}
-```
-
-**Forgetting `buf.clear()`.** `tokenize_into` appends. See the warning above.
+**Forgetting `buf.clear()`.** Every `_into` method here appends. (In
+`verbora_core`, `Stemmer::stem_into` is the one exception — it clears first.)
 
 **Treating `None` as "empty".** For the four optional tokenizers, `None` means
-"the pattern did not match at all," which is not the same as returning `[]`.
-If your application does not need the distinction, collapse it explicitly
-with `.unwrap_or_default()` so the decision is visible in the code.
+"the pattern did not match at all". If you do not need the distinction, collapse
+it explicitly with `.unwrap_or_default()`.
 
-**Calling `tokenize_batch` for speed.** It is a sequential `map` over
-`tokenize`, allocating a fresh `Vec` per document. It is a convenience, not an
-optimisation.
+**Calling `tokenize_batch` for speed.** It is a sequential `map` over `tokenize`,
+allocating a fresh `Vec` per document. It is a convenience, not an optimisation.
 
-**Assuming `to_string_lossy()` is lossless.** It substitutes U+FFFD for unpaired
-surrogates. Two different surrogate halves render identically, so a comparison
-on lossy strings can report a false match. Compare on `to_utf16()`.
+**Assuming `to_string_lossy()` is lossless.** It substitutes U+FFFD, so two
+different surrogate halves render identically and a comparison on lossy strings
+can report a false match. Compare on `to_utf16()`.
 
-**Collecting `as_str()` out of an iterator.** `Utf16Token::as_str` returns
-`Option<&str>` borrowed from *the token*, not from the input, so this does not
-compile (`error[E0515]`):
+**Collecting `as_str()` straight out of an iterator.** `Utf16Token::as_str`
+borrows from *the token*, not from the input, so
+`.tokens(text).filter_map(|t| t.as_str()).collect()` is `error[E0515]`. Collect the
+tokens first and borrow from those.
 
-```rust  ignore
-let words: Vec<&str> = TreebankWordTokenizer::new()
-    .tokens(text)
-    .filter_map(|t| t.as_str())   // error[E0515]: returns a value referencing
-    .collect();                   // data owned by the current function
-```
+**Expecting a token to be a substring.** It is, for the thirteen
+`BorrowingTokenizer` types, for `WordTokenizer`, and for `WordPunctTokenizer` and
+`OrthographyTokenizer` in splitting mode. It is not for `AggressiveTokenizerHi`
+(deletes characters), `No`/`Sv` (rewrite diacritics), `TokenizerJa` (rebuilds
+tokens from code units) or `SentenceTokenizer` (substitutes placeholders).
 
-Collect the tokens first and borrow from those, as in the example above.
-
-**Expecting a token to be a substring.** It is, for the thirteen tokenizers that
-implement `BorrowingTokenizer`, for `WordTokenizer`, and for
-`WordPunctTokenizer` and `OrthographyTokenizer` in splitting mode. It is not for
-`AggressiveTokenizerHi` (deletes characters), `AggressiveTokenizerNo` and
-`AggressiveTokenizerSv` (rewrite diacritics), `TokenizerJa` (strips punctuation
-from inside tokens and rebuilds them from code units) or `SentenceTokenizer`
-(substitutes placeholders). `TreebankWordTokenizer` maps every token back onto a
-byte range of the input and so borrows in practice, but its `Utf16Token` type
-does not promise to.
-
-**Using the wrong tokenizer for a language.** `AggressiveTokenizerEs` and
-`AggressiveTokenizerPt` have **no digits** in their classes;
-`OrthographyTokenizer::new("fi")` has no digits either. If your Spanish corpus
-contains numbers, they silently disappear.
+**Using the wrong tokenizer for a language.** `AggressiveTokenizerEs`,
+`AggressiveTokenizerPt` and `OrthographyTokenizer::new("fi")` have **no digits**
+in their classes. If your corpus contains numbers, they silently disappear.
 
 ## Related
 
 - [Choosing an API: tokenization](../choosing/tokenization.md) — the long-form
-  version of the section above, with pipeline diagrams.
+  decision, with pipeline diagrams
 - [API shapes](../choosing/api-shapes.md) — the workspace-wide convention that
-  `_into` appends and `tokens()` is the primitive.
+  `_into` appends and `tokens()` is the primitive
 - [Core traits](core.md) — `verbora_core::Tokenizer`, `BorrowingTokenizer`,
-  `trim_edge_empties`.
-- [n-grams](ngrams.md) — consumes a tokenizer, and carries its own
-  process-global tokenizer binding.
-- [Normalizers](normalizers.md) — what to run before or after tokenizing.
-- [Performance](../performance/index.md), and in detail:
-  [Zero-copy](../performance/zero-copy.md),
-  [Buffer reuse](../performance/buffer-reuse.md),
-  [Iterator vs `_into`](../performance/iterator-vs-into.md),
-  [Allocation](../performance/allocation.md),
-  [Batch vs streaming](../performance/batch-vs-streaming.md),
-  [Parallelism](../performance/parallelism.md).
-- [Benchmarks](../benchmarks/index.md).
-- [Recipes](../recipes/index.md).
+  `trim_edge_empties`
+- [n-grams](ngrams.md) — consumes a tokenizer · [Normalizers](normalizers.md) —
+  what to run before or after tokenizing
+- [Zero-copy](../performance/zero-copy.md) · [Buffer reuse](../performance/buffer-reuse.md) ·
+  [Allocation](../performance/allocation.md) · [Parallelism](../performance/parallelism.md)
+- [Benchmarks](../benchmarks/index.md) · [Recipes](../recipes/index.md)
 
 ## API reference
-
-Generate the rustdoc locally:
 
 ```bash
 cargo doc -p verbora-tokenizers --no-deps --open
 ```
-
-Once published, the same content is at
-<https://docs.rs/verbora-tokenizers/latest/verbora_tokenizers/>. The items you
-will use most often:
 
 | Item | Path |
 |---|---|

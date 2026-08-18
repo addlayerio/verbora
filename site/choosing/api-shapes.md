@@ -150,18 +150,14 @@ assert_eq!(out[1].len(), 3);
 ```
 
 <div class="callout callout-warn">
-<strong>Read this before reaching for it.</strong> Verbora's batch methods are
-provided methods on the <code>verbora_core::Tokenizer</code> and
-<code>verbora_core::Stemmer</code> traits, and their default bodies are a plain
-sequential <code>map</code> — one fresh <code>Vec&lt;String&gt;</code> per input,
-no shared buffer, no parallelism. They exist so that generic code can express
-"process these all" and so implementations can override them later. Today,
-<code>tokenize_batch</code> is not faster than a loop, and it allocates
-<em>more</em> than <code>tokenize_into</code> does — note that it also produces
-<code>Vec&lt;String&gt;</code> rather than the borrowed <code>&amp;str</code>
-that <code>Tokenize::tokenize</code> gives you. This is about the generic
-<code>verbora_core</code> traits specifically, not the workspace as a whole —
-see the note below.
+<strong>Batch is a call-site convenience, not an optimisation.</strong> The
+batch methods on <code>verbora_core::Tokenizer</code> and
+<code>verbora_core::Stemmer</code> are provided methods whose default bodies are
+a sequential <code>map</code>: one fresh <code>Vec&lt;String&gt;</code> per
+input, no shared buffer, no parallelism. <code>tokenize_batch</code> allocates
+<em>more</em> than <code>tokenize_into</code> does, and produces owned
+<code>String</code>s rather than the borrowed <code>&amp;str</code> that
+<code>Tokenize::tokenize</code> gives you.
 </div>
 
 **Use it when** you are writing generic code over the `Tokenizer` trait and want
@@ -223,21 +219,12 @@ assert!(t.tokenize("hello world").is_some());
 
 ## Summary
 
-```text
-Which shape?
-│
-├── I want a result I can hold, index, or pass on
-│      └── eager:        tokenize(), process(), keys_with_prefix()
-│
-├── I want to consume it once, in order — maybe not all of it
-│      └── lazy:         tokens(), ngrams_iter(), iter_keys_with_prefix()
-│
-├── I am doing this millions of times with the same shape of output
-│      └── into-buffer:  tokenize_into(), pluralize_into()
-│
-└── I am writing generic code over the trait
-       └── batch:        tokenize_batch()   (sequential today)
-```
+| You want | Shape | Example calls |
+|---|---|---|
+| a result you can hold, index or pass on | eager | `tokenize()`, `process()`, `keys_with_prefix()` |
+| to consume it once, in order — maybe not all of it | lazy | `tokens()`, `ngrams_iter()`, `iter_keys_with_prefix()` |
+| to do this millions of times with the same shape of output | into-buffer | `tokenize_into()`, `pluralize_into()` |
+| generic code over the trait | batch | `tokenize_batch()` (sequential today) |
 
 Next: the same reasoning applied concretely, in
 [Tokenization](tokenization.md).

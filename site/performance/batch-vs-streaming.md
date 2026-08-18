@@ -72,27 +72,20 @@ item. For a batch it is the cost of all of them.
 ## What Verbora actually provides
 
 <div class="callout callout-warn">
-<strong>Verbora's sequential batch surface is two provided trait methods, and
-they are not optimised.</strong> <code>verbora_core::Tokenizer::tokenize_batch</code>
-and <code>verbora_core::Stemmer::stem_batch</code> have sequential default
-bodies: a plain <code>map</code> over the inputs, one fresh allocation per
-item, no shared buffer and no parallelism — nothing in the workspace overrides
-either. Thirteen other crates additionally expose an optional, <em>parallel</em>
-<code>par_*_batch</code> function behind a <code>parallel</code> Cargo feature
-(see <a href="parallelism">Parallelism</a>) — a real <code>rayon</code> fan-out
-over the existing sequential primitive, benchmarked and tested. That
-solves a different problem than this section, though: none of the thirteen
-reuse a buffer across items either, so it is not the allocation story below.
+<strong><code>tokenize_batch</code> and <code>stem_batch</code> are convenience,
+not optimisation.</strong> Both are default trait methods on
+<code>verbora_core</code>: a plain <code>map</code> over the inputs, one fresh
+allocation per item, no shared buffer. <code>tokenize_batch</code> therefore
+allocates <em>more</em> than a <code>tokenize_into</code> loop, and yields
+<code>Vec&lt;Vec&lt;String&gt;&gt;</code> — owned strings — where
+<code>Tokenize::tokenize</code> gives you borrowed <code>&amp;str</code>. They
+exist so generic code over the traits can say "process all of these", and so an
+implementor can override them later without breaking callers.
 </div>
 
-They exist so that generic code over the traits can express "process all of
-these", and so an implementation can override them later without changing its
-callers. Today, `tokenize_batch` allocates **more** than a `tokenize_into` loop
-does, and it yields `Vec<Vec<String>>` — owned strings — where
-`Tokenize::tokenize` would have given you borrowed `&str`.
-
-So for this sequential, allocation-conscious shape, "batch" in Verbora is still
-code you write, not a function you call:
+For parallel batching there are thirteen opt-in `par_*_batch` APIs — see
+[Parallelism](parallelism.md). None of them reuse a buffer across items either,
+so the allocation-conscious batch loop is still code you write:
 
 ```rust
 use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
@@ -121,24 +114,13 @@ library guessing.
 
 ## Choosing
 
-```text
-Does the whole input fit in memory comfortably?
-│
-├── No ────────────────────────────────▶ stream
-│
-└── Yes
-     │
-     ├── Do I need the first result before the last input arrives?
-     │      └── Yes ─────────────────────▶ stream
-     │
-     ├── Am I going to parallelise?
-     │      └── Yes ─────────────────────▶ batch (you need a slice to split)
-     │
-     ├── Is per-item setup expensive?
-     │      └── Yes ─────────────────────▶ batch (hoist it)
-     │
-     └── Otherwise ──────────────────────▶ either; pick the clearer one
-```
+| If… | Then |
+|---|---|
+| the whole input does not fit in memory comfortably | **stream** |
+| you need the first result before the last input arrives | **stream** |
+| you are going to parallelise | **batch** — you need a slice to split |
+| per-item setup is expensive | **batch** — hoist it |
+| none of the above | either; pick the clearer one |
 
 ## The hybrid worth knowing
 

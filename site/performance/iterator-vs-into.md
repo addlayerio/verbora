@@ -129,19 +129,12 @@ you something in exchange for a saving you will not measure.
 
 ## The decision
 
-```text
-Do I need every item at once?
-│
-├── No — I consume them one at a time
-│      │
-│      ├── Might I stop early?         → tokens()          (iterator wins twice)
-│      └── No, I always consume all     → tokens()          (still no container)
-│
-└── Yes — I need the whole collection
-       │
-       ├── Once?                        → tokenize()
-       └── Repeatedly, in a loop?        → tokenize_into() with one buffer
-```
+| Do you need every item at once? | Then |
+|---|---|
+| No — one at a time, and you might stop early | `tokens()` — the iterator wins twice |
+| No — one at a time, always all of them | `tokens()` — still no container |
+| Yes, once | `tokenize()` |
+| Yes, repeatedly in a loop | `tokenize_into()` with one buffer |
 
 ## What Verbora actually offers
 

@@ -1,0 +1,83 @@
+# Builds the VitePress site under site/ and publishes it to this repo's
+# GitHub Pages (project page at https://addlayerio.github.io/verbora/, which is
+# the `base` already hardcoded in site/.vitepress/config.ts).
+#
+# One-time repository setup: Settings → Pages → "Build and deployment" →
+# Source = "GitHub Actions". Without that, the deploy step fails with a
+# "Pages site not found" style error; nothing in this file can set it.
+name: site
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'site/**'
+      - '.github/workflows/site.yml'
+  # Same build on PRs that touch the site, so a broken page or dead link is
+  # caught before it can reach Pages. The deploy job below is skipped there.
+  pull_request:
+    paths:
+      - 'site/**'
+      - '.github/workflows/site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race. `cancel-in-progress: false` because a half-run
+# deployment left cancelled is worse than a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: site
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # config.ts sets `lastUpdated: true`, and VitePress reads that
+          # timestamp from git history. A shallow clone would stamp every page
+          # with the same commit date.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Validates the *rendered* output that is about to be uploaded: every
+      # internal link, every #anchor, every page reachable from the sidebar.
+      # No network access — external links are deliberately not fetched.
+      - name: Check internal links and anchors
+        run: python3 check-links.py
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/.vitepress/dist
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

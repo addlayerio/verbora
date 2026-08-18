@@ -6,7 +6,7 @@ normalization, inflection, a trie, transliteration, WordNet, TF-IDF,
 sentiment analysis, and Bayes/logistic-regression/MaxEnt classifiers — each
 designed for Rust from the start.
 
-> **Status: 105 public APIs, specified and test-pinned.**
+> **Status: pre-1.0; every production crate is implemented, documented, and test-pinned.**
 
 ## Documentation
 
@@ -17,6 +17,10 @@ to use each of its variants and what each one costs. Its centrepiece is
 **Choosing the Right API**: whenever more than one function solves the same
 conceptual problem, the docs must say why each exists, what it allocates,
 whether it is lazy, whether it reuses memory, and which one you should call.
+
+The complete documentation layout — public site, Rust API contracts and
+internal engineering records — is defined in [DOCUMENTATION.md](DOCUMENTATION.md).
+Contribution expectations are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 | | |
 |---|---|
@@ -134,8 +138,10 @@ method in [the benchmarks page](https://addlayerio.github.io/verbora/benchmarks/
 
 | Benchmark | Verbora |
 |---|--:|
-| `levenshtein/ascii/1024` | 3.24 ms |
-| `levenshtein/ascii/16` | 515.8 ns |
+| `levenshtein/ascii/1024` | 27.5 µs |
+| `levenshtein/ascii/16` | 41.1 ns |
+| `levenshtein_shapes/near/1024` | 0.35 µs |
+| `levenshtein_shapes/disjoint/1024` | 1.18 µs |
 | `hamming/256` | 72.8 ns |
 | `dice/1024` | 10.84 µs |
 | `jaro_winkler/16` | 81.9 ns |

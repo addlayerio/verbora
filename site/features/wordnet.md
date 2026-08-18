@@ -2,97 +2,77 @@
 
 `verbora-wordnet` reads the Princeton WordNet lexical database and turns its
 `index.*` / `data.*` files into synsets, definitions and relational pointers.
-It keeps two long-established behaviours that are, strictly, wrong: the index search is
-an **incomplete** binary search that reports "not found" for lemmas that are
-unquestionably in the file, and every relation traversal comes back in
-**reverse** order because the traversal drains its internal work lists with
-`pop()` instead of reading them front-to-back.
-Both are deliberate, both are covered by the test fixture, and both are
-explained below.
+
+Two behaviours will surprise you if you assume otherwise: the index search is an
+**incomplete** bisection that reports "not found" for some lemmas that are in the
+file, and every traversal returns results in **reverse** of the order the files
+list them. Both are pinned by the crate's test suite, and both are explained
+below.
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> <code>lookup</code>, <code>get</code>,
 <code>lookup_synonyms</code>, <code>get_synonyms</code>, the index bisection's
-probe sequence and the database reader's handling of CRLF line endings,
-missing gloss separators and non-ASCII keys are all documented and
-test-pinned, with no external data required.
-<code>cargo test -p verbora-wordnet</code> runs <strong>54</strong> unit tests
-and <strong>14</strong> doctests.
+probe sequence and the reader's handling of CRLF line endings, missing gloss
+separators and non-ASCII keys are all documented and test-pinned, with no
+external data required. <code>cargo test -p verbora-wordnet</code> runs
+<strong>54</strong> unit tests and <strong>14</strong> doctests.
 </div>
 
-## WordNet is separately licensed
+## The database is separately licensed
 
 `verbora` is MIT. **The WordNet database is not.** This crate ships **no
-dictionary data at all** — no `index.noun`, no `data.verb`, none of the roughly
-28 MB of index and data files WordNet 3.0/3.1 consists of. It reads them at run
-time from a directory you supply, which is what keeps 34 MB of separately
-licensed content out of this repository and out of your dependency tree. The
-database is covered by Princeton University's own licence, reproduced verbatim
-in `LICENSE-WORDNET` beside the crate; it requires the notice to accompany all
-copies, including modifications, and forbids using Princeton's name in
-advertising.
+dictionary data at all** — none of the roughly 28 MB of index and data files
+WordNet 3.0/3.1 consists of. It reads them at run time from a directory you
+supply. The database is covered by Princeton University's own licence,
+reproduced verbatim in `LICENSE-WORDNET` beside the crate; it requires the notice
+to accompany all copies, including modifications, and forbids using Princeton's
+name in advertising.
 
-Get the database with either of these, then point `WordNet::open` or
-`WordNet::from_env` at the `dict` directory it produces:
+Download any WordNet 3.0 or 3.1 database from Princeton, then point
+`WordNet::open` at the `dict` directory it contains — or set an environment
+variable and use `WordNet::from_env`:
 
 ```text
-npm install wordnet-db          # WordNet 3.1, ~10 MB packed
-export WORDNET_DB_PATH="$PWD/node_modules/wordnet-db/dict"
+export WORDNET_DB_PATH=/path/to/wordnet/dict
 ```
 
-or download any WordNet 3.0 or 3.1 database directory directly from Princeton
-and point the same variable at it. `WordNet::from_env` checks
-`$WORDNET_DB_PATH`, then `$VERBORA_WORDNET_DICT` (this crate's own override),
-then `./node_modules/wordnet-db/dict`, and fails with `Error::Io` naming every
-candidate it tried rather than silently doing nothing.
+`WordNet::from_env` checks `$WORDNET_DB_PATH`, then `$VERBORA_WORDNET_DICT`
+(this crate's own override), then one conventional relative path, and fails with
+`Error::Io` naming every candidate it tried.
 
-Every snippet on this page that needs the real database is fenced `no_run` and
-says so. The runnable ones build a tiny, hand-written dictionary in the WordNet
-text format — a few lines of `index.*` and `data.*` content — the same trick
-the crate's own unit tests use so they never need the 34 MB database either.
+Snippets on this page that need the real database are fenced `no_run`. The
+runnable ones build a tiny, hand-written dictionary in the WordNet text format —
+the same trick the crate's own unit tests use.
 
 ## When to use it
 
-- **You need every documented behaviour — including the incomplete index
-  search's false misses — pinned by an explicit test fixture.** Every entry
-  point has a predictable, single-purpose Rust signature (see
-  [The core API surface](#the-core-api-surface)), and its results —
-  definitions, synonym lists, pointer traversal, the search's edge cases
-  included — are fixed by the crate's own regression suite rather than left
-  to interpretation.
-- **Synonym, definition and relation lookup for English words**, when you
-  already have (or can install) the database and do not need it embedded in
-  your binary.
-- **Walking the hypernym/hyponym/meronym graph.** `WordNet::relation` gives
-  you one hop; `WordNet::closure` walks the whole transitive chain lazily,
-  with cycle protection.
-- **A long-lived process serving concurrent lookups.** `WordNet` is
-  immutable after construction and `Send + Sync`; share one `Arc<WordNet>`
-  across threads with no locking. See [Concurrency](#concurrency).
+- **Synonym, definition and relation lookup for English words**, when you already
+  have (or can install) the database and do not need it embedded in your binary.
+- **Walking the hypernym/hyponym/meronym graph.** `relation` gives you one hop;
+  `closure` walks the whole transitive chain lazily, with cycle protection.
+- **A long-lived process serving concurrent lookups.** `WordNet` is immutable
+  after construction and `Send + Sync`; share one `Arc<WordNet>` across threads
+  with no locking. See [Concurrency](#concurrency).
 
 ## When not to use it
 
-- **You cannot ship or install the database.** There is no bundled fallback and
-  no partial dictionary; every method that needs a file the caller has not
-  provided returns `Error::Io` at open, not later.
+- **You cannot ship or install the database.** There is no bundled fallback; every
+  method that needs a missing file returns `Error::Io` at open, not later.
 - **You need every WordNet entry to be reachable.** The index search is not
   merely slow, it is **incomplete** — see
-  [The index search is deliberately incomplete](#the-index-search-is-deliberately-incomplete).
-  A word that is genuinely in the database can still come back as a miss.
-- **You want results in dictionary or alphabetical order.** Every traversal —
-  `lookup`, `get_synonyms`, pointer walks — comes back in `pop()`-driven
-  reverse order. See
-  [Result order is defined by a bug](#result-order-is-defined-by-a-bug).
+  [The index search is incomplete](#the-index-search-is-incomplete). A word
+  genuinely in the database can still come back as a miss.
+- **You want results in dictionary or alphabetical order.** Every traversal comes
+  back in `pop()`-driven reverse order. See
+  [Result order is reversed](#result-order-is-reversed).
 - **You want stemming, POS tagging, or a general thesaurus API.** This crate is
-  the lexical database reader only; nothing here inflects a word to find its
-  base form first. Pair it with [Inflectors](./inflectors) or your own
-  normalisation if the input is not already a WordNet headword.
+  the lexical database reader only. Pair it with [Inflectors](./inflectors) or
+  your own normalisation if the input is not already a WordNet headword.
 
 ## Quick example
 
-This uses the same tiny, hand-built dictionary format the crate's own tests
-use — two synsets, `alpha` and `beta`, with `alpha` pointing at `beta` as its
-hypernym. No download required.
+Two synsets, `alpha` and `beta`, with `alpha` pointing at `beta` as its hypernym.
+No download required.
 
 ```rust
 use verbora_wordnet::{WordNet, pointer};
@@ -104,7 +84,6 @@ fn tiny_dict() -> std::path::PathBuf {
         std::thread::current().id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    // Two index lines: alpha (one sense) and beta (one sense, pointed at by alpha).
     let index = "aaa n 1 0 1 0 00000000  \nbbb n 2 1 @ 2 0 00000000 00000083  \nccc n 1 0 1 0 00000083  \n";
     let data = "00000000 06 n 01 alpha 0 001 @ 00000083 n 0000 | the first letter; \"as in alpha\"  \n00000083 06 n 02 beta 0 second 1 000 | the second letter  \n";
     for pos in ["noun", "verb", "adj", "adv"] {
@@ -125,7 +104,6 @@ fn main() {
 
     // One pointer hop from alpha reaches beta.
     let synonyms = wn.get_synonyms_of(&alpha).unwrap();
-    assert_eq!(synonyms.len(), 1);
     assert_eq!(synonyms[0].lemma.as_deref(), Some("beta"));
 
     assert_eq!(wn.relation(&alpha, pointer::HYPERNYM).count(), 1);
@@ -135,430 +113,152 @@ fn main() {
 }
 ```
 
-Against the real database the same shape looks like this — fenced `no_run`
-because it needs a `dict/` directory this page cannot provide:
+Against the real database:
 
 ```rust no_run
 use verbora_wordnet::{WordNet, pointer};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let wn = WordNet::open("node_modules/wordnet-db/dict")?;
+    let wn = WordNet::open("/path/to/wordnet/dict")?;
 
-    for synset in wn.lookup("node")? {
+    for synset in wn.lookup("bank")? {
         println!("{:?}  {}", synset.lemma, synset.def);
     }
 
-    // Walk up the hypernym chain from "node" (the network sense).
-    let node = wn.get(3_832_647.0, "n")?;
-    for parent in wn.closure(&node, pointer::HYPERNYM).take(5) {
+    // Walk up the hypernym chain from one specific noun sense.
+    let sense = wn.get(3_832_647.0, "n")?;
+    for parent in wn.closure(&sense, pointer::HYPERNYM).take(5) {
         println!("^ {}", parent?.def);
     }
     Ok(())
 }
 ```
 
-## Choosing the right API
+## Choosing a `Storage` strategy
 
-Two decisions sit on top of each other here, and both are the site's usual
-"more than one way to do the same conceptual thing": **which byte-access
-strategy backs the dictionary**, and **which traversal shape to call** for a
-given question. Neither has a universally correct answer.
+The four strategies change only how the dictionary's bytes physically arrive.
+None changes a single answer — the crate's own tests assert that the same lookup
+against the same dictionary agrees across all four — which is what lets `Storage`
+be a runtime choice rather than a type parameter.
 
-### Choosing a WordNet loading strategy
-
-The index bisection works entirely in terms of computed byte *positions*, not
-lines — each probe snaps back to the start of whatever line that position
-lands on, which is what produces the false misses documented in
-[The index search is deliberately incomplete](#the-index-search-is-deliberately-incomplete).
-Four `Storage` strategies change only how those bytes physically arrive —
-positioned syscalls, a bulk read, or an in-memory scan — never which probe
-positions are visited or which answer results:
-
-| `Storage` | Startup | Per query | Resident memory |
-|---|---|---|---|
-| `Storage::Pread` | none | a handful of positioned syscalls | none |
-| `Storage::LazyResident` | none | in-memory, once a file is first touched | grows to whichever files were used |
-| `Storage::Resident` *(default)* | reads ~28 MB | in-memory scan | ~28 MB |
-| `Storage::Indexed` | + one `memchr` pass over the resident bytes | `partition_point` over a `u32` line-start table | + about 4 bytes per line (~470 KiB for `index.noun`'s 118k lines) |
-
-No strategy changes a single answer — only how the bytes arrive — which is
-exactly what lets `Storage` be a runtime choice rather than a type parameter.
-The crate's own unit tests assert this directly: the same lookup against the
-same tiny dictionary agrees across all four backends.
-
-```rust
-use verbora_wordnet::{Config, Storage, WordNet};
-
-fn tiny_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-storage-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let index = "aaa n 1 0 1 0 00000000  \nbbb n 2 1 @ 2 0 00000000 00000083  \nccc n 1 0 1 0 00000083  \n";
-    let data = "00000000 06 n 01 alpha 0 001 @ 00000083 n 0000 | the first letter; \"as in alpha\"  \n00000083 06 n 02 beta 0 second 1 000 | the second letter  \n";
-    for pos in ["noun", "verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), index).unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), data).unwrap();
-    }
-    dir
-}
-
-fn main() {
-    let dir = tiny_dict();
-    let reference = WordNet::open_with(&dir, &Config::new(Storage::Resident))
-        .unwrap()
-        .lookup("bbb")
-        .unwrap();
-
-    for storage in [Storage::Pread, Storage::LazyResident, Storage::Indexed] {
-        let wn = WordNet::open_with(&dir, &Config::new(storage)).unwrap();
-        assert_eq!(wn.lookup("bbb").unwrap(), reference, "{storage:?}");
-    }
-    std::fs::remove_dir_all(&dir).ok();
-}
-```
-
-Choosing between them is a genuine judgment call — nothing here is right for
-every deployment:
-
-- **`Storage::Pread`** — no bulk read at all, just positioned reads per probe
-  (a backward scan reads 512-byte blocks, a forward scan reads 4 KiB blocks).
-  Pick this for a **CLI tool run once**: no startup cost, and the process
-  exits before residency would have paid for itself.
-- **`Storage::LazyResident`** — free startup, and the first query against a
-  given file pays to read the whole thing; every query after that is
-  in-memory. Pick this for a **long-lived process that might not touch every
-  one of the eight files** — a service that only ever looks up nouns pays
-  nothing for `data.verb`.
-- **`Storage::Resident`** *(the default)* — pays ~28 MB up front so every
-  query afterwards is uniformly in-memory. Pick this for a **long-lived
-  process that queries broadly**, where predictable per-query latency matters
-  more than a fast first request.
-- **`Storage::Indexed`** — `Resident` plus a line-start table, so
-  `findPrevEOL` becomes a `partition_point` instead of a backward byte scan.
-  Pick this for a **hot path with many repeated lookups** where the bisection
-  itself shows up in a profile.
-
-```text
-Which Storage strategy?
-│
-├── Short-lived process, one or two lookups
-│      └── Storage::Pread
-│
-├── Long-lived process, but this dictionary may go untouched
-│      └── Storage::LazyResident
-│
-├── Long-lived process that queries broadly across the dictionary
-│      └── Storage::Resident            (the default)
-│
-└── Hot path with many repeated lookups
-       ├── Startup can pay for the memchr scan once
-       │      └── Storage::Indexed
-       └── Startup must be near-zero too, across many process restarts
-              └── Storage::Indexed + a PrebuiltIndex sidecar
-```
-
-#### The `PrebuiltIndex` sidecar
-
-`Storage::Indexed` normally builds its line-start tables with one `memchr`
-pass over the resident bytes at open time. `PrebuiltIndex` trades that scan
-for a smaller one: it persists the derived line offsets to a file once, and
-every later open loads that file instead of re-scanning ~28 MB for newlines.
-
-The dictionary text files remain the **only** source of truth. The sidecar
-carries no lemmas, no glosses, and no offsets drawn from the dictionary's
-content — only the byte position of every line, plus the length of the file it
-was built from. `PrebuiltIndex::source_for` refuses an entry whose file has
-since changed size, because the index bisection's probe positions are a
-function of file length: a sidecar built against a different dictionary would
-silently describe a different search if it were trusted.
-
-```rust
-use verbora_wordnet::{Config, PrebuiltIndex, Storage, WordNet};
-
-fn tiny_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-prebuilt-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let index = "aaa n 1 0 1 0 00000000  \nbbb n 2 1 @ 2 0 00000000 00000083  \nccc n 1 0 1 0 00000083  \n";
-    let data = "00000000 06 n 01 alpha 0 001 @ 00000083 n 0000 | the first letter; \"as in alpha\"  \n00000083 06 n 02 beta 0 second 1 000 | the second letter  \n";
-    for pos in ["noun", "verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), index).unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), data).unwrap();
-    }
-    dir
-}
-
-fn main() {
-    let dir = tiny_dict();
-    let sidecar = dir.join("wordnet.nrsidx");
-    PrebuiltIndex::build(&dir).unwrap().save(&sidecar).unwrap();
-
-    // Same answers, whether the tables were scanned just now or loaded from disk.
-    let scanned = WordNet::open_with(&dir, &Config::new(Storage::Indexed)).unwrap();
-    let loaded = WordNet::open_with(&dir, &Config::default().with_prebuilt(&sidecar)).unwrap();
-    for word in ["aaa", "bbb", "ccc", "zzz"] {
-        assert_eq!(scanned.lookup(word).unwrap(), loaded.lookup(word).unwrap());
-    }
-    std::fs::remove_dir_all(&dir).ok();
-}
-```
-
-The builder is a pure function of the eight dictionary files — same bytes in,
-same sidecar out, on any machine, with no timestamps — so it can be built once
-in CI or a deploy step and shipped alongside the dictionary.
-
-### The core API surface
-
-Every method below performs strictly sequential, synchronous I/O and returns
-its result directly:
-
-| Method | Returns |
-|---|---|
-| `WordNet::lookup` | `Result<Vec<DataRecord>>` (see also the lazy `WordNet::lookup_iter`) |
-| `WordNet::get` | `Result<DataRecord>` |
-| `WordNet::data_file` | `Option<&DataFile>` |
-| `WordNet::lookup_synonyms` | `Result<Vec<DataRecord>>` |
-| `WordNet::get_synonyms` | `Result<Vec<DataRecord>>` |
-| `WordNet::get_synonyms_of` | `Result<Vec<DataRecord>>` |
-
-**`WordNet::open` / `open_with` / `from_env`.** `open` takes the directory
-holding `index.noun` and its seven siblings — the path
-`require('wordnet-db').path` returns in Node — and fails immediately with
-`Error::Io` if a file is missing. `open_with` takes an explicit `Config`
-(storage strategy, optional prebuilt sidecar); `from_env` locates the
-directory for you, checking `$WORDNET_DB_PATH`, `$VERBORA_WORDNET_DICT`, then
-`./node_modules/wordnet-db/dict`.
+| `Storage` | Startup | Per query | Resident memory | Pick it when |
+|---|---|---|---|---|
+| `Pread` | none | a handful of positioned syscalls | none | short-lived process, one or two lookups (a CLI tool) |
+| `LazyResident` | none | in-memory, once a file is first touched | grows to whichever files were used | long-lived process that may never touch some of the eight files |
+| `Resident` *(default)* | reads ~28 MB | in-memory scan | ~28 MB | long-lived process querying broadly, where predictable per-query latency beats a fast first request |
+| `Indexed` | + one `memchr` pass over the resident bytes | `partition_point` over a `u32` line-start table | + ~4 bytes per line (~470 KiB for `index.noun`) | hot path with many repeated lookups, where the bisection shows up in a profile |
 
 ```rust no_run
 use verbora_wordnet::{Config, Storage, WordNet};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wn = WordNet::from_env()?;
-    let indexed = WordNet::open_with("node_modules/wordnet-db/dict", &Config::new(Storage::Indexed))?;
-    let _ = (wn, indexed);
+    let indexed = WordNet::open_with("/path/to/wordnet/dict", &Config::new(Storage::Indexed))?;
+    // Same answers either way.
+    assert_eq!(wn.lookup("entity")?, indexed.lookup("entity")?);
     Ok(())
 }
 ```
 
-**`WordNet::lookup` and `lookup_iter`.** `lookup` normalises `word` — lowercase,
-whitespace runs collapsed to a single `_` — then searches all four parts of
-speech and returns every synset found, in the order described in
-[Result order is defined by a bug](#result-order-is-defined-by-a-bug).
-`lookup_iter` is the lazy primitive it is built on: reading one synset costs
-one line read, so `.take(n)` genuinely avoids the rest. See
-[Eager vs lazy relation traversal](#eager-vs-lazy-relation-and-lookup-traversal).
+There is deliberately no memory-mapped fifth strategy: `mmap` cannot be reached
+from safe Rust without an extra dependency or `unsafe`, and this crate admits
+neither. `LazyResident` covers the case `mmap` is usually reached for — near-zero
+startup, in-memory cost once a file is touched — at the honest cost of paying for
+the whole file the first time any part of it is read.
 
-**`WordNet::get` and `get_at`.** `get(offset, tag)` reads the synset at a raw
-byte offset in the data file for a part-of-speech *tag* (`"n"`, `"v"`, `"a"`,
-`"s"`, `"r"`), returning `Error::UnknownPos` for anything else — where the
-reference throws a `TypeError` reading `'get'` on `undefined`. `get_at` takes a
-typed `Pos` instead and cannot fail to resolve one.
+### The `PrebuiltIndex` sidecar
 
-**`get_synonyms` vs `get_synonyms_of` — two call shapes, two names.** Synonym
-lookup has two legitimate starting points: a bare `(offset, tag)` pair, or a
-`DataRecord` already in hand. `WordNet::get_synonyms(offset, tag)` looks up a
-fresh synset by offset and tag; `WordNet::get_synonyms_of(&record)` re-reads
-the synset the record already describes. Giving the two shapes their own
-names, rather than one function overloaded on argument count, means an
-offset of `0.0` is never mistaken for "no offset given" — it is a value like
-any other, not a signal:
+`Storage::Indexed` normally builds its line-start tables with one `memchr` pass
+at open time. `PrebuiltIndex` persists those line offsets to a file once, so every
+later open loads them instead of re-scanning ~28 MB for newlines.
 
-```rust
-use verbora_wordnet::WordNet;
+The dictionary text files remain the only source of truth: the sidecar carries no
+lemmas, glosses or content-derived offsets — only each line's byte position, plus
+the length of the file it was built from. `PrebuiltIndex::source_for` refuses an
+entry whose file has since changed size, because the bisection's probe positions
+are a function of file length. The builder is a pure function of the eight
+dictionary files — same bytes in, same sidecar out, no timestamps — so it can be
+built once in CI and shipped alongside the dictionary.
 
-fn tiny_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-getsyn-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let index = "aaa n 1 0 1 0 00000000  \nbbb n 2 1 @ 2 0 00000000 00000083  \nccc n 1 0 1 0 00000083  \n";
-    let data = "00000000 06 n 01 alpha 0 001 @ 00000083 n 0000 | the first letter; \"as in alpha\"  \n00000083 06 n 02 beta 0 second 1 000 | the second letter  \n";
-    for pos in ["noun", "verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), index).unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), data).unwrap();
-    }
-    dir
-}
+```rust no_run
+use verbora_wordnet::{Config, PrebuiltIndex, Storage, WordNet};
 
-fn main() {
-    let dir = tiny_dict();
-    let wn = WordNet::open(&dir).unwrap();
-    let alpha = wn.get(0.0, "n").unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = "/path/to/wordnet/dict";
+    let sidecar = PrebuiltIndex::default_path(dir);
+    PrebuiltIndex::build(dir)?.save(&sidecar)?;
 
-    // Same answer, reached two ways: by offset and tag, or from a record already in hand.
-    let by_pair = wn.get_synonyms(0.0, "n").unwrap();
-    let by_record = wn.get_synonyms_of(&alpha).unwrap();
-    assert_eq!(by_pair, by_record);
-    std::fs::remove_dir_all(&dir).ok();
+    // Same answers, whether the tables were scanned just now or loaded from disk.
+    let scanned = WordNet::open_with(dir, &Config::new(Storage::Indexed))?;
+    let loaded = WordNet::open_with(dir, &Config::default().with_prebuilt(&sidecar))?;
+    assert_eq!(scanned.lookup("entity")?, loaded.lookup("entity")?);
+    Ok(())
 }
 ```
 
-**`WordNet::pointers`, `relation` and `closure`.** Covered in full under
-[Eager vs lazy relation and lookup traversal](#eager-vs-lazy-relation-and-lookup-traversal).
+## Traversal: eager vs lazy
 
-**`Sense`, `find_sense` and `query_sense`.** `Sense` parses a `lemma#pos[#n]`
-string (`"entity#n#1"`), `WordNet::query_sense` lists every sense of a lemma
-numbered from 1, and `WordNet::find_sense` resolves one numbered sense
-straight to its synset:
-
-```rust
-use verbora_wordnet::WordNet;
-
-fn multi_pos_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-sense-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let noun_a = "00000000 06 n 01 x 0 000 | noun sense A  \n".to_string();
-    let noun_b_offset = noun_a.len();
-    let noun_b = format!("{noun_b_offset:08} 06 n 01 x 0 000 | noun sense B  \n");
-    std::fs::write(dir.join("data.noun"), format!("{noun_a}{noun_b}")).unwrap();
-    std::fs::write(
-        dir.join("index.noun"),
-        format!("x n 2 0 2 0 00000000 {noun_b_offset:08}  \n"),
-    )
-    .unwrap();
-    for pos in ["verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), "").unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), "").unwrap();
-    }
-    dir
-}
-
-fn main() {
-    let dir = multi_pos_dict();
-    let wn = WordNet::open(&dir).unwrap();
-
-    let senses: Vec<String> = wn
-        .query_sense("x#n")
-        .unwrap()
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    assert_eq!(senses, ["x#n#1", "x#n#2"]);
-
-    assert_eq!(wn.find_sense("x#n#1").unwrap().unwrap().def.trim_end(), "noun sense A");
-    assert_eq!(wn.find_sense("x#n#2").unwrap().unwrap().def.trim_end(), "noun sense B");
-    std::fs::remove_dir_all(&dir).ok();
-}
-```
-
-<div class="callout callout-warn">
-<strong>Careful.</strong> Sense numbers run <strong>forwards</strong> over the
-index line's own order — sense 1 is the first offset written on the line. That
-is the <strong>opposite</strong> of the order <code>lookup</code> yields for
-that part of speech, because <code>lookup</code> drains the same offsets from
-the back. In the example above, <code>wn.lookup("x")</code> yields
-<code>["noun sense B", "noun sense A"]</code> — sense 2 before sense 1 — while
-<code>find_sense("x#n#1")</code> correctly answers sense 1. Numbering results
-as <code>lookup</code> hands them to you would number every word backwards;
-that is precisely why <code>find_sense</code>/<code>query_sense</code> exist
-rather than inviting every caller to rediscover this.
-</div>
-
-## Eager vs lazy relation and lookup traversal
-
-This is the site's usual thesis — lazy iterator vs. eager `Vec` — applied to a
-graph instead of a token stream, plus one more axis specific to WordNet: how
-many hops a traversal walks.
-
-### Comparison table
+Every method performs strictly sequential, synchronous I/O and returns its result
+directly.
 
 | API | Answers | Lazy | Output | Allocates |
 |---|---|:--:|---|---|
-| `WordNet::lookup` | every synset for a word, all parts of speech | ❌ | `Vec<DataRecord>` | one `Vec`, one `DataRecord` per synset |
-| `WordNet::lookup_iter` | the same synsets | ✅ | `LookupIter` → `Result<DataRecord>` | one `DataRecord` per synset actually read |
-| `WordNet::par_lookup_batch` | `lookup`, fanned out over many words at once | ❌ | `Vec<Result<Vec<DataRecord>>>` | one outer `Vec`, plus `lookup`'s own allocations per word |
-| `WordNet::pointers` | every synset one hop from a record | ✅ | `Pointers` → `Result<DataRecord>` | one `DataRecord` per hop actually followed |
-| `WordNet::relation` | `pointers`, filtered to one relation symbol | ✅ | `Pointers` → `Result<DataRecord>` | as `pointers`, minus the hops skipped |
-| `WordNet::closure` | the whole transitive chain of one relation | ✅ | `Closure` → `Result<DataRecord>` | one `DataRecord` per synset visited, plus a `VecDeque` queue and a seen-offsets `Vec` |
-| `WordNet::get_synonyms_of` | `pointers`, eager and **re-read from disk** | ❌ | `Vec<DataRecord>` | as `pointers`, plus the re-read of the starting record |
+| `lookup` | every synset for a word, all parts of speech | ❌ | `Vec<DataRecord>` | one `Vec`, one `DataRecord` per synset |
+| `lookup_iter` | the same synsets | ✅ | `LookupIter` → `Result<DataRecord>` | one `DataRecord` per synset actually read |
+| `par_lookup_batch` | `lookup`, fanned out over many words | ❌ | `Vec<Result<Vec<DataRecord>>>` | one outer `Vec`, plus `lookup`'s own per word |
+| `pointers` | every synset one hop from a record | ✅ | `Pointers` → `Result<DataRecord>` | one `DataRecord` per hop followed |
+| `relation` | `pointers`, filtered to one relation symbol | ✅ | `Pointers` → `Result<DataRecord>` | as `pointers`, minus the hops skipped |
+| `closure` | the whole transitive chain of one relation | ✅ | `Closure` → `Result<DataRecord>` | one `DataRecord` per synset visited, plus a `VecDeque` queue and a seen-offsets `Vec` |
+| `get_synonyms_of` | `pointers`, eager and **re-read from disk** | ❌ | `Vec<DataRecord>` | as `pointers`, plus the re-read |
 
-Two things are easy to miss:
+Three things are easy to miss:
 
-- **`get_synonyms_of` does not reuse the pointers already on your record.** It
-  re-reads the synset from disk by offset and tag before following its
-  pointers, so the caller's in-memory record is left untouched — deliberately,
-  which is why it takes `&DataRecord` rather than consuming it. `pointers` is
-  the same relation, made lazy and without the re-read, because it works from
-  the pointers already in hand.
-- **`closure` is the only one of these that walks more than one hop.** It is
-  breadth-first, cycle-safe (each synset offset is visited at most once,
-  tracked by the bit pattern of its `f64` offset so `NaN` compares by
-  identity), and the starting record itself is never yielded.
-- **`par_lookup_batch` is the only one of these with a built-in parallel
-  sibling.** It fans `lookup` out across threads, one word per `rayon` task —
-  see [`par_lookup_batch`](#par-lookup-batch) below.
+- **`lookup` is exactly `lookup_iter(word).collect()`.** `"run"` has 57 senses in
+  the real database, so collecting all of them to take the first two is 55 line
+  reads you did not need. `lookup_iter`'s errors are sticky: once one lookup
+  fails, later `next()` calls return `None` rather than re-reporting forever.
+- **`get_synonyms_of` re-reads the starting synset from disk** by offset and tag
+  before following its pointers, so a record you mutated after reading is not
+  what gets followed. Use `pointers` when you want the pointers already in hand.
+- **`closure` is the only one that walks more than one hop.** It is
+  breadth-first, never yields the starting record, and is cycle-safe: an offset
+  already emitted is never queued again, tracked as the bit pattern of the `f64`
+  offset so a `NaN` offset compares by identity rather than by IEEE 754's "`NaN`
+  never equals anything", which would otherwise defeat the cycle check.
 
-### Decision tree
+`get_synonyms(offset, tag)` and `get_synonyms_of(&record)` are the same operation
+from two starting points, given two names rather than one overloaded function, so
+an offset of `0.0` is never mistaken for "no offset given".
 
-```text
-I have a DataRecord and a relation to follow
-│
-├── "Every synset for this word, across every part of speech"
-│      ├── I want them all, and I'll hold onto the result
-│      │      └── WordNet::lookup()          → Vec<DataRecord>
-│      ├── I might stop early, or read one at a time
-│      │      └── WordNet::lookup_iter()      → lazy, .take(n) saves real I/O
-│      └── I have MANY words to look up at once
-│             └── WordNet::par_lookup_batch() → lookup, fanned out (parallel feature)
-│
-├── "Everything one hop away, of ANY relation"
-│      └── WordNet::pointers()                → lazy
-│
-├── "Everything one hop away, of ONE relation (hypernym, hyponym, …)"
-│      └── WordNet::relation(record, symbol)  → lazy, filtered
-│
-└── "The WHOLE chain — keep following this relation until it stops"
-       └── WordNet::closure(record, symbol)   → lazy, breadth-first, cycle-safe
+```rust no_run
+use verbora_wordnet::{WordNet, pointer};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let wn = WordNet::open("/path/to/wordnet/dict")?;
+    let sense = wn.get(3_832_647.0, "n")?;
+
+    // One hop of one relation.
+    for parent in wn.relation(&sense, pointer::HYPERNYM) {
+        println!("^ {}", parent?.def);
+    }
+    // The whole chain, lazily, one read at a time.
+    for ancestor in wn.closure(&sense, pointer::HYPERNYM) {
+        println!("^^ {}", ancestor?.def);
+    }
+    Ok(())
+}
 ```
-
-### `lookup` <a class="badge badge-owned" href="../performance/allocation">OWNED</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager — reads every offset on all four index lines before returning</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v">Owned <code>Vec&lt;DataRecord&gt;</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>Vec</code>, plus one <code>DataRecord</code> (several <code>String</code>s and <code>Vec</code>s each) per synset found</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A — no caller-supplied buffer</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">A word you expect to have few senses, or whose whole result set you want to keep</span></div>
-</div>
-
-Exactly `self.lookup_iter(word).collect()`. `"run"` has 57 senses in the real
-database; collecting all of them to then take the first two is 55 line reads
-you did not need.
 
 ### `par_lookup_batch`
 
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager — <code>words.par_iter().map(|w| self.lookup(w)).collect()</code> over Rayon's global thread pool</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v">Owned <code>Vec&lt;Result&lt;Vec&lt;DataRecord&gt;&gt;&gt;</code>, input order preserved</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One outer <code>Vec</code> sized to <code>words.len()</code>, plus whatever <code>lookup</code> itself allocates per word</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">Yes — behind the <code>parallel</code> Cargo feature</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">A few hundred words or more, resolved as one offline batch</span></div>
-</div>
+Behind the `parallel` Cargo feature, `par_lookup_batch` is exactly
+`words.par_iter().map(|w| self.lookup(w)).collect()` — a thin fan-out over the
+same sequential `lookup`, input order preserved, each element carrying its own
+`Result`. `WordNet` is already immutable and `Send + Sync` with nothing cached or
+locked per query, so it needed no new synchronization.
 
-`WordNet` is immutable after construction and already `Send + Sync` with
-nothing cached or locked per query (see [Concurrency](#concurrency) below), so
-fanning `lookup` out across threads needed no new synchronization at all —
-`par_lookup_batch` is exactly `words.par_iter().map(|w| self.lookup(w)).collect()`,
-a thin wrapper over the same sequential `lookup`, not a second search
-implementation. Enable it with the crate's `parallel` Cargo feature.
-
-Measured on `benches/wordnet.rs`'s own `par_lookup_batch` group
-(`Storage::Resident`, 32 hardware threads, the same 16-word mix
-`bench_repeat` uses, repeated out to each size), sequential vs. parallel:
+Measured on `benches/wordnet.rs`'s `par_lookup_batch` group (`Storage::Resident`,
+32 hardware threads, the same 16-word mix repeated out to each size):
 
 | Batch size | Sequential | Parallel | Speedup |
 |--:|--:|--:|--:|
@@ -566,101 +266,30 @@ Measured on `benches/wordnet.rs`'s own `par_lookup_batch` group
 | 160 | 7.03 ms | 2.10 ms | ~3.3× |
 | 1600 | 100.2 ms | 24.95 ms | ~4.0× |
 
-A batch of 16 common words sits close to the break-even point: a `rayon` task
-costs on the order of a microsecond to schedule, which is comparable to a
-single lookup's own cost (~5.7–6.9 µs for a common entry like `entity`, up to
-~150–206 µs for a high-sense-count word like `run`). Prefer a plain
-`.iter().map(WordNet::lookup)` loop at that scale; from a few hundred words up
-the scheduling cost amortises and the win is real — see
-[Parallelism](../performance/parallelism) for the same reasoning applied
-workspace-wide.
+A batch of 16 common words sits close to break-even: a `rayon` task costs about a
+microsecond to schedule, comparable to a single lookup's own cost (~5.7–6.9 µs
+for a common entry like `entity`, up to ~150–206 µs for a high-sense-count word
+like `run`). Prefer a plain `.iter().map(WordNet::lookup)` loop at that scale;
+from a few hundred words up, the win is real. See
+[Parallelism](../performance/parallelism).
 
 ```rust  ignore
-use verbora_wordnet::WordNet;
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let wn = WordNet::open("node_modules/wordnet-db/dict")?;
-    let results = wn.par_lookup_batch(&["run", "entity", "zzzzz"]);
-    for r in results {
-        match r {
-            Ok(synsets) => println!("{} senses", synsets.len()),
-            Err(e) => println!("lookup failed: {e}"),
-        }
+let results = wn.par_lookup_batch(&["run", "entity", "zzzzz"]);
+for r in results {
+    match r {
+        Ok(synsets) => println!("{} senses", synsets.len()),
+        Err(e) => println!("lookup failed: {e}"),
     }
-    Ok(())
 }
 ```
 
-### `lookup_iter` <a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a>
+## Result order is reversed
 
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Lazy — one index probe and one data-file line read per item actually yielded</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>LookupIter&lt;'_&gt;</code> → <code>Result&lt;DataRecord&gt;</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>DataRecord</code> per synset actually read; nothing for the parts of speech that come back empty or are never reached</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v"><code>.take(n)</code>, an existence check, or any early exit</span></div>
-</div>
-
-An error is sticky: once one lookup fails, the iterator returns `None` on
-every later `next()` rather than re-reporting the same failure forever.
-
-### `pointers` / `relation` <a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Lazy — one data-file read per pointer actually followed, draining the pointer list from the back</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Pointers&lt;'_&gt;</code> → <code>Result&lt;DataRecord&gt;</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>DataRecord</code> per hop followed; <code>relation</code>'s filtering costs a symbol comparison, not an allocation, for every hop it skips</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">One hop of the graph, using the pointers already on a record you have in hand</span></div>
-</div>
-
-### `closure` <a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Lazy, breadth-first — one data-file read per synset actually visited</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Closure&lt;'_&gt;</code> → <code>Result&lt;DataRecord&gt;</code>; the starting record itself is never yielded</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>DataRecord</code> per synset visited, plus a <code>VecDeque&lt;Pointer&gt;</code> work queue and a <code>Vec&lt;u64&gt;</code> of visited offsets, both bounded by the reachable subgraph</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Climbing a hypernym chain to its root, or any question that needs the whole transitive closure of one relation</span></div>
-</div>
-
-Cycle-safe: an offset already emitted is never queued again, tracked as the
-bit pattern of the `f64` offset so a `NaN` offset — reachable from a malformed
-record — compares by identity rather than by IEEE 754's "`NaN` never equals
-anything", which would otherwise defeat the cycle check.
-
-### `get_synonyms_of` <a class="badge badge-owned" href="../performance/allocation">OWNED</a> <span class="badge badge-fallible">FALLIBLE</span>
-
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager — re-reads the starting synset from disk by offset and tag, then follows every pointer on <strong>that</strong> read</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v">Owned <code>Vec&lt;DataRecord&gt;</code></span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One re-read <code>DataRecord</code> plus one per pointer followed</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Reproducing <code>getSynonyms(record, cb)</code> exactly, re-read included</span></div>
-</div>
-
-The re-read is not an oversight to optimise away — it is deliberate, so a
-record you mutated after reading it is not what gets followed. Reach for
-`pointers` instead when you want the pointers already in hand.
-
-### Result order is defined by a bug
-
-Every recursive traversal in this crate walks its work list with `pop()`, so
-results come back backwards at two levels: the parts of speech are consulted
-in the order **adv, adj, verb, noun** — the reverse of the `[noun, verb, adj,
-adv]` array the search starts from — and within one part of speech, the
-index line's offsets are visited **last to first**. `lookup("fast")` therefore
-yields `r:86892 r:86488 s:324771 … n:1071904` against the real database. This
-order is not incidental: it is pinned by value in the crate's own test suite,
-so it cannot silently drift between releases.
-
-The following builds a small two-part-of-speech dictionary — one verb sense
-and two noun senses sharing the lemma `"x"` — to make both reversals visible
-without the real database:
+Every traversal drains its work list from the back, so results arrive reversed at
+two levels: parts of speech are consulted **adv, adj, verb, noun**, and within one
+part of speech the index line's offsets are visited **last to first**.
+`lookup("fast")` therefore yields `r:86892 r:86488 s:324771 … n:1071904` against
+the real database. The order is pinned by value in the crate's test suite.
 
 ```rust
 use verbora_wordnet::WordNet;
@@ -697,8 +326,8 @@ fn main() {
     let dir = multi_pos_dict();
     let wn = WordNet::open(&dir).unwrap();
 
-    // Verb before noun (the reversed [noun, verb, adj, adv] order), and within
-    // noun, sense B (the SECOND offset on the index line) before sense A.
+    // Verb before noun, and within noun, sense B (the SECOND offset on the
+    // index line) before sense A.
     let defs: Vec<String> = wn
         .lookup("x")
         .unwrap()
@@ -707,8 +336,8 @@ fn main() {
         .collect();
     assert_eq!(defs, ["verb sense", "noun sense B", "noun sense A"]);
 
-    // lookup_iter is lazy: the FIRST result costs exactly one line read, and
-    // it is the verb sense — reading it never touches data.noun at all.
+    // lookup_iter is lazy: the FIRST result costs exactly one line read, and it
+    // is the verb sense — reading it never touches data.noun at all.
     let first: Vec<String> = wn
         .lookup_iter("x")
         .take(1)
@@ -716,189 +345,33 @@ fn main() {
         .collect();
     assert_eq!(first, ["verb sense"]);
 
-    std::fs::remove_dir_all(&dir).ok();
-}
-```
-
-### `closure` walks past what `relation` can see
-
-```rust
-use verbora_wordnet::{WordNet, pointer};
-
-fn chain_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-closure-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // alpha --hypernym--> beta --hypernym--> gamma
-    let rec_gamma = "00000000 06 n 01 gamma 0 000 | top  \n".to_string();
-    let beta_off = rec_gamma.len();
-    let rec_beta = format!("{beta_off:08} 06 n 01 beta 0 001 @ 00000000 n 0000 | middle  \n");
-    let alpha_off = rec_gamma.len() + rec_beta.len();
-    let rec_alpha =
-        format!("{alpha_off:08} 06 n 01 alpha 0 001 @ {beta_off:08} n 0000 | bottom  \n");
-    let data = format!("{rec_gamma}{rec_beta}{rec_alpha}");
-    let index = format!(
-        "alpha n 1 0 1 0 {alpha_off:08}  \nbeta n 1 0 1 0 {beta_off:08}  \ngamma n 1 0 1 0 00000000  \n"
-    );
-
-    for pos in ["noun", "verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), &index).unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), &data).unwrap();
-    }
-    dir
-}
-
-fn main() {
-    let dir = chain_dict();
-    let wn = WordNet::open(&dir).unwrap();
-    let alpha_offset = wn.lookup("alpha").unwrap()[0].synset_offset;
-    let alpha = wn.get(alpha_offset, "n").unwrap();
-
-    // One hop: only "middle".
-    let one_hop: Vec<String> = wn
-        .relation(&alpha, pointer::HYPERNYM)
-        .map(|r| r.unwrap().def.trim_end().to_owned())
-        .collect();
-    assert_eq!(one_hop, ["middle"]);
-
-    // The whole chain: "middle" AND "top", walked lazily, one read at a time.
-    let whole_chain: Vec<String> = wn
-        .closure(&alpha, pointer::HYPERNYM)
-        .map(|r| r.unwrap().def.trim_end().to_owned())
-        .collect();
-    assert_eq!(whole_chain, ["middle", "top"]);
+    // Sense NUMBERS run forwards over the index line, the opposite direction.
+    assert_eq!(wn.find_sense("x#n#1").unwrap().unwrap().def.trim_end(), "noun sense A");
+    let senses: Vec<String> =
+        wn.query_sense("x#n").unwrap().iter().map(|s| s.to_string()).collect();
+    assert_eq!(senses, ["x#n#1", "x#n#2"]);
 
     std::fs::remove_dir_all(&dir).ok();
 }
 ```
 
-Against the real database, this is exactly the shape of climbing from a
-specific noun sense up to `entity` — shown in the crate's own doctest, `no_run`
-here because it needs the real dictionary:
+<div class="callout callout-warn">
+<strong>Careful.</strong> Sense numbers run <strong>forwards</strong> over the
+index line's own order — sense 1 is the first offset written on the line — which
+is the <strong>opposite</strong> of the order <code>lookup</code> yields for that
+part of speech. Numbering results as <code>lookup</code> hands them to you would
+number every word backwards. Use <code>query_sense</code> /
+<code>find_sense</code>, which parse and resolve a <code>lemma#pos[#n]</code>
+string, rather than the position a synset arrives in.
+</div>
 
-```rust no_run
-use verbora_wordnet::{WordNet, pointer};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let wn = WordNet::open("node_modules/wordnet-db/dict")?;
-    let node = wn.get(3_832_647.0, "n")?;
-    for parent in wn.closure(&node, pointer::HYPERNYM).take(5) {
-        println!("^ {}", parent?.def);
-    }
-    Ok(())
-}
-```
-
-## Advanced usage
-
-### Concurrency
-
-`WordNet`, `IndexFile` and `DataFile` are immutable after construction
-and `Send + Sync`. Nothing is cached per query and nothing is locked, so any
-number of threads can query one shared dictionary concurrently with no
-coordination:
-
-```rust
-use verbora_wordnet::WordNet;
-use std::sync::Arc;
-
-fn tiny_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-concurrency-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let index = "aaa n 1 0 1 0 00000000  \nbbb n 2 1 @ 2 0 00000000 00000083  \nccc n 1 0 1 0 00000083  \n";
-    let data = "00000000 06 n 01 alpha 0 001 @ 00000083 n 0000 | the first letter; \"as in alpha\"  \n00000083 06 n 02 beta 0 second 1 000 | the second letter  \n";
-    for pos in ["noun", "verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), index).unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), data).unwrap();
-    }
-    dir
-}
-
-fn main() {
-    fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<WordNet>();
-
-    let dir = tiny_dict();
-    let wn = Arc::new(WordNet::open(&dir).unwrap());
-    let expected = wn.lookup("bbb").unwrap();
-
-    let handles: Vec<_> = (0..8)
-        .map(|_| {
-            let wn = Arc::clone(&wn);
-            let expected = expected.clone();
-            std::thread::spawn(move || {
-                for _ in 0..20 {
-                    assert_eq!(wn.lookup("bbb").unwrap(), expected);
-                }
-            })
-        })
-        .collect();
-    for h in handles {
-        h.join().unwrap();
-    }
-    std::fs::remove_dir_all(&dir).ok();
-}
-```
-
-This is the same "share one `Arc`, fan out read-only queries" pattern
-[Parallelism](../performance/parallelism) describes for `Trie`: build or open
-the dictionary once, wrap it in an `Arc`, and drive queries from as many
-threads as you like — with your own `rayon` parallel iterator over any
-traversal shown above, or with [`par_lookup_batch`](#par-lookup-batch) for the
-one traversal (`lookup`) that ships a built-in fan-out behind the `parallel`
-Cargo feature.
-
-### Why there is no `mmap` backend
-
-`Storage` offers four strategies and deliberately no fifth, memory-mapped
-one. `mmap` cannot be reached from safe Rust without an extra dependency
-(`memmap2`) or `unsafe` code, and this workspace admits neither — no
-`unsafe_code` anywhere in the crate, and no dependency outside the curated
-`[workspace.dependencies]` list. `Storage::LazyResident` is offered
-specifically to cover the case `mmap` is usually reached for: near-zero
-startup, in-memory cost once a file is touched — at the honest cost of paying
-for the whole file the first time any part of it is read, rather than the
-kernel paging it in on demand.
-
-## Deliberate divergences <span class="badge badge-fallible">FALLIBLE</span>
-
-Every method that reaches malformed or unusual on-disk data returns a
-specific `Error` variant instead of panicking, hanging, or looping
-unboundedly — each one exercised by the fixture, so the mapping between
-condition and error cannot drift silently:
-
-| Condition | Result |
-|---|---|
-| An unopenable dictionary file | `Error::Io`, reported at open rather than at the first query |
-| An offset that lands past EOF | `Error::UnterminatedLine` |
-| A record with no `'\| '` gloss separator | `Error::MissingGloss` |
-| An absurdly large word or pointer count | `Error::CountTooLarge`, refused beyond `numfmt::MAX_COUNT` |
-| A dictionary file's length | recorded once, at open — a file that changes size mid-session does not change the search path |
-| A dictionary file's descriptor | held once (or not at all, for `Storage::Resident`) for the process lifetime, not opened and closed per operation |
-| A negative probe position | `Error::NegativeProbe` — verified unreachable across all 147,580 keys the fixture exercises, but reported rather than silently clamped |
-
-Two more divergences are forced by the type system rather than chosen:
-
-- **`lookup(123)` cannot be written.** The parameter type is `&str`, so
-  passing anything else is a compile error rather than a runtime failure.
-- **Two calling conventions become two named methods** — see
-  [`get_synonyms` vs `get_synonyms_of`](#the-core-api-surface) above.
-
-### The index search is deliberately incomplete
+## The index search is incomplete
 
 `IndexFile::find` bisects **byte positions**, not lines. Each probe snaps
-backwards to the start of the line it landed in, compares that line's first
-token to the search key, and halves the step — and because the snap-back
-changes which line a position denotes, the invariant a binary search needs does
-not hold. Measured against the shipped WordNet 3.1 database:
+backwards to the start of the line it landed in, compares that line's first token
+to the search key, and halves the step — and because the snap-back changes which
+line a position denotes, the invariant a binary search needs does not hold.
+Measured against the shipped WordNet 3.1 database:
 
 | File | Lemmas | Reported missing |
 |---|---:|---:|
@@ -907,107 +380,140 @@ not hold. Measured against the shipped WordNet 3.1 database:
 | `index.adj` | 21,499 | 117 |
 | `index.noun` | 117,953 | 624 |
 
-`index.verb` misses the **entire head of the file** — `aah`, `abandon`,
-`abase`, `abate` are all reported missing — and `awful`, `safely`, `such`,
-`bitter` and `firm` are adverbs this search cannot find. This is not a
-subtle inefficiency to route around; a search that finds every lemma is a
-*different program*, and the crate's own test suite asserts results that
-depend on the incomplete one. Keeping this search exactly as specified — not
-"fixing" it — is the single highest-value correctness requirement in this
-crate.
+`index.verb` misses the **entire head of the file** — `aah`, `abandon`, `abase`,
+`abate` are all reported missing — and `awful`, `safely`, `such`, `bitter` and
+`firm` are adverbs this search cannot find. The probe sequence is pinned by the
+test suite, so which lemmas are reachable is stable and reproducible. Treat a miss
+as "this search could not reach the word", never as "the word is absent"; if you
+need guaranteed coverage, scan the index file yourself or keep your own lemma
+list.
+
+## Concurrency
+
+`WordNet`, `IndexFile` and `DataFile` are immutable after construction and
+`Send + Sync`. Nothing is cached per query and nothing is locked, so any number
+of threads can query one shared dictionary concurrently with no coordination:
+
+```rust no_run
+use std::sync::Arc;
+use verbora_wordnet::WordNet;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let wn = Arc::new(WordNet::open("/path/to/wordnet/dict")?);
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let wn = Arc::clone(&wn);
+            std::thread::spawn(move || wn.lookup("entity").unwrap().len())
+        })
+        .collect();
+    for h in handles {
+        println!("{} senses", h.join().unwrap());
+    }
+    Ok(())
+}
+```
+
+This is the same "share one `Arc`, fan out read-only queries" pattern
+[Parallelism](../performance/parallelism) describes: open the dictionary once,
+wrap it in an `Arc`, and drive queries from as many threads as you like — with
+your own `rayon` iterator over any traversal above, or with
+[`par_lookup_batch`](#par-lookup-batch) for the one that ships a built-in
+fan-out.
+
+## Error behaviour <span class="badge badge-fallible">FALLIBLE</span>
+
+Every method that reaches malformed or unusual on-disk data returns a specific
+`Error` variant instead of panicking, hanging, or looping unboundedly:
+
+| Condition | Result |
+|---|---|
+| An unopenable dictionary file | `Error::Io`, at open rather than at the first query |
+| An offset that lands past EOF | `Error::UnterminatedLine` |
+| A record with no `'\| '` gloss separator | `Error::MissingGloss` |
+| An absurdly large word or pointer count | `Error::CountTooLarge`, refused beyond `numfmt::MAX_COUNT` |
+| A part-of-speech tag that is not `n`/`v`/`a`/`s`/`r` | `Error::UnknownPos` — case-sensitive, no `"noun"`, no default |
+| A negative probe position | `Error::NegativeProbe` — verified unreachable across all 147,580 keys the fixture exercises, but reported rather than silently clamped |
+
+A file's length is recorded once at open, so a file that changes size mid-session
+does not change the search path; descriptors are held for the process lifetime
+(or not at all, for `Storage::Resident`) rather than opened per operation.
+
+## Allocation behaviour
+
+- **At open.** `Resident` and `Indexed` each read the whole file into one
+  `Box<[u8]>` per file (eight files); `Indexed` adds one `u32` per line. `Pread`
+  and `LazyResident` allocate nothing beyond the `File` handles —
+  `LazyResident`'s buffer is allocated the first time that file is queried.
+- **Per query, eager.** `get` and `lookup` return owned `DataRecord`s: one
+  `String` per textual field, one `Vec` each for `synonyms`, `ptrs` and `exp`.
+- **Per query, borrowed** <a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>**.**
+  `DataFile::with_record` hands a `DataRecordRef` to a closure instead: every
+  string field except the cleaned examples is a subslice of the line being
+  parsed, so reading a synset allocates only for examples containing a quote or a
+  whitespace run needing cleanup. This is the primitive `DataFile::get` is built
+  on.
+- **Traversal.** `pointers` and `relation` allocate nothing beyond the
+  `DataRecord` each hop reads. `closure` adds a `VecDeque<Pointer>` queue and a
+  `Vec<u64>` of visited offsets, both bounded by the reachable subgraph.
+- **`IndexFile::find`.** Each probe allocates one `String` for the line it reads
+  (or reuses a scratch buffer on the positioned-read backends); nothing is
+  retained but the winning line.
+
+There is no `_into` variant and no caller-supplied output buffer anywhere in this
+crate. See [Allocation](../performance/allocation) and
+[Zero-copy](../performance/zero-copy).
 
 ## Performance characteristics
 
 `crates/verbora-wordnet/benches/wordnet.rs` is a Criterion suite comparing the
-four `Storage` strategies against each other across five dimensions:
-
-| Group | Question |
-|---|---|
-| `open` | startup cost — what a one-shot process pays before its first answer |
-| `cold` | open plus one lookup — the honest cost of a single query |
-| `lookup` | steady-state per-query latency on a warm dictionary |
-| `repeat` | throughput over a realistic word list |
-| `footprint` | resident bytes per strategy, reported as a `Throughput` so it lands in the report |
-
-These benches need the real, separately licensed database and skip cleanly
-when `$WORDNET_DB_PATH` is unset, rather than failing a build over a missing
-licensed asset.
-
-<div class="callout callout-note">
-<strong>Not yet benchmarked against another implementation.</strong> Unlike
-<code>verbora-distance</code>, there is currently no recorded baseline or
-joined comparison table for WordNet access. See
-<a href="../benchmarks/index">Benchmarks</a> for what has and has not been
-measured across the workspace, and reproduce the in-tree numbers yourself with
-<code>cargo bench -p verbora-wordnet</code> against an installed dictionary.
-</div>
-
-## Allocation behaviour
-
-**At open.** `Storage::Resident` and `Storage::Indexed` each read the whole
-file into one `Box<[u8]>` per file (eight files total); `Storage::Indexed`
-additionally allocates one `u32` per line. `Storage::Pread` and
-`Storage::LazyResident` allocate nothing at open beyond the `File` handles
-themselves — `LazyResident`'s `Box<[u8]>` is allocated lazily, the first time
-that file is actually queried.
-
-**Per query, on the eager path.** `WordNet::get` and `WordNet::lookup`
-return owned `DataRecord`s: one `String` (or `Option<String>`) per textual
-field, one `Vec` for `synonyms`, one for `ptrs`, one for `exp`. A synset with
-many synonyms and pointers — `run` has senses with a dozen or more of each —
-allocates proportionally.
-
-**Per query, on the borrowed path** <a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>**.**
-`DataFile::with_record` hands a
-`DataRecordRef` to a closure instead: every string field except the cleaned
-examples is a subslice of the line being parsed, so reading a synset allocates
-**only** for the examples that actually contain a quote or a whitespace run
-needing cleanup. This is the primitive `DataFile::get` is built on.
-
-**Relation traversal.** `WordNet::pointers` and `relation` allocate nothing
-of their own beyond the `DataRecord` each hop reads — they borrow the pointer
-slice already on your record. `WordNet::closure` additionally carries a
-`VecDeque<Pointer>` work queue and a `Vec<u64>` of visited offsets, both
-growing with the size of the reachable subgraph rather than the whole
-dictionary.
-
-**`IndexFile::find`.** Each probe allocates one `String` for the line it reads
-(or reuses a `scratch: Vec<u8>` on the positioned-read backends); nothing is
-retained once the bisection stops, aside from the winning line.
-
-There is no `_into` variant and no caller-supplied output buffer anywhere in
-this crate. See [Allocation](../performance/allocation) and
-[Zero-copy](../performance/zero-copy).
+four `Storage` strategies across five dimensions: `open` (startup cost), `cold`
+(open plus one lookup), `lookup` (steady-state per-query latency), `repeat`
+(throughput over a realistic word list) and `footprint` (resident bytes). These
+benches need the real database and skip cleanly when `$WORDNET_DB_PATH` is unset.
+Reproduce with `cargo bench -p verbora-wordnet`; see
+[Benchmarks](../benchmarks/index) for results across the workspace.
 
 ## Unicode and language notes
 
 - **String comparison during the bisection is UTF-16 code-unit order**
-  <span class="badge badge-utf16">UTF-16</span>
-  (`whitespace::value_lt`), not Rust's UTF-8 byte `Ord`. The two disagree for
-  supplementary-plane characters, which decides which way a probe turns.
+  <span class="badge badge-utf16">UTF-16</span> (`whitespace::value_lt`), not
+  Rust's UTF-8 byte `Ord`. The two disagree for supplementary-plane characters,
+  which decides which way a probe turns.
 - **Lookup normalisation is full Unicode lowercasing**, not
   `str::to_ascii_lowercase`: `'İSTANBUL'` lowercases to nine code units from
-  eight, and `'ΟΔΟΣ'` produces a final sigma. Whitespace runs — a Unicode set
-  that is not Rust's `char::is_whitespace` (it excludes U+0085 and includes
-  U+FEFF) — collapse to a single `_`, so `"  entity  "` becomes `"_entity_"`,
-  which then misses.
+  eight, and `'ΟΔΟΣ'` produces a final sigma. Whitespace runs — a set that
+  excludes U+0085 and includes U+FEFF — collapse to a single `_`, so
+  `"  entity  "` becomes `"_entity_"`, which then misses.
 - **Line splitting on `/\s+/` keeps empty edge fields**, which is what makes
-  `find("")` a hit on a WordNet licence-header line: the header starts with
-  two spaces, so its first token is `""`.
+  `find("")` a hit on a licence-header line: the header starts with two spaces,
+  so its first token is `""`.
 - **Decoding is lossy, not fallible.** A line's bytes are converted with
-  `String::from_utf8_lossy`, substituting U+FFFD for invalid bytes rather
-  than erroring.
-- **Path handling follows Node's `path.join` semantics** for the paths this
-  crate reports back (`IndexFile::file_path`, `DataFile::file_path`),
-  including normalising `.`, `..` and duplicate separators — plain
+  `String::from_utf8_lossy`, substituting U+FFFD for invalid bytes.
+- **Reported paths are normalised.** `IndexFile::file_path` and
+  `DataFile::file_path` collapse `.`, `..` and duplicate separators, which plain
   [`Path::join`](https://doc.rust-lang.org/std/path/struct.Path.html#method.join)
   does not.
 
 ## Common mistakes
 
-**Assuming the database ships with the crate, or with any Verbora crate.** It
-does not, ever. `WordNet::open` on a missing directory fails immediately with
-`Error::Io` — no partial dictionary, no silent stall:
+- **Assuming the database ships with the crate.** It does not, ever.
+  `WordNet::open` on a missing directory fails immediately with `Error::Io` — no
+  partial dictionary, no silent stall.
+- **Passing a `Pos` name instead of its one-letter tag.** `get` and
+  `get_synonyms` take `"n"`, `"v"`, `"a"`, `"s"` or `"r"`; `"noun"` and `"N"`
+  both return `Error::UnknownPos`. `get_at` takes a typed `Pos` and cannot fail
+  to resolve one.
+- **Treating a miss as proof the word is not in the database.** The bisection is
+  incomplete by construction — see
+  [The index search is incomplete](#the-index-search-is-incomplete).
+- **Expecting `lookup` or `get_synonyms` to follow the index line's order.** Both
+  reverse it; number senses with `query_sense`, not by arrival position.
+- **Expecting `get_synonyms_of` to reuse your record's own pointers.** It re-reads
+  the synset from disk. Use `pointers` for the value in hand.
+- **Mixing up `get`'s two error paths.** `Error::UnknownPos` means the *tag* was
+  wrong; `Error::MissingGloss` and `Error::UnterminatedLine` mean the tag resolved
+  but the *offset* landed somewhere that is not a well-formed record start.
 
 ```rust
 use verbora_wordnet::{Error, WordNet};
@@ -1017,92 +523,28 @@ fn main() {
 }
 ```
 
-**Passing a `Pos` name instead of its one-letter tag.** `WordNet::get` and
-`WordNet::get_synonyms` take `"n"`, `"v"`, `"a"`, `"s"` or `"r"` — matching
-is case-sensitive and there is no `"noun"`, `"N"`, or default:
-
-```rust
-use verbora_wordnet::{Error, WordNet};
-
-fn tiny_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-postag-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let index = "aaa n 1 0 1 0 00000000  \n";
-    let data = "00000000 06 n 01 alpha 0 000 | the first letter  \n";
-    for pos in ["noun", "verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), index).unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), data).unwrap();
-    }
-    dir
-}
-
-fn main() {
-    let dir = tiny_dict();
-    let wn = WordNet::open(&dir).unwrap();
-    assert!(matches!(wn.get(0.0, "noun"), Err(Error::UnknownPos(_))));
-    assert!(matches!(wn.get(0.0, "N"), Err(Error::UnknownPos(_))));
-    assert!(wn.get(0.0, "n").is_ok());
-    std::fs::remove_dir_all(&dir).ok();
-}
-```
-
-**Treating a "miss" from `lookup`/`find` as proof the word is not in the
-database.** The bisection is incomplete by construction — see
-[The index search is deliberately incomplete](#the-index-search-is-deliberately-incomplete).
-A miss means only that this search could not reach the word, which is not the
-same claim as "not present".
-
-**Expecting `lookup` or `get_synonyms` to come back in the order the index
-line lists.** Both reverse it — see
-[Result order is defined by a bug](#result-order-is-defined-by-a-bug). Number
-senses with `WordNet::query_sense` instead of the position a synset arrives
-in from `lookup`.
-
-**Calling `get_synonyms_of` and expecting it to reuse your record's own
-pointers.** It re-reads the synset from disk by offset and tag, exactly as the
-reference does, so a record you built or mutated yourself is not what gets
-followed. Use `WordNet::pointers` when you want to follow the pointers
-already on the value in hand.
-
-**Mixing up `WordNet::get`'s two error paths.** `Error::UnknownPos` means the
-*tag* was not one of `n`/`v`/`a`/`s`/`r`; `Error::MissingGloss` and
-`Error::UnterminatedLine` mean the tag resolved fine but the *offset* landed
-somewhere that is not a well-formed record start. Both are reachable from
-ordinary-looking mistakes — a hand-typed offset, or an offset copied from the
-wrong file's dictionary.
-
 ## Related
 
-- [Choosing an API](../choosing/index) — the cross-crate version of the
-  decision trees on this page.
-- [Parallelism](../performance/parallelism) — the shared, `Arc`-wrapped,
-  read-only-query pattern this page reuses from `Trie`.
+- [Inflectors](./inflectors) — normalise a word to a headword before looking it
+  up here.
 - [Iterator vs. `_into`](../performance/iterator-vs-into) — the lazy/eager
   distinction behind `lookup` vs. `lookup_iter` and `relation` vs. `closure`.
+- [Parallelism](../performance/parallelism) — the shared, `Arc`-wrapped,
+  read-only-query pattern this page reuses.
 - [Allocation](../performance/allocation) and
   [Zero-copy](../performance/zero-copy) — what "borrowed" means for
   `DataRecordRef`.
-  way it does.
-- [Benchmarks](../benchmarks/index) — what has and has not been measured.
-- [Inflectors](./inflectors) — normalise a word to a headword before looking
-  it up here.
-- [Core traits](./core) — the shared vocabulary the rest of the workspace uses.
-- [Recipes](../recipes/index) — end-to-end pipelines.
+- [Choosing an API](../choosing/index), [Core traits](./core),
+  [Benchmarks](../benchmarks/index), [Recipes](../recipes/index).
 
 ## API reference
 
-Everything the crate exports:
-
 ```rust ignore
 // verbora_wordnet
-pub struct WordNet { /* private */ }
 pub struct Config { pub storage: Storage, pub prebuilt: Option<PathBuf> }
-pub struct FilePair<'a> { pub index: &'a IndexFile, pub data: &'a DataFile }
+pub enum Storage { Pread, LazyResident, Resident /* default */, Indexed }
 pub enum Pos { Noun, Verb, Adj, Adv }
+pub struct FilePair<'a> { pub index: &'a IndexFile, pub data: &'a DataFile }
 
 impl WordNet {
     pub fn open(dict_dir: impl AsRef<Path>) -> Result<Self>;
@@ -1119,8 +561,6 @@ impl WordNet {
 
     pub fn lookup(&self, word: &str) -> Result<Vec<DataRecord>>;
     pub fn lookup_iter<'a>(&'a self, word: &str) -> LookupIter<'a>;
-    pub fn lookup_from_files(&self, files: &mut Vec<FilePair<'_>>, results: &mut Vec<DataRecord>, word: &str) -> Result<()>;
-    pub fn push_results(&self, data: &DataFile, results: &mut Vec<DataRecord>, offsets: &mut Vec<f64>) -> Result<()>;
 
     pub fn get(&self, synset_offset: f64, tag: &str) -> Result<DataRecord>;
     pub fn get_at(&self, synset_offset: f64, pos: Pos) -> Result<DataRecord>;
@@ -1128,8 +568,6 @@ impl WordNet {
     pub fn lookup_synonyms(&self, word: &str) -> Result<Vec<DataRecord>>;
     pub fn get_synonyms(&self, synset_offset: f64, tag: &str) -> Result<Vec<DataRecord>>;
     pub fn get_synonyms_of(&self, record: &DataRecord) -> Result<Vec<DataRecord>>;
-    pub fn load_synonyms(&self, synonyms: &mut Vec<DataRecord>, results: &mut Vec<DataRecord>, ptrs: &mut Vec<Pointer>) -> Result<()>;
-    pub fn load_result_synonyms(&self, synonyms: &mut Vec<DataRecord>, results: &mut Vec<DataRecord>) -> Result<()>;
 
     pub fn pointers<'a>(&'a self, record: &'a DataRecord) -> Pointers<'a>;
     pub fn relation<'a>(&'a self, record: &'a DataRecord, symbol: &'a str) -> Pointers<'a>;
@@ -1138,7 +576,6 @@ impl WordNet {
     // requires the `parallel` Cargo feature
     pub fn par_lookup_batch(&self, words: &[&str]) -> Vec<Result<Vec<DataRecord>>>;
 
-    // sense.rs — extensions with no reference counterpart
     pub fn query_sense(&self, spec: &str) -> Result<Vec<Sense>>;
     pub fn find_sense(&self, spec: &str) -> Result<Option<DataRecord>>;
 }
@@ -1154,8 +591,7 @@ impl Iterator for LookupIter<'_> { type Item = Result<DataRecord>; }
 impl Iterator for Pointers<'_>   { type Item = Result<DataRecord>; }
 impl Iterator for Closure<'_>    { type Item = Result<DataRecord>; }
 
-// data_file
-pub struct DataFile { /* private */ }
+// records
 pub struct DataRecord { pub synset_offset: f64, pub lex_filenum: f64, pub pos: Option<String>,
     pub w_cnt: f64, pub lemma: Option<String>, pub synonyms: Vec<Option<String>>,
     pub lex_id: Option<String>, pub ptrs: Vec<Pointer>, pub gloss: String, pub def: String,
@@ -1163,61 +599,36 @@ pub struct DataRecord { pub synset_offset: f64, pub lex_filenum: f64, pub pos: O
 pub struct DataRecordRef<'a> { /* borrowed mirror of DataRecord */ }
 pub struct Pointer { pub pointer_symbol: Option<String>, pub synset_offset: f64,
     pub pos: Option<String>, pub source_target: Option<String> }
-pub struct PointerRef<'a> { /* borrowed mirror of Pointer */ }
+pub struct IndexRecord { pub lemma: Option<String>, pub pos: Option<String>,
+    pub ptr_symbol: Vec<Option<String>>, pub sense_cnt: f64, pub tagsense_cnt: f64,
+    pub synset_offset: Vec<f64> }
+pub enum Find { Hit(IndexHit), Miss }
 
 impl DataFile {
     pub fn open(dict_dir: &Path, name: &str, storage: Storage) -> Result<Self>;
     pub fn file_path(&self) -> &str;
     pub fn path(&self) -> PathBuf;
-    pub fn source(&self) -> &Source;
     pub fn with_record<R>(&self, offset: f64, f: impl FnOnce(&DataRecordRef<'_>) -> R) -> Result<R>;
     pub fn get(&self, offset: f64) -> Result<DataRecord>;
 }
-pub fn parse_data_line(line: &str) -> std::result::Result<DataRecordRef<'_>, ParseError>;
-
-// index_file
-pub struct IndexFile { /* private */ }
-pub enum Find { Hit(IndexHit), Miss }
-pub struct IndexHit { /* private */ }
-pub struct IndexRecord { pub lemma: Option<String>, pub pos: Option<String>,
-    pub ptr_symbol: Vec<Option<String>>, pub sense_cnt: f64, pub tagsense_cnt: f64,
-    pub synset_offset: Vec<f64> }
-pub struct Probe { pub position: i64, pub adjustment: i64, pub key: String }
-pub struct Probes<'a> { /* private */ }
-
 impl IndexFile {
     pub fn open(dict_dir: &Path, name: &str, storage: Storage) -> Result<Self>;
     pub fn file_path(&self) -> &str;
     pub fn path(&self) -> PathBuf;
-    pub fn source(&self) -> &Source;
     pub fn probes<'a>(&'a self, search_key: &'a str) -> Probes<'a>;
     pub fn find(&self, search_key: &str) -> Result<Find>;
     pub fn lookup(&self, word: &str) -> Result<Option<IndexRecord>>;
 }
+pub fn parse_data_line(line: &str) -> std::result::Result<DataRecordRef<'_>, ParseError>;
 pub fn parse_index_line(line: &str) -> Result<IndexRecord>;
 
-// source
-pub enum Storage { Pread, LazyResident, Resident /* default */, Indexed }
-pub struct Source { /* private */ }
-impl Source {
-    pub fn open(path: &Path, storage: Storage) -> Result<Self>;
-    pub fn len(&self) -> u64;
-    pub fn is_empty(&self) -> bool;
-    pub fn path(&self) -> &Path;
-    pub fn line_starts(&self) -> Option<&[u32]>;
-    pub fn prev_eol(&self, pos: i64) -> Result<u64>;
-    pub fn line_at<'a>(&'a self, start: u64, scratch: &'a mut Vec<u8>) -> Result<&'a [u8]>;
-}
-pub fn build_line_starts(bytes: &[u8]) -> Box<[u32]>;
-
 // prebuilt
-pub struct PrebuiltIndex { /* private */ }
 impl PrebuiltIndex {
     pub fn build(dict_dir: impl AsRef<Path>) -> Result<Self>;
-    pub fn to_bytes(&self) -> Vec<u8>;
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self>;
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()>;
     pub fn load(path: impl AsRef<Path>) -> Result<Self>;
+    pub fn to_bytes(&self) -> Vec<u8>;
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self>;
     pub fn source_for(&self, name: &str, path: &Path) -> Result<Source>;
     pub fn names(&self) -> Vec<&str>;
     pub fn line_count(&self) -> usize;
@@ -1227,20 +638,15 @@ impl PrebuiltIndex {
 
 // sense
 pub struct Sense { pub lemma: String, pub pos: Pos, pub number: Option<usize> }
-pub struct ParseSenseError(/* private */);
 impl std::str::FromStr for Sense { type Err = ParseSenseError; }
 impl std::fmt::Display for Sense { /* "lemma#pos[#n]" */ }
 
-// pointer — relation-symbol constants and their descriptions
-pub const ANTONYM: &str; pub const HYPERNYM: &str; pub const INSTANCE_HYPERNYM: &str;
-pub const HYPONYM: &str; pub const INSTANCE_HYPONYM: &str; pub const MEMBER_HOLONYM: &str;
-pub const SUBSTANCE_HOLONYM: &str; pub const PART_HOLONYM: &str; pub const MEMBER_MERONYM: &str;
-pub const SUBSTANCE_MERONYM: &str; pub const PART_MERONYM: &str; pub const ATTRIBUTE: &str;
-pub const DERIVATIONALLY_RELATED: &str; pub const DOMAIN_TOPIC: &str; pub const MEMBER_TOPIC: &str;
-pub const DOMAIN_REGION: &str; pub const MEMBER_REGION: &str; pub const DOMAIN_USAGE: &str;
-pub const MEMBER_USAGE: &str; pub const ENTAILMENT: &str; pub const CAUSE: &str;
-pub const ALSO_SEE: &str; pub const VERB_GROUP: &str; pub const SIMILAR_TO: &str;
-pub const PARTICIPLE: &str; pub const PERTAINYM: &str;
+// pointer — relation-symbol constants: ANTONYM, HYPERNYM, INSTANCE_HYPERNYM,
+// HYPONYM, INSTANCE_HYPONYM, MEMBER_HOLONYM, SUBSTANCE_HOLONYM, PART_HOLONYM,
+// MEMBER_MERONYM, SUBSTANCE_MERONYM, PART_MERONYM, ATTRIBUTE,
+// DERIVATIONALLY_RELATED, DOMAIN_TOPIC, MEMBER_TOPIC, DOMAIN_REGION,
+// MEMBER_REGION, DOMAIN_USAGE, MEMBER_USAGE, ENTAILMENT, CAUSE, ALSO_SEE,
+// VERB_GROUP, SIMILAR_TO, PARTICIPLE, PERTAINYM
 pub fn describe(symbol: &str) -> Option<&'static str>;
 
 // error
@@ -1259,8 +665,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 ```
 
 No `unsafe`, no global mutable state. `WordNet`, `IndexFile` and `DataFile` are
-`Send + Sync`; nothing here depends on what was looked up before.
-`WordNet::par_lookup_batch` is the crate's only parallel entry point, gated
-behind the `parallel` Cargo feature and off by default — see
-[`par_lookup_batch`](#par-lookup-batch) above and
-[Parallelism](../performance/parallelism).
+`Send + Sync`; nothing depends on what was looked up before.
+`par_lookup_batch` is the crate's only parallel entry point, gated behind the
+`parallel` Cargo feature and off by default.

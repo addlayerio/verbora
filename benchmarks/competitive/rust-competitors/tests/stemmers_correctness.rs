@@ -602,3 +602,478 @@ fn sastrawi_agrees_with_verbora_except_three_documented_gaps() {
         }
     }
 }
+
+// TEMPORARY EXPLORATION — will be removed.
+#[test]
+#[ignore]
+fn explore3() {
+    let data = load_words();
+    let dictionary = load_dictionary("embedded://ipadic").expect("dict");
+    let filter = JapaneseKatakanaStemTokenFilter::new(NonZeroUsize::new(3).unwrap());
+    let v = StemmerJa::new();
+    let words = words_for(&data, "ja");
+    let mut mm = 0;
+    let mut total = 0;
+    for (i, a) in words.iter().enumerate() {
+        for b in words.iter().skip(i + 1) {
+            let w = format!("{a}{b}");
+            total += 1;
+            let x = v.stem(&w).into_owned();
+            let y = lindera_stem_one(&filter, &dictionary, &w);
+            if x != y {
+                mm += 1;
+                println!("  JAC {w:?}: v={x:?} lindera={y:?}");
+            }
+        }
+    }
+    println!("ja pairs: total={total} mm={mm}");
+    // min=4 negative control
+    let strict4 = JapaneseKatakanaStemTokenFilter::new(NonZeroUsize::new(4).unwrap());
+    println!(
+        "min4 on コーヒー: {:?}",
+        lindera_stem_one(&strict4, &dictionary, "コーヒー")
+    );
+    println!("verbora on コーヒー: {:?}", v.stem("コーヒー"));
+    // full id affixed sweep to double-check the 15 pinned mismatches
+    let dict = SastrawiDictionary::new();
+    let stemmer = SastrawiStemmer::new(&dict);
+    let vid = StemmerId::new();
+    let mut mm2 = Vec::new();
+    let mut t2 = 0;
+    for w in words_for(&data, "id") {
+        for d in [
+            format!("me{w}"),
+            format!("di{w}"),
+            format!("{w}kan"),
+            format!("{w}nya"),
+            format!("ke{w}an"),
+            format!("pe{w}an"),
+        ] {
+            t2 += 1;
+            let a = vid.stem(&d).into_owned();
+            let mut b = d.clone();
+            stemmer.stem_word(&mut b);
+            if a != b {
+                mm2.push(d);
+            }
+        }
+    }
+    println!("id affixed: total={t2} mm={} -> {mm2:?}", mm2.len());
+}
+
+// TEMPORARY EXPLORATION — will be removed.
+#[test]
+#[ignore]
+fn explore2() {
+    let v = StemmerId::new();
+    let dict = SastrawiDictionary::new();
+    let stemmer = SastrawiStemmer::new(&dict);
+    for w in [
+        "belajarkan",
+        "belajar",
+        "belajarnya",
+        "belajarlah",
+        "pelajarkan",
+        "bekerjakan",
+    ] {
+        let a = v.stem(w).into_owned();
+        let mut b = w.to_owned();
+        stemmer.stem_word(&mut b);
+        println!("id {w:?}: verbora={a:?} sastrawi={b:?}");
+    }
+    println!("bajar in dict: {}", v.dictionary().contains(&"bajar"));
+    println!("ajar in dict: {}", v.dictionary().contains(&"ajar"));
+    println!("belajar in dict: {}", v.dictionary().contains(&"belajar"));
+
+    // full en pair sweep (all i<j), all three implementations
+    let data = load_words();
+    let words = words_for(&data, "en");
+    let nltk = nltk_porter::PorterStemmer::new(nltk_porter::Mode::Original);
+    let ven = PorterStemmer::new();
+    let mut nltk_mm = Vec::new();
+    let mut ps_mm = Vec::new();
+    let mut total = 0;
+    for (i, a) in words.iter().enumerate() {
+        for b in words.iter().skip(i + 1) {
+            let w = format!("{a}{b}");
+            total += 1;
+            let x = ven.stem(&w).into_owned();
+            let y = nltk.stem(&w);
+            let z = porter_stemmer::stem(&w);
+            if x != y {
+                nltk_mm.push((w.clone(), x.clone(), y));
+            }
+            if x != z {
+                ps_mm.push((w, x, z));
+            }
+        }
+    }
+    println!(
+        "en full pairs: total={total} nltk_mm={} ps_mm={}",
+        nltk_mm.len(),
+        ps_mm.len()
+    );
+    for m in nltk_mm.iter().take(20) {
+        println!("  NLTK {m:?}");
+    }
+    for m in ps_mm.iter().take(20) {
+        println!("  PS {m:?}");
+    }
+
+    // id dict sweep denser: every 29th root
+    {
+        let mut mm = Vec::new();
+        let mut total = 0;
+        for w in v.dictionary().iter().step_by(29) {
+            total += 1;
+            let a = v.stem(w).into_owned();
+            let mut b = (*w).to_owned();
+            stemmer.stem_word(&mut b);
+            if a != b {
+                mm.push((w.to_owned(), a, b));
+            }
+        }
+        println!("id dict sweep 29: total={total} mm={}", mm.len());
+        for m in mm.iter().take(10) {
+            println!("  ID {m:?}");
+        }
+    }
+
+    // ja: length-boundary sweep from repeated first-chars of shared ja words
+    {
+        let dictionary = load_dictionary("embedded://ipadic").expect("dict");
+        let filter = JapaneseKatakanaStemTokenFilter::new(NonZeroUsize::new(3).unwrap());
+        let vja = StemmerJa::new();
+        let mut mm = 0;
+        let mut total = 0;
+        for w in words_for(&data, "ja") {
+            let chars: Vec<char> = w.chars().collect();
+            for len in 1..=chars.len() {
+                let prefix: String = chars[..len].iter().collect();
+                for cand in [prefix.clone(), format!("{prefix}ー")] {
+                    total += 1;
+                    let a = vja.stem(&cand).into_owned();
+                    let b = lindera_stem_one(&filter, &dictionary, &cand);
+                    if a != b {
+                        mm += 1;
+                        println!("  JA {cand:?}: v={a:?} lindera={b:?}");
+                    }
+                }
+            }
+        }
+        println!("ja boundary sweep: total={total} mm={mm}");
+    }
+}
+
+// TEMPORARY EXPLORATION — will be removed.
+#[test]
+#[ignore]
+fn explore() {
+    let data = load_words();
+
+    // 1. Snowball langs: concatenated pairs + stem-of-stem.
+    macro_rules! probe {
+        ($lang:literal, $verbora:ty, $rs_algo:expr, $sn_algo:expr) => {{
+            let words = words_for(&data, $lang);
+            let rs = rust_stemmers::Stemmer::create($rs_algo);
+            let sn = snowball_stemmers_rs::Stemmer::create($sn_algo);
+            let v = <$verbora>::new();
+            let mut rs_mm = Vec::new();
+            let mut sn_mm = Vec::new();
+            let mut total = 0;
+            for (i, a) in words.iter().enumerate() {
+                for b in words.iter().skip(i + 1) {
+                    let w = format!("{a}{b}");
+                    total += 1;
+                    let x = v.stem(&w).into_owned();
+                    if $lang != "ru" || !w.contains('ё') {
+                        let y = rs.stem(&w).into_owned();
+                        if x != y {
+                            rs_mm.push((w.clone(), x.clone(), y));
+                        }
+                    }
+                    let z = sn.stem(&w).into_owned();
+                    if x != z {
+                        sn_mm.push((w, x, z));
+                    }
+                }
+            }
+            // stem-of-stem
+            let mut ss_rs = 0;
+            let mut ss_sn = 0;
+            for w in &words {
+                if $lang == "ru" && w.contains('ё') {
+                    continue;
+                }
+                let s1 = v.stem(w).into_owned();
+                if v.stem(&s1) != rs.stem(&s1) {
+                    ss_rs += 1;
+                }
+                if v.stem(&s1) != sn.stem(&s1) {
+                    ss_sn += 1;
+                }
+            }
+            println!(
+                "{}: pairs={} rs_mm={} sn_mm={} ss_rs={} ss_sn={}",
+                $lang,
+                total,
+                rs_mm.len(),
+                sn_mm.len(),
+                ss_rs,
+                ss_sn
+            );
+            for m in rs_mm.iter() {
+                println!("  RS {:?}", m);
+            }
+            for m in sn_mm.iter() {
+                println!("  SN {:?}", m);
+            }
+        }};
+    }
+    probe!(
+        "de",
+        PorterStemmerDe,
+        rust_stemmers::Algorithm::German,
+        snowball_stemmers_rs::Algorithm::German
+    );
+    probe!(
+        "es",
+        PorterStemmerEs,
+        rust_stemmers::Algorithm::Spanish,
+        snowball_stemmers_rs::Algorithm::Spanish
+    );
+    probe!(
+        "fr",
+        PorterStemmerFr,
+        rust_stemmers::Algorithm::French,
+        snowball_stemmers_rs::Algorithm::French
+    );
+    probe!(
+        "it",
+        PorterStemmerIt,
+        rust_stemmers::Algorithm::Italian,
+        snowball_stemmers_rs::Algorithm::Italian
+    );
+    probe!(
+        "no",
+        PorterStemmerNo,
+        rust_stemmers::Algorithm::Norwegian,
+        snowball_stemmers_rs::Algorithm::Norwegian
+    );
+    probe!(
+        "pt",
+        PorterStemmerPt,
+        rust_stemmers::Algorithm::Portuguese,
+        snowball_stemmers_rs::Algorithm::Portuguese
+    );
+    probe!(
+        "sv",
+        PorterStemmerSv,
+        rust_stemmers::Algorithm::Swedish,
+        snowball_stemmers_rs::Algorithm::Swedish
+    );
+    probe!(
+        "ru",
+        PorterStemmerRu,
+        rust_stemmers::Algorithm::Russian,
+        snowball_stemmers_rs::Algorithm::Russian
+    );
+
+    // nl pairs, fresh instance per word
+    {
+        let words = words_for(&data, "nl");
+        let rs = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::Dutch);
+        let sn =
+            snowball_stemmers_rs::Stemmer::create(snowball_stemmers_rs::Algorithm::DutchPorter);
+        let mut rs_mm = Vec::new();
+        let mut sn_mm = Vec::new();
+        let mut total = 0;
+        for (i, a) in words.iter().enumerate() {
+            for b in words.iter().skip(i + 1) {
+                let w = format!("{a}{b}");
+                total += 1;
+                let x = PorterStemmerNl::new().stem(&w).into_owned();
+                let y = rs.stem(&w).into_owned();
+                let z = sn.stem(&w).into_owned();
+                if x != y {
+                    rs_mm.push((w.clone(), x.clone(), y));
+                }
+                if x != z {
+                    sn_mm.push((w, x, z));
+                }
+            }
+        }
+        println!(
+            "nl: pairs={} rs_mm={} sn_mm={}",
+            total,
+            rs_mm.len(),
+            sn_mm.len()
+        );
+        for m in rs_mm.iter() {
+            println!("  RS {:?}", m);
+        }
+        for m in sn_mm.iter() {
+            println!("  SN {:?}", m);
+        }
+    }
+
+    // 2. Reused vs fresh instance purity for the 8 macro langs.
+    macro_rules! purity {
+        ($lang:literal, $verbora:ty) => {{
+            let words = words_for(&data, $lang);
+            let shared = <$verbora>::new();
+            let mut diff = 0;
+            for w in &words {
+                if shared.stem(w) != <$verbora>::new().stem(w) {
+                    diff += 1;
+                }
+            }
+            println!("purity {}: diffs={}", $lang, diff);
+        }};
+    }
+    purity!("de", PorterStemmerDe);
+    purity!("es", PorterStemmerEs);
+    purity!("fr", PorterStemmerFr);
+    purity!("it", PorterStemmerIt);
+    purity!("no", PorterStemmerNo);
+    purity!("pt", PorterStemmerPt);
+    purity!("sv", PorterStemmerSv);
+    purity!("ru", PorterStemmerRu);
+
+    // 3. English suffix-extended sweep.
+    {
+        let words = words_for(&data, "en");
+        let nltk = nltk_porter::PorterStemmer::new(nltk_porter::Mode::Original);
+        let v = PorterStemmer::new();
+        let suffixes = [
+            "ing", "ed", "s", "es", "ly", "ness", "ational", "ization", "fulness", "iveness",
+            "ement", "ability",
+        ];
+        let mut nltk_mm = Vec::new();
+        let mut ps_mm = Vec::new();
+        let mut total = 0;
+        for w in &words {
+            for sfx in suffixes {
+                let d = format!("{w}{sfx}");
+                total += 1;
+                let a = v.stem(&d).into_owned();
+                let b = nltk.stem(&d);
+                let c = porter_stemmer::stem(&d);
+                if a != b {
+                    nltk_mm.push((d.clone(), a.clone(), b));
+                }
+                if a != c {
+                    ps_mm.push((d, a, c));
+                }
+            }
+        }
+        println!(
+            "en derived: total={} nltk_mm={} ps_mm={}",
+            total,
+            nltk_mm.len(),
+            ps_mm.len()
+        );
+        for m in nltk_mm.iter() {
+            println!("  NLTK {:?}", m);
+        }
+        for m in ps_mm.iter() {
+            println!("  PS {:?}", m);
+        }
+        // en pair concats too
+        let mut nltk_mm2 = 0;
+        let mut ps_mm2 = 0;
+        let mut t2 = 0;
+        for (i, a) in words.iter().enumerate() {
+            for b in words.iter().skip(i + 1).take(8) {
+                let d = format!("{a}{b}");
+                t2 += 1;
+                let x = v.stem(&d).into_owned();
+                if x != nltk.stem(&d) {
+                    nltk_mm2 += 1;
+                }
+                if x != porter_stemmer::stem(&d) {
+                    ps_mm2 += 1;
+                }
+            }
+        }
+        println!("en pairs: total={t2} nltk_mm={nltk_mm2} ps_mm={ps_mm2}");
+    }
+
+    // 4. Indonesian: dictionary sweep + affixed derivations.
+    {
+        let dict = SastrawiDictionary::new();
+        let stemmer = SastrawiStemmer::new(&dict);
+        let v = StemmerId::new();
+        let roots = v.dictionary();
+        let mut mm = Vec::new();
+        let mut total = 0;
+        for w in roots.iter().step_by(97) {
+            total += 1;
+            let a = v.stem(w).into_owned();
+            let mut b = (*w).to_owned();
+            stemmer.stem_word(&mut b);
+            if a != b {
+                mm.push((w.to_owned(), a, b));
+            }
+        }
+        println!("id dict sweep: total={} mm={}", total, mm.len());
+        for m in mm.iter().take(5) {
+            println!("  ID {:?}", m);
+        }
+        // affixed forms of shared list words
+        let words = words_for(&data, "id");
+        let mut mm2 = Vec::new();
+        let mut t2 = 0;
+        for w in &words {
+            for d in [
+                format!("me{w}"),
+                format!("di{w}"),
+                format!("{w}kan"),
+                format!("{w}nya"),
+                format!("ke{w}an"),
+                format!("pe{w}an"),
+            ] {
+                t2 += 1;
+                let a = v.stem(&d).into_owned();
+                let mut b = d.clone();
+                stemmer.stem_word(&mut b);
+                if a != b {
+                    mm2.push((d, a, b));
+                }
+            }
+        }
+        println!("id affixed: total={} mm={}", t2, mm2.len());
+        for m in mm2.iter() {
+            println!("  IDA {:?}", m);
+        }
+    }
+
+    // 5. Japanese extra vectors.
+    {
+        let dictionary = load_dictionary("embedded://ipadic").expect("dict");
+        let filter = JapaneseKatakanaStemTokenFilter::new(NonZeroUsize::new(3).unwrap());
+        let v = StemmerJa::new();
+        for w in [
+            "コンピューター",
+            "エレベーター",
+            "ソーダー",
+            "アアアー",
+            "スーパーマーケット",
+            "データベース",
+            "カラオケ",
+            "テーブル",
+            "ラーメン",
+            "セーター",
+            "みかんー",
+            "漢字ー",
+            "カタカナば",
+            "ミックスjuiceー",
+            "アーー",
+            "アイウエー",
+        ] {
+            let a = v.stem(w).into_owned();
+            let b = lindera_stem_one(&filter, &dictionary, w);
+            println!("ja {:?}: v={:?} lindera={:?} agree={}", w, a, b, a == b);
+        }
+    }
+}

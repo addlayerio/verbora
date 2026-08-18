@@ -38,6 +38,14 @@ default = []
 # See AGENTS.md's "Verbora-Native Extensions" section for the policy this
 # follows.
 language-detection = ["dep:whatlang"]
+# Adds HashedLinearDetector: a latency-first LanguageDetector with
+# compiled-in hashed-linear models and zero extra dependencies — the
+# weight tables are generated Rust source (see src/hashed_linear.rs and
+# tools/langdetect-train). Independent of `language-detection`, and
+# deliberately NOT a default or a replacement: WhatlangDetector remains
+# the accuracy reference; see src/hashed_linear.rs's own doc comment for
+# what this detector does and does not claim.
+fast-language-detection = []
 # `par_detect_batch` — see `src/parallel.rs` for why it exists and when to
 # reach for it. Independent of `language-detection`: it is generic over any
 # `LanguageDetector + Sync`, not tied to `WhatlangDetector`.

@@ -323,11 +323,15 @@ fast_radix_trie = "=1.2.0"
 # `FstDictionary` on top of this exact crate (composed with the *separate*
 # `levenshtein_automata` crate for fuzzy matching, not this feature).
 fst = { version = "=0.4.7", features = ["levenshtein"] }
-# §1.6 Phonetics — the one actively-maintained Rust crate covering all four
-# of Verbora's phonetic families (Soundex, Metaphone, Double Metaphone,
-# Daitch-Mokotoff) from the canonical Apache commons-codec reference (matrix:
-# Partial on every row — same shape of work, documented algorithm-variant
-# divergence, never byte-exact). `embedded_dm` pulls in the crate's bundled
+# §1.6 Phonetics — the one actively-maintained Rust crate covering every
+# phonetic family benchmarked here, from the canonical Apache commons-codec
+# reference. Two regimes (see tests/phonetics_correctness.rs's own doc):
+# the four reference-ported encoders (Soundex, Metaphone, Double Metaphone,
+# single-branch SoundExDM) are matrix-Partial — same shape of work,
+# documented algorithm-variant divergence, never byte-exact — while the
+# seven rphonetic-pinned native extensions (Cologne, Nysiis, Caverphone1/2,
+# Phonex, RefinedSoundex, MatchRatingApproach, branching DaitchMokotoff)
+# are byte-exact against this crate. `embedded_dm` pulls in the crate's bundled
 # `dmrules.txt` so `DaitchMokotoffSoundex::default()` is available without
 # hand-loading a rules file. `embedded_bm` (Beider-Morse) closes a real,
 # previously-undiscovered coverage gap: `verbora-phonetics::BeiderMorse`

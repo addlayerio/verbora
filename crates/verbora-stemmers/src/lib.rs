@@ -61,6 +61,7 @@
 //! to rayon's own per-task scheduling cost that word-level parallelism would
 //! mostly measure the scheduler, while a whole document clears that floor.
 
+mod among;
 pub mod base;
 mod carry;
 mod data;
@@ -79,6 +80,8 @@ mod pt;
 mod ru;
 pub mod stopwords;
 mod sv;
+#[cfg(test)]
+mod test_support;
 mod uk;
 mod units;
 

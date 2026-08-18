@@ -34,15 +34,15 @@ follows from the workload rather than from the operation.
 
 The same operation, four times:
 
-| Workload | Tokenizer call | Why |
-|---|---|---|
-| Interactive | `tokenize()` | One allocation, invisible next to the network |
-| Streaming | `tokens()` | One token resident at a time; can stop early |
-| Batch | `tokenize_into()` | One buffer, reused across the corpus |
-| Parallel | `map_init(Vec::new, …)` + `tokenize_into()` | A buffer per worker; `&mut` cannot be shared |
+| Workload | Tokenizer call | What you optimise | Watch out for |
+|---|---|---|---|
+| Interactive | `tokenize()` | Latency and readability | Doing `O(n)` work over a whole corpus per request |
+| Streaming | `tokens()` | Peak memory, time to first result | Any `collect()` in the middle of the pipeline |
+| Batch | `tokenize_into()` | Allocations per document | Forgetting `buf.clear()` at the top of the loop |
+| Parallel | `map_init(Vec::new, …)` + `tokenize_into()` | CPU utilisation | Tasks too small to pay for scheduling |
 
-Notice that none of the rows is "the fast one". They are answers to different
-questions. See [Choosing the right API](../choosing/index.md).
+None of those rows is "the fast one" — they are answers to different questions.
+See [Choosing the right API](../choosing/index.md).
 
 ## Problem recipes
 
@@ -62,30 +62,16 @@ Complete programs for common tasks:
 
 </div>
 
-## The priority list, by workload
+## Before you optimise
 
-**Interactive.** Latency, ergonomics, predictability. Do not optimise here
-without a profile — a request handler that allocates a `Vec` per request is not
-your bottleneck, and the readable version is worth more than the saved
-allocation.
+Every recipe here that uses a performance-oriented API also says what it costs
+you in code complexity, because that is a real cost. Two rules of thumb:
 
-**Streaming.** Bounded memory, lazy processing, early output. The reason to
-stream is usually that you cannot afford not to. Use `tokens()`,
-`ngrams_iter()`, `iter_keys_with_prefix()`, and avoid anything that collects.
+- **Optimise the sequential version first.** A `tokenize_into` loop that removes
+  ten million allocations may make threads unnecessary — and it composes with
+  them if not.
+- **Measure before and after.** Batch is the one workload where these techniques
+  reliably show up. If the numbers do not move, put the simple version back.
 
-**Batch.** Throughput, memory reuse, shared setup. Hoist construction, reuse one
-buffer, pre-size outputs, and remove per-item allocations. Measure before and
-after: this is the workload where those changes actually show up.
-
-**Massive parallel.** CPU utilisation, batch sizing, cache behaviour. Optimise
-the sequential version first — a `tokenize_into` loop that removed ten million
-allocations may make the parallel version unnecessary, and it composes with it if
-not. Then chunk so each task is large enough to dwarf scheduling overhead, and
-measure the scaling curve rather than a single point.
-
-## A note on premature optimisation
-
-Every recipe in this section that uses a performance-oriented API says what it
-costs you in code complexity, because that is a real cost. If you are not in the
-workload the recipe is written for, take the simpler version from
-[Your first program](../getting-started/first-program.md) instead.
+If you are not in the workload a recipe was written for, take the simpler
+version from [Your first program](../getting-started/first-program.md) instead.

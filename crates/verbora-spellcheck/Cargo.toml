@@ -29,11 +29,11 @@ serde_json = { workspace = true }
 [features]
 default = []
 # Adds `Spellcheck::par_get_corrections_batch`, a `rayon`-backed fan-out over
-# the existing sequential `Spellcheck::get_corrections`. `get_corrections`
-# alone measures 3.9–5.5 ms/call at distance 2 (this crate's own
-# `spellcheck_get_corrections_d2` benchmark) and every call is independent
-# against one shared, read-only `Spellcheck`, which is the shape a `rayon`
-# fan-out is for.
+# the existing sequential `Spellcheck::get_corrections`. Every call is
+# independent against one shared, read-only `Spellcheck`, which is the shape a
+# `rayon` fan-out is for: the combinatorial search at distance >= 3 still
+# costs milliseconds per word, and even indexed distance <= 2 calls add up
+# over document-sized batches.
 parallel = ["dep:rayon"]
 
 [[bench]]

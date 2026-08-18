@@ -63,9 +63,19 @@
 //! thing that pulls in `whatlang`. A caller who wants explicit-language
 //! phonetic strategy selection, or plugs in their own detector, pays
 //! nothing for automatic detection they never asked for.
+//!
+//! A second, opt-in detector exists behind `fast-language-detection`:
+//! [`HashedLinearDetector`], a latency-first alternative with compiled-in
+//! models and no extra dependencies. It trades coverage and hard-input
+//! judgement for a several-hundred-fold latency reduction — see
+//! `src/hashed_linear.rs`'s own doc comment for exactly what it does and
+//! does not claim. [`WhatlangDetector`] stays the accuracy reference;
+//! neither feature enables the other.
 
 mod auto;
 mod detect;
+#[cfg(feature = "fast-language-detection")]
+mod hashed_linear;
 mod language;
 #[cfg(feature = "parallel")]
 mod parallel;
@@ -76,6 +86,11 @@ mod whatlang_detector;
 
 pub use auto::{AutoPhoneticStrategy, AutoResult};
 pub use detect::{LanguageCandidate, LanguageDetection, LanguageDetector};
+#[cfg(feature = "fast-language-detection")]
+pub use hashed_linear::HashedLinearDetector;
+#[doc(hidden)]
+#[cfg(feature = "fast-language-detection")]
+pub use hashed_linear::train_support;
 pub use language::{Language, ParseLanguageError};
 #[cfg(feature = "parallel")]
 pub use parallel::par_detect_batch;

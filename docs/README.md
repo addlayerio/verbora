@@ -31,3 +31,6 @@ narrative style must never leak into `site/`, and `site/`'s numbers must
 never be sourced by copying prose from here — only by re-verifying the
 current facts. See [`.claude/agents/doc-sync.md`](../.claude/agents/doc-sync.md)
 for the rules that enforce this.
+
+The repository-wide ownership map is in
+[`DOCUMENTATION.md`](../DOCUMENTATION.md).

@@ -100,12 +100,19 @@
 //! and what it costs.
 
 pub mod beider_morse;
+pub mod caverphone;
+pub mod cologne;
+pub mod daitch_mokotoff;
 pub mod dm_soundex;
 pub mod double_metaphone;
 pub mod index;
+pub mod match_rating;
 pub mod metaphone;
+pub mod nysiis;
 #[cfg(feature = "parallel")]
 pub mod parallel;
+pub mod phonex;
+pub mod refined_soundex;
 pub mod soundex;
 pub mod units;
 
@@ -113,15 +120,22 @@ mod dm_table;
 mod pipe;
 
 pub use beider_morse::{BeiderMorse, BeiderMorseCode, Language, LanguageSet, NameType, RuleType};
+pub use caverphone::{Caverphone1, Caverphone2};
+pub use cologne::Cologne;
+pub use daitch_mokotoff::DaitchMokotoff;
 pub use dm_soundex::{RuleMapping, Rules, SoundExDM};
 pub use double_metaphone::DoubleMetaphone;
 pub use index::{
     DaitchMokotoffCode, EntryId, InlineCode, MetaphoneCode, Neighbors, PhoneticCodes,
     PhoneticCodesIter, PhoneticEncoder, PhoneticIndex, PhoneticIndexBuilder, SoundexCode,
 };
+pub use match_rating::MatchRatingApproach;
 pub use metaphone::Metaphone;
+pub use nysiis::Nysiis;
 #[cfg(feature = "parallel")]
 pub use parallel::{DEFAULT_CHUNK_SIZE, par_encode_batch, par_encode_double_batch};
+pub use phonex::Phonex;
+pub use refined_soundex::RefinedSoundex;
 pub use soundex::SoundEx;
 
 use std::fmt;

@@ -54,6 +54,12 @@
 //! * folds case **once** at the entry point instead of re-lowercasing the
 //!   remaining suffix at every level (the reference is quadratic in word
 //!   length here; folding is idempotent, so one pass is observably identical);
+//! * maintains two query accelerators alongside the arena — per-node subtree
+//!   word counts and a hash membership set over the folded stored words — so
+//!   a prefix count (`iter_keys_with_prefix(p).count()`) is O(|prefix|) and
+//!   [`Trie::contains`] is one hash plus a short probe instead of one
+//!   dependent arena hop per code unit, at a disclosed ~one-third build-time
+//!   premium (see [`Trie::add_string`]);
 //! * runs every operation iteratively, so a 100 KB input cannot overflow the
 //!   stack the way the reference's per-code-unit recursion does.
 //!
@@ -68,6 +74,7 @@
 
 mod frozen;
 mod iter;
+mod membership;
 mod trie;
 
 pub use frozen::{FrozenKeysWithPrefix, FrozenTrie};

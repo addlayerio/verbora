@@ -6,14 +6,14 @@ Enough work that threads are worth the complexity.
 **Prerequisite:** the sequential version, already optimised and measured.
 
 <div class="callout callout-note">
-<strong>Check for a built-in first.</strong> Thirteen crates now ship an
-optional, feature-gated <code>par_*_batch</code> function — a thin
-<code>rayon</code> fan-out over the crate's own sequential primitive,
-benchmarked and tested, not a second implementation. If the table on
-<a href="../performance/parallelism">Parallelism</a> already lists an entry
-for the operation you're about to hand-roll below, enable that crate's
-<code>parallel</code> feature and call it instead — it's less code, and it's
-the version this project has actually measured.
+<strong>Check for a built-in first.</strong> Thirteen crates ship an optional,
+feature-gated <code>par_*_batch</code> function — a thin <code>rayon</code>
+fan-out over the crate's own sequential primitive, benchmarked and tested, not a
+second implementation. If the table on
+<a href="../performance/parallelism">Parallelism</a> lists an entry for the
+operation you are about to hand-roll, enable that crate's
+<code>parallel</code> feature and call it instead: less code, and it is the
+version this project has measured.
 </div>
 
 ## When a built-in already covers your workload
@@ -36,32 +36,22 @@ fn tokenize_corpus<'a>(corpus: &[&'a str]) -> Vec<Vec<&'a str>> {
 ```
 
 `par_tokenize_batch` is a default method on the `Tokenize` trait, so every
-tokenizer in the crate gets it for free, and output order matches input order.
-See [Parallelism](../performance/parallelism.md) for the other twelve
-built-ins — WordNet lookups, spellcheck corrections, sentiment, stemming,
-phonetics, distance, classification, TF-IDF ingestion, and more, including the
-real measured crossover numbers reported for two of them — before writing
-anything below by hand.
+tokenizer in the crate gets it, and output order matches input order. See
+[Parallelism](../performance/parallelism.md) for the other twelve built-ins —
+WordNet lookups, spellcheck corrections, sentiment, stemming, phonetics,
+distance, classification, TF-IDF ingestion and more — before writing anything
+below by hand.
 
 ## Rolling your own
 
-Nothing below is obsolete. It's what you still reach for whenever no built-in
-fits:
+Reach for the patterns below when no built-in fits — a crate with no `par_*`
+function (such as `verbora-ngrams`), or a computation none of the built-ins
+wraps: a derived value rather than the wrapped function's return type (a
+*count*, not the tokens themselves — exactly the example below), a reduction
+into a shared structure, a multi-stage pipeline, or a shared read-only index.
 
-- an operation the audit evaluated and explicitly rejected — `verbora-trie`
-  (query cost ~67 ns, at or below `rayon`'s own dispatch overhead),
-  `verbora-inflectors` (~360 ns/word, the same overhead problem), or
-  `verbora-util` (its graph algorithms operate on one shared graph per call,
-  not independent items — there is no batch shape to parallelize);
-- `verbora-ngrams`, not yet evaluated for a `par_*` API either way;
-- a computation none of the thirteen wraps — a derived value instead of the
-  wrapped function's own return type (a *count*, not the tokens themselves,
-  exactly the example below), a reduction into a shared structure, a
-  multi-stage pipeline, or a shared read-only index built from a crate with no
-  batch primitive at all.
-
-This is possible precisely because Verbora's operations — including the ones
-with no built-in `par_*` API — are stateless and `Send + Sync`.
+All of it works because Verbora's operations — including the ones with no
+built-in `par_*` API — are stateless and `Send + Sync`.
 
 ## Before you start
 
@@ -255,13 +245,9 @@ more arithmetic per byte and scale further.
 mutable state does not. If your output ordering changed, you have a bug, not a
 speedup.
 
-## When to stop
-
-- The stage takes less than a second of total CPU — you would be measuring the
-  scheduler.
-- You are already running one request per thread — intra-request parallelism
-  there usually reduces total throughput.
-- The scaling curve is flat past two threads — find the real bottleneck.
+Stop, and go back to the sequential version, if the stage takes less than a
+second of total CPU, if you are already running one request per thread, or if
+the scaling curve is flat past two threads.
 
 ## Checklist
 

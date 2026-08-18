@@ -15,6 +15,7 @@ publish = false
 # snippet cannot drift from the API it shows.
 
 [dependencies]
+verbora-analyzers = { workspace = true }
 verbora-classifiers = { workspace = true }
 verbora-core = { workspace = true }
 verbora-distance = { workspace = true }
@@ -25,10 +26,12 @@ verbora-phonetics = { workspace = true }
 verbora-sentiment = { workspace = true }
 verbora-spellcheck = { workspace = true }
 verbora-stemmers = { workspace = true }
+verbora-tagger = { workspace = true }
 verbora-tfidf = { workspace = true }
 verbora-tokenizers = { workspace = true }
 verbora-transliterators = { workspace = true }
 verbora-trie = { workspace = true }
+verbora-util = { workspace = true }
 verbora-wordnet = { workspace = true }
 
 [lints]

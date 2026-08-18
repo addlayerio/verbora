@@ -16,9 +16,9 @@ let best = names
     .min_by(|a, b| a.1.total_cmp(&b.1));
 ```
 
-`levenshtein/ascii/16` measures 515.8 ns. Against 100,000 candidates that is
-~50 ms per query — 20 queries per second per core, for a lookup that should be
-sub-millisecond.
+`levenshtein/ascii/16` measures 41.8 ns. Against 100,000 candidates that is
+~4 ms of pure comparison per query — roughly 240 queries per second per core,
+and it grows linearly with your dictionary. Bucketing does not.
 
 ## The shape that works
 
@@ -37,14 +37,13 @@ Step 1 does the work. Step 2 makes the answer good.
 ## Step 1: bucket by phonetic key
 
 <div class="callout callout-note">
-<strong>A built-in version of this step exists.</strong>
+<strong>There is a built-in for this step.</strong>
 <a href="../features/phonetic-index">Phonetic neighbors</a>
-(<code>PhoneticIndex</code>) is a Verbora-native index that replaces the
-hand-rolled <code>HashMap</code> below for a build-once, query-many
-dictionary — same idea, less code, and it handles <code>DoubleMetaphone</code>'s
-two codes per entry for you. The version here stays useful as a minimal,
-dependency-free illustration of exactly what that index does internally, and
-the ranking pattern in Step 2 applies identically to
+(<code>PhoneticIndex</code>) does exactly what the hand-rolled
+<code>HashMap</code> below does, in less code, and it handles
+<code>DoubleMetaphone</code>'s two codes per entry for you — reach for it for any
+build-once, query-many dictionary. The version below shows what that index does
+internally; Step 2 applies unchanged to
 <code>PhoneticIndex::neighbors()</code>'s output.
 </div>
 
@@ -141,7 +140,7 @@ this, because doing so would change every caller's results. The
 | Short codes of equal length | `hamming` | Position-wise; returns `-1` if the lengths differ |
 | Word-order-insensitive overlap | `dice_coefficient` | Bigram set overlap; `NaN` for two empty strings |
 
-See [Choosing a distance metric](../choosing/distance.md).
+See [Choosing a distance API](../choosing/distance.md).
 
 ## Choosing the encoder for step 1
 
@@ -205,13 +204,12 @@ comparison.
 
 ## Step 1, an alternative: bucket by edit distance instead of sound
 
-Phonetic bucketing (above) groups *sound-alike* candidates — it misses a typo
-that changes how a name sounds (a transposed letter, a doubled consonant) but
-keeps its spelling close. `verbora-spellcheck`'s `FuzzyIndex` covers that
-case instead: same Build → Freeze → Query shape as `PhoneticIndex`, but
-buckets by *edit distance* — "which stored words are within `k` edits of
-this query?" — using a BK-tree, so it's still the same fast candidate
-generation, not a distance metric run over every entry:
+Phonetic bucketing groups *sound-alike* candidates, so it misses a typo that
+changes how a name sounds (a transposed letter, a doubled consonant) while
+keeping its spelling close. `verbora-spellcheck`'s `FuzzyIndex` covers that case:
+same build-then-query shape as `PhoneticIndex`, but it answers "which stored
+words are within `k` edits of this query?" using a BK-tree — still fast candidate
+generation, not a distance metric run over every entry.
 
 ```rust
 use verbora_spellcheck::FuzzyIndexBuilder;
@@ -234,16 +232,10 @@ bucketing catches "spelled almost the same, however it sounds." A caller
 who needs both runs Step 2 (ranking) over the union of both indexes'
 candidates.
 
-## What is missing
+## Bring your own dictionary
 
-Verbora ships `verbora-spellcheck` (Norvig-style correction) and, as of the
-`FuzzyIndex` type above, an edit-distance candidate index — but no bundled
-dictionary; both take a caller-supplied word list. See the
-[roadmap](../features/roadmap.md) for what doesn't have a dedicated site page
-yet. Candidate generation by sound is covered by
-[`PhoneticIndex`](../features/phonetic-index), which is the same
-bucket-by-phonetic-key architecture this recipe walks through by hand, packaged
-as a reusable, benchmarked type instead of a one-off `HashMap`.
+`verbora-spellcheck` ships Norvig-style correction and the `FuzzyIndex` above,
+but no bundled word list — both take a caller-supplied dictionary.
 
 For prefix-shaped queries rather than sound-alike ones, a
 [trie](autocomplete.md) is the better index.
@@ -253,5 +245,5 @@ For prefix-shaped queries rather than sound-alike ones, a
 - [Phonetic neighbors](../features/phonetic-index) — the built-in index behind Step 1
 - `FuzzyIndex` (`verbora-spellcheck`) — the edit-distance alternative to Step 1 above
 - [Phonetics](../features/phonetics.md) · [String distance](../features/distance.md)
-- [Choosing a distance metric](../choosing/distance.md)
+- [Choosing a distance API](../choosing/distance.md)
 - [Prefix autocomplete](autocomplete.md)

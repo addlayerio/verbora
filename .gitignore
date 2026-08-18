@@ -33,3 +33,6 @@ Cargo.lock
 # should not fail a build, so every bench that reads from here skips cleanly
 # with a printed notice when it is absent.
 /benchmarks/competitive/models/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/

@@ -75,19 +75,62 @@ pub fn remove_diacritics(s: &str) -> Cow<'_, str> {
     }
 }
 
+/// First codepoint past the dense direct-index table's range.
+///
+/// 346 of the 820 non-ASCII keys — and virtually every accent that occurs in
+/// real Latin-script text — live below U+0250 (the end of Latin Extended-B),
+/// so that range gets a 464-entry array indexed by `cp - 0x80` while the
+/// sparse remainder keeps the bitmap-gated binary search.
+const DENSE_END: u32 = 0x250;
+
+/// Direct index for `0x80..DENSE_END`: `FOLD` position + 1, or 0 for identity.
+///
+/// Derived from [`table::FOLD`] by `const` evaluation rather than generated
+/// alongside it, so it *cannot* disagree with the table it indexes — same
+/// data, different index structure.
+static LOW: [u16; (DENSE_END - 0x80) as usize] = build_low();
+
+/// Builds [`LOW`] by scanning [`table::FOLD`] at compile time.
+const fn build_low() -> [u16; (DENSE_END - 0x80) as usize] {
+    let mut low = [0u16; (DENSE_END - 0x80) as usize];
+    let mut i = 0;
+    while i < table::FOLD.len() {
+        let cp = table::FOLD[i].0 as u32;
+        // Keys are non-ASCII by construction, so `cp >= 0x80` always holds.
+        if cp < DENSE_END {
+            low[(cp - 0x80) as usize] = i as u16 + 1;
+        }
+        i += 1;
+    }
+    low
+}
+
 /// The base string for `c`, or `None` when the table leaves it alone.
 ///
-/// The two-level bitmap in front of the binary search is what keeps this cheap
-/// on text the table has nothing to say about: the 820 non-ASCII keys occupy
-/// nine 256-codepoint blocks and are sparse inside several of them, so Cyrillic,
-/// Greek, Hebrew, CJK, kana, halfwidth forms and emoji are all rejected in a
-/// handful of operations rather than ten comparisons that always miss.
+/// Two structures serve two densities. Below [`DENSE_END`] — where 346 of the
+/// 820 keys cluster, including every accent on the Latin-1 and Latin
+/// Extended-A/B pages — a folding character costs one array load instead of a
+/// ~10-probe binary search, which alone was measured as ~23% of a fold-heavy
+/// document's total cost. Above it the keys are sparse across nine
+/// 256-codepoint blocks, so the two-level bitmap gate stays: Cyrillic, Greek,
+/// Hebrew, CJK, kana, halfwidth forms and emoji are all rejected in a handful
+/// of operations rather than ten comparisons that always miss.
 #[inline]
 fn fold(c: char) -> Option<&'static str> {
     let cp = c as u32;
     // ASCII entries are identity and are omitted from the table; astral
     // characters have no entries at all.
-    if !(0x80..=0xFFFF).contains(&cp) {
+    if cp < 0x80 {
+        return None;
+    }
+    if cp < DENSE_END {
+        let ix = LOW[(cp - 0x80) as usize];
+        if ix == 0 {
+            return None;
+        }
+        return Some(table::FOLD[ix as usize - 1].1);
+    }
+    if cp > 0xFFFF {
         return None;
     }
     let hi = (cp >> 8) as u8;
@@ -297,6 +340,17 @@ mod tests {
             .filter(|&c| fold(c).is_some())
             .count();
         assert_eq!(folded, table::FOLD.len());
+        // The dense low-range index must agree with the binary search it
+        // replaces, entry for entry — identity where `FOLD` has no key, the
+        // key's own fold everywhere else.
+        for cp in 0x80..DENSE_END {
+            let c = char::from_u32(cp).expect("below the surrogate range");
+            let via_search = table::FOLD
+                .binary_search_by_key(&c, |&(k, _)| k)
+                .ok()
+                .map(|i| table::FOLD[i].1);
+            assert_eq!(fold(c), via_search, "U+{cp:04X}");
+        }
     }
 
     /// Sequential-vs-parallel parity: `par_remove_diacritics_batch` must

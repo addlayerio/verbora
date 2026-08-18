@@ -370,7 +370,7 @@ project's methodology could not fully attribute within one pass.
 | **Verbora result** | Construction+first lookup: english **159.4 ns** · dutch **100.7 ns**. Lookup alone: hit-short **91.7 ns** · hit-long **89.0 ns** · miss **98.7 ns** · lowercase-retry **89.5 ns** · non-ascii **215.0 ns** · empty **69.4 ns**. `tag_with_lexicon`: 8 tok **893.8 ns** · 64 tok **7.96 µs** · 512 tok **64.34 µs** · 4096 tok **512.05 µs** (all medians) |
 | **Competitor result** | Same probes: construction+first lookup english **15.8 ns** · dutch **69.6 ns**. Lookup: hit-short **12.9 ns** · hit-long **13.4 ns** · miss **136.0 ns** · lowercase-retry **15.9 ns** · non-ascii **58.5 ns** · empty **13.7 ns**. `tag_with_lexicon`: **168.8 ns** · **1.46 µs** · **6.19 µs** · **50.56 µs** |
 | **Gap** | Verbora is slower on every row except `miss` (where Verbora is 1.4× *faster* — see "Likely reason"). Construction+lookup: **10.1× slower** (english), 1.4× slower (dutch). Bare lookup: **7.1× slower** (hit-short), **6.6× slower** (hit-long), **5.6× slower** (lowercase-retry), **3.7× slower** (non-ascii), **5.1× slower** (empty). `tag_with_lexicon`: **5.3× slower** (8 tokens) widening to **10.1× slower** (4096 tokens). All at nanosecond-to-low-microsecond absolute scale — genuinely small numbers on both sides, but a consistent, reproducible direction, not noise (see `docs/PERFORMANCE.md`'s POS Tagging section, which cites the same rows and confirms Verbora otherwise wins the vast majority of nanosecond-scale rows across this whole project). |
-| **Likely reason** | Verbora's English/Dutch lexicons ship as a **packed binary index** rather than parsed JSON, specifically to make *first use* free — `crates/verbora-tagger/src/lexicon.rs`'s own module doc comment documents the trade explicitly: "First lookup: after full parse" (JSON, ~55 ms) vs. "~17 byte-compare probes" (packed index, 0 ms init). That "~17 byte-compare probes" figure is `StaticLexicon::find` (`crates/verbora-tagger/src/data.rs`): a textbook binary search over a sorted packed array — `O(log n)`, `log2(92_662) ≈ 16.5` rounds for the English lexicon, each round an unaligned `u32` offset read plus a byte-slice `.cmp()`. The reference's `Lexicon#tagWord` is `this.lexicon[word]` — one the reference engine property access on what is, after the first few calls, a monomorphic object with an inline cache, close to `O(1)`. A handful of nanoseconds' difference between "one hashed property read" and "seventeen rounds of binary search, each doing real work" is exactly what naming the two lookup strategies predicts. `miss` is the one row where Verbora *wins* (1.4×): a binary search on a genuine miss still terminates in the same ~17 rounds, but the reference's *reference* implementation retries the lookup a second time in lowercase on any falsy result (`tagWord`'s `if (!categories \|\| ...) categories = this.lexicon[word.toLowerCase()]`) — for the all-lowercase miss probe used here (`"zzzznotawordatall"`), that means the reference engine pays for the property miss *twice*, once directly and once after an unnecessary `toLowerCase()` allocation, while Verbora's `first_category` only retries when the input actually contains an uppercase byte (confirmed in `Lexicon::first_category`'s own `word.bytes().any(|b| b.is_ascii_uppercase())` guard) — a case this specific probe never triggers on either side otherwise. `tag_with_lexicon`'s widening-with-length gap (5.3×→10.1×) is the same per-token lookup cost simply repeated `n` times with nothing to amortize it against, since this benchmark deliberately excludes the rule pass. |
+| **Likely reason** | Verbora's English/Dutch lexicons ship as a **packed binary index** rather than parsed JSON, specifically to make *first use* free — `crates/verbora-tagger/src/lexicon.rs`'s own module doc comment documents the trade explicitly: "First lookup: after full parse" (JSON, ~55 ms) vs. "~17 byte-compare probes" (packed index, 0 ms init). That "~17 byte-compare probes" figure is `StaticLexicon::find` (`crates/verbora-tagger/src/data.rs`): a textbook binary search over a sorted packed array — `O(log n)`, `log2(92_662) ≈ 16.5` rounds for the English lexicon, each round an unaligned `u32` offset read plus a byte-slice `.cmp()`. The reference's `Lexicon#tagWord` is `this.lexicon[word]` — one the reference engine property access on what is, after the first few calls, a monomorphic object with an inline cache, close to `O(1)`. A handful of nanoseconds' difference between "one hashed property read" and "seventeen rounds of binary search, each doing real work" is exactly what naming the two lookup strategies predicts. `miss` is the one row where Verbora *wins* (1.4×): a binary search on a genuine miss still terminates in the same ~17 rounds, but the reference's *reference* implementation retries the lookup a second time in lowercase on any falsy result (`tagWord`'s `if (!categories \|\| ...) categories = this.lexicon[word.toLowerCase()]`) — for the all-lowercase miss probe used here (`"zzzznotawordatall"`), that means the reference engine pays for the property miss *twice*, once directly and once after an unnecessary `toLowerCase()` allocation, while Verbora's `first_category` only retries when the input actually contains an uppercase byte (confirmed in `Lexicon::first_category`'s own `word.bytes().any(\|b\| b.is_ascii_uppercase())` guard) — a case this specific probe never triggers on either side otherwise. `tag_with_lexicon`'s widening-with-length gap (5.3×→10.1×) is the same per-token lookup cost simply repeated `n` times with nothing to amortize it against, since this benchmark deliberately excludes the rule pass. |
 | **Profiling evidence** | Read `crates/verbora-tagger/src/data.rs`'s `StaticLexicon::find` (binary search, `u32_at` unaligned reads, byte-slice `Ord::cmp`) and `crates/verbora-tagger/src/lexicon.rs`'s `first_category` (the ASCII-uppercase guard deciding whether to retry lowercase) directly, plus `lib/natural/brill_pos_tagger/lib/Lexicon`'s `tagWord` (the unconditional lowercase retry on any falsy result, `typeof categories === 'function'` prototype-pollution guard included) directly. Real benchmark run: `cargo bench -p verbora-tagger`; both scripts read the identical hard-coded word lists (the reference harness's own doc comment on why they are copied rather than shared via JSON). |
 | **Optimization opportunity** | A hash map (`FxHashMap<&str, Categories>`, matching this crate's own `Spellcheck`'s choice of `FxHashMap` for a similar keyed-lookup problem) would restore `O(1)` lookup, but it is a real trade-off, not a strict improvement: the packed binary index's entire purpose (per its own module doc comment's comparison table) is **zero-cost startup** — no allocation, no hashing, no parse step, the dictionary is read directly out of the compiled binary. A `HashMap` alternative would need to be built at first use (paying real time and allocating real memory, the exact cost the packed index exists to avoid — see this crate's own comparison of "JSON at first use" vs. "packed index" startup cost) or shipped as a second, larger, differently-encoded binary asset. Given the absolute scale involved (tens of nanoseconds per lookup, in a pipeline where the *rule* pass — not the lexicon pass — dominates `tag`'s total cost for every non-trivial rule set per `docs/PERFORMANCE.md`'s own `tag` numbers, where Verbora wins 1.6×–15.5×), this is flagged as a real but low-priority opportunity for a **future, separate, dedicated phase** that would need its own startup-cost/lookup-cost trade-off analysis before committing to a specific data structure — not implemented in Fase 6. |
 
@@ -1192,15 +1192,16 @@ different question, different answer.
 
 **Real result: another genuine, honest trade-off, not a clean win.** Re-measured (`cargo bench -p verbora-spellcheck --bench deletion_index`, `max_distance=2`, same machine): construction — `DeletionIndex` is **13×–25× slower to build than `FuzzyIndex`** at every size (977.6 µs → 407.0 ms vs. 38.7 µs → 26.97 ms, n=100→20,000) — the same shape of cost `fast_symspell` itself pays against Verbora's plain `Spellcheck` above. Query — a genuine **crossover**: `FuzzyIndex` is actually faster at the smallest size (100 words, 1.73×, where a shallow BK-tree beats a deletion index's fixed per-query overhead), but `DeletionIndex` wins from 1,000 words up, the margin **widening rapidly** — 4.9× → 35.3× → 54.3× at 20,000 — near-flat growth with corpus size (3.3× over a 200× larger corpus) against `FuzzyIndex`'s roughly 300× growth over the same range, the same widening shape `fast_symspell` showed against `FuzzyIndex` in the comparison above. `DeletionIndex` also beats brute force by a wide, widening margin throughout (1.6× → 190×). Neither structure replaces the other: `FuzzyIndex` stays the default (cheaper, more predictable, no build-time distance cap); `DeletionIndex` earns its place for large (≥1,000-word), high-query-volume, fixed-`max_distance` workloads specifically — see `docs/PERFORMANCE_MATRIX.md`'s own `DeletionIndex` entry and `docs/COMPETITIVE_BENCHMARKS.md` §1.17's updated Architectural decision note for the full numbers and reasoning.
 
-## 36. Three independently-confirmed upstream bugs, found while re-verifying "abandoned" crates before trusting their numbers
+## 36. Independently-confirmed upstream bugs, found while verifying competitor crates before trusting their numbers
 
 `docs/research/fase6-benchmark-brief.md`'s own "Do NOT trust marketing benchmarks — reproduce locally"
-rule, applied to the crates this round's own re-verification passes flagged
-as abandoned/stale, surfaced three real, reproducible defects in third-party
-dependencies — none in Verbora's own code, all found by the same discipline
-this whole document already applies (verify before trusting a number).
-Recorded here as disclosed findings, not filed upstream without separate
-confirmation.
+rule surfaced real, reproducible defects in third-party dependencies — none
+in Verbora's own code, all found by the same discipline this whole document
+already applies (verify before trusting a number). Items 1–3 came out of
+that round's re-verification passes over crates flagged as abandoned/stale;
+item 4 (added 2026-08) came out of the phonetics-extension equivalence
+audit's differential fuzzing of an actively-maintained crate. Recorded here
+as disclosed findings, not filed upstream without separate confirmation.
 
 1. **`triple_accel` 0.4.0 `rdamerau_exp` over-counts a doubled-letter
    insertion.** `rdamerau_exp("tac", "tatc")` returns **2**; the correct
@@ -1268,6 +1269,47 @@ confirmation.
    toolchain. No code change made to work around it (the abort is in
    `eddie`'s own `unsafe` code, not reachable from this workspace); flagged
    here rather than silently tolerated.
+4. **`rphonetic` 3.0.6 panics on realistic non-ASCII input in four encoder
+   families.** Found by the phonetics-extension equivalence audit (the
+   104,114-input-per-encoder differential fuzz behind
+   `benchmarks/competitive/rust-competitors/tests/phonetics_correctness.rs`'s
+   regime-2 byte-exact claims), every case reproduced against rphonetic
+   3.0.6 **release** builds — these are not debug-only precondition checks
+   like eddie's above:
+   - `Nysiis` (strict mode, its default): the truncation
+     `result[..min(len, 6)]` is a raw byte slice with no char-boundary
+     check, so any input whose >6-byte code puts a multi-byte character
+     across byte offset 6 panics — 4,233 of the 104,114 fuzz inputs hit it,
+     i.e. a realistic non-ASCII-surname shape, not a pathological one.
+   - `Caverphone1`/`Caverphone2`: same class — the final `&txt[0..6]` /
+     `&txt[0..10]` byte slice on the padded rewrite result panics when a
+     surviving multi-byte (non-ASCII, Unicode-lowercase) character
+     straddles the cut. ASCII input can never reach it.
+   - `RefinedSoundex`: cleaning keeps every `char::is_alphabetic()`
+     character but then indexes `mapping[ch as usize - 65]`, so any
+     alphabetic character whose uppercase form is not entirely `A`–`Z`
+     (`é`, `ñ`, Cyrillic, CJK, `İ` U+0130, `ʼn` U+0149, the Kelvin sign
+     U+212A) indexes out of bounds.
+   - `MatchRatingApproach`: two distinct paths — `encode`'s
+     `&value[0..3]` / `&value[len - 3..]` truncation panics when either
+     offset falls mid-character (`"Москва"`, `"ABC日X"`), and
+     `is_encoded_equals` underflows on an empty encoding: verified against
+     release rphonetic, `("..", "ab")` returns `false` but `("ab", "..")`
+     panics — an asymmetric partial function.
+
+   Verbora's own seven spec-pinned encoders panic on **none** of these
+   inputs: each substitutes a defined, documented output (see the
+   "Divergence" section of each module's own doc comment in
+   `crates/verbora-phonetics/src/`), and exactly these input shapes are
+   excluded from the benchmark domain per the fairness pattern, so no
+   timing number anywhere compares a panicking path. Recorded alongside,
+   distinct from the bugs: four `DaitchMokotoffSoundex` behavioral quirks
+   Verbora *reproduces deliberately* for byte-parity rather than treats as
+   defects (non-ASCII rule keys `ą`/`ę`/`ţ`/`ț` consuming the following
+   character; a before-a-vowel probe that looks one character too far;
+   duplicate final codes surviving branch dedup; `ü`/`œ` missing from the
+   ASCII-folding list) — documented in
+   `crates/verbora-phonetics/src/daitch_mokotoff.rs`'s module doc.
 
 ## 37. Fuzzy candidate lookup: a double crossover — Verbora's `FuzzyIndex` vs. `fst`'s Levenshtein automaton (Rust)
 

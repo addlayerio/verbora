@@ -67,6 +67,7 @@
 mod comparator_sort;
 pub mod document;
 pub mod encoding;
+mod fast_build;
 pub mod globals;
 pub mod mathlog;
 pub mod tfidf;

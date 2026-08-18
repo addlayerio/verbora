@@ -1,13 +1,12 @@
 # Allocation behaviour
 
-A per-API reference for the question "does this allocate, and how much?".
+A per-API reference for one question: **does this allocate, and how much?**
 
 <div class="callout callout-warn">
-<strong>These are read from the source, not measured.</strong> Allocation counting
+<strong>Read from the source, not from a profiler.</strong> Allocation counting
 and peak-RSS instrumentation are planned but not yet in the repository. Every
-entry below describes what the code does structurally — which is stable and
-checkable — rather than a profiler reading. Where a number would need a
-measurement, this page says so.
+entry below describes what the code does structurally — stable and checkable —
+rather than a measured count.
 </div>
 
 ## Tokenizers
@@ -39,16 +38,18 @@ then slice it — their tokens are `Cow`, borrowed when the pre-pass was a no-op
 
 | API | Allocates per call | Notes |
 |---|---|---|
-| `levenshtein` (plain) | two `Vec<f64>` of length `m + 1` | The 2-row working set |
+| `levenshtein` (weighted) | one `Vec<f64>` of length `m + 1` | Rolling-row working set |
+| `levenshtein` (unit cost, ASCII) | bit-vector state and Peq table | No scalar DP row allocation |
 | `levenshtein` / `damerau_levenshtein` (restricted) | three `Vec<f64>` | Transposition reaches row − 2 |
 | `damerau_levenshtein` (unrestricted) | **nothing** for byte operands ≤ 8 (a fixed stack matrix); two integer rows plus a per-symbol row-snapshot arena otherwise (`u16` cells while the combined length fits, `u32` beyond) | Transposition reaches an arbitrary earlier row, so each source symbol's last row is snapshotted instead of building the matrix. Non-unit costs fall back to the full cost **and** parent matrices |
 | `levenshtein_search`, `damerau_levenshtein_search` | full cost matrix **and** a parent matrix, plus a `String` for the result substring | Backtracking needs the parents |
 | `jaro`, `jaro_winkler` | **nothing** for inputs ≤ 128 code units | Two stack `[bool; 128]` arrays; two `Vec<bool>` above that |
-| `dice_coefficient` | one `FxHashMap` of `(u16, u16)` keys | No `String` per bigram, unlike a widely-used JavaScript NLP library |
+| `dice_coefficient` | one `FxHashMap` of `(u16, u16)` keys | Bigrams are hashed as integer pairs, so no `String` is allocated per bigram |
 | `hamming`, `hamming_checked` | **nothing** on ASCII with `ignore_case: false` | A single scan. With `ignore_case: true`, both operands are folded via `to_lowercase()` first — two `String`s, regardless of ASCII-ness |
 
-Non-ASCII input adds **one `Vec<u16>` per operand** across this crate, from the
-promotion described in [Zero-copy](zero-copy.md#_3-exact-fast-paths). ASCII input
+Long non-ASCII input may add **one `Vec<u16>` per operand**, from the promotion
+described in [Zero-copy](zero-copy.md#_3-exact-fast-paths). Plain unit-cost
+Levenshtein keeps short Unicode operands in fixed stack buffers; ASCII input
 is compared as `&[u8]` borrowed from the inputs.
 
 There is no scratch-buffer API. The working rows cannot currently be hoisted out
@@ -131,14 +132,14 @@ suffix and `write!` it yourself.
 borrowing `&[u8]` and allocating a `Vec<u16>` per operand in distance and
 phonetics.
 
-**Hoist construction out of loops.** Most tokenizers and all four phonetic
+**Hoist construction out of loops.** Most tokenizers and nearly all phonetic
 encoders are zero-sized or near-zero-sized types, so this matters less than you
 would expect — but `SentenceTokenizer::with_abbreviations` owns a `Vec<String>`,
 and `OrthographyTokenizer::new(lang)` and the regex-driven tokenizers hold
 compiled patterns. Build those once.
 
 **Do not chase allocations that the work dominates.** `levenshtein/ascii/1024`
-takes 3.24 ms per call. Its two working rows are not the story.
+takes 29.08 µs per call. Its working state is not the story.
 
 ## Related
 

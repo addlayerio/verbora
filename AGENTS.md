@@ -1950,7 +1950,7 @@ purpose-built extension under `# Verbora-Native Extensions` above —
 `PhoneticIndex` (Fase 4) was the first, `verbora-language` (Fase 5) the
 second. Unlike those two, it wasn't scoped by a numbered Fase spec: it was
 proposed and approved mid-session, in direct response to a real gap this
-crate's other four phonetic encoders (`SoundEx`, `Metaphone`,
+crate's four core encoders (`SoundEx`, `Metaphone`,
 `DoubleMetaphone`, `SoundExDM`) share — all four are tuned for one
 language's (mostly English's) orthography, and none solve the problem a
 genealogical name index actually has: the *same* family name plausibly has
@@ -2248,6 +2248,73 @@ alternative not yet built for lack of that evidence at the time.
   visibility into the implementation's own design reasoning — the same
   "independent audit of a major feature" pattern already applied to
   Beider-Morse and `FrozenTrie`.
+
+---
+
+# Spec-Pinned Phonetic Encoders (Cologne, NYSIIS, Caverphone, Phonex, Refined Soundex, Match Rating, Daitch-Mokotoff)
+
+`verbora-phonetics`'s seven spec-pinned encoders — `Cologne`, `Nysiis`,
+`Caverphone1`/`Caverphone2`, `Phonex`, `RefinedSoundex`,
+`MatchRatingApproach`, and the branching `DaitchMokotoff` — are the
+workspace's **seventh** purpose-built extension under
+`# Verbora-Native Extensions` above, shipped as one coherent batch:
+`PhoneticIndex` (Fase 4), `verbora-language` (Fase 5), Beider-Morse,
+`FuzzyIndex`, `FrozenTrie`, and `DeletionIndex` came first. Like
+Beider-Morse, they fill algorithm gaps the JS reference never covered; unlike
+Beider-Morse (textbook-derived, independently implemented, `Partial` in the
+matrix), each of these pins its behavior **byte-for-byte to rphonetic 3.0.6**
+(the Apache commons-codec lineage, and the crate they are benchmarked
+against) — the competitor *is* the specification, which is what makes their
+`docs/COMPETITIVE_BENCHMARKS.md` §1.6 rows the module's only **Yes**
+(full output equivalence) classifications.
+
+- **Self-identified.** Each module's own `//!` doc comment
+  (`crates/verbora-phonetics/src/{cologne,nysiis,caverphone,phonex,refined_soundex,match_rating,daitch_mokotoff}.rs`)
+  states plainly that it is a Verbora-native extension, cites the published
+  algorithm it implements, names rphonetic 3.0.6 as its pin, and itemizes
+  every behavioral decision and every documented divergence — all of which
+  are panic-domain substitutions (rphonetic panics on realistic non-ASCII
+  input in four of these encoder families, `docs/PERFORMANCE_GAPS.md` entry
+  36 item 4; Verbora returns a documented substitute output instead and
+  panics on none of them). `daitch_mokotoff.rs` additionally documents the
+  four rphonetic quirks it *reproduces deliberately* for byte-parity, and —
+  because the crate also ships the JS reference's single-branch `SoundExDM` —
+  both module docs state when to use which: the two coexist on purpose, and
+  neither replaces the other.
+- **Strictly scoped.** Encoders encode and compare, nothing more: no
+  ranking, no indexing, no query language — composition with
+  `PhoneticIndex`/`verbora-distance` stays at the call site, the same
+  boundary every prior entry in this section draws. The only surface beyond
+  `process`/`compare` is what each published algorithm itself defines:
+  `Nysiis`'s strict flag, `Phonex`'s max code length,
+  `RefinedSoundex::difference` (commons-codec's own companion measure),
+  `MatchRatingApproach::compare` (the published MRA match *decision*,
+  overriding the trait's key-equality default), and
+  `DaitchMokotoff::codes` (the branch list).
+- **Benchmark-justified like everything else.** Correctness first:
+  byte-exact agreement with rphonetic asserted in
+  `benchmarks/competitive/rust-competitors/tests/phonetics_correctness.rs`
+  (regime 2 — the 653-name corpus plus per-algorithm extras, the MRA
+  decision over every ordered corpus pair ≈426K comparisons, and a
+  three-way `process`/`codes`/`encode` check for Daitch-Mokotoff), all
+  passing first-run; independently re-verified by an adversarial audit that
+  differentially fuzzed 104,114 inputs per encoder against real rphonetic
+  with zero mismatches, proved every documented divergence exactly as
+  narrow as claimed, and mutation-tested the suites; crate suite at 322
+  unit + 49 doctests green. Then performance: full-default Criterion,
+  Verbora faster in **all 24 cells** (8 groups × 3 batch sizes, 2.08× to
+  17.41×) — see `docs/COMPETITIVE_BENCHMARKS.md` §1.6 and
+  `docs/PERFORMANCE_MATRIX.md`'s own entry for the numbers, published on
+  `site/benchmarks/competitive.md` with the verification pedigree stated.
+- **Same architectural rules, no separate track.** Rule sets are static
+  compiled-in tables in the crate's established `dm_table` style —
+  `DaitchMokotoff` embeds the commons-codec rule set as pre-sorted `static`
+  arrays (an ordering invariant asserted by a unit test) where rphonetic
+  `nom`-parses the rules text at builder time — and every encoder runs a
+  single-pass scan over one reused buffer with one allocation per call
+  (the returned code; `DaitchMokotoff` adds a small branch `Vec`). Total
+  functions throughout: no `Err` path, no panic, on any `&str` — the
+  never-panic-on-text discipline the rest of the workspace already holds.
 
 ---
 

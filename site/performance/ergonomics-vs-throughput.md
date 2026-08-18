@@ -1,17 +1,14 @@
 # Ergonomics vs throughput
 
-Verbora offers a high-level, ergonomic API for the common case, and a
-low-level one that gives you control over memory. It is tempting to read that as
-"the good one and the slow one". It is not that.
+Verbora offers a high-level API for the common case and a low-level one that
+gives you control over memory. They are not "the good one and the slow one" —
+they are sized for different workloads.
 
-## The claim, stated plainly
+> **`tokenize()` is the right choice for the overwhelming majority of programs.
+> `tokenize_into()` is for pipelines processing millions of documents.**
 
-> `tokenize()` is exactly the right choice for around 95% of programs.
-> `tokenize_into()` is preferable for pipelines processing millions of
-> documents.
-
-Both halves matter. The second half is why the low-level API exists; the first
-half is why it is not the default.
+The second sentence is why the low-level API exists. The first is why it is not
+the default.
 
 ## What the high-level API actually costs
 
@@ -73,27 +70,20 @@ loop, you have taken on that risk for nothing.
 
 Ask, in this order:
 
-```text
-1. Has a profiler told me this line is hot?
-        no  → use the high-level API and stop reading
-        yes → continue
-
-2. Is the cost the container allocation, or the work inside it?
-        the work → a different API will not help; look at the algorithm,
-                   the input size, or how many candidates you are comparing
-        the container → continue
-
-3. Do I consume the result once, in order?
-        yes → tokens()          (no container at all)
-        no  → tokenize_into()   (one container, reused)
-```
+1. **Has a profiler told me this line is hot?** No → use the high-level API and
+   stop reading.
+2. **Is the cost the container allocation, or the work inside it?** The work → a
+   different API will not help; look at the algorithm, the input size, or how
+   many candidates you are comparing.
+3. **Do I consume the result once, in order?** Yes → `tokens()`, no container at
+   all. No → `tokenize_into()`, one container reused.
 
 Step 2 is the one people skip. If you are computing Levenshtein against 100,000
 candidates, the fix is a [trie](../features/trie.md) or a
 [phonetic bucket](../features/phonetics.md) that cuts the candidate set — not a
-different call shape for the metric. Verbora's own benchmark table shows
-`levenshtein/ascii/1024` at 3.24 ms *per call*: at that size no allocation
-strategy is the story, the O(nm) sweep is.
+different call shape for the metric. A `levenshtein/ascii/1024` call is 29.08 µs
+of real work; no container decision moves that. Removing 99% of the comparisons
+does.
 
 ## Where the high-level API is genuinely better
 

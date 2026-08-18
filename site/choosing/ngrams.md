@@ -2,23 +2,18 @@
 
 `verbora-ngrams` gives you three ways to ask for the same windows, two ways to
 supply the input, two ways to pick the tokenizer, and an optional frequency
-table bolted on top. That is a lot of doors for one idea, so this page is
-ordered by how much the choice actually costs you.
+table on top. The spine is one decision — **lazy or materialised** — and
+everything else follows from where your input already is.
 
-The spine of it is one decision — **lazy or materialised** — and everything else
-is a consequence of where your input already is. For the full surface, see
-[Features: n-grams](../features/ngrams.md).
+For the full surface, see [Features: n-grams](../features/ngrams.md).
 
 <div class="callout callout-note">
 <strong>Note.</strong> Blocks marked <code>rust,ignore</code> on this page do not
-compile on purpose, and the prose says why each one fails. Every other Rust block
-is a complete program that compiles and whose assertions pass; they are checked
-by the site-wide snippet harness (<code>python3 site/check-snippets.py</code>).
+compile on purpose, and the prose says why. Every other Rust block is a complete
+program whose assertions pass.
 </div>
 
 ## The decision that matters: lazy or materialised
-
-### Comparison table
 
 | API | Execution | Result | Windows copied | Random access | May outlive the sequence | Allocations |
 |---|---|---|:--:|:--:|:--:|---|
@@ -29,44 +24,20 @@ by the site-wide snippet harness (<code>python3 site/check-snippets.py</code>).
 All three produce **exactly the same n-grams in exactly the same order**. They
 differ only in when the work happens and who owns the result.
 
-### Decision tree
+| If you… | Call |
+|---|---|
+| stop early (`take` / `find` / `any` / `position`), or fold windows into a counter | `ngrams_iter()` |
+| consume everything and want indexable windows — **the default** | `ngrams()` |
+| need the tuples to outlive the token slice (returned, stored, cached, sent to another thread) | `ngrams_owned()` |
+| also need frequencies or a count-of-counts | `ngrams_with_stats()` |
+| want `n == 2` or `n == 3` | `bigrams()` / `trigrams()` — the same call with `n` fixed |
 
-```text
-I have a slice of tokens and I want its n-grams
-│
-├── Will I look at every n-gram?
-│   │
-│   ├── No — I stop early (take / find / any / position),
-│   │        or I only fold them into a counter
-│   │      └── ngrams_iter()          ← nothing is built that you do not read
-│   │
-│   └── Yes
-│         │
-│         ├── Do the tuples have to outlive the token slice?
-│         │    (returned from a function, stored in a struct,
-│         │     sent to another thread, put in a cache)
-│         │   │
-│         │   ├── Yes → ngrams_owned()
-│         │   └── No  → ngrams()      ← the recommended default
-│         │
-│         └── Do I also need frequencies / a count-of-counts?
-│               └── ngrams_with_stats()
-│
-└── (n == 2 or 3? bigrams() / trigrams() are the same call with n fixed.
-    multrigrams() is an exact alias of ngrams().)
-```
+`multrigrams()` is an exact alias of `ngrams()`.
 
 ### `ngrams_iter()` <a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a> <a class="badge badge-cow" href="../performance/zero-copy">COW</a>
 
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Lazy — nothing happens until you advance it</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Cow&lt;'a, [T]&gt;</code>: <code>Borrowed</code> windows, <code>Owned</code> pad tuples</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">None per window; one <code>Vec</code> per padded tuple (at most <code>2(n-1)</code>)</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">N/A — there is no output buffer</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Early termination, streaming a corpus, folding into a counter</span></div>
-</div>
+Nothing happens until you advance it. Windows are `Cow::Borrowed`; only padded
+tuples allocate, at most `2(n-1)` of them.
 
 `NGramIter` implements `ExactSizeIterator`, so `len()` is available without
 consuming anything — you do not have to collect just to count. It also
@@ -75,35 +46,17 @@ scan. It is **not** a `DoubleEndedIterator`.
 
 ### `ngrams()` <a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>
 
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager — <code>ngrams_iter(…).collect()</code></span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Vec&lt;Cow&lt;'a, [T]&gt;&gt;</code>, borrowing the token slice</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>Vec</code>, reserved once from the iterator's exact <code>size_hint</code>; one <code>Vec</code> per padded tuple</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">The default: indexable windows whose token slice outlives them</span></div>
-</div>
-
-This is the middle road and usually the right one. You pay for exactly one
-`Vec`; the windows themselves are still pointer-and-length views into your
-tokens. Nothing is copied.
+`ngrams_iter(…).collect()`, with the outer `Vec` reserved once from the
+iterator's exact `size_hint`. This is the middle road and usually the right one:
+you pay for exactly one `Vec`, and the windows themselves are still
+pointer-and-length views into your tokens. Nothing is copied.
 
 ### `ngrams_owned()` <a class="badge badge-owned" href="../performance/allocation">OWNED</a>
 
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v">Eager — <code>ngrams_iter(…).map(Cow::into_owned).collect()</code></span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>Vec&lt;Vec&lt;T&gt;&gt;</code>, detached from the sequence — a plain owned nested vector</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One outer <code>Vec</code>, one <code>Vec</code> per n-gram, one <code>T::clone</code> per element</span></div>
-<div class="perf-row"><span class="perf-k">Buffer reuse</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Batch</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Parallel</span><span class="perf-v">No</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Tuples that must outlive the token slice</span></div>
-</div>
-
-The expensive one. With `T = String` and `n = 2` over `k` tokens it allocates
-roughly `2k` strings plus `k` vectors. Use it when the borrow checker tells you
-to, not by default.
+`ngrams_iter(…).map(Cow::into_owned).collect()` — a plain owned nested vector,
+detached from the sequence. The expensive one: with `T = String` and `n = 2`
+over `k` tokens it allocates roughly `2k` strings plus `k` vectors. Use it when
+the borrow checker tells you to, not by default.
 
 **That is a real signal, not a nuisance.** This does not compile:
 
@@ -134,10 +87,10 @@ fn main() {
 }
 ```
 
-## Worked example: where laziness actually wins
+## Where laziness actually wins
 
-Laziness pays when the caller **never needs the rest of the sequence**. Then the
-windows you skip are never built, and the outer `Vec` is never allocated at all.
+Laziness does not make producing a window cheaper — a window is a borrow either
+way. What it saves is the outer `Vec` and the windows past your stopping point.
 
 ```rust
 use verbora_ngrams::ngrams_iter;
@@ -164,21 +117,10 @@ fn main() {
 }
 ```
 
-Written with `ngrams()` instead, each of these builds a `Vec` holding a
-pointer-and-length pair for **every** window in the document, and then reads
-five of them. On a nine-word sentence that is irrelevant. On a 20,000-token
-document it is 20,000 fat pointers written to the heap and thrown away.
-
-**Be precise about what you save.** Laziness does not make producing a window
-cheaper — a window is a borrow either way. What it saves is:
-
-- the outer `Vec` allocation and the writes into it, and
-- the windows past your stopping point.
-
-If you consume every n-gram anyway, `ngrams()` costs one extra allocation and
-gives you `len()`, indexing and slicing in return. Take it.
-
-### Folding, not collecting
+On a nine-word sentence the saving is irrelevant. On a 20,000-token document it
+is 20,000 fat pointers written to the heap and thrown away. If you consume every
+n-gram anyway, `ngrams()` costs one extra allocation and gives you `len()`,
+indexing and slicing in return — take it.
 
 The same argument applies when you consume everything but never need the list —
 a frequency count, a maximum, a filter into some other structure:
@@ -208,8 +150,8 @@ Some("&lt;/s&gt;"))</code> contains a two-element tuple. Indexing
 ## Pre-tokenized slice vs string input
 
 `ngrams` takes `&[T]`. `ngrams_str` takes `&str` and **tokenizes first**, then
-calls `ngrams_owned` on the result — because the tokens are created and dropped
-inside the call, so nothing can be borrowed from them.
+calls `ngrams_owned` on the result — the tokens are created and dropped inside
+the call, so nothing can be borrowed from them.
 
 | | `ngrams(&tokens, …)` | `ngrams_str(text, …)` |
 |---|---|---|
@@ -219,9 +161,9 @@ inside the call, so nothing can be borrowed from them.
 | Windows copied | ❌ | ✅ — `n` `String`s per tuple |
 | Reads the process-global tokenizer | ❌ | ✅ |
 
-So a caller that already has tokens should never go through `ngrams_str`. It
-would re-tokenize text it does not have, and copy every element of every tuple
-on the way out.
+Splitting the text is the expensive half; sliding a window over a slice you
+already have is close to free. A caller that already has tokens should never go
+through `ngrams_str`.
 
 ```rust
 use verbora_ngrams::{bigrams, ngrams_str, tokenize, trigrams};
@@ -243,27 +185,6 @@ fn main() {
     assert!(matches!(two[0], Cow::Borrowed(_)));
 }
 ```
-
-A baseline recorded from a widely-used JavaScript NLP library puts numbers on
-the shape of this, over a 4,096-word input:
-
-| Operation | ns/op |
-|---|---:|
-| `tokenize` alone | 152,211 |
-| `ngrams_str` (tokenize + window) | 201,660 |
-| windowing pre-tokenized input | 48,550 |
-
-Tokenizing is about three quarters of the string entry point's cost. That ratio
-is a property of the algorithm rather than of the runtime, which is why the
-pre-tokenized API exists at all.
-
-<div class="callout callout-note">
-<strong>Note.</strong> No Rust-versus-JavaScript comparison has been published
-for this crate — <code>docs/PERFORMANCE.md</code> covers the 26
-<code>verbora-distance</code> benchmarks only. The table above is a baseline
-recorded from that JavaScript library, quoted to show the <em>internal</em>
-ratio between tokenizing and windowing. See <a href="../benchmarks/">Benchmarks</a>.
-</div>
 
 ### If your loop is over documents
 
@@ -308,12 +229,9 @@ tokenizer.
 | Visible in the signature | ❌ | ✅ |
 | Safe to call from a multi-threaded test suite | ⚠️ | ✅ |
 
-**Prefer `ngrams_str_with`.** The global exists to support callers who need a
-single, process-wide tokenizer that can be rebound at runtime — a
-`set_tokenizer` call changes what every subsequent `ngrams_str` call in the
-process sees. That is a real, deliberate capability, not an accident of the
-API, but it is there for compatibility, not as a recommendation: most callers
-should pass the tokenizer explicitly.
+**Prefer `ngrams_str_with`.** The global exists for callers who genuinely want
+one process-wide tokenizer that can be rebound at runtime; pass the tokenizer
+explicitly unless you need that.
 
 ```rust
 use verbora_ngrams::{FnTokenizer, current_tokenizer, ngrams_str_with};
@@ -334,8 +252,7 @@ fn main() {
 <strong>Careful.</strong> Rust runs a test binary's tests on several threads in
 one process. A test that calls <code>set_tokenizer</code> changes what every
 concurrently running test observes, and there is no scoped or thread-local
-variant. If you must use the global in tests, serialise on a mutex — the crate's
-own tests do exactly that. See
+variant. If you must use the global in tests, serialise on a mutex. See
 <a href="../features/ngrams#the-process-global-tokenizer">The process-global
 tokenizer</a>.
 </div>
@@ -358,29 +275,15 @@ table, a count-of-counts, and a total. That is not free:
 | Extra allocations | none | one key `String` **per n-gram**, one `HashMap`, one slot `Vec`, one `frequencies` `Vec`, one `BTreeMap` |
 | Extra work per n-gram | none | render the key, hash it, probe the map |
 
-The key `String` is built for every n-gram, not for every *distinct* n-gram —
-`index.entry(ngram_key(&gram))` constructs it unconditionally and drops it again
-on a repeat. So if you only need the windows, do not ask for the statistics.
+The key `String` is built for every n-gram, not for every *distinct* n-gram, and
+dropped again on a repeat. So if you only need the windows, do not ask for the
+statistics.
 
-Conversely, if you need counts but not the list, `ngrams_with_stats` is still
-building the full `Vec<Cow<…>>` of n-grams as a side effect. Folding
-`ngrams_iter` into your own map (shown above) skips that, at the cost of
-the first-seen insertion order and the `Nr` count-of-counts map that
-`ngrams_with_stats` builds — which is usually the trade you wanted.
-
-```text
-I want frequency information
-│
-├── I need the {ngrams, frequencies, Nr, numberOfNgrams} shape
-│      └── ngrams_with_stats() / bigrams_with_stats() / trigrams_with_stats()
-│
-├── I need counts only, my own key format is fine
-│      └── ngrams_iter() folded into a HashMap
-│
-└── I need many lookups by key
-       └── ngrams_with_stats(), then index `frequencies` into a HashMap once
-          (NGramStats::frequency is a linear scan by design)
-```
+| If you need… | Call |
+|---|---|
+| the `{ngrams, frequencies, Nr, numberOfNgrams}` shape | `ngrams_with_stats()` / `bigrams_with_stats()` / `trigrams_with_stats()` |
+| counts only, with your own key format | `ngrams_iter()` folded into a `HashMap` (shown above) |
+| many lookups by key | `ngrams_with_stats()`, then index `frequencies` into a `HashMap` once — `NGramStats::frequency` is a linear scan by design |
 
 ## Chinese: which door
 
@@ -392,25 +295,16 @@ I want frequency information
 | `zh::ngrams_zh_utf16` | `&'a [u16]` | exact, round-trippable | the input may contain astral characters |
 | `zh::split_lossy` + `ngrams` | `Cow<'a, str>` | as `ngrams_zh` | large documents: split once, then window with borrowed tuples |
 
-For **array** input there is no choice to make: `zh` only changes how a
-*string* is split into elements before windowing; once you already have a
-slice, use `ngrams` directly.
+For **array** input there is no choice to make: `zh` only changes how a *string*
+is split into elements before windowing.
 
 ## What this crate does not have
 
-Three shapes you will find elsewhere in Verbora — or expect from other
-libraries — are simply absent here, and it is better to know that up front than
-to search for them.
-
-- **No parallel API in this crate, and not yet evaluated either way.** Unlike
-  the thirteen crates that ship an opt-in `par_*_batch` behind a
-  `parallel` feature, `verbora-ngrams` has not been separately assessed for
-  one — treat its absence here as "not yet evaluated," not as a
-  rejection. Every entry point is a free function over borrowed input with no
-  interior state, so you can parallelise across documents yourself today.
-  Avoid `ngrams_str` and `tokenize` in worker threads because they read the
-  process-global binding; use `ngrams_str_with` so each worker's tokenizer is
-  explicit.
+- **No parallel API.** `verbora-ngrams` ships no `par_*_batch`. Every entry
+  point is a free function over borrowed input with no interior state, so you
+  can parallelise across documents yourself. Avoid `ngrams_str` and `tokenize`
+  in worker threads because they read the process-global binding; use
+  `ngrams_str_with` so each worker's tokenizer is explicit.
 
   ```rust  ignore
   // `rayon` is not a dependency of verbora-ngrams itself; add it to YOUR
@@ -425,34 +319,16 @@ to search for them.
 
   See [Parallelism](../performance/parallelism.md).
 
-- **No `_into` API.** There is no `ngrams_into(&tokens, n, …, &mut out)`. The
-  lazy iterator is the memory-frugal path instead: it lets you decide where the
-  output goes without the crate owning a buffer. Buffer reuse *is* available one
-  layer down, on the tokenizer (`tokenize_borrowed_into`), which is where the
-  per-document allocations actually are. See
-  [Iterator vs `_into`](../performance/iterator-vs-into.md).
+- **No `_into` API.** The lazy iterator is the memory-frugal path instead.
+  Buffer reuse *is* available one layer down, on the tokenizer
+  (`tokenize_borrowed_into`), which is where the per-document allocations
+  actually are. See [Iterator vs `_into`](../performance/iterator-vs-into.md).
 
-- **No batch API.** There is no `ngrams_batch`. The only batch-shaped thing
-  reachable from this crate is `verbora_core::Tokenizer::tokenize_batch`, which
-  `WordTokenizer` inherits as a provided method; its default body is
-  `texts.iter().map(|t| self.tokenize(t.as_ref())).collect()` — a plain
-  sequential map that does **not** reuse a buffer, despite the trait's doc
-  comment saying it does. Loop over your documents yourself. See
+- **No batch API.** The only batch-shaped thing reachable from this crate is
+  `verbora_core::Tokenizer::tokenize_batch`, which `WordTokenizer` inherits as a
+  provided method — a sequential map that does not reuse a buffer. Loop over
+  your documents yourself. See
   [Batch vs streaming](../performance/batch-vs-streaming.md).
-
-## Summary
-
-| If you… | Call |
-|---|---|
-| stop early, or fold windows into something else | `ngrams_iter` |
-| want indexable windows and the tokens outlive them | `ngrams` (or `bigrams` / `trigrams`) |
-| need the tuples after the tokens are gone | `ngrams_owned` |
-| need the `{ngrams, frequencies, Nr, numberOfNgrams}` shape | `ngrams_with_stats` |
-| have a string and control the tokenizer | `ngrams_str_with` |
-| have a string and want the process-global tokenizer | `ngrams_str` |
-| have Chinese BMP text | `zh::ngrams_zh` |
-| have Chinese text that may contain astral characters | `zh::code_units` + `zh::ngrams_zh_utf16` |
-| prefer the `multrigrams` name | `multrigrams` — an exact alias of `ngrams` |
 
 ## Related
 

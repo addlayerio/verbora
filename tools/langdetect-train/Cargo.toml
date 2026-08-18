@@ -1,0 +1,37 @@
+# Training pipeline for `verbora-language`'s HashedLinearDetector.
+#
+# Deliberately NOT a member of the repository workspace (the empty
+# `[workspace]` table below detaches it): it is a maintainer tool, not a
+# shipped crate — it must never appear in the workspace build graph, its
+# dependencies must never count against the toolkit's dependency-light
+# stance, and its test suite (which includes a counting global allocator,
+# something the workspace's `unsafe_code = "deny"` lint rightly forbids in
+# shipped crates) runs only when a maintainer retrains the model.
+[package]
+name = "langdetect-train"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Corpus preparation, training, calibration, codegen, and evaluation for HashedLinearDetector"
+
+[dependencies]
+# The crate under training: `fast-language-detection` re-exports the
+# exact feature-extraction code inference runs (train/inference parity by
+# construction); `language-detection` provides WhatlangDetector as the
+# accuracy baseline in `eval`.
+verbora-language = { path = "../../crates/verbora-language", features = [
+    "fast-language-detection",
+    "language-detection",
+] }
+# Only for reading benchmarks/competitive/datasets/language-accuracy/
+# dataset.json in `eval` and writing the training manifest.
+serde_json = "1"
+
+# Training is compute-bound; mirror the measurement profile the
+# decomposition analysis used so eval latencies are representative.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[workspace]

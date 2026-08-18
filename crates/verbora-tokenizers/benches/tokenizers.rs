@@ -207,6 +207,17 @@ fn languages(c: &mut Criterion) {
                 .len()
         });
     });
+    // Regression guard for the block-mask scanner: WordTokenizer's class
+    // *includes* Cyrillic, so on this input word runs live outside the ASCII
+    // fast path entirely. A regression here means the block scan's non-ASCII
+    // handoff got more expensive, which the all-ASCII rows cannot show.
+    group.bench_function("word-cyrillic", |b| {
+        b.iter(|| {
+            WordTokenizer::new()
+                .tokenize(black_box(&cyrillic))
+                .map(|v| v.len())
+        });
+    });
 
     group.throughput(Throughput::Bytes(japanese.len() as u64));
     group.bench_function("ja-segmenter", |b| {

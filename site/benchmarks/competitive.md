@@ -1,27 +1,28 @@
 # Competitive benchmarks
 
-[String distance results](distance.md) measures Verbora against a widely-used
-JavaScript NLP library (v8.1.1). This page measures something different:
-Verbora against **the wider Rust ecosystem** — real, actively-selected,
-version-pinned competing crates — on the same inputs, plus that JavaScript
-library again where a Rust competitor does not exist. It is the output of
-the project's own competitive-performance audit.
+Where does Verbora stand against the Rust ecosystem? This page reports
+like-for-like, version-pinned measurements — same input, equivalent result,
+and a public loss whenever another library is faster.
 
-<div class="callout callout-warn">
-<strong>Performance depends on workload, input distribution, hardware and
-configuration.</strong> These benchmarks measure the workloads described
-below and should not be interpreted as universal performance guarantees.
+<div class="callout callout-note">
+<strong>Read by capability, not by one global score.</strong> A tokenizer, a
+stemmer and a string-distance function solve different problems. Each section
+therefore shows the measured workload, the result and its limits.
 </div>
 
-**290 benchmark comparisons** across 13 modules with a real Rust competitor,
-plus a 4-module, 3-detector language-detection accuracy report. Every
-comparison here passed an independent fairness audit before publication —
-see [How these numbers were audited](#how-these-numbers-were-audited) — and
-every loss is shown as a loss, with a link to the investigation in
-[`docs/PERFORMANCE_GAPS.md`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md).
-Three modules (WordNet, analyzers, sentiment) have no fair Rust
-competitor at all — see [No Rust competitor exists](#no-rust-competitor-exists-wordnet-analyzers-sentiment)
-— and are covered on their own pages instead of here.
+| Coverage | What it means |
+|---|---|
+| 314 timed comparisons | 13 capabilities with a fair Rust comparison |
+| 3 capabilities without a fair peer | WordNet, sentence analysis and sentiment are documented on their feature pages instead |
+| 1 primary metric | Criterion median, single-threaded, on the hardware below |
+
+Start with [String distance](#distance), [Tokenizers](#tokenizers),
+[Stemmers](#stemmers), or [Spellcheck](#spellcheck). Exact harnesses and raw
+data are linked from each section; [reproduction instructions](#reproducing-these-numbers)
+are at the end.
+
+<details>
+<summary>Methodology and audit details</summary>
 
 ## Benchmark methodology
 
@@ -39,11 +40,14 @@ competitor at all — see [No Rust competitor exists](#no-rust-competitor-exists
 | Metric | **Median**, per Criterion's own robust-statistics estimate — not mean, per this project's own `PRIMARY METRIC` policy |
 | Threads | **1 (single-threaded)** for every benchmark on this page — no parallel API is exercised anywhere in this audit; see [Thread counts](#thread-counts) |
 | Source | [`benchmarks/competitive/rust-competitors/benches/*.rs`](https://github.com/addlayerio/verbora/tree/main/benchmarks/competitive/rust-competitors/benches) (one file per module), raw Criterion output under [`benchmarks/competitive/results/raw/`](https://github.com/addlayerio/verbora/tree/main/benchmarks/competitive/results/raw), joined into [`results/results.json`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/results/results.json) |
-| Date | Results captured 2026-08-15/17 (`results/metadata.json`'s timestamp: `2026-08-15T23:50:55Z`; the Metaphone, unrestricted-Damerau, and N-Grams groups are the freshest, from 2026-08-17) |
+| Date | Results captured 2026-08-15/17 (`results/metadata.json`'s timestamp: `2026-08-15T23:50:55Z`; the Metaphone, unrestricted-Damerau, N-Grams, and the eight byte-exact phonetics groups are the freshest, from 2026-08-17) |
 
-Every number on this page is read from that `results.json` file — none is
-retyped from memory or rounded inconsistently; the relative-speedup figures
-are computed from the raw `median_ns` values at page-generation time. See
+Every number on this page is read from Criterion's own saved estimates —
+joined into that `results.json` file for most modules, and read directly
+from the same per-group raw `estimates.json` files for the freshest groups
+named in the Date row — none is retyped from memory or rounded
+inconsistently; the relative-speedup figures are computed from the raw
+`median_ns` values at page-generation time. See
 [Reproducing these numbers](#reproducing-these-numbers) for the exact
 commands that regenerate all of it from a clean checkout.
 
@@ -91,14 +95,15 @@ different question from this one.
 
 ## How these numbers were audited
 
-Every table below was cleared by an independent fairness audit that read
-every benchmark file and correctness test in this workspace, re-ran the
-Rust suite and the language-accuracy report itself, and cross-referenced all
-133 "Verbora loses" rows in `results.json` (each `(benchmark, competitor)`
-pair where Verbora's median is slower than that competitor's, the same
-per-row comparison the Relative column below uses) against
+The page's audited core — 290 of the 314 comparisons — was cleared by an
+independent fairness audit that read every benchmark file and correctness
+test in this workspace, re-ran the Rust suite and the language-accuracy
+report itself, and cross-referenced all 133 "Verbora loses" rows in
+`results.json` (each `(benchmark, competitor)` pair where Verbora's median
+is slower than that competitor's, the same per-row comparison the Relative
+column below uses) against
 [`docs/PERFORMANCE_GAPS.md`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md).
-Its verdict: **every comparison on this page is FAIR** — same input, genuinely
+Its verdict: **every comparison in that set is FAIR** — same input, genuinely
 equivalent (or honestly narrowed and labeled) semantics, `black_box` on every
 call's input and output, correctness-before-performance tests that were run
 and passed, and version pins of `=x.y.z` on every third-party crate. Two
@@ -107,6 +112,18 @@ inline where they occur: the normalizers' accented-input case
 ([Normalizers](#normalizers)) and the `WhatlangDetector` wrapper-overhead
 check ([Language detection](#language-detection)), neither of which is a
 ranked "X beats Y" comparison in the first place.
+
+The remaining 24 comparisons — the byte-exact encoder table in
+[Phonetics](#phonetics) — carry a stronger correctness check in place of
+that audit's narrowed-semantics review: byte-exact output equality with the
+competitor itself, asserted in
+[`tests/phonetics_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/phonetics_correctness.rs)
+and independently re-verified by an adversarial audit that differentially
+fuzzed 104,114 inputs per encoder against `rphonetic` with zero mismatches,
+proved every documented divergence exactly as narrow as each module's own
+documentation claims, and mutation-tested the correctness suites.
+
+</details>
 
 ## Results by capability
 
@@ -183,13 +200,14 @@ not merely unused, genuinely uncompiled).
 | strsim | 0.11.1 | Rust | 625.21 µs | 1.6K/s | 21.51× slower |
 | stringmetrics | 2.2.2 | Rust | 915.47 µs | 1.1K/s | 31.49× slower |
 
-| Input size | Verbora | rapidfuzz | strsim | stringmetrics |
+| Input / shape | Verbora | rapidfuzz | strsim | stringmetrics |
 |---:|--:|--:|--:|--:|
-| 4 | 14.8 ns | 32.0 ns | 20.6 ns | 26.0 ns |
-| 16 | 41.9 ns | 74.3 ns | 271.3 ns | 169.7 ns |
-| 64 | 164.7 ns | 247.8 ns | 2.86 µs | 2.91 µs |
-| 256 | 2.09 µs | 3.30 µs | 41.83 µs | 55.70 µs |
-| 1024 | 29.07 µs | 31.72 µs | 625.21 µs | 915.47 µs |
+| 4 random | 14.8 ns | 32.0 ns | 20.6 ns | 26.0 ns |
+| 16 random | 41.9 ns | 74.3 ns | 271.3 ns | 169.7 ns |
+| 64 random | 164.7 ns | 247.8 ns | 2.86 µs | 2.91 µs |
+| 256 random | 2.09 µs | 3.30 µs | 41.83 µs | 55.70 µs |
+| 1024 random | 29.07 µs | 31.72 µs | 625.21 µs | 915.47 µs |
+| 1024 near (`d = 1`) | **306 ns** | 806 ns | 655 µs | 580 ns |
 
 Verbora is the **fastest implementation at every size** — against all four
 char-indexed competitors here and the two byte-level ones below. Against
@@ -203,6 +221,56 @@ algorithm. Against
 `strsim` the win is 1.39× (4 chars) up to 21.5× (1024); against
 `stringmetrics` 1.76× up to 31.5× — neither scalar design has a bit-vector
 formulation to close the gap with.
+
+The random rows are intentionally retained as their own workload. They do
+not show the common-affix optimization: independent strings have almost no
+affix to remove. The same competitive harness also measures a 1,024-unit
+pair with one central substitution (`1024-near`):
+
+| Library | Median (`1024-near`) | Relative to Verbora |
+|---|---:|---:|
+| Verbora | **306 ns** | **1.00×** |
+| `editdistancek` | 182 ns | 1.68× faster |
+| `stringmetrics` | 580 ns | 1.89× slower |
+| `rapidfuzz` | 806 ns | 2.63× slower |
+| `triple_accel` | 541 µs | 1,766× slower |
+| `strsim` | 655 µs | 2,141× slower |
+
+These are the current local competitive medians (30 samples, release build,
+Intel i9-14900KF). The important comparison is within this row: Verbora's
+previous near-1024 result was about 30.8 µs, so the affix path reduces it to
+about 306 ns (roughly 101×). `editdistancek` remains faster on this specific
+near-match shape because its bounded-edit algorithm is designed for small
+distances; that is a legitimate workload-specific result, not hidden by the
+aggregate random table.
+
+#### Competitive shape suite
+
+The competitive harness also has a dedicated
+`levenshtein_edge_shapes` group. It uses the exact same lowercase-ASCII,
+unit-cost inputs for every implementation, so both char-indexed and
+byte-indexed competitors remain directly comparable. It keeps the
+shape-sensitive results separate from the random-size table above:
+
+| Case | Operands | What it verifies |
+|---|---|---|
+| `near/1024` | 1,024 vs. 1,024; one central substitution | Common-prefix/suffix trimming |
+| `disjoint/1024` | 1,024 vs. 1,024; no character overlap | Disjoint-alphabet early exit |
+| `late-overlap/65x10000` | 65 vs. 10,000; overlap only at the end | The disjoint probe's worst placement |
+
+This is deliberately a separate group, rather than an extra median in the
+table above: random pairs, near pairs and disjoint alphabets exercise
+different valid algorithmic shortcuts, and blending them would hide that
+trade-off. It benchmarks Verbora, `strsim`, `rapidfuzz`, `stringmetrics`,
+`triple_accel` and `editdistancek`; the accompanying correctness test checks
+that all six return the same distance on every timed shape. Reproduce it
+with:
+
+```bash
+cd benchmarks/competitive/rust-competitors
+cargo test --test distance_correctness levenshtein_competitors_agree_on_the_timed_edge_shapes
+cargo bench --bench distance -- levenshtein_edge_shapes
+```
 
 #### Damerau–Levenshtein (unrestricted)
 
@@ -977,17 +1045,31 @@ independently-confirmed upstream defect — see
 
 ### Phonetics
 
-All four encoders (`docs/COMPETITIVE_BENCHMARKS.md`
+Eleven encoder types (`docs/COMPETITIVE_BENCHMARKS.md`
 [§1.6](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#16-phonetics))
 against [rphonetic](https://github.com/Dalvany/rphonetic) 3.0.6 — the one
-actively-maintained Rust crate covering Soundex, Metaphone, Double Metaphone
-and Daitch–Mokotoff from the canonical Apache commons-codec reference in a
-single crate. Every row is throughput-only (`Partial`, never `Yes`): Verbora
-implements its own documented variants (condense-before-drop Soundex, a
-documented Metaphone stage-ordering quirk, single-branch Daitch–Mokotoff),
-rphonetic the textbook originals — byte-exact output is never asserted, only
-that both sides do the same *shape* of work, verified in
-[`tests/phonetics_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/phonetics_correctness.rs).
+actively-maintained Rust crate covering the same phonetic-algorithm
+families, in the Apache commons-codec lineage, in a single crate. The
+comparison runs in two regimes with two different equivalence claims, both
+verified in
+[`tests/phonetics_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/phonetics_correctness.rs)
+before any number was trusted:
+
+- **Four variant encoders — throughput-only (`Partial`, never `Yes`).**
+  `SoundEx`, `Metaphone`, `DoubleMetaphone` and `SoundExDM` implement
+  Verbora's own documented variants (condense-before-drop Soundex, a
+  documented Metaphone stage-ordering quirk, single-branch Daitch–Mokotoff),
+  rphonetic the textbook originals — byte-exact output is never asserted,
+  only that both sides do the same *shape* of work.
+- **Seven byte-exact encoders — full output equivalence (`Yes`).**
+  `Cologne`, `Nysiis`, `Caverphone1`/`Caverphone2`, `Phonex`,
+  `RefinedSoundex`, `MatchRatingApproach` and the branching `DaitchMokotoff`
+  are Verbora-native extensions whose output is **byte-identical** to
+  rphonetic's on every input rphonetic handles without panicking — a
+  stronger claim than any `Partial` row on this page carries.
+
+#### The four variant encoders — throughput only
+
 rphonetic's Metaphone/Double Metaphone default to a 4-character max code
 length; both are reconfigured to `Some(32)` here to match Verbora's real
 default of 32 — independently verified by test to actually change
@@ -1027,9 +1109,102 @@ See
 entry 6</a> for the full mechanism.
 </div>
 
-Full per-algorithm, per-size table:
+Full per-algorithm, per-size data for these four groups:
 [`results/results.json`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/results/results.json)
 (module `"phonetics"`).
+
+#### The seven byte-exact encoders
+
+Verification for this table goes beyond the shape-parity check above,
+because here byte-exact equality **is** the claim:
+`tests/phonetics_correctness.rs` asserts identical output over the shared
+653-name corpus plus per-algorithm extras for every encoder; for
+`MatchRatingApproach` it additionally checks the real MRA match *decision*
+(`compare`, not just the code) over every ordered pair of corpus names
+(~426K pairs); and Daitch–Mokotoff is checked three ways at once — the
+pipe-joined `process` string, the `codes` vector, and the first-branch code
+against rphonetic's non-branching `encode`. An independent adversarial audit
+then differentially fuzzed 104,114 inputs per encoder against rphonetic with
+zero mismatches, proved every documented divergence exactly as narrow as
+claimed, and mutation-tested the suites. The only divergences are inputs on
+which rphonetic itself panics — see
+[Upstream bugs found](#upstream-bugs-found); those input shapes are excluded
+from the benchmark domain per this page's fairness pattern, and the
+ASCII-only shared corpus never reaches them anyway. Configuration is
+identical on both sides: `Nysiis` runs strict (the commons-codec default),
+`Phonex` at its default max code length of 4.
+
+**Verbora is faster in all 24 cells** (Verbora vs. rphonetic, Criterion
+medians):
+
+| Encoder | 1 name | 10,000 names | 100,000 names |
+|---|--:|--:|--:|
+| Cologne | **17.4 ns** vs. 72.2 ns (4.16×) | **314.99 µs** vs. 738.89 µs (2.35×) | **3.250 ms** vs. 7.321 ms (2.25×) |
+| NYSIIS | **29.7 ns** vs. 224.5 ns (7.56×) | **266.53 µs** vs. 1.889 ms (7.09×) | **2.688 ms** vs. 20.517 ms (7.63×) |
+| Caverphone 1.0 | **176.4 ns** vs. 914.3 ns (5.18×) | **1.907 ms** vs. 10.317 ms (5.41×) | **19.013 ms** vs. 99.617 ms (5.24×) |
+| Caverphone 2.0 | **153.9 ns** vs. 811.8 ns (5.27×) | **1.770 ms** vs. 9.262 ms (5.23×) | **17.748 ms** vs. 88.009 ms (4.96×) |
+| Phonex | **41.3 ns** vs. 145.7 ns (3.53×) | **483.95 µs** vs. 1.358 ms (2.81×) | **4.608 ms** vs. 12.933 ms (2.81×) |
+| Refined Soundex | **14.8 ns** vs. 114.2 ns (7.73×) | **129.36 µs** vs. 972.06 µs (7.51×) | **1.298 ms** vs. 9.630 ms (7.42×) |
+| Match Rating Approach | **31.9 ns** vs. 489.3 ns (15.32×) | **323.12 µs** vs. 5.344 ms (16.54×) | **3.059 ms** vs. 53.249 ms (17.41×) |
+| Daitch–Mokotoff (branching) | **154.9 ns** vs. 363.4 ns (2.35×) | **1.788 ms** vs. 3.720 ms (2.08×) | **16.834 ms** vs. 37.170 ms (2.21×) |
+
+The mechanism is consistent across all eight groups rather than one trick:
+Verbora's encoders run single-pass scans over one reused buffer, with one
+heap allocation per call for the returned code (the branching
+Daitch–Mokotoff adds a small branch list), against static compiled-in rule
+tables. rphonetic's implementations allocate intermediate `String`s as
+they go (Caverphone's rewrite cascade is one freshly allocated `String` per
+step there) and, for Daitch–Mokotoff, parse the rules text with a `nom`
+grammar at builder time and walk a `BTreeMap` per lookup where Verbora
+indexes a pre-sorted static array. The margins range from 2.08×
+(Daitch–Mokotoff at 10,000 names — the one algorithm where both sides
+spend most of their time in the same branching walk) to 17.41× (Match
+Rating at 100,000).
+
+The Daitch–Mokotoff row compares Verbora's branching
+`DaitchMokotoff::process` against rphonetic's own pipe-joined `soundex()` —
+output-format identical, unlike the `SoundExDM` row above, which is
+Verbora's separate single-branch type benchmarked against rphonetic's
+non-branching `encode()`. Four rphonetic Daitch–Mokotoff behavioral quirks
+are reproduced deliberately for byte-parity and documented in
+`crates/verbora-phonetics/src/daitch_mokotoff.rs`'s own module
+documentation. Raw Criterion estimates for these eight groups live in the
+same Criterion tree `cargo bench` writes — see
+[Reproducing these numbers](#reproducing-these-numbers).
+
+#### A second Double Metaphone implementation — C++, not Rust
+
+Every other competitor on this page is a Rust crate. `pixelglow/double_metaphone`
+is different: a header-only C++11 implementation of Lawrence Philips'
+Double Metaphone algorithm, vendored into the workspace and compiled by
+`build.rs`, then called through a thin `extern "C"` shim — the only
+non-Cargo, non-Rust competitor benchmarked anywhere on this page. Every
+measured call crosses the Rust/C++ boundary once (one `CString`
+construction, one FFI call, two bounded buffer copies, one UTF-8
+validation on the way back), and that cost is measured as part of the
+number, not subtracted out.
+
+Correctness here is `Partial`, not byte-exact: 584 of 653 real English
+surnames (89.4%) produce identical primary and secondary keys on both
+sides. The one confirmed, dominant rule difference: Verbora silences a
+trailing `S` whenever it is preceded by `A` or `I`, while the C++ library
+only silences a trailing `S` in the narrower pattern where `I` or `Y` is
+immediately followed by `S` then `L` — `island`, `isle`, `carlisle`. Both
+sides agree `Isle` should lose its `S`; they disagree on names like
+`Davis`, which keeps its `S` on the C++ side but loses it on Verbora's,
+encoding the same way `Isle` does. Neither reading is more correct;
+Double Metaphone's own published algorithm write-up never fully
+disambiguates this case.
+
+| Library | Version | Language | Time (median, 653 names) | Throughput | Relative |
+|---|---|---|---:|---:|---:|
+| Verbora | 0.1.0 | Rust | 47.23 µs | 21.2K/s | **1.00×** |
+| pixelglow/double_metaphone | 79dd226 (2014) | C++11 | 85.30 µs | 11.7K/s | 1.81× slower |
+
+Verbora is 1.81× faster (medians, full Criterion defaults). This is a
+result about one specific, vendored C++ implementation, benchmarked once
+and disclosed honestly — not a claim about C++ Double Metaphone
+implementations in general.
 
 ---
 
@@ -1143,9 +1318,7 @@ Isolates the cost of Verbora's own wrapper around <code>whatlang::Detector</code
 — it is <strong>not</strong> "Verbora vs. whatlang," because
 <code>WhatlangDetector</code> literally constructs a
 <code>whatlang::Detector</code> and calls <code>.detect()</code> on it.
-Numbers below are this page's own single run; a second, independent run
-(reported in <code>docs/PERFORMANCE.md</code>) produced ratios in a wider
-0.70×–1.89× band with no consistent direction — including one tier where the
+Numbers below are this page's own single run. The noisy ratios include a tier where the
 wrapper measured <em>faster</em> than the bare call it makes, which is
 structurally impossible as a real effect. Read as noise from a shared
 benchmark machine, not a finding.
@@ -1561,17 +1734,13 @@ all** — every candidate found was investigated and rejected on maintenance,
 adoption or scope grounds (WordNet: the one candidate is abandoned since
 2017; analyzers and sentiment: no Rust crate performs the specific composed
 task). Per this project's `NO FAIR COMPETITOR FOUND` policy, none is forced.
-A widely-used JavaScript NLP library remains the required baseline for all
-three, and each has its own full comparison table already published:
-
-- [`docs/PERFORMANCE.md` § `verbora-wordnet`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-wordnet)
-- [`docs/PERFORMANCE.md` § `verbora-analyzers`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-analyzers)
-- [`docs/PERFORMANCE.md` § `verbora-sentiment`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-sentiment)
+A widely-used JavaScript NLP library remains the available baseline for those
+modules. Reproduce or publish any comparison using the method on this site;
+do not infer a Rust ranking where no equivalent Rust implementation exists.
 
 N-grams has a real Rust competitor for character n-gram generation — see
 [N-Grams](#n-grams) above. Its separate comparison against the JavaScript
-library (22 benchmarks, median 2.8× faster) is published at
-[`docs/PERFORMANCE.md` § `verbora-ngrams`](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE.md#results--verbora-ngrams).
+library is a separate result set from the Rust comparison documented here.
 
 Full reasoning for every rejected candidate:
 [`docs/COMPETITIVE_BENCHMARKS.md` § 3](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#3-modules--sub-capabilities-with-no-fair-competitor-identified).
@@ -1585,11 +1754,13 @@ feature page instead of here.
 
 ## Upstream bugs found
 
-Re-verifying crates flagged as stale or abandoned before trusting their
-numbers (this audit's own "do not trust marketing benchmarks — reproduce
-locally" rule) surfaced three real, reproducible defects in third-party
-dependencies — none in Verbora's own code. Disclosed here, not filed
-upstream without separate confirmation.
+Two verification disciplines surfaced real, reproducible defects in
+third-party dependencies — none in Verbora's own code: re-verifying crates
+flagged as stale or abandoned before trusting their numbers (this audit's
+own "do not trust marketing benchmarks — reproduce locally" rule), and the
+differential fuzzing behind the byte-exact phonetics table
+([Phonetics](#phonetics)). Disclosed here, not filed upstream without
+separate confirmation.
 
 - **`triple_accel` 0.4.0** — `rdamerau_exp("tac", "tatc")` returns **2**; the
   correct restricted-Damerau-Levenshtein distance is **1**. Confirmed against
@@ -1610,6 +1781,21 @@ upstream without separate confirmation.
   `--release`; the numbers on this page (a `--release` audit throughout) are
   unaffected. Real, if latent, evidence for the "abandoned since 2020" caveat
   this page already carries for that crate.
+- **`rphonetic` 3.0.6** — several encoders panic on realistic non-ASCII
+  input, all reproduced against 3.0.6 release builds during the differential
+  fuzzing above: `Nysiis` in strict mode byte-slices its code at offset 6
+  with no character-boundary check, panicking whenever a longer code's byte
+  6 splits a multi-byte character (4,233 of the 104,114 fuzzed inputs);
+  `Caverphone1`/`Caverphone2` panic the same way at their fixed 6-/10-byte
+  code cut; `RefinedSoundex` indexes a 26-entry mapping table out of bounds
+  for any alphabetic character whose uppercase form leaves `A`–`Z` (`é`,
+  Cyrillic, CJK, the Kelvin sign); and `MatchRatingApproach` can panic on
+  both its encode path (mid-character truncation) and its compare path (an
+  empty-encoding underflow: `("ab", "..")` panics where `("..", "ab")`
+  returns `false`). The ASCII-only shared corpus never exercises any of
+  these; on every one of those inputs Verbora's own seven byte-exact
+  encoders return a documented substitute output instead of panicking — the
+  one place they deliberately do not match rphonetic.
 
 ## Library coverage summary
 

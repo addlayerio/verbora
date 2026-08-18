@@ -282,6 +282,10 @@ pub struct TfIdf {
     /// scanned the slow way. Empty for every corpus built through
     /// `add_document`/`add_file_sync` with string or token input.
     exotic: Vec<usize>,
+    /// Reusable buffers for the text-ingestion fast path — see `fast_build`.
+    /// Zeroed between calls; carried on the instance so a corpus pays their
+    /// allocation once, not once per document.
+    scratch: crate::fast_build::FastScratch,
 }
 
 impl Default for TfIdf {
@@ -299,6 +303,7 @@ impl TfIdf {
             cache: IdfCache::plain(),
             built_df: FxHashMap::default(),
             exotic: Vec::new(),
+            scratch: crate::fast_build::FastScratch::default(),
         }
     }
 
@@ -337,6 +342,7 @@ impl TfIdf {
             cache: IdfCache::plain(),
             built_df: FxHashMap::default(),
             exotic,
+            scratch: crate::fast_build::FastScratch::default(),
         }
     }
 
@@ -384,6 +390,7 @@ impl TfIdf {
             cache: IdfCache::plain(),
             built_df: FxHashMap::default(),
             exotic,
+            scratch: crate::fast_build::FastScratch::default(),
         }
     }
 
@@ -655,17 +662,19 @@ impl TfIdf {
     ///
     /// 1. **Parallel** — every `(text, key)` pair's text is lowercased and
     ///    tokenized independently, via the *exact same* [`lowercase_units`] and
-    ///    [`globals::tokenize_global`] calls [`Self::build_document`]'s
-    ///    `Text` branch already makes. Nothing here re-derives tokenizing or
-    ///    lowercasing rules; both are called, not reimplemented.
+    ///    [`globals::tokenize_global`] calls the reference `Text` ingestion
+    ///    loop makes. Nothing here re-derives tokenizing or lowercasing
+    ///    rules; both are called, not reimplemented.
     /// 2. **Sequential** — the tokenized documents are replayed, in original
-    ///    order, through the exact per-token loop `build_document`'s `Text`
-    ///    branch already runs: [`globals::is_stopword`],
-    ///    [`Interner::intern`], [`BuiltDocument::observe`], then
-    ///    [`Self::push`]. This is the part that touches the shared interner
-    ///    and document-frequency table, and it is untouched — same calls,
-    ///    same order, same result as calling [`Self::add_document`] once per
-    ///    document.
+    ///    order, through the reference per-token loop:
+    ///    [`globals::is_stopword`], [`Interner::intern`],
+    ///    [`BuiltDocument::observe`], then [`Self::push`]. This is the part
+    ///    that touches the shared interner and document-frequency table —
+    ///    same calls, same order, same result as calling
+    ///    [`Self::add_document`] once per document. (With the default
+    ///    tokenizer, `add_document` itself runs `fast_build`'s fused scan
+    ///    instead of this loop; the two are differentially verified to
+    ///    produce byte-exact state, so the replay remains equivalent.)
     ///
     /// Because step 2 replays step 1's output in the original order through
     /// unmodified sequential primitives, this method is provably equivalent
@@ -1102,6 +1111,19 @@ impl TfIdf {
                 Document::Built(doc)
             }
             DocumentInput::Text(text) => {
+                // With the default tokenizer the whole per-token pipeline —
+                // lowercase, tokenize, stop-word test, intern, `observe` — is
+                // replaced by `fast_build`'s fused scan, which is
+                // differentially verified against the loop below to produce
+                // byte-exact state (same ids, entries, counts, and keys).
+                if globals::tokenizer_is_default() {
+                    return Document::Built(crate::fast_build::build_text(
+                        &mut self.interner,
+                        &mut self.scratch,
+                        text,
+                        key,
+                    ));
+                }
                 let lowered = lowercase_units(text);
                 let mut doc = BuiltDocument::new(key);
                 let interner = &mut self.interner;
@@ -1669,5 +1691,246 @@ mod tests {
         verbora_core::stopwords::remove_global_stopword("mango");
         let t = corpus(&["node and mango"]);
         assert_eq!(keys(&t, 0), ["node", "mango"]);
+    }
+
+    // -- fast-path differential parity ---------------------------------------
+    //
+    // `build_document`'s `Text` branch dispatches to `fast_build` whenever the
+    // process-global tokenizer is the default one, so the tests below hold it
+    // to the reference per-token loop — the pre-fast-path `add_document` body,
+    // reproduced verbatim in `reference_add_document` — on the full observable
+    // state: term-id assignment order, per-document entries (ids, counts,
+    // insertion order), document keys, the incremental document-frequency
+    // table, and the serialized JSON.
+
+    /// The reference `Text` ingestion loop: what `add_document` executed
+    /// before `fast_build` existed, kept as the parity oracle.
+    fn reference_add_document(t: &mut TfIdf, text: &str, key: DocKey) {
+        let lowered = lowercase_units(text);
+        let mut doc = BuiltDocument::new(key);
+        let interner = &mut t.interner;
+        globals::tokenize_global(&lowered).for_each(|term| {
+            let filtered = globals::is_stopword(term);
+            let id = interner.intern(term);
+            doc.observe(id, term, filtered, interner);
+        });
+        t.push(Document::Built(doc), "push")
+            .expect("fresh instance");
+        t.cache = IdfCache::null_prototype();
+    }
+
+    /// One document's state: its key (via `Debug`) and its entries in
+    /// insertion order, with ids kept so id-assignment order is compared too.
+    type DocState = (String, Vec<(TermId, String, f64)>);
+
+    /// Everything observable about a corpus's built state, id-exact.
+    fn full_state(t: &TfIdf) -> (Vec<DocState>, Vec<(TermId, u32)>) {
+        let docs = t
+            .documents()
+            .expect("built corpora have documents")
+            .iter()
+            .map(|d| match d {
+                Document::Built(b) => (
+                    format!("{:?}", b.key()),
+                    b.entries()
+                        .iter()
+                        .map(|(id, c)| (*id, t.interner().name(*id).to_owned(), *c))
+                        .collect(),
+                ),
+                Document::Raw(_) => panic!("differential corpora contain no raw documents"),
+            })
+            .collect();
+        let mut df: Vec<(TermId, u32)> = t.built_df.iter().map(|(k, v)| (*k, *v)).collect();
+        df.sort_unstable();
+        (docs, df)
+    }
+
+    fn assert_fast_matches_reference(inputs: &[(String, DocKey)], label: &str) {
+        let mut fast = TfIdf::new();
+        for (text, key) in inputs {
+            fast.add_document(DocumentInput::Text(text), key.clone(), false)
+                .expect("fresh instance");
+        }
+        let mut reference = TfIdf::new();
+        for (text, key) in inputs {
+            reference_add_document(&mut reference, text, key.clone());
+        }
+        assert_eq!(
+            full_state(&fast),
+            full_state(&reference),
+            "{label}: state diverged"
+        );
+        assert_eq!(
+            fast.to_json(),
+            reference.to_json(),
+            "{label}: JSON diverged"
+        );
+    }
+
+    /// The competitive bench's fallback corpus (scaled down), whose rotation
+    /// varies token boundaries against the 64-byte bitmap words.
+    #[test]
+    fn fast_build_matches_the_reference_loop_on_the_bench_corpus() {
+        let _guard = lock();
+        let text =
+            "the quick brown fox jumps over the lazy dog while node and ruby argue ".repeat(240);
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for n in [4usize, 16, 64] {
+            let inputs: Vec<(String, DocKey)> = (0..n)
+                .map(|i| {
+                    let start = (i * 7) % words.len();
+                    #[expect(clippy::cast_precision_loss, reason = "test corpora are tiny")]
+                    let key = DocKey::Num(i as f64);
+                    (words[start..].join(" "), key)
+                })
+                .collect();
+            assert_fast_matches_reference(&inputs, &format!("bench corpus n={n}"));
+        }
+    }
+
+    /// Randomized corpora over an adversarial vocabulary: `__proto__`/`__key`
+    /// collisions, `Object.prototype` method names, digit runs, every
+    /// lowercasing special case (dotted İ, final sigma, ẞ), non-word scripts,
+    /// astral characters, and mixed case — each exercising a different
+    /// dispatch tier of the fast path (borrowed ASCII, lowered ASCII,
+    /// char-exact fallback).
+    #[test]
+    fn fast_build_matches_the_reference_loop_on_adversarial_corpora() {
+        let _guard = lock();
+        const VOCAB: &[&str] = &[
+            "the",
+            "quick",
+            "node",
+            "ruby",
+            "__proto__",
+            "__key",
+            "toString",
+            "constructor",
+            "hasOwnProperty",
+            "valueOf",
+            "2020",
+            "10",
+            "0",
+            "4294967295",
+            "İstanbul",
+            "naïve",
+            "ΑΣ",
+            "ΟΣ",
+            "Σ",
+            "ёлка",
+            "Москва",
+            "don't",
+            "a",
+            "_",
+            "___",
+            "e.g.",
+            "😀abc😀",
+            "𝕳𝖊𝖑𝖑𝖔",
+            "MiXeD",
+            "CASE",
+            "ẞ",
+            "ǅungla",
+            "over",
+            "and",
+            "while",
+            "length",
+            "日本語",
+            "exactly8",
+            "morethan8bytes",
+        ];
+        let mut state = 0x243F_6A88_85A3_08D3u64;
+        let mut xorshift = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for case in 0..4000u32 {
+            let ndocs = 1 + (xorshift() % 5) as usize;
+            let inputs: Vec<(String, DocKey)> = (0..ndocs)
+                .map(|i| {
+                    let ntokens = (xorshift() % 40) as usize;
+                    let mut text = String::new();
+                    for k in 0..ntokens {
+                        if k > 0 {
+                            match xorshift() % 4 {
+                                0 => text.push(' '),
+                                1 => text.push_str("  "),
+                                2 => text.push('.'),
+                                _ => text.push_str(", "),
+                            }
+                        }
+                        text.push_str(VOCAB[(xorshift() % VOCAB.len() as u64) as usize]);
+                    }
+                    #[expect(clippy::cast_precision_loss, reason = "test corpora are tiny")]
+                    let key = match xorshift() % 6 {
+                        0 => DocKey::Undefined,
+                        1 => DocKey::Null,
+                        2 => DocKey::Num(i as f64),
+                        3 => DocKey::Num(0.0),
+                        4 => DocKey::string(format!("k{i}")),
+                        _ => DocKey::Bool(i % 2 == 0),
+                    };
+                    (text, key)
+                })
+                .collect();
+            assert_fast_matches_reference(&inputs, &format!("case {case}"));
+        }
+    }
+
+    #[test]
+    fn key_and_proto_tokens_through_the_text_path() {
+        let _guard = lock();
+        // `__key` corrupts a string key by concatenation; `__proto__` is
+        // silently dropped — both through the fast `Text` path, not `observe`
+        // directly.
+        let mut t = TfIdf::new();
+        t.add_document(
+            DocumentInput::Text("__key __key alpha __proto__"),
+            DocKey::string("mykey"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            t.to_json(),
+            r#"{"documents":[{"__key":"mykey11","alpha":1}],"_idfCache":{}}"#
+        );
+    }
+
+    #[test]
+    fn prototype_method_zero_slot_through_the_text_path() {
+        let _guard = lock();
+        // `constructor` is the one `Object.prototype` member that survives
+        // lowercasing, so it is the only way the `Text` path can reach the
+        // issue-#119 zero-before-count rule.
+        let t = corpus(&["constructor constructor alpha"]);
+        assert_eq!(
+            t.to_json(),
+            r#"{"documents":[{"__key":0,"constructor":2,"alpha":1}],"_idfCache":{}}"#
+        );
+
+        // Stop-worded, the zeroed slot must survive as an own `0` property.
+        assert!(TfIdf::set_stopwords(&StopwordList::of(["constructor"])));
+        let t = corpus(&["constructor alpha"]);
+        globals::reset_stopwords();
+        assert_eq!(
+            t.to_json(),
+            r#"{"documents":[{"__key":0,"constructor":0,"alpha":1}],"_idfCache":{}}"#
+        );
+    }
+
+    #[test]
+    fn a_replaced_stopword_list_reaches_the_fast_path() {
+        let _guard = lock();
+        // With the default list replaced, default stop words like `and` must
+        // come back and only the custom word may be filtered — resolved per
+        // document, so the swap takes effect with no explicit invalidation.
+        assert!(TfIdf::set_stopwords(&StopwordList::of(["node"])));
+        let t = corpus(&["node and ruby"]);
+        globals::reset_stopwords();
+        assert_eq!(keys(&t, 0), ["and", "ruby"]);
+
+        let t = corpus(&["node and ruby"]);
+        assert_eq!(keys(&t, 0), ["node", "ruby"]);
     }
 }

@@ -130,10 +130,14 @@
 //!
 //! Five groups are benchmarked, one per matrix-eligible capability:
 //!
-//! - `build` — insert-all throughput, on both a "random" 20 000-word set and
-//!   a "prefix_heavy" 32 000-entry set (short shared stems, many suffixes —
-//!   see `prefix_heavy` below), matching the two datasets Verbora's own
-//!   in-workspace `build` benchmark already uses. `fast_radix_trie`, like
+//! - `build` — insert-all throughput, on five datasets: the "random"
+//!   20 000-word set and the "prefix_heavy" 32 000-entry set (short shared
+//!   stems, many suffixes — see `prefix_heavy` below) that Verbora's own
+//!   in-workspace `build` benchmark already uses, plus three shapes derived
+//!   from the same `words.json` ("sorted", "short", "long" — see the
+//!   `# Derived input shapes` section below) that isolate insertion-order
+//!   locality, branching density and path depth respectively.
+//!   `fast_radix_trie`, like
 //!   Verbora and `qp-trie`, is incrementally mutable — `build` is a plain
 //!   per-word `GenericRadixMap::insert` loop, not a compile step (see the
 //!   `trie-rs` section below for the one implementation where that is not
@@ -141,7 +145,15 @@
 //! - `contains_hit` / `contains_miss` — exact-match lookup throughput, hits
 //!   and misses measured separately since a miss exits the walk early and is
 //!   the common case in real lookups (mirrors Verbora's own in-workspace
-//!   bench).
+//!   bench). Each group is measured under two probe shapes: hits in corpus
+//!   order ("words") and in ascending byte-lexicographic order ("sorted" —
+//!   the same 20 000 probes, so consecutive lookups revisit warm paths;
+//!   isolates probe-order locality from per-lookup cost), and misses that
+//!   fail on the *last* character ("words" — the `{w}QQ` convention: the
+//!   walk consumes the whole stored word before failing) vs. on the *first*
+//!   character ("first_char" — `QQ{w}`: the cheapest possible exit, since no
+//!   generated word starts with an uppercase letter). See the `# Derived
+//!   input shapes` section below.
 //! - `common_prefix_search` — throughput of "which stored words are
 //!   prefixes of this query" (`Trie::find_matches_on_path` /
 //!   `trie_rs::Trie::common_prefix_search` /
@@ -165,12 +177,22 @@
 //!   needs) — so the set wrapper cannot answer this question at all, and the
 //!   map-with-`()`-value shape is used instead, exactly the pattern
 //!   `qp_trie::Trie<BString, ()>` above already established in this file.
+//!   Two probe shapes: "probes" (the first 4 000 stored words themselves)
+//!   and "extended" (the same 4 000 words each with `ed` appended — probes
+//!   that are *not* themselves stored keys, so the walk runs ≥ 2 characters
+//!   past a terminal node, and the stored word is guaranteed to be a strict
+//!   prefix on its own probe's path; the shape an inflected-form lookup
+//!   against a stem dictionary issues).
 //! - `predictive_search` — throughput of prefix enumeration
 //!   (`Trie::keys_with_prefix` / `trie_rs::Trie::predictive_search` /
 //!   `qp_trie::Trie::iter_prefix_str` /
-//!   `fast_radix_trie::GenericRadixMap::iter_prefix`), both for the full
-//!   corpus (empty prefix) and for single-letter prefixes (the shape a real
-//!   autocomplete issues).
+//!   `fast_radix_trie::GenericRadixMap::iter_prefix`), for the full corpus
+//!   (empty prefix), for single-letter prefixes (the shape a real
+//!   autocomplete issues), for every distinct two-letter prefix the corpus
+//!   contains ("2char", all 676 — mid-fanout descents with mid-size result
+//!   sets), and for a deterministic sample of distinct four-letter prefixes
+//!   ("4char", every 16th in sorted order — deep descents whose result sets
+//!   are near-singletons, so per-descent overhead dominates enumeration).
 //!
 //! ## `fast_radix_trie` operations left out, and why
 //!
@@ -200,6 +222,35 @@
 //! be given this word list at all, and is exactly what any real caller would
 //! do (build once from a fixed dictionary, then query many times).
 //!
+//! # Derived input shapes
+//!
+//! Beyond the two datasets Verbora's own in-workspace `build` benchmark
+//! already uses ("random", "prefix_heavy"), the `build` group measures three
+//! shapes derived deterministically from the same `words.json` — no new
+//! source data anywhere in this file; each shape isolates one structural
+//! variable the "random" shape blends together:
+//!
+//! - **"sorted"** — the same 20 000 words (duplicates kept) in ascending
+//!   byte-lexicographic order. Isolates insertion-order locality: every
+//!   insert shares a long already-walked prefix with its predecessor, the
+//!   best case for path-compressed structures — and `build_fst`'s internal
+//!   sort becomes a sort of already-sorted data (still timed inside the
+//!   closure: `sort_unstable` on sorted input is not free, and hoisting it
+//!   would break this file's own "measure the real cost" rule).
+//! - **"short"** — only the words of at most 6 characters (6 676 of them).
+//!   Branching concentrates near the root: high fanout, shallow paths, so
+//!   per-node dispatch cost dominates per-character walk cost.
+//! - **"long"** — only the words of at least 11 characters (6 644). The
+//!   opposite extreme: deep paths, sparse branching, so per-character walk
+//!   cost dominates.
+//!
+//! The query groups apply the same discipline to *probe* shapes ("sorted"
+//! hits, "first_char" misses, "extended" common-prefix probes, "2char" /
+//! "4char" predictive prefixes — each described in its group's bullet
+//! above): every one is derived from `words.json` in a single deterministic
+//! expression, documented at its own definition site, so no new dataset is
+//! introduced and every implementation still reads byte-identical input.
+//!
 //! # Word list: synthetic ASCII strings, not a dictionary
 //!
 //! `benches/data/words.json` (`tools/bench-data/generate.py`) is a
@@ -213,6 +264,8 @@
 //! ordering (documented in `verbora_trie::Trie::keys_with_prefix`) — that
 //! quirk is a real, separately-tested property of the exact-semantics row
 //! this file does not benchmark, not something silently dodged here.
+
+use std::collections::BTreeSet;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use fast_radix_trie::StringRadixMap;
@@ -268,6 +321,50 @@ fn prefix_heavy(words: &[String]) -> Vec<String> {
 /// contains an uppercase letter, so appending one guarantees a miss.
 fn misses(words: &[String]) -> Vec<String> {
     words.iter().map(|w| format!("{w}QQ")).collect()
+}
+
+/// Words that are *not* in the trie, failing on the FIRST character rather
+/// than the last: prepending the uppercase letters guarantees the walk exits
+/// at the root — the mirror image of `misses`' `{w}QQ` convention (which
+/// consumes the whole stored word before failing). See the module doc
+/// comment's `# Derived input shapes` section.
+fn misses_first_char(words: &[String]) -> Vec<String> {
+    words.iter().map(|w| format!("QQ{w}")).collect()
+}
+
+/// The "sorted" shape: the same words (duplicates kept) in ascending
+/// byte-lexicographic order — used both as a `build` dataset
+/// (insertion-order locality) and as the `contains_hit` "sorted" probe order
+/// (probe-order locality). See `# Derived input shapes`.
+fn sorted_words(words: &[String]) -> Vec<String> {
+    let mut v = words.to_vec();
+    v.sort_unstable();
+    v
+}
+
+/// The "short" `build` shape: only the words of at most 6 characters —
+/// branching concentrated near the root. See `# Derived input shapes`.
+fn short_words(words: &[String]) -> Vec<String> {
+    words.iter().filter(|w| w.len() <= 6).cloned().collect()
+}
+
+/// The "long" `build` shape: only the words of at least 11 characters —
+/// deep, sparsely-branching paths. See `# Derived input shapes`.
+fn long_words(words: &[String]) -> Vec<String> {
+    words.iter().filter(|w| w.len() >= 11).cloned().collect()
+}
+
+/// Every distinct `n`-character prefix of the stored words, in sorted order —
+/// the "2char"/"4char" `predictive_search` shapes. Deterministic: the
+/// `BTreeSet` both collapses duplicates and fixes the iteration order.
+fn distinct_prefixes(words: &[String], n: usize) -> Vec<String> {
+    words
+        .iter()
+        .filter(|w| w.len() >= n)
+        .map(|w| w[..n].to_owned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -345,9 +442,20 @@ fn build_fst(words: &[String]) -> Set<Vec<u8>> {
 fn bench_build(c: &mut Criterion) {
     let words = load_words();
     let heavy = prefix_heavy(&words);
+    // The three derived shapes — see `# Derived input shapes` in the module
+    // doc comment for what each isolates.
+    let sorted = sorted_words(&words);
+    let short = short_words(&words);
+    let long = long_words(&words);
     let mut g = c.benchmark_group("build");
 
-    for (label, set) in [("random", &words), ("prefix_heavy", &heavy)] {
+    for (label, set) in [
+        ("random", &words),
+        ("prefix_heavy", &heavy),
+        ("sorted", &sorted),
+        ("short", &short),
+        ("long", &long),
+    ] {
         g.throughput(Throughput::Elements(set.len() as u64));
 
         g.bench_with_input(BenchmarkId::new("verbora", label), set, |b, set| {
@@ -378,6 +486,11 @@ fn bench_build(c: &mut Criterion) {
 fn bench_contains(c: &mut Criterion) {
     let words = load_words();
     let absent = misses(&words);
+    // Probe shapes — same probe count per group, different order or failure
+    // point; see the module doc comment's `contains_hit`/`contains_miss`
+    // bullet and `# Derived input shapes`.
+    let sorted = sorted_words(&words);
+    let absent_first = misses_first_char(&words);
 
     let verbora = build_verbora(&words);
     // Included here for a complete, honest picture, not because this group
@@ -397,66 +510,75 @@ fn bench_contains(c: &mut Criterion) {
     // structure in this function is built once before its query benchmarks.
     let fst_set = build_fst(&words);
 
-    for (group_name, probes) in [("contains_hit", &words), ("contains_miss", &absent)] {
+    for (group_name, shapes) in [
+        ("contains_hit", [("words", &words), ("sorted", &sorted)]),
+        (
+            "contains_miss",
+            [("words", &absent), ("first_char", &absent_first)],
+        ),
+    ] {
         let mut g = c.benchmark_group(group_name);
-        g.throughput(Throughput::Elements(probes.len() as u64));
 
-        g.bench_with_input(BenchmarkId::new("verbora", "words"), probes, |b, probes| {
-            b.iter(|| {
-                probes
-                    .iter()
-                    .filter(|w| verbora.contains(black_box(w)))
-                    .count()
-            });
-        });
-        g.bench_with_input(
-            BenchmarkId::new("verbora_frozen", "words"),
-            probes,
-            |b, probes| {
+        for (shape, probes) in shapes {
+            g.throughput(Throughput::Elements(probes.len() as u64));
+
+            g.bench_with_input(BenchmarkId::new("verbora", shape), probes, |b, probes| {
                 b.iter(|| {
                     probes
                         .iter()
-                        .filter(|w| verbora_frozen.contains(black_box(w)))
+                        .filter(|w| verbora.contains(black_box(w)))
                         .count()
                 });
-            },
-        );
-        g.bench_with_input(BenchmarkId::new("trie_rs", "words"), probes, |b, probes| {
-            b.iter(|| {
-                probes
-                    .iter()
-                    .filter(|w| trie_rs.exact_match(black_box(w.as_str())))
-                    .count()
             });
-        });
-        g.bench_with_input(BenchmarkId::new("qp_trie", "words"), probes, |b, probes| {
-            b.iter(|| {
-                probes
-                    .iter()
-                    .filter(|w| qp_trie.contains_key_str(black_box(w.as_str())))
-                    .count()
-            });
-        });
-        g.bench_with_input(
-            BenchmarkId::new("fast_radix_trie", "words"),
-            probes,
-            |b, probes| {
+            g.bench_with_input(
+                BenchmarkId::new("verbora_frozen", shape),
+                probes,
+                |b, probes| {
+                    b.iter(|| {
+                        probes
+                            .iter()
+                            .filter(|w| verbora_frozen.contains(black_box(w)))
+                            .count()
+                    });
+                },
+            );
+            g.bench_with_input(BenchmarkId::new("trie_rs", shape), probes, |b, probes| {
                 b.iter(|| {
                     probes
                         .iter()
-                        .filter(|w| fast_radix_trie.contains_key(black_box(w.as_str())))
+                        .filter(|w| trie_rs.exact_match(black_box(w.as_str())))
                         .count()
                 });
-            },
-        );
-        g.bench_with_input(BenchmarkId::new("fst", "words"), probes, |b, probes| {
-            b.iter(|| {
-                probes
-                    .iter()
-                    .filter(|w| fst_set.contains(black_box(w.as_str())))
-                    .count()
             });
-        });
+            g.bench_with_input(BenchmarkId::new("qp_trie", shape), probes, |b, probes| {
+                b.iter(|| {
+                    probes
+                        .iter()
+                        .filter(|w| qp_trie.contains_key_str(black_box(w.as_str())))
+                        .count()
+                });
+            });
+            g.bench_with_input(
+                BenchmarkId::new("fast_radix_trie", shape),
+                probes,
+                |b, probes| {
+                    b.iter(|| {
+                        probes
+                            .iter()
+                            .filter(|w| fast_radix_trie.contains_key(black_box(w.as_str())))
+                            .count()
+                    });
+                },
+            );
+            g.bench_with_input(BenchmarkId::new("fst", shape), probes, |b, probes| {
+                b.iter(|| {
+                    probes
+                        .iter()
+                        .filter(|w| fst_set.contains(black_box(w.as_str())))
+                        .count()
+                });
+            });
+        }
 
         g.finish();
     }
@@ -479,30 +601,32 @@ fn bench_contains(c: &mut Criterion) {
 fn bench_common_prefix_search(c: &mut Criterion) {
     let words = load_words();
     let probes: Vec<&str> = words.iter().take(4000).map(String::as_str).collect();
+    // The "extended" probe shape: the same 4 000 words with `ed` appended —
+    // probes that are not themselves stored keys, so the walk runs past a
+    // terminal node, and the stored word is guaranteed to be a strict prefix
+    // on its own probe's path. See the module doc comment's
+    // `common_prefix_search` bullet.
+    let extended: Vec<String> = words.iter().take(4000).map(|w| format!("{w}ed")).collect();
+    let extended_refs: Vec<&str> = extended.iter().map(String::as_str).collect();
 
     let verbora = build_verbora(&words);
     let trie_rs = build_trie_rs(&words);
     let fast_radix_trie = build_fast_radix_trie(&words);
 
     let mut g = c.benchmark_group("common_prefix_search");
-    g.throughput(Throughput::Elements(probes.len() as u64));
 
-    g.bench_with_input(
-        BenchmarkId::new("verbora", "probes"),
-        &probes,
-        |b, probes| {
+    for (shape, probes) in [("probes", &probes), ("extended", &extended_refs)] {
+        g.throughput(Throughput::Elements(probes.len() as u64));
+
+        g.bench_with_input(BenchmarkId::new("verbora", shape), probes, |b, probes| {
             b.iter(|| {
                 probes
                     .iter()
                     .map(|w| verbora.iter_matches_on_path(black_box(w)).count())
                     .sum::<usize>()
             });
-        },
-    );
-    g.bench_with_input(
-        BenchmarkId::new("trie_rs", "probes"),
-        &probes,
-        |b, probes| {
+        });
+        g.bench_with_input(BenchmarkId::new("trie_rs", shape), probes, |b, probes| {
             b.iter(|| {
                 probes
                     .iter()
@@ -513,20 +637,20 @@ fn bench_common_prefix_search(c: &mut Criterion) {
                     })
                     .sum::<usize>()
             });
-        },
-    );
-    g.bench_with_input(
-        BenchmarkId::new("fast_radix_trie", "probes"),
-        &probes,
-        |b, probes| {
-            b.iter(|| {
-                probes
-                    .iter()
-                    .map(|w| fast_radix_trie.common_prefixes(black_box(w)).count())
-                    .sum::<usize>()
-            });
-        },
-    );
+        });
+        g.bench_with_input(
+            BenchmarkId::new("fast_radix_trie", shape),
+            probes,
+            |b, probes| {
+                b.iter(|| {
+                    probes
+                        .iter()
+                        .map(|w| fast_radix_trie.common_prefixes(black_box(w)).count())
+                        .sum::<usize>()
+                });
+            },
+        );
+    }
 
     g.finish();
 }
@@ -669,6 +793,104 @@ fn bench_predictive_search(c: &mut Criterion) {
                 .sum::<usize>()
         });
     });
+
+    // Multi-character prefixes — see the module doc comment's
+    // `predictive_search` bullet. "2char" is every distinct two-letter
+    // prefix the corpus contains (all 676); "4char" is every 16th distinct
+    // four-letter prefix in sorted order (1 139 of 18 218) — sampled, not
+    // exhaustive, to keep the per-iteration prefix count in the same ballpark
+    // as the other shapes (each iteration still constructs one `Str`
+    // automaton per prefix on the `fst` side, the real per-query cost a
+    // caller pays).
+    let two_char = distinct_prefixes(&words, 2);
+    let four_char: Vec<String> = distinct_prefixes(&words, 4)
+        .into_iter()
+        .step_by(16)
+        .collect();
+
+    for (shape, prefixes) in [("2char", &two_char), ("4char", &four_char)] {
+        g.throughput(Throughput::Elements(prefixes.len() as u64));
+        g.bench_with_input(
+            BenchmarkId::new("verbora", shape),
+            prefixes,
+            |b, prefixes| {
+                b.iter(|| {
+                    prefixes
+                        .iter()
+                        .map(|p| verbora.iter_keys_with_prefix(black_box(p)).count())
+                        .sum::<usize>()
+                });
+            },
+        );
+        g.bench_with_input(
+            BenchmarkId::new("verbora_frozen", shape),
+            prefixes,
+            |b, prefixes| {
+                b.iter(|| {
+                    prefixes
+                        .iter()
+                        .map(|p| verbora_frozen.iter_keys_with_prefix(black_box(p)).count())
+                        .sum::<usize>()
+                });
+            },
+        );
+        g.bench_with_input(
+            BenchmarkId::new("trie_rs", shape),
+            prefixes,
+            |b, prefixes| {
+                b.iter(|| {
+                    prefixes
+                        .iter()
+                        .map(|p| {
+                            trie_rs
+                                .predictive_search::<String, _>(black_box(p.as_str()))
+                                .count()
+                        })
+                        .sum::<usize>()
+                });
+            },
+        );
+        g.bench_with_input(
+            BenchmarkId::new("qp_trie", shape),
+            prefixes,
+            |b, prefixes| {
+                b.iter(|| {
+                    prefixes
+                        .iter()
+                        .map(|p| qp_trie.iter_prefix_str(black_box(p.as_str())).count())
+                        .sum::<usize>()
+                });
+            },
+        );
+        g.bench_with_input(
+            BenchmarkId::new("fast_radix_trie", shape),
+            prefixes,
+            |b, prefixes| {
+                b.iter(|| {
+                    prefixes
+                        .iter()
+                        .map(|p| fast_radix_trie.iter_prefix(black_box(p.as_str())).count())
+                        .sum::<usize>()
+                });
+            },
+        );
+        g.bench_with_input(BenchmarkId::new("fst", shape), prefixes, |b, prefixes| {
+            b.iter(|| {
+                prefixes
+                    .iter()
+                    .map(|p| {
+                        let automaton = Str::new(black_box(p)).starts_with();
+                        let mut stream = fst_set.search(automaton).into_stream();
+                        let mut n = 0usize;
+                        while stream.next().is_some() {
+                            n += 1;
+                        }
+                        n
+                    })
+                    .sum::<usize>()
+            });
+        });
+    }
 
     g.finish();
 }

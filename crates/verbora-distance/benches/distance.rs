@@ -75,7 +75,8 @@ fn bench_levenshtein(c: &mut Criterion) {
     let opts = Options::default();
 
     for (n, a, b) in &inputs.ascii {
-        // Throughput in "cells" makes the quadratic core comparable across sizes.
+        // Report the logical n×n DP grid as normalized work; the bit-vector
+        // implementation deliberately does not evaluate those cells one by one.
         g.throughput(Throughput::Elements((n * n) as u64));
         g.bench_with_input(BenchmarkId::new("ascii", n), n, |bench, _| {
             bench.iter(|| levenshtein(black_box(a), black_box(b), &opts));
@@ -89,6 +90,91 @@ fn bench_levenshtein(c: &mut Criterion) {
         });
     }
 
+    g.finish();
+}
+
+fn bench_levenshtein_shapes(c: &mut Criterion) {
+    let inputs = load_inputs();
+    let opts = Options::default();
+    let mut g = c.benchmark_group("levenshtein_shapes");
+    let (_, near_a, _) = inputs
+        .ascii
+        .iter()
+        .find(|(n, _, _)| *n == 1024)
+        .expect("1024-char pair");
+    let mut near_b = near_a.clone().into_bytes();
+    near_b[512] = if near_b[512] == b'x' { b'y' } else { b'x' };
+    let near_b = String::from_utf8(near_b).unwrap();
+    g.bench_function("near/1024", |bench| {
+        bench.iter(|| levenshtein(black_box(near_a), black_box(&near_b), &opts));
+    });
+    let near_unicode_a = "абвг".repeat(256);
+    let mut near_unicode_chars: Vec<char> = near_unicode_a.chars().collect();
+    near_unicode_chars[512] = 'д';
+    let near_unicode_b: String = near_unicode_chars.into_iter().collect();
+    g.bench_function("near_unicode/1024", |bench| {
+        bench.iter(|| {
+            levenshtein(
+                black_box(&near_unicode_a),
+                black_box(&near_unicode_b),
+                &opts,
+            )
+        });
+    });
+    g.bench_function("empty_ascii/1024", |bench| {
+        bench.iter(|| levenshtein(black_box(""), black_box(near_a), &opts));
+    });
+    g.bench_function("empty_unicode/1024", |bench| {
+        bench.iter(|| levenshtein(black_box(""), black_box(&near_unicode_a), &opts));
+    });
+    let disjoint_a = "a".repeat(1024);
+    let disjoint_b = "z".repeat(1024);
+    g.bench_function("disjoint/1024", |bench| {
+        bench.iter(|| levenshtein(black_box(&disjoint_a), black_box(&disjoint_b), &opts));
+    });
+    let late_overlap_a = "z".repeat(65);
+    let late_overlap_b = format!("{}zb", "a".repeat(9_998));
+    g.bench_function("late_overlap/65x10000", |bench| {
+        bench.iter(|| {
+            levenshtein(
+                black_box(&late_overlap_a),
+                black_box(&late_overlap_b),
+                &opts,
+            )
+        });
+    });
+    g.finish();
+}
+
+fn bench_levenshtein_weighted(c: &mut Criterion) {
+    let inputs = load_inputs();
+    let weighted = Options {
+        substitution_cost: 0.5,
+        ..Options::default()
+    };
+    let mut g = c.benchmark_group("levenshtein_weighted");
+    for (n, a, b) in &inputs.ascii {
+        if !matches!(*n, 16 | 64 | 256) {
+            continue;
+        }
+        g.bench_with_input(BenchmarkId::from_parameter(n), n, |bench, _| {
+            bench.iter(|| levenshtein(black_box(a), black_box(b), &weighted));
+        });
+    }
+
+    let (_, short_a, _) = inputs
+        .ascii
+        .iter()
+        .find(|(n, _, _)| *n == 16)
+        .expect("16-char pair");
+    let (_, long_b, _) = inputs
+        .ascii
+        .iter()
+        .find(|(n, _, _)| *n == 1024)
+        .expect("1024-char pair");
+    g.bench_function("rectangular/16x1024", |bench| {
+        bench.iter(|| levenshtein(black_box(short_a), black_box(long_b), &weighted));
+    });
     g.finish();
 }
 
@@ -111,10 +197,9 @@ fn bench_levenshtein_variants(c: &mut Criterion) {
         ..Options::default()
     };
 
-    // These exercise the two-row, three-row and full-matrix code paths
-    // respectively; the gap between them is the payoff for not always
-    // materialising the matrix.
-    g.bench_function("plain_2row", |bench| {
+    // These exercise the bit-vector, three-row and unrestricted-Damerau
+    // kernels respectively.
+    g.bench_function("plain_myers_unit", |bench| {
         bench.iter(|| levenshtein(black_box(a), black_box(b), &plain));
     });
     g.bench_function("damerau_restricted_3row", |bench| {
@@ -339,6 +424,8 @@ fn bench_par_hamming(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_levenshtein,
+    bench_levenshtein_shapes,
+    bench_levenshtein_weighted,
     bench_levenshtein_variants,
     bench_jaro_winkler,
     bench_dice,

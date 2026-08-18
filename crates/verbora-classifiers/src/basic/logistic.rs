@@ -24,6 +24,29 @@
 //! 5. **`Vector.dot` returns `null` on a length mismatch**, and
 //!    `sigmoid(null)` is exactly `0.5`. A model left stale by a post-training
 //!    `addDocument` silently reports 0.5 for every class instead of failing.
+//!
+//! Within those constraints the fit path is restructured for speed in three
+//! ways, each bit-exact (differentially verified against the dense reference
+//! form over thousands of randomized corpora — see `tests/train_parity.rs`):
+//!
+//! * **The hypothesis is computed once per iteration, not twice.** The
+//!   reference evaluates `hypothesis(theta_new)` inside `cost()` and then again
+//!   at the top of the next iteration — the same pure function of the same
+//!   unchanged inputs. Keeping the cost pass's result halves the `exp` count.
+//!   The memo also survives a learning-rate restart, because `theta` does:
+//!   the restarted loop's opening hypothesis is for the very `theta` the last
+//!   cost pass evaluated.
+//! * **The 0/1 design matrix is stored as sparse index lists** ([`SparseDesign`]),
+//!   walked in the same descending order as the dense `while (k--)` /
+//!   `while (r--)` contractions. A skipped term is `0.0 * v = ±0.0`, which can
+//!   only affect a sum through the sign of zero; that never happens here
+//!   because `sigmoid` never returns `-0.0` (so no `diff` entry, and no
+//!   partial sum with nonzero terms remaining, sits at `-0.0`) and `theta`
+//!   stays finite (a diverging learning rate fails `current < last` within two
+//!   iterations, long before overflow could make a skipped term `0.0 * ±inf`).
+//! * **The design and the scratch buffers are built once per `fit()`** and
+//!   shared across the one-vs-rest passes — the reference rebuilds nothing
+//!   between classes either; only the target column changes.
 
 use crate::basic::classifier::{
     Classification, Classifier, ClassifierError, Engine, sort_descending,
@@ -84,74 +107,123 @@ impl LogisticEngine {
     }
 }
 
-/// `Observations.x(theta).map(sigmoid)`.
+/// `Matrix.One(m, 1).augment(Examples)`, stored as sparse index lists.
 ///
-/// The inner product runs `while (k--)`, so each row is accumulated from the
-/// last feature back to the first.
-fn hypothesis(theta: &[f64], examples: &[Vec<f64>]) -> Vec<f64> {
-    examples
-        .iter()
-        .map(|row| {
-            let mut sum = 0.0;
-            let mut k = row.len();
-            while k > 0 {
-                k -= 1;
-                sum += row[k] * theta[k];
-            }
-            transcendental::sigmoid(sum)
-        })
-        .collect()
+/// Every entry of the augmented matrix is 0 or 1, so a dot product against it
+/// is a sum of the other operand's entries at the 1-positions. Both list
+/// families are kept **descending** so that walking one accumulates in exactly
+/// the order the dense `while (k--)` / `while (r--)` loops did — the module
+/// docs explain why dropping the zero terms is bit-exact.
+struct SparseDesign {
+    /// Example count `m`.
+    m: usize,
+    /// `theta` length: one weight per feature, plus the intercept column.
+    n1: usize,
+    /// Per example: positions of its 1-entries in the augmented row,
+    /// descending, ending at 0 — the always-on intercept column, which sits in
+    /// front of the features and is therefore the *last* index a descending
+    /// walk visits.
+    rows_desc: Vec<Vec<u32>>,
+    /// Per column: the examples with a 1 in that column, descending, matching
+    /// the `while (r--)` contraction of `Examplesᵀ · (h − y)`. Column 0 is the
+    /// intercept and lists every example.
+    cols_desc: Vec<Vec<u32>>,
 }
 
-/// The apparatus cost function.
-///
-/// `(1 / m) * Σ_asc [ (0 - y[k]) * log(h[k]) - (1 - y[k]) * log(1 - h[k]) ]`,
-/// with the sum running **ascending** — `Vector.sum` maps over the elements in
-/// order, unlike every dot product in the same file.
-fn cost(theta: &[f64], examples: &[Vec<f64>], y: &[f64]) -> f64 {
-    let h = hypothesis(theta, examples);
-    let m = examples.len();
-    let mut sum = 0.0;
-    for k in 0..m {
-        let cost_1 = (0.0 - y[k]) * transcendental::log(h[k]);
-        let cost_0 = (1.0 - y[k]) * transcendental::log(1.0 - h[k]);
-        sum += cost_1 - cost_0;
+impl SparseDesign {
+    /// Builds both index families in one pass over the recorded observations.
+    ///
+    /// `rows` must be non-empty and rectangular — `fit()` guarantees both,
+    /// because a single `train()` call snapshots the vocabulary once and
+    /// rebuilds the engine from scratch.
+    fn build(rows: &[&Vec<u8>]) -> Self {
+        let m = rows.len();
+        let width = rows[0].len();
+        let n1 = width + 1;
+        let mut rows_desc = Vec::with_capacity(m);
+        let mut cols_desc: Vec<Vec<u32>> = vec![Vec::new(); n1];
+        for (r, row) in rows.iter().enumerate() {
+            let mut nz: Vec<u32> = Vec::new();
+            for (k, &cell) in row.iter().enumerate().rev() {
+                if cell != 0 {
+                    nz.push(k as u32 + 1);
+                }
+            }
+            nz.push(0);
+            rows_desc.push(nz);
+            for (k, &cell) in row.iter().enumerate() {
+                if cell != 0 {
+                    cols_desc[k + 1].push(r as u32);
+                }
+            }
+            cols_desc[0].push(r as u32);
+        }
+        // The rows were visited ascending to fill the columns; the contraction
+        // wants them descending.
+        for col in &mut cols_desc {
+            col.reverse();
+        }
+        Self {
+            m,
+            n1,
+            rows_desc,
+            cols_desc,
+        }
     }
-    (1.0 / m as f64) * sum
+
+    /// `Observations.x(theta).map(sigmoid)`, written into `h`.
+    ///
+    /// The dense inner product runs `while (k--)`; walking the descending
+    /// index list adds the same nonzero terms in the same order.
+    fn hypothesis_into(&self, theta: &[f64], h: &mut [f64]) {
+        for (r, nz) in self.rows_desc.iter().enumerate() {
+            let mut sum = 0.0;
+            for &k in nz {
+                sum += theta[k as usize];
+            }
+            h[r] = transcendental::sigmoid(sum);
+        }
+    }
 }
 
 /// `descendGradient(theta, Examples, classifications)`.
 ///
 /// Returns the optimised parameters with the intercept already chopped off.
+/// `h`, `diff` and `gradient` are caller-owned scratch buffers so the
+/// one-vs-rest passes share their allocations; their contents on entry are
+/// irrelevant.
 fn descend_gradient(
-    theta_init: &[f64],
-    examples: &[Vec<f64>],
+    x: &SparseDesign,
     y: &[f64],
+    h: &mut Vec<f64>,
+    diff: &mut Vec<f64>,
+    gradient: &mut Vec<f64>,
 ) -> Result<Vec<f64>, ClassifierError> {
-    let m = examples.len();
+    let m = x.m;
+    let n1 = x.n1;
     let max_it = 500 * m;
 
-    // `Matrix.One(m, 1).augment(Examples)`: a ones column in front.
-    let x: Vec<Vec<f64>> = examples
-        .iter()
-        .map(|row| {
-            let mut r = Vec::with_capacity(row.len() + 1);
-            r.push(1.0);
-            r.extend_from_slice(row);
-            r
-        })
-        .collect();
-    // `theta.augment([0])`: a zero at the end. Both are all-zero at this point,
-    // so the asymmetry with the prepended ones column is harmless — but it is
-    // why `chomp(1)` drops the bias rather than the last weight.
-    let mut theta: Vec<f64> = theta_init.to_vec();
-    theta.push(0.0);
-    let n1 = theta.len();
+    // `theta.augment([0])`: the reference appends a zero to the all-zero init,
+    // while the ones column goes in *front* — which is why `chomp(1)` at the
+    // end drops the bias rather than the last weight.
+    let mut theta = vec![0.0f64; n1];
+    h.clear();
+    h.resize(m, 0.0);
+    diff.clear();
+    diff.resize(m, 0.0);
+    gradient.clear();
+    gradient.resize(n1, 0.0);
 
+    // Hoisting `1/m` is safe: the reference computes `(g[k] * (1/m)) * rate`
+    // with `1/m` as its own division, so one shared quotient is the same value.
+    let inv_m = 1.0 / m as f64;
     let mut learning_rate = 3.0f64;
     let mut learning_rate_found = false;
-    let mut diff = vec![0.0; m];
-    let mut gradient = vec![0.0; n1];
+    // Whether `h` already holds the hypothesis for the current `theta`. The
+    // cost pass below evaluates `hypothesis(theta_new)`, and the next
+    // iteration's opening hypothesis is the same pure function of the same
+    // unchanged `theta` — including across a learning-rate restart.
+    let mut have_h = false;
 
     while !learning_rate_found && learning_rate != 0.0 {
         let mut i = 0usize;
@@ -159,24 +231,37 @@ fn descend_gradient(
         // a cost of exactly `0` are falsy, so one variable models both.
         let mut last = 0.0f64;
         loop {
-            let h = hypothesis(&theta, &x);
+            if !have_h {
+                x.hypothesis_into(&theta, h);
+            }
             for k in 0..m {
                 diff[k] = h[k] - y[k];
             }
             // Examplesᵀ · (h - y), contracted descending over the row index.
             for (col, g) in gradient.iter_mut().enumerate() {
                 let mut sum = 0.0;
-                let mut r = m;
-                while r > 0 {
-                    r -= 1;
-                    sum += x[r][col] * diff[r];
+                for &r in &x.cols_desc[col] {
+                    sum += diff[r as usize];
                 }
                 *g = sum;
             }
             for k in 0..n1 {
-                theta[k] -= (gradient[k] * (1.0 / m as f64)) * learning_rate;
+                theta[k] -= (gradient[k] * inv_m) * learning_rate;
             }
-            let current = cost(&theta, &x, y);
+            // The apparatus cost function:
+            // `(1/m) * Σ_asc [ (0 - y[k]) * log(h[k]) - (1 - y[k]) * log(1 - h[k]) ]`,
+            // summed **ascending** — `Vector.sum` maps over the elements in
+            // order, unlike every dot product in the same file. Its hypothesis
+            // is for the just-updated `theta`, so it is kept for reuse.
+            x.hypothesis_into(&theta, h);
+            have_h = true;
+            let mut sum = 0.0;
+            for k in 0..m {
+                let cost_1 = (0.0 - y[k]) * transcendental::log(h[k]);
+                let cost_0 = (1.0 - y[k]) * transcendental::log(1.0 - h[k]);
+                sum += cost_1 - cost_0;
+            }
+            let current = inv_m * sum;
             i += 1;
 
             if last != 0.0 && !last.is_nan() {
@@ -223,31 +308,40 @@ impl Engine for LogisticEngine {
         let num_classes = self.examples.len();
         // createClassifications(): exampleCount rows of numClasses zeros.
         let mut targets = vec![vec![0.0f64; num_classes]; self.example_count];
-        let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(self.example_count);
+        let mut rows: Vec<&Vec<u8>> = Vec::with_capacity(self.example_count);
 
         let mut d = 0usize;
         // `for (var classification in this.examples)` — enumeration order, which
         // is where the label/theta misalignment comes from.
         for (c, label) in self.examples.enumeration_order().into_iter().enumerate() {
-            let rows = self.examples.get(label).expect("key came from this map");
-            for row in rows {
-                matrix.push(row.iter().map(|&b| f64::from(b)).collect());
+            for row in self.examples.get(label).expect("key came from this map") {
+                rows.push(row);
                 targets[d][c] = 1.0;
                 d += 1;
             }
         }
 
-        if matrix.is_empty() {
+        if rows.is_empty() {
             // `$M([])` dereferences `elements[0][0]`.
             return Err(ClassifierError::NoExamples);
         }
 
-        let width = matrix[0].len();
-        let zeros = vec![0.0f64; width];
+        // One design and one set of scratch buffers for every one-vs-rest
+        // pass; only the target column differs between classes.
+        let design = SparseDesign::build(&rows);
+        let mut h = Vec::new();
+        let mut diff = Vec::new();
+        let mut gradient = Vec::new();
         let mut theta = Vec::with_capacity(self.classifications.len());
         for i in 0..self.classifications.len() {
             let column: Vec<f64> = targets.iter().map(|row| row[i]).collect();
-            theta.push(descend_gradient(&zeros, &matrix, &column)?);
+            theta.push(descend_gradient(
+                &design,
+                &column,
+                &mut h,
+                &mut diff,
+                &mut gradient,
+            )?);
         }
         self.theta = Some(theta);
         Ok(())

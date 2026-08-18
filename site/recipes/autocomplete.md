@@ -50,12 +50,10 @@ With four matches the difference is nothing. With a prefix like `"a"` over a
 <a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a>
 <a class="badge badge-owned" href="../performance/allocation">OWNED</a>
 
-<div class="perf">
-<div class="perf-row"><span class="perf-k">Execution</span><span class="perf-v"><code>iter_keys_with_prefix</code> — lazy; <code>keys_with_prefix</code> — eager</span></div>
-<div class="perf-row"><span class="perf-k">Output</span><span class="perf-v"><code>String</code> per key — trie keys are reconstructed by walking, so there is nothing to borrow</span></div>
-<div class="perf-row"><span class="perf-k">Allocations</span><span class="perf-v">One <code>String</code> per key <em>yielded</em>; the lazy form yields only what you take</span></div>
-<div class="perf-row"><span class="perf-k">Best for</span><span class="perf-v">Top-<em>k</em> suggestion lists</span></div>
-</div>
+Either way the output is a `String` per key — trie keys are reconstructed by
+walking, so there is nothing to borrow. The lazy form allocates one only for
+each key you actually take, which is what makes it right for a top-*k*
+suggestion list.
 
 ## The complete handler
 
@@ -80,10 +78,9 @@ assert!(suggest(&index, "", 10).is_empty());
 
 <div class="callout callout-warn">
 <strong><code>keys_with_prefix</code> never folds case — even on a
-case-insensitive trie.</strong> Every <em>other</em> method does. This is a
-bug preserved deliberately, not an oversight: it is load-bearing for anyone
-relying on recorded behaviour, so it is preserved and documented rather than
-fixed.
+case-insensitive trie.</strong> Every <em>other</em> method does. This is
+specified behaviour, not an oversight, and it is pinned by the test suite: fold
+the prefix yourself before you pass it in.
 </div>
 
 ```rust
@@ -123,9 +120,9 @@ assert_eq!(
 );
 ```
 
-For single code units the "array-index-like" keys are exactly `'0'`–`'9'`.
-Neither a `HashMap`, a `BTreeMap` nor a plain insertion-ordered list reproduces
-that, which is why the trie maintains its children in this order directly.
+For single code units the "array-index-like" keys are exactly `'0'`–`'9'`. Treat
+the order as an implementation detail: if you need a specific one, sort after
+collecting.
 
 **If you want relevance ordering, sort after taking.** Take more than you need,
 score them, then truncate:

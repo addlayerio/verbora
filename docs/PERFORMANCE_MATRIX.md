@@ -443,6 +443,51 @@ steep one-time construction cost is worth paying — exactly the situation
 `docs/COMPETITIVE_BENCHMARKS.md` §1.17's Architectural decision note
 identified before this was built.
 
+### verbora-phonetics: spec-pinned encoder extensions (Cologne, NYSIIS, Caverphone 1/2, Phonex, Refined Soundex, Match Rating, branching Daitch-Mokotoff)
+
+The seventh Verbora-native extension, shipped as one coherent batch of seven
+encoder types — no reference counterpart (the JS reference exports exactly
+four phonetic classes), so each module pins its behavior **byte-for-byte to
+rphonetic 3.0.6** (Apache commons-codec lineage), the same crate it is
+benchmarked against. See `AGENTS.md`'s `# Spec-Pinned Phonetic Encoders`
+section for the policy entry and each module's own `//!` doc comment in
+`crates/verbora-phonetics/src/` for the authoritative behavioral record.
+
+| Aspect | Status | Notes |
+|---|---|---|
+| Lazy API | ➖ | one short code (or small code set) per token; nothing to stream |
+| Zero-copy | ➖ | codes are inherently owned output; one returned `String` per call |
+| Reusable memory | ✅ | each encoder runs a single-pass scan over one reused internal buffer; no `_into` variant, same as the crate's four core encoders |
+| Batch | ✅ | all seven implement `verbora_core::Phonetic`, so `par_encode_batch` and `phoneticize_tokens*` accept them unchanged |
+| Parallel | ✅ | via the crate's existing chunked `par_encode_batch` (feature `parallel`); no new parallel surface added |
+| Alloc reviewed | ✅ | one heap allocation per call (the returned code); `DaitchMokotoff` adds a small branch `Vec` (two allocations/call, per its module doc). rphonetic allocates intermediate `String`s per rewrite step — the main measured mechanism below |
+| Data structures reviewed | ✅ | rule sets embedded as pre-sorted `static` tables (the crate's `dm_table` style; ordering invariant asserted by a unit test) vs. rphonetic's `nom`-parsed-at-builder-time rules and per-lookup `BTreeMap` walk |
+| mmap/rkyv reviewed | ➖ | compiled-in static tables only, no file-backed dataset |
+| Benchmarked | ✅ | `benchmarks/competitive/rust-competitors/benches/phonetics.rs`, 8 Criterion groups × {1, 10,000, 100,000} names, Verbora vs. rphonetic 3.0.6 — full-default Criterion settings |
+| Parity | N/A (not a JS-parity surface) | **byte-exact vs. rphonetic instead** — a stronger equivalence than the crate's four Partial rphonetic rows: `tests/phonetics_correctness.rs` regime 2 asserts identical output over the 653-name corpus + per-algorithm extras, the MRA match decision over every ordered corpus pair (~426K), and a three-way `process`/`codes`/`encode` Daitch-Mokotoff check — all first-run green; an independent adversarial audit differentially fuzzed 104,114 inputs per encoder with zero mismatches, proved every documented divergence exactly as narrow as claimed, and mutation-tested the suites; crate suite 322 unit + 49 doctests |
+
+**Real numbers, one development machine** (Criterion medians, Verbora vs.
+rphonetic; ratios recomputed from the raw `estimates.json` medians —
+Verbora wins all 24 cells):
+
+| Encoder | 1 name | 10,000 names | 100,000 names |
+|---|--:|--:|--:|
+| `cologne` | 17.4 ns vs. 72.2 ns (4.16×) | 314.99 µs vs. 738.89 µs (2.35×) | 3.250 ms vs. 7.321 ms (2.25×) |
+| `nysiis` | 29.7 ns vs. 224.5 ns (7.56×) | 266.53 µs vs. 1.889 ms (7.09×) | 2.688 ms vs. 20.517 ms (7.63×) |
+| `caverphone1` | 176.4 ns vs. 914.3 ns (5.18×) | 1.907 ms vs. 10.317 ms (5.41×) | 19.013 ms vs. 99.617 ms (5.24×) |
+| `caverphone2` | 153.9 ns vs. 811.8 ns (5.27×) | 1.770 ms vs. 9.262 ms (5.23×) | 17.748 ms vs. 88.009 ms (4.96×) |
+| `phonex` | 41.3 ns vs. 145.7 ns (3.53×) | 483.95 µs vs. 1.358 ms (2.81×) | 4.608 ms vs. 12.933 ms (2.81×) |
+| `refined_soundex` | 14.8 ns vs. 114.2 ns (7.73×) | 129.36 µs vs. 972.06 µs (7.51×) | 1.298 ms vs. 9.630 ms (7.42×) |
+| `match_rating` | 31.9 ns vs. 489.3 ns (15.32×) | 323.12 µs vs. 5.344 ms (16.54×) | 3.059 ms vs. 53.249 ms (17.41×) |
+| `daitch_mokotoff` | 154.9 ns vs. 363.4 ns (2.35×) | 1.788 ms vs. 3.720 ms (2.08×) | 16.834 ms vs. 37.170 ms (2.21×) |
+
+A clean sweep, so unlike `FrozenTrie`/`DeletionIndex` there is no
+unfavourable cell to publish — the honest disclosures here are behavioral
+instead: the four rphonetic Daitch-Mokotoff quirks reproduced deliberately
+for byte-parity, and the rphonetic panic-domain findings
+(`docs/PERFORMANCE_GAPS.md` entry 36, item 4) whose input shapes are
+excluded from the benchmark domain because only Verbora survives them.
+
 ## What this table does not yet cover
 
 - `verbora-core` and `verbora-examples` are infrastructure

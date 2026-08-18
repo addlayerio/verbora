@@ -19,6 +19,16 @@
 //! order as if it were first-match — the Italian convention — would give
 //! `"важностию"` a different stem.
 //!
+//! `stem` computes the first two shapes with one [`crate::among`] binary
+//! search per rule group instead of a linear scan per alternative
+//! (`docs/PERFORMANCE_GAPS.md` entry 34): the longest listed suffix is what
+//! `find_among_b` returns natively, and the preceded-by-`[ая]` shape is the
+//! link-walk with a condition ([`crate::among::AmongTable::longest_where`]).
+//! Every rule is a tail truncation of RV, so the whole pipeline runs as one
+//! shrinking end cursor over a single buffer — the per-rule `to_vec()`
+//! snapshots are gone. The pre-conversion implementation is kept in this
+//! module's tests as the byte-exactness oracle.
+//!
 //! # `||` is falsy, not null-ish
 //!
 //! `reflexive(RV) || RV` and `superlative(x) || x` fall back when the rule
@@ -43,9 +53,11 @@
 //! `deviations` in the crate's parity report.
 
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
 use verbora_tokenizers::classes;
 
+use crate::among::AmongTable;
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_ru;
 use crate::stopwords::{self, Language};
@@ -88,24 +100,6 @@ pub(crate) fn alt_suffix(w: &[u16], alts: &[&str]) -> Option<usize> {
     for a in alts {
         if ends_with(w, a) {
             let start = w.len() - slen(a);
-            if best.is_none_or(|b| start < b) {
-                best = Some(start);
-            }
-        }
-    }
-    best
-}
-
-/// `/([ая])(ла|на|…)$/`: the index just after the kept `[ая]`.
-///
-/// Returns where to truncate so that the captured letter survives and the listed
-/// suffix does not — which is exactly what replacing with `'$1'` does.
-fn alt_suffix_after(w: &[u16], keep: &[u16], alts: &[&str]) -> Option<usize> {
-    let mut best: Option<usize> = None;
-    for a in alts {
-        let n = slen(a);
-        if n < w.len() && ends_with(w, a) && keep.contains(&w[w.len() - n - 1]) {
-            let start = w.len() - n;
             if best.is_none_or(|b| start < b) {
                 best = Some(start);
             }
@@ -176,55 +170,102 @@ pub(crate) fn or_falsy(value: Option<Vec<u16>>, fallback: &[u16]) -> Vec<u16> {
 }
 
 // ---------------------------------------------------------------------------
-// The rule groups
+// The rule groups, as cursor arithmetic over one buffer
 // ---------------------------------------------------------------------------
+//
+// Every rule reads `t[rv..end]` and, on a match, moves `end` left. The
+// `Option<usize>`/`or_falsy` shapes of the reference are preserved exactly:
+// `None` is "the rule's regex did not match", `Some(rv)` is "it matched and
+// left the empty string" — the two outcomes the falsy fallbacks distinguish.
 
-fn perfective_gerund(w: &[u16]) -> Option<Vec<u16>> {
-    if let Some(at) = av_shi(w) {
-        return Some(w[..at].to_vec());
+/// The sorted search tables, built once from the rule tables below.
+struct RuTables {
+    /// `(ши|шись)` — the alternation inside `/[ая]в(ши|шись)$/`.
+    shi: AmongTable,
+    /// The unconditional perfective-gerund alternatives.
+    gerund2: AmongTable,
+    reflexive: AmongTable,
+    adjective: AmongTable,
+    /// The `[ая]`-conditioned participle alternatives.
+    part1: AmongTable,
+    part2: AmongTable,
+    /// The `[ая]`-conditioned verb alternatives.
+    verb1: AmongTable,
+    verb2: AmongTable,
+    noun: AmongTable,
+    superlative: AmongTable,
+    derivational: AmongTable,
+}
+
+static TABLES: LazyLock<RuTables> = LazyLock::new(|| RuTables {
+    shi: AmongTable::build(&["ши", "шись"]),
+    gerund2: AmongTable::build(&["ив", "ивши", "ившись", "ывши", "ывшись", "ыв"]),
+    reflexive: AmongTable::build(&["ся", "сь"]),
+    adjective: AmongTable::build(ADJECTIVE),
+    part1: AmongTable::build(&["ем", "нн", "вш", "ющ", "щ"]),
+    part2: AmongTable::build(&["ивш", "ывш", "ующ"]),
+    verb1: AmongTable::build(VERB1),
+    verb2: AmongTable::build(VERB2),
+    noun: AmongTable::build(NOUN),
+    superlative: AmongTable::build(&["ейш", "ейше"]),
+    derivational: AmongTable::build(&["ост", "ость"]),
+});
+
+/// `perfectiveGerund` over `t[rv..end]`: the new end, or `None`.
+fn perfective_gerund_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+    // `/[ая]в(ши|шись)$/` first, unconditionally preferred over the plain
+    // alternatives when it matches — the reference tests it first.
+    let n = tb.shi.longest_where(t, end, rv, |n| {
+        end - n >= rv + 2 && t[end - n - 1] == 0x0432 && matches!(t[end - n - 2], 0x0430 | 0x044F)
+    });
+    if n > 0 {
+        return Some(end - n - 2);
     }
-    alt_suffix(w, &["ив", "ивши", "ившись", "ывши", "ывшись", "ыв"]).map(|at| w[..at].to_vec())
+    let m = tb.gerund2.longest(t, end, rv);
+    if m > 0 { Some(end - m) } else { None }
 }
 
-fn adjective(w: &[u16]) -> Option<Vec<u16>> {
-    alt_suffix(w, ADJECTIVE).map(|at| w[..at].to_vec())
-}
-
-fn participle(w: &[u16]) -> Option<Vec<u16>> {
-    if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], &["ем", "нн", "вш", "ющ", "щ"])
-    {
-        return Some(w[..at].to_vec());
+/// `participle`: the `[ая]`-conditioned list keeps the captured letter.
+fn participle_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+    let n = tb.part1.longest_where(t, end, rv, |n| {
+        end - n > rv && matches!(t[end - n - 1], 0x0430 | 0x044F)
+    });
+    if n > 0 {
+        return Some(end - n);
     }
-    alt_suffix(w, &["ивш", "ывш", "ующ"]).map(|at| w[..at].to_vec())
+    let m = tb.part2.longest(t, end, rv);
+    if m > 0 { Some(end - m) } else { None }
 }
 
-fn adjectival(w: &[u16]) -> Option<Vec<u16>> {
-    let result = adjective(w)?;
+/// `adjectival`: adjective, then participle with the falsy fallback.
+fn adjectival_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+    let a = tb.adjective.longest(t, end, rv);
+    if a == 0 {
+        return None;
+    }
+    let e1 = end - a;
     // `result = pariticipleResult || result` — falsy fallback again.
-    Some(or_falsy(participle(&result), &result))
+    Some(match participle_end(t, rv, e1, tb) {
+        Some(pe) if pe > rv => pe,
+        _ => e1,
+    })
 }
 
-fn reflexive(w: &[u16]) -> Option<Vec<u16>> {
-    alt_suffix(w, &["ся", "сь"]).map(|at| w[..at].to_vec())
-}
-
-fn verb(w: &[u16]) -> Option<Vec<u16>> {
-    if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], VERB1) {
-        return Some(w[..at].to_vec());
+/// `verb`: same two-list shape as `participle`.
+fn verb_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+    let n = tb.verb1.longest_where(t, end, rv, |n| {
+        end - n > rv && matches!(t[end - n - 1], 0x0430 | 0x044F)
+    });
+    if n > 0 {
+        return Some(end - n);
     }
-    alt_suffix(w, VERB2).map(|at| w[..at].to_vec())
+    let m = tb.verb2.longest(t, end, rv);
+    if m > 0 { Some(end - m) } else { None }
 }
 
-fn noun(w: &[u16]) -> Option<Vec<u16>> {
-    alt_suffix(w, NOUN).map(|at| w[..at].to_vec())
-}
-
-fn superlative(w: &[u16]) -> Option<Vec<u16>> {
-    alt_suffix(w, &["ейш", "ейше"]).map(|at| w[..at].to_vec())
-}
-
-fn derivational(w: &[u16]) -> Option<Vec<u16>> {
-    alt_suffix(w, &["ост", "ость"]).map(|at| w[..at].to_vec())
+fn noun_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+    let m = tb.noun.longest(t, end, rv);
+    if m > 0 { Some(end - m) } else { None }
 }
 
 static ADJECTIVE: &[&str] = &[
@@ -260,6 +301,7 @@ impl PorterStemmerRu {
     )]
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
+        let tb = &*TABLES;
         // `.toLowerCase().replace(/ё/g, 'е')` — global, so every ё folds.
         let mut t = units(&token.to_lowercase());
         for c in &mut t {
@@ -268,54 +310,76 @@ impl PorterStemmerRu {
             }
         }
 
-        let Some((head_end, rv_start)) = split_at_first_vowel(&t, is_vowel) else {
+        let Some((_, rv)) = split_at_first_vowel(&t, is_vowel) else {
             return Cow::Owned(text(&t));
         };
-        let head = &t[..head_end];
-        let rv = &t[rv_start..];
+        let full = t.len();
+        // R2 is the same split applied to the original RV; only its tail is
+        // ever read, and only through the guard below.
+        let r2 = split_at_first_vowel(&t[rv..], is_vowel).map(|(_, after)| rv + after);
 
-        // R2 is the same split applied to RV; only its tail is ever read.
-        let r2_tail = split_at_first_vowel(rv, is_vowel).map(|(_, s)| &rv[s..]);
-
-        let mut result = match perfective_gerund(rv) {
-            Some(r) => r,
+        let mut end = match perfective_gerund_end(&t, rv, full, tb) {
+            Some(e) => e,
             None => {
-                let reflexed = or_falsy(reflexive(rv), rv);
-                adjectival(&reflexed)
-                    .or_else(|| verb(&reflexed))
-                    .or_else(|| noun(&reflexed))
+                // `reflexive(RV) || RV` — the falsy fallback.
+                let refl = tb.reflexive.longest(&t, full, rv);
+                let reflexed = if refl > 0 && full - refl > rv {
+                    full - refl
+                } else {
+                    full
+                };
+                adjectival_end(&t, rv, reflexed, tb)
+                    .or_else(|| verb_end(&t, rv, reflexed, tb))
+                    .or_else(|| noun_end(&t, rv, reflexed, tb))
                     .unwrap_or(reflexed)
             }
         };
-        strip_final(&mut result, 0x0438); // /и$/
+        // /и$/ on the working string (the RV region).
+        if end > rv && t[end - 1] == 0x0438 {
+            end -= 1;
+        }
 
-        // `result` is not read again after this, so it can move into whichever
-        // branch is taken instead of being cloned up front.
-        //
-        // This guard only needs the fact of whether `derivational` would match
-        // `tail`, not the truncated word it would build — `derivational(tail)`
-        // discarded its `Vec<u16>` on every call here, purely for `.is_some()`.
-        // `alt_suffix(w, alts).is_some() == alt_suffix(w, alts).map(f).is_some()`
-        // for any `f`, so calling the non-allocating `alt_suffix` scan directly
-        // (the same one `derivational` itself calls) is provably equivalent and
-        // skips that allocation.
-        let derived = if r2_tail
-            .is_some_and(|tail| !tail.is_empty() && alt_suffix(tail, &["ост", "ость"]).is_some())
+        // The guard reads R2's tail *of the original word*, not the shrunken
+        // working string — the regions were marked once. The reference throws
+        // when this second `derivational` misses; keeping the string as-is is
+        // the documented divergence (see the module docs).
+        if r2.is_some_and(|r2s| full > r2s && tb.derivational.longest(&t, full, r2s) > 0) {
+            let d = tb.derivational.longest(&t, end, rv);
+            if d > 0 {
+                end -= d;
+            }
+        }
+
+        // `superlative(x) || x` — falsy fallback.
+        let sup = tb.superlative.longest(&t, end, rv);
+        if sup > 0 && end - sup > rv {
+            end -= sup;
+        }
+
+        // `/(н)н/g → '$1'` over the RV region, compacted in place.
         {
-            // The reference throws here when this second call returns null; see the
-            // module note. Falling back to `result` is the documented divergence.
-            derivational(&result).unwrap_or(result)
-        } else {
-            result
-        };
+            let mut write = rv;
+            let mut read = rv;
+            while read < end {
+                if t[read] == 0x043D && read + 1 < end && t[read + 1] == 0x043D {
+                    t[write] = 0x043D;
+                    write += 1;
+                    read += 2;
+                } else {
+                    t[write] = t[read];
+                    write += 1;
+                    read += 1;
+                }
+            }
+            end = write;
+        }
+        // /ь$/.
+        if end > rv && t[end - 1] == 0x044C {
+            end -= 1;
+        }
 
-        let mut out = or_falsy(superlative(&derived), &derived);
-        out = collapse_double(&out, 0x043D); // /(н)н/g
-        strip_final(&mut out, 0x044C); // /ь$/
-
-        let mut full = head.to_vec();
-        full.extend_from_slice(&out);
-        Cow::Owned(text(&full))
+        t.truncate(end);
+        Cow::Owned(text(&t))
     }
 }
 
@@ -414,5 +478,246 @@ mod tests {
     #[test]
     fn a_vowelless_word_is_returned_untouched() {
         assert_eq!(s("бвг"), "бвг");
+    }
+
+    // -----------------------------------------------------------------------
+    // Differential oracle: the pre-find_among implementation, verbatim.
+    // -----------------------------------------------------------------------
+    mod oracle {
+        use super::super::*;
+
+        /// `/([ая])(ла|на|…)$/`: the index just after the kept `[ая]`.
+        fn alt_suffix_after(w: &[u16], keep: &[u16], alts: &[&str]) -> Option<usize> {
+            let mut best: Option<usize> = None;
+            for a in alts {
+                let n = slen(a);
+                if n < w.len() && ends_with(w, a) && keep.contains(&w[w.len() - n - 1]) {
+                    let start = w.len() - n;
+                    if best.is_none_or(|b| start < b) {
+                        best = Some(start);
+                    }
+                }
+            }
+            best
+        }
+
+        fn perfective_gerund(w: &[u16]) -> Option<Vec<u16>> {
+            if let Some(at) = av_shi(w) {
+                return Some(w[..at].to_vec());
+            }
+            alt_suffix(w, &["ив", "ивши", "ившись", "ывши", "ывшись", "ыв"])
+                .map(|at| w[..at].to_vec())
+        }
+
+        fn adjective(w: &[u16]) -> Option<Vec<u16>> {
+            alt_suffix(w, ADJECTIVE).map(|at| w[..at].to_vec())
+        }
+
+        fn participle(w: &[u16]) -> Option<Vec<u16>> {
+            if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], &["ем", "нн", "вш", "ющ", "щ"])
+            {
+                return Some(w[..at].to_vec());
+            }
+            alt_suffix(w, &["ивш", "ывш", "ующ"]).map(|at| w[..at].to_vec())
+        }
+
+        fn adjectival(w: &[u16]) -> Option<Vec<u16>> {
+            let result = adjective(w)?;
+            Some(or_falsy(participle(&result), &result))
+        }
+
+        fn reflexive(w: &[u16]) -> Option<Vec<u16>> {
+            alt_suffix(w, &["ся", "сь"]).map(|at| w[..at].to_vec())
+        }
+
+        fn verb(w: &[u16]) -> Option<Vec<u16>> {
+            if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], VERB1) {
+                return Some(w[..at].to_vec());
+            }
+            alt_suffix(w, VERB2).map(|at| w[..at].to_vec())
+        }
+
+        fn noun(w: &[u16]) -> Option<Vec<u16>> {
+            alt_suffix(w, NOUN).map(|at| w[..at].to_vec())
+        }
+
+        fn superlative(w: &[u16]) -> Option<Vec<u16>> {
+            alt_suffix(w, &["ейш", "ейше"]).map(|at| w[..at].to_vec())
+        }
+
+        fn derivational(w: &[u16]) -> Option<Vec<u16>> {
+            alt_suffix(w, &["ост", "ость"]).map(|at| w[..at].to_vec())
+        }
+
+        pub(super) fn stem(token: &str) -> String {
+            let mut t = units(&token.to_lowercase());
+            for c in &mut t {
+                if *c == 0x0451 {
+                    *c = 0x0435;
+                }
+            }
+
+            let Some((head_end, rv_start)) = split_at_first_vowel(&t, is_vowel) else {
+                return text(&t);
+            };
+            let head = &t[..head_end];
+            let rv = &t[rv_start..];
+
+            let r2_tail = split_at_first_vowel(rv, is_vowel).map(|(_, s)| &rv[s..]);
+
+            let mut result = match perfective_gerund(rv) {
+                Some(r) => r,
+                None => {
+                    let reflexed = or_falsy(reflexive(rv), rv);
+                    adjectival(&reflexed)
+                        .or_else(|| verb(&reflexed))
+                        .or_else(|| noun(&reflexed))
+                        .unwrap_or(reflexed)
+                }
+            };
+            strip_final(&mut result, 0x0438); // /и$/
+
+            let derived = if r2_tail.is_some_and(|tail| {
+                !tail.is_empty() && alt_suffix(tail, &["ост", "ость"]).is_some()
+            }) {
+                derivational(&result).unwrap_or(result)
+            } else {
+                result
+            };
+
+            let mut out = or_falsy(superlative(&derived), &derived);
+            out = collapse_double(&out, 0x043D); // /(н)н/g
+            strip_final(&mut out, 0x044C); // /ь$/
+
+            let mut full = head.to_vec();
+            full.extend_from_slice(&out);
+            text(&full)
+        }
+    }
+
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// Cyrillic stems crossed with real table suffixes (stacked up to two
+    /// deep), plus ё, uppercase, line-terminator, astral and digit noise —
+    /// every special path the module documents.
+    fn random_word(rng: &mut Rng) -> String {
+        const ALPHA: &[char] = &[
+            'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'к', 'л', 'м', 'н', 'о', 'п', 'р', 'с',
+            'т', 'у', 'ч', 'ш', 'щ', 'ы', 'ь', 'э', 'ю', 'я', 'ё',
+        ];
+        const SUFFIXES: &[&str] = &[
+            "авшись",
+            "явши",
+            "ывшись",
+            "ившись",
+            "ив",
+            "ыв",
+            "ими",
+            "ыми",
+            "его",
+            "ому",
+            "ая",
+            "яя",
+            "ся",
+            "сь",
+            "ла",
+            "на",
+            "ете",
+            "ешь",
+            "нно",
+            "ила",
+            "ейте",
+            "уйте",
+            "ишь",
+            "ует",
+            "иями",
+            "ями",
+            "ией",
+            "иях",
+            "ью",
+            "ья",
+            "ость",
+            "ост",
+            "ейше",
+            "ейш",
+            "нн",
+            "н",
+            "и",
+            "ь",
+            "авши",
+            "яв",
+            "ав",
+        ];
+        let mut s = String::new();
+        for _ in 0..rng.below(8) {
+            s.push(ALPHA[rng.below(ALPHA.len())]);
+        }
+        if rng.below(10) < 7 {
+            s.push_str(SUFFIXES[rng.below(SUFFIXES.len())]);
+            if rng.below(4) == 0 {
+                s.push_str(SUFFIXES[rng.below(SUFFIXES.len())]);
+            }
+        }
+        match rng.below(40) {
+            0 => s = s.to_uppercase(),
+            1 => s.push('😀'),
+            2 => s.insert(0, '日'),
+            3 => s.push_str("123"),
+            4 => s.push('\n'),
+            5 => s.insert(0, '\u{2028}'),
+            _ => {}
+        }
+        s
+    }
+
+    #[test]
+    fn differential_against_the_linear_scan_oracle() {
+        let stemmer = PorterStemmerRu::new();
+        let check = |input: &str| {
+            assert_eq!(
+                stemmer.stem(input).as_ref(),
+                oracle::stem(input),
+                "stem({input:?})"
+            );
+        };
+        for w in crate::test_support::bench_words("ru") {
+            check(&w);
+        }
+        for w in [
+            "",
+            "ся",
+            "сь",
+            "нннн",
+            "бвг",
+            "аб\nв",
+            "важнейшими",
+            "важностию",
+            "валандался",
+            "ёёёё",
+            "ость",
+            "остью",
+            "радость",
+            "ЁЛКА",
+        ] {
+            check(w);
+        }
+        let mut rng = Rng(0xA5A5_1234_5678_9ABC);
+        for _ in 0..60_000 {
+            let w = random_word(&mut rng);
+            check(&w);
+        }
     }
 }

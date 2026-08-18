@@ -1,16 +1,49 @@
 # Features overview
 
-What Verbora can do today, and where each thing lives.
+Every subsystem below is implemented, tested, and documented. Start from what
+you want to *do*, or from the crate map further down.
 
-## Implemented
+## Start from the problem
 
-Every subsystem below is implemented and covered by the workspace test suite.
+| I want to… | Use |
+|---|---|
+| Split text into words | [Tokenizers](tokenizers.md) — start with `AggressiveTokenizer` |
+| Split text into sentences | [`SentenceTokenizer`](tokenizers.md) |
+| Tokenize a language other than English | [Tokenizers](tokenizers.md) — 16 language variants |
+| Measure how similar two strings are | [String distance](distance.md) |
+| Correct a typo | [`levenshtein`](distance.md), usually after narrowing candidates |
+| Correct spelling against a corpus | [Spellcheck](spellcheck.md) |
+| Match names that sound alike | [Phonetics](phonetics.md) |
+| Search a whole dictionary for sound-alikes | [Phonetic neighbors](phonetic-index.md) |
+| Match names across language boundaries (genealogy) | [Beider-Morse](beider-morse.md) |
+| Match names with a shared prefix | [`jaro_winkler`](distance.md) |
+| Work out which encoder or stemmer a text even needs | [Language](language.md) |
+| Build an autocomplete index | [Trie](trie.md) |
+| Find repeated phrases | [N-grams](ngrams.md) |
+| Strip accents before comparing | [`remove_diacritics`](normalizers.md) |
+| Expand English contractions | [`normalize`](normalizers.md) |
+| Normalise Japanese width and kana | [`normalize_ja`](normalizers.md) |
+| Romanise Japanese kana | [Transliterators](transliterators.md) |
+| Pluralise a noun, or write "23rd" | [Inflectors](inflectors.md) |
+| Reduce words to a stem | [Stemmers](stemmers.md) |
+| Rank documents by relevance | [TF-IDF](tfidf.md) |
+| Classify documents into categories | [Classifiers](classifiers.md) |
+| Score sentiment over a token list | [Sentiment](sentiment.md) |
+| Look up synonyms and word relations | [WordNet](wordnet.md) |
+| Tag parts of speech | [POS tagger](tagger.md) |
+| Split a tagged sentence into subject and predicate | [Sentence analyzers](analyzers.md) |
+| Write generic code over any tokenizer | [Core vocabulary](core.md) |
+
+## The crates
 
 | Subsystem | Crate | Public surface |
 |---|---|---|
 | [Tokenizers](tokenizers.md) | `verbora-tokenizers` | 25 tokenizers, `Tokenize`, `Utf16Token` |
 | [String distance](distance.md) | `verbora-distance` | 8 metrics, 5 `StringMetric` impls |
-| [Phonetics](phonetics.md) | `verbora-phonetics` | SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff |
+| [Phonetics](phonetics.md) | `verbora-phonetics` | 11 encoders: SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff ×2, Cologne, Nysiis, Caverphone 1/2, Phonex, Refined Soundex, Match Rating |
+| [Phonetic neighbors](phonetic-index.md) | `verbora-phonetics` | `PhoneticIndex` — dictionary-wide candidate generation over any of the four core encoders |
+| [Beider-Morse](beider-morse.md) | `verbora-phonetics` | Cross-language surname matching over up to 18 languages at once, with auto-detection |
+| [Language](language.md) | `verbora-language` | Script detection, optional statistical language detection, and `recommend()` — language → phonetic encoder |
 | [N-grams](ngrams.md) | `verbora-ngrams` | window engine, stats, Chinese n-grams |
 | [Normalizers](normalizers.md) | `verbora-normalizers` | 6 normalizers, 17 Japanese converters |
 | [Inflectors](inflectors.md) | `verbora-inflectors` | 6 inflectors, runtime rules |
@@ -20,73 +53,18 @@ Every subsystem below is implemented and covered by the workspace test suite.
 | [TF-IDF](tfidf.md) | `verbora-tfidf` | term interning, incremental idf cache, `listTerms`/`tfidf`/`tfidfs` |
 | [Sentiment](sentiment.md) | `verbora-sentiment` | 14 lexicons across 10 languages, sticky negation |
 | [Classifiers](classifiers.md) | `verbora-classifiers` | Bayes, logistic regression, MaxEnt + GIS |
+| [Stemmers](stemmers.md) | `verbora-stemmers` | 16 stemmers: Porter/Snowball across 12 languages, Lancaster, Japanese, Indonesian |
+| [Spellcheck](spellcheck.md) | `verbora-spellcheck` | frequency-ranked correction, BK-tree and deletion indexes |
+| [POS tagger](tagger.md) | `verbora-tagger` | Brill tagging, training and evaluation; English and Dutch data |
+| [Sentence analyzers](analyzers.md) | `verbora-analyzers` | phrase annotation, subject/predicate splitting, sentence type |
+| [Utilities](util.md) | `verbora-util` | stop words, abbreviations, weighted graphs and storage backends |
 | [Core vocabulary](core.md) | `verbora-core` | 6 traits, `Token`, `StopWords`, whitespace helpers |
-
-<div class="callout callout-note">
-<strong>Implemented, not yet on this site.</strong> Five crates pass their
-full test suites today with no known failures, but have no feature page yet:
-<code>verbora-analyzers</code> (sentence analysis — prepositional phrases,
-subject/predicate splitting),
-<code>verbora-util</code> (stop words, abbreviations, edge-weighted digraphs,
-pluggable storage backends),
-<code>verbora-spellcheck</code> (Norvig-style correction with a lazy,
-frequency-ranked candidate generator),
-<code>verbora-stemmers</code> (Porter × 13, Lancaster, Japanese, Indonesian),
-and <code>verbora-tagger</code> (the Brill POS tagger, trainer and tester).
-This is a documentation gap, not a code gap, and it is tracked on the
-[roadmap](roadmap.md) rather than left silently absent.
-</div>
-
-## Coverage
-
-The library is feature-complete: every subsystem listed above is implemented
-and tested. What is left is documentation, not code — the five crates in the
-callout above have no feature page yet. See the [roadmap](roadmap.md) for what
-remains to be written up.
-
-## Verbora-native extensions
-
-Some of what follows solves a problem no comparable library had to. These are
-Verbora's own designs, held to the same benchmark-evidence discipline as the
-crates above.
-
-| Extension | Crate | What it adds |
-|---|---|---|
-| [Phonetic neighbors](phonetic-index) | `verbora-phonetics` | An index over a phonetic encoder's output. `PhoneticIndex::neighbors` answers "which stored words share a code with this query?" across a whole dictionary — phonetic candidate generation, not a search engine. |
-| [Beider-Morse](beider-morse) | `verbora-phonetics` | Cross-language surname matching across up to 18 languages at once (10 Ashkenazi, 5 Sephardic), auto-detecting which one(s) a name is plausibly spelled under. Solves what a single-language phonetic encoder can't: the same historical family name has different "correct" spellings depending on which country transcribed it. |
-| [Language](language) | `verbora-language` | Script and (optional, feature-gated) statistical language detection, plus `recommend()` — a closed lookup from `Language` to which of `verbora-phonetics`'s four encoders actually fits. Answers "which encoder should I even use?" up front, closing a decision that would otherwise fall entirely on the caller. |
-
-## By problem
-
-If you know what you want to *do* rather than what it is called:
-
-| I want to… | Use |
-|---|---|
-| Split text into words | [Tokenizers](tokenizers.md) — start with `AggressiveTokenizer` |
-| Split text into sentences | [`SentenceTokenizer`](tokenizers.md) |
-| Tokenize a language other than English | [Tokenizers](tokenizers.md) — 16 language variants |
-| Measure how similar two strings are | [String distance](distance.md) |
-| Correct a typo | [`levenshtein`](distance.md), usually after narrowing candidates |
-| Match names that sound alike | [Phonetics](phonetics.md) |
-| Match names across language/spelling boundaries (genealogy) | [Beider-Morse](beider-morse.md) |
-| Match names with a shared prefix | [`jaro_winkler`](distance.md) |
-| Build an autocomplete index | [Trie](trie.md) |
-| Find repeated phrases | [N-grams](ngrams.md) |
-| Strip accents before comparing | [`remove_diacritics`](normalizers.md) |
-| Expand English contractions | [`normalize`](normalizers.md) |
-| Normalise Japanese width and kana | [`normalize_ja`](normalizers.md) |
-| Pluralise a noun, or write "23rd" | [Inflectors](inflectors.md) |
-| Write generic code over any tokenizer | [Core vocabulary](core.md) |
-| Rank documents by relevance | [TF-IDF](tfidf.md) |
-| Score sentiment over a token list | [Sentiment](sentiment.md) |
-| Classify documents into categories | [Classifiers](classifiers.md) |
-| Reduce words to a stem | `verbora-stemmers` — implemented, no feature page yet (see [roadmap](roadmap.md)) |
 
 ## Language support
 
 | Language | Tokenizer | Normalizer | Inflector | Phonetics |
 |---|:--:|:--:|:--:|:--:|
-| English | ✅ | ✅ | ✅ nouns, verbs, ordinals | ✅ all four encoders |
+| English | ✅ | ✅ | ✅ nouns, verbs, ordinals | ✅ all four core encoders |
 | French | ✅ | | ✅ nouns, ordinals | |
 | German | ✅ | | | |
 | Spanish | ✅ | | | |
@@ -108,24 +86,16 @@ If you know what you want to *do* rather than what it is called:
 | Chinese | ✅ n-grams | | | |
 
 Latin-script diacritic folding via `remove_diacritics` applies far more broadly
-than the "Normalizer" column suggests — it is a table over 820 non-ASCII
-characters, not a per-language rule set.
+than the Normalizer column suggests — it is a table over 820 non-ASCII
+characters, not a per-language rule set. Stemmers cover 12 languages on their
+own axis; see [Stemmers](stemmers.md).
 
-## How the feature pages are structured
+## Where else to look
 
-Each one follows the same shape, so you can skim to the part you need:
-
-```text
-Overview  →  When to use  →  When not to  →  Quick example
-          →  Choosing the right API   ← comparison table + decision tree
-          →  Advanced usage
-          →  Performance characteristics
-          →  Allocation behaviour
-          →  Unicode and language notes
-          →  Common mistakes
-          →  Related  →  API reference
-```
-
-The **Choosing the right API** section is mandatory wherever a subsystem exposes
-more than one way to do the same conceptual thing. That is a project rule, not a
-stylistic preference — see [Choosing the right API](../choosing/index.md).
+- [Choosing the right API](../choosing/index.md) — cross-subsystem decisions.
+- [Performance](../performance/index.md) — allocation, zero-copy, parallelism.
+- [Benchmarks](../benchmarks/index.md) — measured numbers and how to reproduce.
+- [Recipes](../recipes/index.md) — end-to-end pipelines.
+- [Status and scope](roadmap.md) — what "available" means, and the boundaries.
+- Exact signatures live in [rustdoc](../reference/api.md); these pages cover
+  selection, composition, costs and common mistakes.
