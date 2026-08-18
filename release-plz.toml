@@ -1,9 +1,8 @@
 # Each public Verbora crate has its own version. release-plz prepares a release
-# only for crates affected by the merged changes, then publishes them after its
-# Release PR is reviewed and merged into `main`.
+# only for crates affected by the merged changes, then publishes crates whose
+# versioned Release PR has been reviewed and merged into `main`.
 
 [workspace]
-release_always = false
 changelog_update = false
 publish_all_features = true
 publish_timeout = "30m"
