@@ -3,6 +3,10 @@ name: Release crates
 on:
   push:
     branches: [main]
+  # Resume a partially throttled crates.io publication without human input.
+  # Scheduled workflows run from the repository's default branch (`main`).
+  schedule:
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       command:
@@ -14,15 +18,15 @@ on:
           - release-pr
           - release
 
-# release-plz creates or updates a Release PR for version changes. On each
-# push to main it publishes packages whose release version is ready, in
-# dependency order, and creates their tags and GitHub releases.
+# release-plz creates or updates a Release PR for version changes. Pushes to
+# main publish ready packages; scheduled runs resume a crates.io-throttled
+# publication in dependency order without creating a Release PR.
 jobs:
   release:
     name: Publish ready crates
     if: >-
       github.repository_owner == 'addlayerio' &&
-      (github.event_name == 'push' || inputs.command == 'release')
+      (github.event_name == 'push' || github.event_name == 'schedule' || inputs.command == 'release')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -34,6 +38,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify the release commit
+        if: github.event_name != 'schedule'
         run: cargo test --workspace --all-features
       - name: Publish crates and create releases
         uses: release-plz/action@v0.5.131
