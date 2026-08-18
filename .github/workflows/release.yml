@@ -36,7 +36,7 @@ jobs:
       - name: Verify the release commit
         run: cargo test --workspace --all-features
       - name: Publish crates and create releases
-        uses: release-plz/action@v0.3
+        uses: release-plz/action@v0.5.131
         with:
           command: release
         env:
@@ -62,7 +62,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Create or update the release PR
-        uses: release-plz/action@v0.3
+        uses: release-plz/action@v0.5.131
         with:
           command: release-pr
         env:
