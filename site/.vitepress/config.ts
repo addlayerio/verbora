@@ -89,6 +89,18 @@ export default defineConfig({
         license: 'https://github.com/addlayerio/verbora/blob/main/LICENSE',
       }),
     ],
+    // Google Analytics (GA4). `async` so it never blocks first paint, and the
+    // inline bootstrap follows it because gtag() queues onto dataLayer before
+    // the remote script arrives.
+    ['script', { async: '', src: 'https://www.googletagmanager.com/gtag/js?id=G-BK7VXYJHQJ' }],
+    [
+      'script',
+      {},
+      `window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-BK7VXYJHQJ');`,
+    ],
   ],
 
   themeConfig: {
