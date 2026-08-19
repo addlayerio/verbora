@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "TF-IDF term weighting for Rust"
-keywords = ["tfidf", "information-retrieval", "nlp"]
+keywords = ["tfidf", "search", "nlp"]
 categories.workspace = true
 
 [dependencies]
