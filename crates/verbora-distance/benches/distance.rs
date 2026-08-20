@@ -6,8 +6,9 @@
 //! Criterion benchmarks for the distance metrics.
 //!
 //! Input sizes span four orders of magnitude so that scaling behaviour — not
-//! just single-call latency — is visible. See `docs/PERFORMANCE.md` for the
-//! paired results against the reference implementation.
+//! just single-call latency — is visible. Measured results live in
+//! `site/benchmarks/distance.md`, backed by
+//! `benchmarks/competitive/results/results.json`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use verbora_distance::{

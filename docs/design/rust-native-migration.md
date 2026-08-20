@@ -1,6 +1,12 @@
 # Rust-native migration — plan and standing findings
 
-**Status:** in progress. `verbora-distance` is complete; twelve crates remain.
+**Status:** the code is migrated. All nineteen crates derive their behaviour
+from a published standard or an explicit Verbora contract, and their tests pin
+that contract rather than a recording. What remains is documentation: roughly
+140 doc comments in `crates/*/src` still explain behaviour by reference to
+another implementation, concentrated in `verbora-stemmers`. Those render on
+docs.rs, so they are user-facing and fall under the same rule as the site —
+see `.claude/agents/doc-sync.md` Rule #2.
 
 Verbora is specified from Rust. Its behaviour is defined by an explicit
 contract plus the tests that pin it — never by another implementation. This

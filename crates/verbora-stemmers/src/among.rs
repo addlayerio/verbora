@@ -4,16 +4,17 @@
 //! # Why this exists
 //!
 //! `docs/PERFORMANCE_GAPS.md` entry 34 diagnosed, and a measured decomposition
-//! confirmed, that the dominant cost in seven of the nine Snowball ports was the
-//! *linear* suffix scan: every step called [`crate::units::ends_with`] on every
+//! confirmed, that the dominant cost in seven of the nine Snowball stemmers was
+//! the *linear* suffix scan: every step called [`crate::units::ends_with`] on every
 //! candidate in its table even after the true answer was known, and a real word
 //! rejects most candidates (Spanish paid up to ~16 table scans × up to 95
 //! candidates per word). Replacing those scans with the Snowball runtime's own
 //! `find_among_b` — a binary search over the table sorted by *reversed* unit
 //! sequence, with `common_i`/`common_j` prefix tracking so no unit is compared
 //! twice — recovered 78% of the entire competitive gap on Spanish before any
-//! other change. The port was verified byte-exact against the existing
-//! linear-scan implementation over 500k+ differential cases.
+//! other change. The search is byte-exact against the linear scan it replaced:
+//! each language keeps that scan as an in-tree test oracle, and the two are
+//! swept against each other over 500k+ differential cases.
 //!
 //! # The unit
 //!
@@ -45,13 +46,13 @@
 //!
 //! [`AmongTable::longest`] returns the length of the **longest** table entry
 //! that is a suffix of `w[lb..cursor]` — exactly what `longest_suffix` computes
-//! over a region slice, and exactly what the reference's `/(a|bb|ccc)$/`
-//! alternations compute (the earliest start at which some alternative reaches
-//! `$` is the longest listed suffix). Tables whose reference semantics are
-//! *first listed match* may only go through this search when their hand
-//! ordering makes first and longest coincide; each such language pins that
-//! property with a static ordering test (`nested_pairs_are_longest_first`,
-//! test-only).
+//! over a region slice, and exactly what an anchored alternation
+//! `/(a|bb|ccc)$/` computes (the earliest start at which some alternative
+//! reaches `$` is the longest listed suffix). Tables whose contract is instead
+//! *first listed match* — Italian's and Portuguese's — may only go through this
+//! search when their hand ordering makes first and longest coincide; each such
+//! language pins that property with a static ordering test
+//! (`nested_pairs_are_longest_first`, test-only).
 //!
 //! # Substring links
 //!
@@ -209,14 +210,13 @@ impl<U: Unit> Table<U> {
     /// The core of Snowball's `find_among_b`: the index of the longest entry
     /// that is a suffix of `w[lb..cursor]`, or `-1`.
     ///
-    /// Exact port of the reference runtime's search, including the
+    /// The Snowball runtime search in full, including the
     /// `first_key_inspected` re-probe of key 0 and the fallback walk along
     /// substring links. `lb` is Snowball's `limit_backward`: comparisons stop
     /// at it, so an entry longer than `cursor - lb` can never match — which is
     /// precisely the region restriction every caller needs. Callers must pass
-    /// `lb <= cursor` (clamp with `min` when a stale region index may exceed
-    /// the current length, as the reference's `slice` clamping does
-    /// implicitly).
+    /// `lb <= cursor`; clamp with `min` when a stale region index may exceed
+    /// the current length.
     ///
     /// # The rejection test
     ///
@@ -514,7 +514,7 @@ pub(crate) fn longest_at_most(mask: u32, avail: usize) -> usize {
 /// Asserts that, whenever one entry of `table` is a proper suffix of another,
 /// the longer one is listed first.
 ///
-/// Italian's `endsinArr` and Portuguese's `replaceSuffixInRegion` stop at the
+/// The Italian and Portuguese suffix tables are defined to stop at the
 /// **first** listed match; routing them through the longest-match search above
 /// is only byte-exact because their tables are hand-ordered so that first and
 /// longest coincide. This check pins that property so a future table edit
@@ -548,13 +548,11 @@ pub(crate) fn nested_pairs_are_longest_first(name: &str, table: &[&str]) {
 /// inline while halving that memset against the 64 this started at. Anything
 /// longer spills to the heap and is correct, just not free.
 ///
-/// The constant is stated in the buffer's own unit, so moving from the UTF-16
-/// code unit to the scalar value *widened* its coverage: a word of 32 scalar
-/// values is 32 or more code units, so every word that used to fit still fits.
-/// The array itself is now 128 bytes rather than 64, since a [`char`] is four
-/// bytes and a `u16` two, which doubles both the per-word memset and the
-/// snapshot copy below. Whether 32 is still the right constant against a
-/// four-byte unit is **UNMEASURED** — it is a tuning question, and this crate
+/// The constant is stated in the buffer's own unit, the scalar value, which is
+/// the wider of the two readings: a word of 32 scalar values is 32 or more
+/// UTF-16 code units. The array is 128 bytes, a [`char`] being four bytes, so
+/// both the per-word memset and the snapshot copy below are sized against that.
+/// Whether 32 is the right constant against a four-byte unit is **UNMEASURED** — it is a tuning question, and this crate
 /// does not move a tuning constant on reasoning alone.
 pub(crate) const INLINE: usize = 32;
 
@@ -596,10 +594,10 @@ impl<U: Unit> Buf<U> {
 
     /// The units of `word.to_lowercase()`, without the intermediate `String`.
     ///
-    /// Nine of the twelve Snowball ports open with a lowercase, and the
-    /// straightforward port allocated twice before the algorithm had run a
-    /// single rule: once for the lowered `String`, once for the buffer it was
-    /// then re-encoded into. Both are gone here — the lowered units land
+    /// Nine of the twelve Snowball stemmers open with a lowercase, and doing
+    /// that the straightforward way allocates twice before the algorithm has
+    /// run a single rule: once for the lowered `String`, once for the buffer it
+    /// is then re-encoded into. Both are gone here — the lowered units land
     /// straight in the inline array.
     ///
     /// # The ASCII arm

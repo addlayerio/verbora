@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use rustc_hash::{FxHashMap, FxHasher};
 use verbora_distance::damerau_levenshtein;
 
-use crate::deletions::{distinct_deletions, to_scalars};
+use crate::deletions::{for_each_deletion, to_scalars};
 
 /// The largest `max_distance` the lazily built deletion index answers.
 ///
@@ -64,7 +64,35 @@ impl std::error::Error for CorpusTooLarge {}
 /// at all; `distance` and `frequency` are the two numbers the ordering is built
 /// from, returned rather than hidden so a caller can re-rank, filter or display
 /// them without asking twice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// # Order
+///
+/// [`Ord`] **is** the ranking [`Spellcheck::corrections`] returns — ascending
+/// distance, then *descending* frequency, then ascending word — so sorting a
+/// returned vector leaves it as it was, and [`Iterator::min`] over one answers
+/// what [`Spellcheck::best_correction`] answers.
+///
+/// It is written out rather than derived because the derived order compares
+/// fields in declaration order, which puts `word` first: a correction two edits
+/// away would sort ahead of the query's own spelling on nothing but the
+/// alphabet. A type whose `Ord` contradicts its own documented ranking is a
+/// trap, so this one does not have to be worked around.
+///
+/// The order is total, and consistent with `Eq`: two corrections that tie on
+/// distance, frequency and word are equal in every field there is.
+///
+/// ```
+/// use verbora_spellcheck::Spellcheck;
+///
+/// let sc = Spellcheck::new(["b", "abc"]);
+/// let ranked = sc.corrections("b", 2);
+///
+/// let mut sorted = ranked.clone();
+/// sorted.sort();
+/// assert_eq!(sorted, ranked);
+/// assert_eq!(ranked.iter().copied().min(), sc.best_correction("b", 2));
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Correction<'a> {
     /// The corpus word.
     pub word: &'a str,
@@ -74,6 +102,21 @@ pub struct Correction<'a> {
     /// How many times `word` occurs in the corpus the [`Spellcheck`] was built
     /// from. Always at least 1.
     pub frequency: u32,
+}
+
+impl Ord for Correction<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.distance
+            .cmp(&other.distance)
+            .then(other.frequency.cmp(&self.frequency))
+            .then_with(|| self.word.cmp(other.word))
+    }
+}
+
+impl PartialOrd for Correction<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Spelling correction over a corpus, after
@@ -361,31 +404,43 @@ impl Spellcheck {
     ///
     /// # Cost
     ///
-    /// At `max_distance <= 2` — the overwhelmingly common case, and the range
-    /// Norvig's own figures put 80–95% of real misspellings in — candidates
-    /// come from a symmetric-delete index built lazily on the first such call,
-    /// so only the handful of corpus words sharing a deletion sequence with
-    /// `word` have their distance computed. Above 2 the query falls back to a
-    /// scan of the corpus, skipping any word whose scalar length already
-    /// differs by more than `max_distance` (a valid lower bound on the metric)
-    /// and computing the distance for the rest. Neither path has been
-    /// benchmarked since this crate's contract changed, so no speed figure is
-    /// quoted here; what is stated is the work each path does.
+    /// Three paths, by `max_distance`:
+    ///
+    /// * **`0`** — one hash lookup on the corpus index, and no candidate
+    ///   generation whatsoever. Zero edits is a membership question, and the
+    ///   deletion index is neither built nor consulted to answer it.
+    /// * **`1` or `2`** — the overwhelmingly common case, and the range
+    ///   Norvig's own figures put 80–95% of real misspellings in. Candidates
+    ///   come from a symmetric-delete index built lazily on the first such
+    ///   call, so only the handful of corpus words sharing a deletion sequence
+    ///   with `word` have their distance computed.
+    /// * **above `2`** — a scan of the corpus, skipping any word whose scalar
+    ///   length already differs by more than `max_distance` (a valid lower
+    ///   bound on the metric) and computing the distance for the rest.
+    ///
+    /// No path has been benchmarked since this crate's contract changed, so no
+    /// speed figure is quoted here; what is stated is the work each path does.
+    ///
+    /// The index the middle path builds is what a long word is charged for: one
+    /// bucket entry per deletion sequence, so `length choose 2` entries for a
+    /// word of that scalar length, once, on first use. That is quadratic in the
+    /// longest word rather than in the corpus, and it is the price of the
+    /// structure; generating those sequences costs no memory beyond one
+    /// sequence at a time.
     ///
     /// # Allocation
     ///
-    /// One `Vec` for the candidate indices, one for the result. A
-    /// [`Correction`] borrows its word from `self`, so no string is copied.
+    /// One `Vec` for the candidate indices, one for the result, and one
+    /// scalar-sequence buffer reused across every deletion the query generates
+    /// — never a materialised deletion set. A [`Correction`] borrows its word
+    /// from `self`, so no string is copied.
     #[must_use]
     pub fn corrections(&self, word: &str, max_distance: u32) -> Vec<Correction<'_>> {
         let mut out = Vec::new();
         self.for_each_match(word, max_distance, |c| out.push(c));
-        out.sort_unstable_by(|a, b| {
-            a.distance
-                .cmp(&b.distance)
-                .then(b.frequency.cmp(&a.frequency))
-                .then_with(|| a.word.cmp(b.word))
-        });
+        // `Correction`'s own `Ord` is the documented ranking, so this sort and
+        // the type's order cannot drift apart.
+        out.sort_unstable();
         out
     }
 
@@ -423,14 +478,11 @@ impl Spellcheck {
     pub fn best_correction(&self, word: &str, max_distance: u32) -> Option<Correction<'_>> {
         let mut best: Option<Correction<'_>> = None;
         self.for_each_match(word, max_distance, |c| {
-            let better = match best {
-                None => true,
-                Some(b) => {
-                    (c.distance, std::cmp::Reverse(c.frequency), c.word)
-                        < (b.distance, std::cmp::Reverse(b.frequency), b.word)
-                }
-            };
-            if better {
+            // The comparison is `Correction`'s own `Ord`, which is the ranking
+            // `corrections` sorts by — one definition, so the head of the
+            // sorted list and this minimum are the same correction by
+            // construction rather than by two matching hand-written keys.
+            if best.is_none_or(|b| c < b) {
                 best = Some(c);
             }
         });
@@ -506,7 +558,6 @@ impl Spellcheck {
         max_distance: u32,
         mut f: F,
     ) {
-        let units = to_scalars(query);
         let emit = |i: u32, f: &mut F| {
             let word: &'s str = &self.words[i as usize];
             let distance = damerau_levenshtein(query, word) as u32;
@@ -519,14 +570,37 @@ impl Spellcheck {
             }
         };
 
+        // Zero edits is a membership test, not a retrieval: the answer is the
+        // query itself when the corpus holds it and nothing otherwise. Routing
+        // it through the deletion index would build that index — depth 2, on
+        // every corpus word — to answer a question one hash lookup settles, so
+        // this is not an optimisation of the general path but the general path
+        // being the wrong path. It returns before the query is even split into
+        // scalars, which nothing on this path needs.
+        if max_distance == 0 {
+            if let Some(&i) = self.index.get(query) {
+                // The map matched on the whole key, so the distance is zero
+                // without a metric being run: `emit` would recompute what the
+                // lookup has already established.
+                let word: &'s str = &self.words[i as usize];
+                f(Correction {
+                    word,
+                    distance: 0,
+                    frequency: self.frequencies[i as usize],
+                });
+            }
+            return;
+        }
+
         if max_distance <= NEAR_DISTANCE {
+            let units = to_scalars(query);
             let near = self.near.get_or_init(|| self.build_near_index());
             let mut candidates: Vec<u32> = Vec::new();
-            for variant in distinct_deletions(&units, max_distance) {
-                if let Some(indices) = near.get(&hash_scalars(&variant)) {
+            for_each_deletion(&units, max_distance, |variant| {
+                if let Some(indices) = near.get(&hash_scalars(variant)) {
                     candidates.extend_from_slice(indices);
                 }
-            }
+            });
             candidates.sort_unstable();
             candidates.dedup();
             for i in candidates {
@@ -536,8 +610,10 @@ impl Spellcheck {
         }
 
         // A scan, with the one lower bound that costs less than the metric:
-        // the distance is at least the difference in scalar length.
-        let query_len = units.len();
+        // the distance is at least the difference in scalar length. Counting
+        // the query's scalars is enough here — the scan generates no deletions,
+        // so it never needs them materialised.
+        let query_len = query.chars().count();
         for (i, word) in self.words.iter().enumerate() {
             if word.chars().count().abs_diff(query_len) > max_distance as usize {
                 continue;
@@ -561,15 +637,17 @@ impl Spellcheck {
             // `build` caps `words.len()` at `MAX_DISTINCT_WORDS`.
             let i = i as u32;
             let units = to_scalars(word);
-            for variant in distinct_deletions(&units, NEAR_DISTANCE) {
-                let bucket = near.entry(hash_scalars(&variant)).or_default();
-                // Distinct sequences of one word can collide on one hash; this
-                // word is the bucket's most recent writer, so checking the tail
-                // keeps the bucket free of repeats without a per-key set.
+            for_each_deletion(&units, NEAR_DISTANCE, |variant| {
+                let bucket = near.entry(hash_scalars(variant)).or_default();
+                // Distinct sequences of one word can collide on one hash, and a
+                // word that repeats a scalar generates one sequence twice; this
+                // word is the bucket's most recent writer either way, so
+                // checking the tail keeps the bucket free of repeats without a
+                // per-key set — and without the generator having to dedupe.
                 if bucket.last() != Some(&i) {
                     bucket.push(i);
                 }
-            }
+            });
         }
         near
     }
@@ -776,6 +854,49 @@ mod tests {
         );
     }
 
+    /// `Ord` on a [`Correction`] must be the ranking the type documents, or
+    /// sorting a returned vector reorders it and `min` disagrees with
+    /// [`Spellcheck::best_correction`].
+    #[test]
+    fn the_order_on_a_correction_is_the_documented_ranking() {
+        // Distance first: "b" is the query's own spelling, "abc" is two edits
+        // away and alphabetically first — which comparing fields in
+        // declaration order would rank ahead of an exact match.
+        let sc = Spellcheck::new(["b", "abc"]);
+        let by_distance = sc.corrections("b", 2);
+        assert_eq!(
+            by_distance
+                .iter()
+                .map(|c| (c.word, c.distance))
+                .collect::<Vec<_>>(),
+            [("b", 0), ("abc", 2)]
+        );
+
+        // Then *descending* frequency, so the order is not a plain tuple
+        // comparison either: "ba" is one edit from "aa" like "ab" is, more
+        // frequent, and alphabetically last.
+        let freq = Spellcheck::new(["ba", "ba", "ab"]);
+        let by_frequency = freq.corrections("aa", 1);
+        assert_eq!(
+            by_frequency
+                .iter()
+                .map(|c| (c.word, c.frequency))
+                .collect::<Vec<_>>(),
+            [("ba", 2), ("ab", 1)]
+        );
+
+        for (sc, ranked, query) in [(&sc, &by_distance, "b"), (&freq, &by_frequency, "aa")] {
+            let mut sorted = ranked.to_vec();
+            sorted.sort();
+            assert_eq!(&sorted, ranked, "sorting a ranked vector reordered it");
+            assert_eq!(
+                ranked.iter().copied().min(),
+                sc.best_correction(query, 2),
+                "Ord::min disagrees with best_correction for {query:?}"
+            );
+        }
+    }
+
     #[test]
     fn distance_dominates_frequency_absolutely() {
         let sc = Spellcheck::new(["zz", "zz", "zz", "zz", "az", "a", "a"]);
@@ -827,12 +948,47 @@ mod tests {
         }
     }
 
+    /// `max_distance = 0` is a membership test — "the answer is the word
+    /// itself when it is in the corpus and nothing otherwise" — so it must not
+    /// pay for the deletion index, whose build is cubic in the scalar length
+    /// of every corpus word.
+    #[test]
+    fn a_zero_distance_query_builds_no_deletion_index() {
+        let sc = Spellcheck::new(["cat", "cot", ""]);
+        assert_eq!(words(&sc, "cat", 0), ["cat"]);
+        assert!(sc.corrections("ct", 0).is_empty());
+        assert_eq!(words(&sc, "", 0), [""]);
+        assert_eq!(sc.best_correction("cat", 0).map(|c| c.word), Some("cat"));
+        assert!(
+            sc.near.get().is_none(),
+            "a zero-distance query is a hash lookup, not a candidate generation"
+        );
+    }
+
+    /// A single long token — a URL, a base64 blob, a mis-tokenised line — is
+    /// ordinary corpus input, and both sides of retrieval must survive it.
+    ///
+    /// This is a memory test wearing a correctness test's clothes. Generation
+    /// once materialised the whole depth-2 deletion set, which is cubic in the
+    /// scalar length: this corpus alone cost about a gigabyte of peak RSS, and
+    /// a few thousand scalars aborted the process on allocation failure.
+    /// Streaming the deletions leaves the *index* — quadratic in the word, by
+    /// design — as the only thing a long word is charged for, and the query
+    /// side charged for nothing at all.
     #[test]
     fn very_long_input() {
         let long = "a".repeat(500);
         let sc = Spellcheck::new([long.clone()]);
         assert!(sc.is_correct(&long));
-        assert_eq!(words(&sc, &"a".repeat(499), 1), [long]);
+        assert_eq!(words(&sc, &"a".repeat(499), 1), [long.as_str()]);
+        // The long side as the *query*, at the deepest indexed distance.
+        assert_eq!(words(&sc, &"a".repeat(498), 2), [long.as_str()]);
+        assert!(words(&sc, &"b".repeat(500), 2).is_empty());
+
+        // Zero edits over a long word touches neither generator nor index.
+        let fresh = Spellcheck::new([long.clone()]);
+        assert_eq!(words(&fresh, &long, 0), [long.as_str()]);
+        assert!(fresh.near.get().is_none());
     }
 
     #[test]

@@ -231,13 +231,21 @@ done
 
 echo "== 4. Verbora's own in-workspace benches =="
 for m in "${MODULES[@]}"; do
-  bench="$ROOT/crates/verbora-$m/benches/$m.rs"
+  # A competitive module name is not always the crate that implements it:
+  # POS tagging is measured under `pos_tagging` but lives in `verbora-tagger`.
+  # Assuming the two coincide silently skipped that module's own benches for
+  # a whole campaign, reported as "no such file" rather than as a mapping gap.
+  case "$m" in
+    pos_tagging) crate="tagger" ;;
+    *)           crate="$m" ;;
+  esac
+  bench="$ROOT/crates/verbora-$crate/benches/$crate.rs"
   if [ -f "$bench" ]; then
-    run_step "verbora:$m" "$ROOT" cargo bench -p "verbora-$m" --bench "$m"
+    run_step "verbora:$m" "$ROOT" cargo bench -p "verbora-$crate" --bench "$crate"
   else
     # Distinguished from a failure on purpose: the old `|| echo` reported a
     # bench that crashed and a bench that does not exist with the same line.
-    skip_step "verbora:$m" "no crates/verbora-$m/benches/$m.rs — check the crate's real bench file name"
+    skip_step "verbora:$m" "no crates/verbora-$crate/benches/$crate.rs — add a module-to-crate mapping above if the names differ"
   fi
 done
 

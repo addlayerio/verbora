@@ -1,40 +1,38 @@
-//! The Portuguese Snowball stemmer, ported from
-//! The reference `porter_stemmer_pt`.
+//! The Portuguese Snowball stemmer.
 //!
 //! # Regions are marked once and never remarked
 //!
-//! `stem` marks `all`, `r1`, `r2` and `rv` immediately after the prelude and then
-//! mutates the string through five steps without recomputing any of them. A
-//! region is therefore an index into a string that no longer exists, and
-//! `hasSuffixInRegion` compares `string.length - suffix.length >= regionStart`
-//! against the *current* length. Recomputing regions after each step — which
-//! reads as an obvious tidy-up — changes results.
+//! `stem` marks `all`, `r1`, `r2` and `rv` immediately after the prelude and
+//! then mutates the word through five steps without recomputing any of them. A
+//! region is therefore an index into a word that no longer exists, and the
+//! region test compares `length - suffix.length >= region_start` against the
+//! *current* length. Recomputing regions after each step — which reads as an
+//! obvious tidy-up — changes results.
 //!
 //! # Steps chain rather than alternate
 //!
-//! Step 1 is nine consecutive `replaceSuffixInRegion` calls, not an `else if`
-//! ladder: `"abilidades"` can lose `"idades"` and then have the residue matched
-//! again by a later call in the same step. Only steps 2/4 and 3/4 are mutually
-//! exclusive, and that choice is made by comparing against the string as it was
+//! Step 1 is nine consecutive suffix replacements, not an `else if` ladder:
+//! `"abilidades"` can lose `"idades"` and then have the residue matched again
+//! by a later rule in the same step. Only steps 2/4 and 3/4 are mutually
+//! exclusive, and that choice is made by comparing against the word as it was
 //! before step 1.
 //!
 //! # First listed suffix, not longest
 //!
-//! `replaceSuffixInRegion` walks its array and stops at the first entry that
-//! matches, so every table is hand-ordered longest-first and the order is the
-//! algorithm. This is the opposite of the Spanish/French/Dutch `endsinArr`
-//! convention, and the two must not share a helper.
+//! A step walks its table and stops at the first entry that matches, so every
+//! table is hand-ordered longest-first and the order is the algorithm. This is
+//! the opposite of the Spanish/French/Dutch longest-match convention, and the
+//! two must not share a helper.
 //!
 //! `stem` nevertheless runs each table through one [`crate::among`]
 //! longest-match binary search (`docs/PERFORMANCE_GAPS.md` entry 34): in every
 //! shipped table, whenever one entry is a proper suffix of another the longer
 //! one is listed first, so first-listed and longest coincide — including under
 //! the region check, because an entry too long for the region is excluded from
-//! the search by the same `lb` limit `hasSuffixInRegion` applies. That table
-//! property is pinned by `tables_are_ordered_longest_first_within_nests`
-//! below, so a future table edit cannot silently break the equivalence, and
-//! the pre-conversion implementation is kept in the tests as the
-//! byte-exactness oracle.
+//! the search by the same `lb` limit the region test applies. That table
+//! property is pinned by `tables_are_ordered_longest_first_within_nests` below,
+//! so a future table edit cannot silently break the equivalence, and the
+//! first-match linear scan is kept in the tests as a differential oracle.
 //!
 //! # The nasal detour
 //!
@@ -48,11 +46,9 @@
 //! Region marking here compares positions against the literal constants 1, 2
 //! and 3 and against the word's length, and all of those are counts of
 //! **Unicode scalar values** — R1, R2, RV, the `rv > 3` guard, the literal
-//! `rv = 3`, and every cut. See [`crate::units`] for why that is the faithful
-//! reading of a Snowball algorithm rather than a preference: the specification
-//! is written over *letters*, and the UTF-16 indices this port used to carry
-//! were an artefact of the host language it was transcribed through, not of the
-//! algorithm. `stem("😀eado")` is `"😀ead"`: five letters, so RV starts at 3 and
+//! `rv = 3`, and every cut. See [`crate::units`] for why a Snowball algorithm
+//! is specified over *letters* and why the scalar value is the letter.
+//! `stem("😀eado")` is `"😀ead"`: five letters, so RV starts at 3 and
 //! leaves two of them, which the three-letter step-2 entry `-ado` does not fit.
 //!
 //! The nasal detour below makes the point concrete in the other direction. It
@@ -97,14 +93,13 @@ fn is_vowel(c: char) -> bool {
     )
 }
 
-/// `hasVowelAtIndex`. Out of range is the reference's `undefined`, which is not
-/// in the vowel string, so it is false.
+/// Whether `w[i]` is a vowel. A position past the end is not a vowel.
 #[inline]
 fn vowel_at(w: &[char], i: usize) -> bool {
     w.get(i).copied().is_some_and(is_vowel)
 }
 
-/// `markRegionN`: the first position after a non-vowel that follows a vowel.
+/// R1/R2 marking: the first position after a non-vowel that follows a vowel.
 fn mark_region_n(w: &[char], start: usize) -> usize {
     let length = w.len();
     let mut index = start;
@@ -118,7 +113,7 @@ fn mark_region_n(w: &[char], start: usize) -> usize {
     region
 }
 
-/// `markRegionV`.
+/// RV marking.
 fn mark_region_v(w: &[char]) -> usize {
     let mut rv = w.len();
     if rv > 3 {
@@ -133,8 +128,7 @@ fn mark_region_v(w: &[char]) -> usize {
     rv
 }
 
-/// `replaceAll`, which the reference implements as `split(find).join(replace)`:
-/// every non-overlapping occurrence, scanning left to right.
+/// Replaces every non-overlapping occurrence of `find`, scanning left to right.
 ///
 /// Rebuilds in place only when `find` actually occurs — the four detour calls
 /// in `stem` are no-ops for the typical nasal-free word, and skipping the
@@ -161,8 +155,9 @@ fn replace_all(w: &mut Vec<char>, find: &[char], replacement: &[char]) {
     *w = out;
 }
 
-/// `replaceSuffixInRegion` through one `find_among` search: the longest entry
-/// fitting the region fires, which is the first listed one — see module docs.
+/// Suffix replacement in a region through one `find_among` search: the longest
+/// entry fitting the region fires, which is the first listed one — see module
+/// docs.
 ///
 /// Returns whether a suffix matched and was replaced; every shipped table
 /// pairs a non-empty suffix with a distinct replacement, so "matched" and
@@ -188,9 +183,9 @@ fn replace_in_region(
 ///
 /// # Why one pass for both, and why backwards
 ///
-/// This is `replaceAll` for one-unit needles and two-unit replacements, so
+/// This is a replace-all for one-unit needles and two-unit replacements, so
 /// the word *grows*. Rebuilding into a fresh `Vec` — what the general
-/// `replaceAll` does — cost an allocation on every word even though the
+/// replace-all does — cost an allocation on every word even though the
 /// overwhelming majority of Portuguese words contain no nasal at all, and
 /// running the two rewrites separately cost two full scans instead of one.
 /// The two are safe to fuse because their needles and their replacements
@@ -235,8 +230,8 @@ fn expand_nasals(buf: &mut Buf<char>) {
 /// Neither needle can overlap itself or the other (they differ in their
 /// first unit and a `~` consumed by one could only be consumed by the other
 /// if the same position held both `a` and `o`), so one left-to-right
-/// compaction visits exactly the occurrences the reference's two successive
-/// `split(find).join(replace)` calls would. A word with no `~` at all — every
+/// compaction visits exactly the occurrences two successive replace-all passes
+/// would. A word with no `~` at all — every
 /// word that had no nasal, and that is nearly all of them — skips the pass
 /// entirely.
 fn collapse_nasals(buf: &mut Buf<char>) {
@@ -314,9 +309,7 @@ static MENTE: &[&str] = &["antemente", "avelmente", "ivelmente", "mente"];
 /// `iras|ira → "ir"`, gated on the word ending `eiras`/`eira`.
 static IRA: &[&str] = &["iras", "ira"];
 
-/// The chain order. The reference has a commented-out
-/// `['uço~es', 'uça~o'] -> 'u'` rule between `logia` and `ência`; it is
-/// commented out there and absent here.
+/// The chain order.
 static STEP1_RULES: &[Step1Rule] = &[
     Step1Rule {
         table: 0,
@@ -601,9 +594,7 @@ impl verbora_core::Stemmer for PorterStemmerPt {
 impl PorterStemmerPt {
     /// Appends several stop words to the **process-global Portuguese list**.
     ///
-    /// `stemmer_pt` declares `addStopWords` twice, and the second declaration
-    /// — the concatenating one — wins, so the singular `addStopWord` the first
-    /// declaration was meant to provide does not exist. Neither does it here.
+    /// There is no singular counterpart; pass a one-element iterator.
     pub fn add_stop_words<I, S>(&self, words: I)
     where
         I: IntoIterator<Item = S>,
@@ -725,11 +716,11 @@ mod tests {
     /// The text unit is the **Unicode scalar value**, and Portuguese's region
     /// arithmetic makes the choice observable.
     ///
-    /// Derived from the algorithm rather than recorded from it. `"😀eado"` is
-    /// five letters — `😀 e a d o` — and the nasal detour leaves all of them
-    /// alone, there being no `ã` or `õ`. `hasVowelAtIndex(1)` is `e`, a vowel,
-    /// so `markRegionV` skips its first arm; index 0 is not a vowel, so it
-    /// skips the second and takes the literal **`rv = 3`**. RV therefore leaves
+    /// Derived from the algorithm. `"😀eado"` is five letters — `😀 e a d o` —
+    /// and the nasal detour leaves all of them alone, there being no `ã` or
+    /// `õ`. Index 1 is `e`, a vowel, so RV marking skips its first arm; index 0
+    /// is not a vowel, so it skips the second and takes the literal
+    /// **`rv = 3`**. RV therefore leaves
     /// `5 - 3 = 2` letters, which the three-letter step-2 verb ending `-ado`
     /// does not fit; step 2 declines, step 1 has nothing, and the residual step
     /// cuts the one-letter `-o`: `"😀ead"`.
@@ -763,9 +754,9 @@ mod tests {
     /// neither is rewritten by the lower-casing or by the nasal detour. So the
     /// only thing that can possibly distinguish the two words is **how long
     /// each of them is** — one character each under the contract, one and two
-    /// under the code-unit reading this port used to carry. One build run over
-    /// both therefore measures the unit directly, and a divergence here is a
-    /// position that is still being counted in code units.
+    /// under a code-unit reading. One build run over both therefore measures
+    /// the unit directly, and a divergence here is a position being counted in
+    /// code units.
     ///
     /// The detour is the reason to state that carefully. This stemmer *does*
     /// rewrite one character into two — `ã` becomes `a~` — and it does so
@@ -785,19 +776,19 @@ mod tests {
     /// including the two ends. The counts are pinned by equality so that a walk
     /// which quietly stops enumerating cannot report a clean sweep of nothing.
     ///
-    /// # Red, then green
+    /// # What it catches
     ///
-    /// Against the code-unit reading this port used to carry, this walk reports
-    /// **588 of 302 423** probes measuring an astral character as more than one
-    /// letter. It reports **0** here. Every one of the 588 has the same shape:
-    /// a word that opens with a non-vowel and whose second letter is a vowel,
-    /// so that `markRegionV` takes its third arm and is the literal `rv = 3`.
+    /// Run against a code-unit reading, this walk reports **588 of 302 423**
+    /// probes measuring an astral character as more than one letter. It reports
+    /// **0** here. Every one of the 588 has the same shape: a word that opens
+    /// with a non-vowel and whose second letter is a vowel, so that RV marking
+    /// takes its third arm and is the literal `rv = 3`.
     /// That 3 is an absolute position rather than a relative one, so the extra
     /// code unit lengthened the region past it, and a suffix that does not fit
     /// the region by one letter fitted it by one code unit.
-    /// [`one_astral_character_is_one_letter`] states one such word
-    /// with its arithmetic written out; this walk is what shows the shape is the
-    /// only one, and that nothing else in the shipped data moved.
+    /// [`one_astral_character_is_one_letter`] states one such word with its
+    /// arithmetic written out; this walk is what shows the shape is the only
+    /// one, and that no other shipped entry can see the unit at all.
     #[test]
     fn every_shipped_entry_measures_the_same_under_either_unit() {
         let stemmer = PorterStemmerPt::new();
@@ -884,8 +875,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-find_among implementation, verbatim
-    // (the `Token`-shaped port with linear first-match scans).
+    // Differential oracle: the same steps written over an owned token struct
+    // with linear first-match scans.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;

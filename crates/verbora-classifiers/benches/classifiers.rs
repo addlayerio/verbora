@@ -11,10 +11,11 @@
 //!   logistic regression runs gradient descent per class until convergence.
 //!   Measured on the same corpus at the same sizes, the ratio between them is
 //!   the cost of the model, not of the shared tokenising front end.
-//! * **What does a single classification cost?** `text_to_features` is
-//!   quadratic in the reference (`observation.indexOf(feature)` per feature);
-//!   this crate inverts it to one `OrderedMap::slot_of` lookup per *token*,
-//!   which makes it linear in the probe rather than in the vocabulary.
+//! * **What does a single classification cost?** Asking "is this feature
+//!   present?" once per *feature* costs `O(features x tokens)`;
+//!   `text_to_features` inverts that into one `OrderedMap::slot_of` lookup per
+//!   *token*, which makes it linear in the probe rather than in the
+//!   vocabulary.
 //!   Benchmarking it separately from `classify` shows how much of a
 //!   prediction is feature extraction — on a 342-feature vocabulary the
 //!   answer is now "very little": the remainder is Porter stemming, which no
@@ -24,7 +25,8 @@
 //!   the iteration count is itself data-dependent, so training is measured
 //!   against sample size at a fixed iteration budget.
 //! * **What do the shared numeric primitives cost?** `log` and `exp` are
-//!   in-tree FDLIBM ports and sit in the innermost loop of every model, and
+//!   in-tree FDLIBM implementations and sit in the innermost loop of every
+//!   model, and
 //!   `stable_stringify` runs once per persisted value. A regression in either
 //!   is a regression everywhere.
 //!

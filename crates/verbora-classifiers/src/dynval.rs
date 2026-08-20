@@ -1,42 +1,41 @@
 use std::fmt;
 
-/// A reference value, as far as this crate needs one.
-///
-/// A reference value, its `Number::toString`, and the two serialisers the
-/// classifiers depend on.
-///
-/// Two apparently-cosmetic pieces of the reference reach directly into the numbers
-/// this crate computes:
-///
-/// * `Context.toString()` calls **`safe-stable-stringify`**, and the resulting
-///   string is the *hash key* under which every frequency, weight and
-///   normalisation constant is stored. Change one byte of it — sort keys by
-///   Unicode scalar value instead of UTF-16 code unit, print `1e21` as
-///   `1000000000000000000000` — and two contexts that the reference keeps apart
-///   collide, or two that it merges stay separate. The trained model changes.
-/// * `save()` writes a model as JSON and `restore()` reads it back. Key order
-///   there is the object's **own field order**, left exactly as built — which is
-///   *not* the sorted order `safe-stable-stringify` uses, and is what carries a
-///   classifier's feature slots across the round trip; see [`json_stringify`](DynValue::json_stringify).
-///
-/// Both need the reference's `Number::toString`, which differs from Rust's `{}` in
-/// exactly the region where the exponent form kicks in:
-///
-/// | value | Rust `{}` | the reference |
-/// |---|---|---|
-/// | `1e21` | `1000000000000000000000` | `1e+21` |
-/// | `1e-7` | `0.0000001` | `1e-7` |
-/// | `-0.0` | `-0` | `0` |
-///
-/// [`number_to_string`] implements the ECMA-262 algorithm on top of Rust's
-/// shortest-round-trip digits, so the digits themselves come from a correctly
-/// rounded formatter and only the *layout* is reimplemented.
+/// A JSON value carrying the extra states this crate's persisted models need.
 ///
 /// `serde_json::Value` cannot stand in: it has no `undefined` (an absent
 /// member of a saved model is exactly that), cannot hold `NaN`/`Infinity` (a
 /// Bayes model fitted with a negative smoothing constant scores one — see the
 /// crate-level "`NaN` is computable" section), and does not distinguish
-/// `-0.0`, which `Number::toString` renders as `0`.
+/// `-0.0`, which is written as `0` here.
+///
+/// Two apparently-cosmetic properties of the encoding reach directly into what
+/// a saved model means:
+///
+/// * **Object key order is data.** `save()` writes a model as JSON and
+///   `restore()` reads it back by inserting each object's fields in the order
+///   they appear. A classifier's `features` object is written in feature-slot
+///   order, so the writer has to leave key order exactly as built: that order
+///   is the only thing carrying the feature slots across the round trip — see
+///   [`json_stringify`](DynValue::json_stringify).
+/// * **The spelling of a number is data.** Every number in a saved model goes
+///   through [`number_to_string`], and a saved model is required to come back
+///   byte for byte, so the layout rules below are part of the format rather
+///   than a formatting preference.
+///
+/// [`number_to_string`] implements the ECMA-262 `Number::toString` layout on
+/// top of Rust's shortest-round-trip digits — the digits come from a correctly
+/// rounded formatter and only the layout is written here. It differs from
+/// Rust's `{}` exactly where the exponent form kicks in:
+///
+/// | value | Rust `{}` | written here |
+/// |---|---|---|
+/// | `1e21` | `1000000000000000000000` | `1e+21` |
+/// | `1e-7` | `0.0000001` | `1e-7` |
+/// | `-0.0` | `-0` | `0` |
+///
+/// [`stable_stringify`](DynValue::stable_stringify) is the third serialiser: a
+/// canonical form with object keys sorted, for a caller that needs two equal
+/// values to render identically however each was built.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DynValue {
     /// `undefined`.
@@ -56,12 +55,13 @@ pub enum DynValue {
 }
 
 impl DynValue {
-    /// The value's `safe-stable-stringify` rendering, as `Context.toString`
-    /// computes it.
+    /// A canonical rendering: object keys sorted by UTF-16 code unit, so two
+    /// values with the same members render identically however each was built.
     ///
-    /// Returns `None` for a top-level `undefined`, mirroring the reference
-    /// function returning the value `undefined` rather than a string — which is
-    /// why `Context(undefined).toString()` never caches and recomputes forever.
+    /// `NaN` and the infinities are written as `null`, which is all JSON can
+    /// carry. Returns `None` for a top-level [`Undefined`](Self::Undefined),
+    /// which has no JSON rendering at all; an `undefined` object member is
+    /// dropped, and an `undefined` array element is written as `null`.
     pub fn stable_stringify(&self) -> Option<String> {
         let mut out = String::new();
         if write_stable(&mut out, self) {
@@ -79,7 +79,8 @@ impl DynValue {
     /// back by inserting its fields in the order they appear, so reordering here
     /// would silently re-key every restored model.
     ///
-    /// Returns `None` for a top-level `undefined`, as `JSON.stringify` does.
+    /// Returns `None` for a top-level [`Undefined`](Self::Undefined), which has
+    /// no JSON rendering.
     pub fn json_stringify(&self) -> Option<String> {
         let mut out = String::new();
         if write_json(&mut out, self) {
@@ -89,7 +90,11 @@ impl DynValue {
         }
     }
 
-    /// `String(value)` for the operands of `Element.toString`'s `a + b`.
+    /// The value's plain-text form: a number through [`number_to_string`],
+    /// `null` and `undefined` by name, an array as its elements joined with
+    /// `,` (a `null` or `undefined` element contributing nothing), and any
+    /// object as the literal `[object Object]`. Text is not a serialisation —
+    /// [`json_stringify`](Self::json_stringify) is what writes structure.
     pub fn to_text(&self) -> String {
         match self {
             Self::Undefined => "undefined".to_owned(),
@@ -126,7 +131,7 @@ impl DynValue {
         }
     }
 
-    /// The reference truthiness: everything except `false`, `0`, `-0`, `NaN`,
+    /// ECMA-262 `ToBoolean`: everything except `false`, `0`, `-0`, `NaN`,
     /// `""`, `null` and `undefined`.
     pub fn is_truthy(&self) -> bool {
         match self {
@@ -170,12 +175,12 @@ impl From<bool> for DynValue {
 }
 
 // --------------------------------------------------------------------------
-// Number::toString
+// ECMA-262 Number::toString
 // --------------------------------------------------------------------------
 
 /// ECMA-262 `Number::toString(x, 10)`.
 ///
-/// Rust's `{}` and the reference agree on the *digits* — both print the shortest
+/// Rust's `{}` and this layout agree on the *digits* — both print the shortest
 /// decimal that round-trips — but disagree on when to switch to exponent
 /// notation and on the sign of zero. This takes Rust's shortest digits from
 /// `{:e}` and re-lays them out by the specification's five cases.
@@ -184,8 +189,8 @@ pub fn number_to_string(x: f64) -> String {
         return "NaN".to_owned();
     }
     if x == 0.0 {
-        // Covers -0.0: the reference's String(-0) is "0". (Only Object.is and
-        // 1/x can see the sign; nothing in these classifiers does.)
+        // Covers -0.0: the specification renders both zeros as "0", so the
+        // sign of zero never reaches a saved model.
         return "0".to_owned();
     }
     if x.is_infinite() {
@@ -248,11 +253,12 @@ const fn sign_of(n: i32) -> char {
 // string escaping
 // --------------------------------------------------------------------------
 
-/// Appends a JSON string literal, escaping exactly what `JSON.stringify` does.
+/// Appends a JSON string literal, escaping the control set JSON requires and
+/// nothing beyond it.
 ///
-/// Non-ASCII characters are emitted **raw**, not `\u`-escaped — the reference's
-/// context keys contain `café` and `😀` verbatim, and escaping them would change
-/// every hash key derived from them.
+/// Non-ASCII characters are emitted **raw**, not `\u`-escaped: a feature key
+/// holding `café` or `😀` is stored verbatim, and escaping it would change the
+/// bytes of every model that carries one.
 fn write_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
@@ -274,7 +280,7 @@ fn write_string(out: &mut String, s: &str) {
 }
 
 // --------------------------------------------------------------------------
-// safe-stable-stringify
+// canonical (sorted-key) form
 // --------------------------------------------------------------------------
 
 /// Compares two property names the way `Array.prototype.sort` does: by UTF-16
@@ -288,8 +294,8 @@ pub fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
 
-/// Writes `value` as `safe-stable-stringify` would; returns `false` if the
-/// value is `undefined` (which the reference function omits entirely).
+/// Writes `value` with every object's keys sorted by UTF-16 code unit;
+/// returns `false` for `undefined`, which has no JSON rendering.
 fn write_stable(out: &mut String, value: &DynValue) -> bool {
     match value {
         DynValue::Undefined => false,
@@ -302,7 +308,7 @@ fn write_stable(out: &mut String, value: &DynValue) -> bool {
             true
         }
         DynValue::Num(n) => {
-            // JSON has no NaN or Infinity; the reference emits `null` for both.
+            // JSON has no NaN or Infinity; both are written as `null`.
             out.push_str(&if n.is_finite() {
                 number_to_string(*n)
             } else {
@@ -351,7 +357,7 @@ fn write_stable(out: &mut String, value: &DynValue) -> bool {
 }
 
 // --------------------------------------------------------------------------
-// JSON.stringify
+// JSON output
 // --------------------------------------------------------------------------
 
 /// Writes `value` in its own field order, with no sorting and no reordering.
@@ -359,8 +365,8 @@ fn write_stable(out: &mut String, value: &DynValue) -> bool {
 /// The field order is load-bearing, not cosmetic. `Classifier`'s `features`
 /// object is written in slot order and read back by inserting the fields in the
 /// order they appear, so a feature keeps its slot across a save/restore round
-/// trip only because this writer leaves the order alone. A writer that hoisted
-/// integer-like keys — as `JSON.stringify` does, and as this one used to —
+/// trip only because this writer leaves the order alone. A writer that sorted
+/// the keys, or hoisted the integer-like ones such as `"42"` to the front,
 /// would hand a restored model a feature layout its weights were never trained
 /// against.
 fn write_json(out: &mut String, value: &DynValue) -> bool {
@@ -400,7 +406,8 @@ fn write_json(out: &mut String, value: &DynValue) -> bool {
     }
 }
 
-/// Writes `value` as `JSON.stringify(value, null, indent)` would.
+/// Writes `value` as JSON, indented by `indent` spaces per nesting level and
+/// with every object's keys left in their own field order.
 ///
 /// Every `save()` in this crate writes with an indent of 2, and a saved file is
 /// read back byte for byte by the round-trip tests, so the pretty form is part
@@ -466,7 +473,7 @@ fn write_pretty(out: &mut String, value: &DynValue, indent: usize, depth: usize)
 }
 
 // --------------------------------------------------------------------------
-// JSON.parse
+// JSON input
 // --------------------------------------------------------------------------
 
 /// Why a document could not be parsed as JSON.
@@ -487,7 +494,8 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 impl DynValue {
-    /// `JSON.parse`, producing a [`DynValue`] with object keys in document order.
+    /// Parses a JSON document, producing a [`DynValue`] whose object keys are
+    /// in document order.
     ///
     /// # Why not `serde_json`
     ///
@@ -824,8 +832,11 @@ mod tests {
     // 3.14 is a fixture input, not an approximation of pi.
     #[allow(clippy::approx_constant)]
     #[test]
-    fn number_to_string_matches_the_reference() {
-        // Values recorded from the reference engine; the exponent-form thresholds are the point.
+    fn number_to_string_follows_the_documented_spelling_rules() {
+        // Each value is derived from the rules `number_to_string` documents:
+        // plain decimal inside 1e-7..1e21, exponent form outside it, no
+        // trailing zeros, and `-0.0` spelled `"0"`. The thresholds are the
+        // point of the fixture — they are where the two forms meet.
         assert_eq!(number_to_string(0.0), "0");
         assert_eq!(number_to_string(-0.0), "0");
         assert_eq!(number_to_string(1.0), "1");

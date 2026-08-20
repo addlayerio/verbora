@@ -1,14 +1,13 @@
-//! The Persian stemmer, ported from the reference `porter_stemmer_fa`.
+//! The Persian stemmer.
 //!
-//! `stem` is the **identity function**. The reference says so in a comment —
-//! "disabled stemming for Farsi / Farsi stemming will be supported soon" — and
-//! the whole of the exported behaviour is therefore in `tokenize_and_stem`:
-//! cut at UAX #29 word boundaries, drop the 26 stop words, return the tokens
-//! verbatim. Nothing is lowercased and no gate is applied.
+//! `stem` is the **identity function**: Verbora ships no Persian suffix rules,
+//! so the whole of the exported behaviour is in `tokenize_and_stem` — cut at
+//! UAX #29 word boundaries, drop the 26 stop words, return the tokens
+//! unchanged. Nothing is lowercased and no gate is applied.
 //!
-//! The token stream is the shared [`verbora_tokenizers::WordTokenizer`] one,
-//! not the whitespace split this used to do, so Persian punctuation and the
-//! Arabic comma now separate words instead of clinging to them.
+//! The token stream is the shared [`verbora_tokenizers::WordTokenizer`] one, so
+//! Persian punctuation and the Arabic comma separate words rather than clinging
+//! to them.
 
 use std::borrow::Cow;
 
@@ -32,13 +31,15 @@ use crate::stopwords::Language;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerFa;
 
-/// The fourteen characters `AggressiveTokenizerFa#clearText` looks for.
+/// The fourteen literal characters the Persian pre-pass looks for.
 ///
-/// The reference regex is `/.:\+-=\(\)"'!\?،,؛;/g`. It looks like a punctuation
-/// class with the brackets forgotten; what it compiles to is a *sequence*: any
-/// character except a line terminator, followed by these fourteen literals in
-/// this exact order. It therefore matches essentially nothing — but "essentially"
-/// is not "provably", so it is reproduced rather than dropped.
+/// The pre-pass is specified by the regex `/.:\+-=\(\)"'!\?،,؛;/g`, and that
+/// pattern is a **sequence**, not a character class: any character except a
+/// line terminator, followed by these fourteen literals in this exact order.
+/// Real Persian text therefore essentially never matches it. Verbora keeps the
+/// pass as specified rather than reinterpreting it as the punctuation class it
+/// resembles — "essentially never" is not "never", and rewriting it would strip
+/// characters from tokens that currently keep them.
 const CLEAR_LITERAL: &str = ":+-=()\"'!?،,؛;";
 
 #[inline]
@@ -46,7 +47,7 @@ const fn is_line_terminator(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 
-/// `text.replace(/.:\+-=\(\)"'!\?،,؛;/g, ' ')`.
+/// Replaces every match of `/.:\+-=\(\)"'!\?،,؛;/g` with a space.
 fn clear_text(text: &str) -> Cow<'_, str> {
     if !text.contains(CLEAR_LITERAL) {
         return Cow::Borrowed(text);
@@ -79,7 +80,7 @@ impl PorterStemmerFa {
         Self
     }
 
-    /// Returns `token` unchanged. Persian stemming is disabled upstream.
+    /// Returns `token` unchanged: this crate ships no Persian suffix rules.
     #[allow(
         clippy::unused_self,
         reason = "every stemmer is zero-sized; `stem` is a method so the \
@@ -125,15 +126,13 @@ mod tests {
         }
     }
 
-    /// Persian now cuts at UAX #29 word boundaries like every other language,
-    /// not on runs of non-whitespace.
+    /// Persian cuts at UAX #29 word boundaries like every other language, not
+    /// on runs of non-whitespace.
     ///
     /// U+060C ARABIC COMMA and U+0021 EXCLAMATION MARK are `Word_Break=Other`,
-    /// so they are their own segments and are dropped by the word filter — they
-    /// no longer cling to the preceding token. This is a behaviour change and
-    /// it is the intended one: a token that carries its own trailing
-    /// punctuation cannot match a stop-word list, and the whitespace split that
-    /// produced it was ECMAScript's `\s`, not a property of Persian text.
+    /// so they are their own segments and are dropped by the word filter rather
+    /// than clinging to the preceding token — which matters because a token
+    /// carrying its own trailing punctuation cannot match a stop-word list.
     #[test]
     fn tokenizing_cuts_at_word_boundaries() {
         let s = PorterStemmerFa::new();

@@ -140,6 +140,40 @@ pub(crate) struct Scratch {
 }
 
 /// Accumulates one document's term counts.
+///
+/// # Why the scratch is restored in `Drop`
+///
+/// Counting can be interrupted part-way, and by more than one thing. The
+/// reachable ways: an iterator handed to
+/// [`TfIdf::add_terms`](crate::TfIdf::add_terms) panicking between two terms —
+/// that iterator is the caller's, and `observe` runs inside its `next` — and
+/// the two capacity assertions the crate makes on its own account, one in
+/// [`Counter::observe`] and one in `Interner::next_id`. A panic unwinds
+/// straight past any restore written as a statement at the end of the happy
+/// path, which is what a restore in [`Counter::finish`] is.
+///
+/// A [`Tokenize`](crate::Tokenize) that panics does not currently reach this
+/// state, because the analyzer collects every token before the first one is
+/// counted — but that is an ordering inside another module, not a property of
+/// this one, and it is not what the guarantee should rest on.
+///
+/// Leaving the scratch dirty is not a leak that the next document overwrites.
+/// The next document reads those slots as *its own* entry positions, so its
+/// counts land on the previous document's terms: a term it never contained
+/// reports a count, a term it did contain reports `0` — which
+/// [`TfIdf::term_count`](crate::TfIdf::term_count) documents as "the document
+/// does not contain the term" — and `total_terms` disagrees with the sum of the
+/// per-term counts. Every later score is wrong, with no error and no
+/// diagnostic.
+///
+/// So the restore lives in `Drop`, which runs on both paths. The alternative
+/// considered was to clear the scratch on *entry* to each `build_from_*`, which
+/// is simpler but repairs the damage a moment later than it is done: between
+/// the panic and the next ingestion the invariant this type's owner documents
+/// would be false, and anything that read or cloned the corpus in that window —
+/// including a caught unwind that goes on to serialize — would see it false.
+/// `Drop` makes the invariant hold at every point at which no `Counter` is
+/// alive, which is what "between documents" was always meant to mean.
 struct Counter<'a> {
     interner: &'a mut Interner,
     slots: &'a mut Vec<u32>,
@@ -186,13 +220,24 @@ impl Counter<'_> {
         self.total = self.total.saturating_add(1);
     }
 
-    /// Restores the scratch invariant and produces the document.
-    fn finish(self, key: Option<Box<str>>) -> Document {
-        for id in self.touched.iter() {
-            self.slots[*id as usize] = 0;
+    /// Produces the document. The scratch is restored by `Drop`, which runs
+    /// whether or not counting reached this point.
+    fn finish(mut self, key: Option<Box<str>>) -> Document {
+        Document::from_parts(key, std::mem::take(&mut self.entries), self.total)
+    }
+}
+
+impl Drop for Counter<'_> {
+    fn drop(&mut self) {
+        // `touched` holds exactly the ids whose slot is nonzero, so this is
+        // `O(distinct terms in this document)` and never `O(vocabulary)` — the
+        // same walk `finish` used to do, moved to where unwinding also reaches
+        // it. Nothing here can panic: every id in `touched` was pushed only
+        // after `observe` grew `slots` past it, and `slots` never shrinks
+        // while a `Counter` is alive.
+        for id in self.touched.drain(..) {
+            self.slots[id as usize] = 0;
         }
-        self.touched.clear();
-        Document::from_parts(key, self.entries, self.total)
     }
 }
 

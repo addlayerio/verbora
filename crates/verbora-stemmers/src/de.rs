@@ -1,5 +1,4 @@
-//! The German Snowball stemmer, ported from
-//! The reference `porter_stemmer_de`.
+//! The German Snowball stemmer.
 //!
 //! # Case sensitivity is the whole story
 //!
@@ -12,16 +11,15 @@
 //!
 //! # R2 is computed from the *unadjusted* R1
 //!
-//! The Snowball specification, quoted in the reference's own comment, says R1 is
-//! adjusted so that at least three letters precede it. The code computes R1, then
-//! R2 from the un-adjusted R1's substring, and only afterwards clamps R1 to 3.
-//! Dutch, which is otherwise the same shape, adjusts first. Sharing one region
-//! routine between the two breaks German — verified on `äckern`, where R1 becomes
-//! 3 but R2 stays 5.
+//! Snowball's German adjusts R1 so that at least three letters precede it.
+//! Verbora computes R1, then R2 from the *un-adjusted* R1's substring, and only
+//! afterwards clamps R1 to 3. Dutch, which is otherwise the same shape, adjusts
+//! first, so sharing one region routine between the two breaks German — `äckern`
+//! is the case that shows it, where R1 becomes 3 but R2 stays 5.
 //!
 //! # Suffix selection
 //!
-//! Each `word.search(/(a|b|c)$/)` returns the index where the match *starts*.
+//! Each `/(a|b|c)$/` search returns the index where the match *starts*.
 //! Because the alternatives are distinct literals anchored at `$`, the earliest
 //! start is the longest suffix. The German code then does arithmetic on those
 //! indices (`c1Index++`, `b2Index += 4`, `b3Index++`) and picks the smallest
@@ -34,8 +32,7 @@
 //! `.{3}` lookbehind count **Unicode scalar values** — the unit
 //! [`crate::units`] states for the whole crate, and the one the rules are
 //! written in: R1 is *"the region after the first non-vowel following a
-//! vowel"*, and a `.` in the reference's `/(.{3}[bdfghklmnt]st)$/` stands for
-//! a letter. Nothing in this file is spelled in any other unit, so a cut can
+//! vowel"*, and a `.` in `/(.{3}[bdfghklmnt]st)$/` stands for a letter. Nothing in this file is spelled in any other unit, so a cut can
 //! only ever land on a character boundary.
 
 use std::borrow::Cow;
@@ -94,17 +91,15 @@ const fn is_line_terminator(c: char) -> bool {
 /// Whether `c` is one of the letters [`gate_de`] accepts.
 ///
 /// The gate is stated over Basic Multilingual Plane code points and its
-/// highest member is `ẞ` (`U+1E9E`), so scanning characters and scanning
-/// UTF-16 code units admit exactly the same tokens: a BMP character *is* its
-/// own code unit, and an astral character is neither in the set itself nor are
-/// the two surrogates it used to be scanned as. The scan is per character
-/// because that is the crate's unit, not because the answer moved.
+/// highest member is `ẞ` (`U+1E9E`), so an astral character is never a German
+/// letter: neither the character itself nor either half of the surrogate pair
+/// encoding it is in the set.
 #[inline]
 fn is_german_letter(c: char) -> bool {
     (c as u32) < 0x1_0000 && gate_de(c as u16)
 }
 
-/// `word.search(/(alt|…)$/)`: the start index of the longest matching suffix.
+/// `/(alt|…)$/`: the start index of the longest matching suffix.
 fn search_suffix(w: &[char], alts: &[&str]) -> Option<usize> {
     let mut best: Option<usize> = None;
     for a in alts {
@@ -205,8 +200,8 @@ impl PorterStemmerDe {
 
         // --- Prelude -------------------------------------------------------
         // `u` and `y` between vowels are marked so they stop counting as vowels.
-        // The commented-out ae/oe/ue mappings in the reference stay omitted:
-        // they cause trouble with diphthongs, as its comment says.
+        // `ae`/`oe`/`ue` are deliberately not mapped: doing so causes trouble
+        // with diphthongs.
         mark_between_vowels(buf.as_mut_slice(), 'u', 'U');
         mark_between_vowels(buf.as_mut_slice(), 'y', 'Y');
         expand_sharp_s(&mut buf);
@@ -597,10 +592,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-`Buf` implementation, verbatim — an owned
-    // `Vec<char>` working buffer and a freshly allocated one for the `ß`
-    // expansion. The conversion above is meant to change nothing but where
-    // those characters live.
+    // Differential oracle: the same algorithm over an owned `Vec<char>` working
+    // buffer, with a freshly allocated one for the `ß` expansion. The stack
+    // buffer above is meant to change nothing but where those characters live.
     // -----------------------------------------------------------------------
     fn oracle_stem(word: &str, options: PorterStemmerDeOptions) -> String {
         use crate::units::text;
@@ -608,8 +602,8 @@ mod tests {
 
         // --- Prelude -------------------------------------------------------
         // `u` and `y` between vowels are marked so they stop counting as vowels.
-        // The commented-out ae/oe/ue mappings in the reference stay omitted:
-        // they cause trouble with diphthongs, as its comment says.
+        // `ae`/`oe`/`ue` are deliberately not mapped: doing so causes trouble
+        // with diphthongs.
         mark_between_vowels(&mut w, 'u', 'U');
         mark_between_vowels(&mut w, 'y', 'Y');
         if w.contains(&'ß') {

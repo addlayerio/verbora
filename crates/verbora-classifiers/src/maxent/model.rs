@@ -11,6 +11,9 @@ use crate::transcendental::{exp, log};
 
 /// A fitted conditional maximum-entropy model.
 ///
+/// See [`MaxEntClassifier`](crate::MaxEntClassifier) for the conditional
+/// model this fits, what training optimises, and the guarantees it keeps.
+///
 /// The model is **immutable, owned and `Send + Sync`**: fitting produces one,
 /// and evaluating it never mutates it, so a single model can be shared across
 /// threads behind an [`Arc`] with no lock. Nothing is memoised at prediction
@@ -122,7 +125,15 @@ impl MaxEntModel {
     /// model does not know contribute nothing — a context of entirely unknown
     /// predicates is scored by the uniform distribution, which is the
     /// maximum-entropy answer when no constraint applies. Repeated predicates
-    /// are counted once.
+    /// are counted once, and scores accumulate over the predicates in the
+    /// order given; floating-point addition is not associative, so an
+    /// equivalent context in a different order is not guaranteed to reproduce
+    /// the same score bit for bit.
+    ///
+    /// A restored weight large enough to push a score to `±∞` cannot produce a
+    /// `NaN` here: an infinite score takes the whole probability mass — split
+    /// evenly among any outcomes tied at `+∞` — and a context whose every score
+    /// is `-∞` is scored uniformly instead.
     ///
     /// ```
     /// use verbora_classifiers::{Gis, MaxEntClassifier};

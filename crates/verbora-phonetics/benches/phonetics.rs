@@ -6,7 +6,7 @@
 //! Criterion benchmarks for the phonetic encoders.
 //!
 //! Phonetic encoding is per-word work on short strings, so the costs that matter
-//! are the ones a naive port pays *per call*:
+//! are the ones a naive implementation pays *per call*:
 //!
 //! * **allocation** — every encoder here builds its key into one `String`,
 //!   after collecting the input's letters into one reused `Vec<u8>`;

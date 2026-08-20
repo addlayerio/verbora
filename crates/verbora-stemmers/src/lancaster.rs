@@ -1,5 +1,4 @@
-//! The Lancaster (Paice/Husk) stemmer, ported from
-//! The reference `lancaster_stemmer`.
+//! The Lancaster stemmer — Paice/Husk.
 //!
 //! # The algorithm in one paragraph
 //!
@@ -21,9 +20,9 @@
 //! firing. Delete them as no-ops and `ear`, `miss`, `seen`, `consist` and
 //! `simply` all start stemming.
 //!
-//! `size` is a decimal **string** in the reference table; the arithmetic
-//! `token.length - rules[i].size` works only through the reference's coercion. It is
-//! parsed once, at table-generation time.
+//! `size` is written as a decimal string in the published rule table; it is
+//! parsed to an integer once, at table-generation time, so the length
+//! arithmetic below is integer arithmetic.
 //!
 //! Lengths are Unicode scalar values, as everywhere in this crate.
 //! `stem("😀ing")` is `"😀ing"` because the candidate `"😀"` has length 1, and
@@ -80,12 +79,11 @@ fn acceptable(candidate: &str) -> bool {
     }
 }
 
-/// One pass of `applyRuleSection`, flattened from recursion into a loop.
+/// One pass of the rule-section walk, flattened from recursion into a loop.
 ///
-/// The reference recurses once per accepted continuation rule; depth reaches
-/// about 300 for `"ing".repeat(300)`, which is comfortable in the reference and
-/// wasteful in Rust. The loop is observationally identical because the recursive
-/// call is always in tail position.
+/// The algorithm is stated recursively, once per accepted continuation rule, and
+/// depth reaches about 300 for `"ing".repeat(300)`. The recursive call is always
+/// in tail position, so the loop is observationally identical and costs no stack.
 fn apply_rule_sections(mut token: String, mut intact: bool) -> String {
     'outer: loop {
         // Sections are keyed by the token's last scalar value. No section is

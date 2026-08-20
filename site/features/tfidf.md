@@ -391,8 +391,14 @@ adopting it.
 
 A panic inside a custom tokenizer propagates out of the offending Rayon worker
 under Rayon's own rules — and because that happens in the parallel phase, before
-anything is pushed, the corpus is left completely unchanged, which the sequential
-loop does not guarantee.
+anything is pushed, the corpus is left with none of the batch added.
+`add_documents` differs only in how much of the batch survives a panic: it
+pushes each document as it finishes, so a panic on the *k*th text leaves the
+first *k − 1* already in the corpus. Both leave a corpus that is correct for
+continued use — the document being ingested when a panic happens is never
+added, every document added before it keeps exactly the counts it had, and
+every document added afterwards counts exactly as it would have without the
+panic.
 
 ```rust ignore
 use verbora_tfidf::TfIdf;
@@ -484,7 +490,7 @@ because "newer" says nothing about whether the term partition agrees:
 | Fact | Why it is in the stamp |
 |---|---|
 | `SCHEMA` | A Verbora-owned counter, bumped by hand when the serialized shape or the term-derivation pipeline changes in a way that makes an older artifact wrong. It covers a change no external version number would show. |
-| The Unicode version | Read from `verbora_tokenizers::unicode_version`. Both the `Word_Break` assignments and the alphanumeric property come out of that crate's tables, so one number covers the whole of tokenization. |
+| The Unicode version | Read from `verbora_tokenizers::unicode_version`. Word boundaries (UAX #29 `Word_Break`) are computed from that crate's own tables, which this version number pins directly. The "contains a letter or digit" filter is pinned to the same version by a different route: `unicode-segmentation` compares its own Unicode version against the toolchain's at compile time and, when they agree, delegates to `std`'s `char::is_alphabetic`/`char::is_numeric` rather than consulting its tables. Either way the property is fixed as of the recorded version, so one number still covers the whole of tokenization. |
 | `lowercase_fingerprint()` | A fingerprint of what `str::to_lowercase` actually does in this build. That mapping is `std`'s, so it moves with the Rust toolchain and `Cargo.lock` records nothing about it. |
 
 The lowercase fingerprint needed a fact of its own because the alternative is a

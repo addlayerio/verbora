@@ -97,6 +97,20 @@ back to a scan that skips any word whose scalar length already differs by more
 than `max_distance` and computes the distance for the rest. Depth 3 is not
 indexed because the structure would be larger than the corpus it indexes.
 
+`max_distance = 0` is a membership test, not a retrieval: it costs one hash
+lookup on the corpus's own word index and neither builds nor consults the
+deletion index to answer it.
+
+Generating a word's deletion neighbourhood streams one variant at a time
+rather than materializing the set, so peak memory during generation is
+proportional to the word's length at any depth, not to its cube. A single long
+token — a URL, a base64 blob, a mis-tokenised line — is ordinary input on
+either side of a query: it costs no more memory to generate deletions from
+than its length requires. What a long word is charged for is the index
+itself, once, on first near-distance query: one bucket entry per deletion
+sequence, so `length choose 2` entries for a word of that scalar length —
+quadratic in the word, not in the corpus, and paid once rather than per query.
+
 The number of candidate edits grows rapidly with distance, so avoid large
 distances on unrestricted input, and build one of the indexes once when the same
 dictionary serves many queries.

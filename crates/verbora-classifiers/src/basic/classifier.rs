@@ -7,7 +7,7 @@ use crate::ordmap::OrderedMap;
 use crate::stamp::{ArtifactStamp, StampError};
 use crate::stemmer::{StemCache, Stemmer, default_stemmer};
 
-/// One scored class, as `getClassifications` returns it.
+/// One scored class, as [`Classifier::get_classifications`] returns it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Classification {
     /// The class label.
@@ -173,15 +173,13 @@ pub trait Engine: Default + Clone {
     /// Scores `observation` against every known class, best first.
     fn classifications(&self, observation: &[u8]) -> Result<Vec<Classification>, ClassifierError>;
 
-    /// The engine's own serialised shape, as `JSON.stringify` would produce it.
+    /// The engine's own serialised shape — the object `to_json` writes.
     fn to_value(&self) -> DynValue;
 
     /// Rebuilds an engine from its serialised shape, for `restore`.
     fn from_value(value: &DynValue) -> Self;
 }
 
-/// `String.prototype.trim`.
-///
 /// Trims a class label.
 ///
 /// The trimmed set is [`crate::whitespace::is_whitespace`], which is not Rust's
@@ -255,7 +253,7 @@ impl From<StampError> for LoadError {
 /// token added to a trained classifier takes the next free slot and leaves every
 /// learned index alone. Two behaviours remain surprising, and are deliberate:
 ///
-/// * **`removeDocument` deletes feature entries rather than decrementing them**,
+/// * **Removing a document deletes feature entries rather than decrementing them**,
 ///   removes the *last* of several matching documents, and leaves `lastAdded`
 ///   untouched — so a subsequent `train()` silently skips documents and only
 ///   `retrain()` recovers.
@@ -404,7 +402,7 @@ impl<E: Engine> Classifier<E> {
         }
     }
 
-    /// `addDocument(text, classification)`.
+    /// Records one labelled document.
     ///
     /// A string label is trimmed. A document that tokenises to nothing is
     /// dropped without a word — `""`, `"the a of"` and an empty token slice all
@@ -436,7 +434,7 @@ impl<E: Engine> Classifier<E> {
         self.docs.push(Document { label, text });
     }
 
-    /// `removeDocument(text, classification)`.
+    /// Removes one previously recorded document.
     ///
     /// Scans every document and keeps the **last** index that matches, so with
     /// duplicates it is the final copy that goes. The matched document's tokens
@@ -541,7 +539,7 @@ impl<E: Engine> Classifier<E> {
         let total = self.docs.len();
         if self.last_added < total {
             // Nothing inside the loop touches `features` (only
-            // `addDocument`/`removeDocument` do), so the token→slot layout is
+            // `add_document`/`remove_document` do), so the token→slot layout is
             // loop-invariant and the observation buffer can be reused rather
             // than reallocated per document. Marking each document's tokens
             // into it produces byte-identical observations: a slot is 1 exactly
@@ -552,7 +550,7 @@ impl<E: Engine> Classifier<E> {
                 observation.fill(0);
                 for token in &self.docs[i].text {
                     // A token absent from the vocabulary (never added, or
-                    // deleted by `removeDocument`) contributes nothing, exactly
+                    // deleted by `remove_document`) contributes nothing, exactly
                     // as it fails `text_to_features`'s presence test.
                     if let Some(slot) = self.features.slot_of(token.as_str()) {
                         observation[slot] = 1;
@@ -586,7 +584,14 @@ impl<E: Engine> Classifier<E> {
         self.train_with(listener)
     }
 
-    /// `getClassifications(observation)`, best-scoring class first.
+    /// Every class with its score, best-scoring first.
+    ///
+    /// Use this over [`Self::classify`] when the margin matters — a decision
+    /// that depends on how far ahead the winner is needs the runners-up.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClassifierError`] when the classifier has no trained model.
     pub fn get_classifications<'a>(
         &self,
         observation: impl Into<Observation<'a>>,
@@ -790,14 +795,14 @@ impl<E: Engine> Classifier<E> {
         DynValue::Obj(fields)
     }
 
-    /// `JSON.stringify(classifier)` — what `save()` writes to disk.
+    /// The classifier as JSON — what `save()` writes to disk.
     pub fn to_json(&self) -> String {
         self.to_value()
             .json_stringify()
             .expect("an object is never undefined")
     }
 
-    /// `restore(JSON.parse(data))`: rebuilds a classifier from saved bytes.
+    /// Rebuilds a classifier from saved bytes.
     ///
     /// Rebuilds with [`default_stemmer`]. A model trained through
     /// [`Self::with_stemmer`] carries a different stemmer fingerprint in its
@@ -1112,7 +1117,7 @@ mod tests {
     ///
     /// The slot layout travels in the *key order* of the saved `features`
     /// object and nowhere else, so this is the guard on the JSON writer: a
-    /// writer that sorted or hoisted keys — as `JSON.stringify` does — would
+    /// writer that sorted the keys, or hoisted the integer-like ones, would
     /// hand the restored engine a layout its weights were never fitted on, and
     /// the scores would move without any number in the file changing.
     #[test]

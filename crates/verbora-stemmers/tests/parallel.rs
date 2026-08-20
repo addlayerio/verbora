@@ -16,8 +16,8 @@
 //! crate's own `src/base.rs` unit tests and `benches/stemmers.rs`'s
 //! `worst_cases` group already exercise for the sequential path (emoji, mixed
 //! separators, the Indonesian reduplication/miss/dictionary-hit cases, the long
-//! run that saturates Lancaster's repeating-suffix rule, and Carry's
-//! `Object.prototype`-name suffixes), plus the Unicode samples from
+//! run that saturates Lancaster's repeating-suffix rule, and the
+//! property-shaped words Carry leaves alone), plus the Unicode samples from
 //! `base.rs`'s `run_scanning_agrees_with_the_verified_tokenizers` test.
 
 #![cfg(feature = "parallel")]
@@ -113,7 +113,7 @@ fn unicode_documents() {
 
 #[test]
 fn indonesian_pathological_words() {
-    // Reduplication (multiple `stemSingularWord` passes + prefix-restore loop),
+    // Reduplication (multiple singular-stemming passes + prefix-restore loop),
     // an unanchored-regex miss, and a dictionary hit — the three shapes
     // `worst_cases` in benches/stemmers.rs measures because their *cost*, not
     // their result, is unusual.
@@ -129,8 +129,8 @@ fn indonesian_pathological_words() {
 #[test]
 fn long_and_repeating_runs() {
     // The same worst-case shapes as `benches/stemmers.rs::worst_cases`: a very
-    // long word (stresses the UTF-16 buffer + region scan) and a long repeating
-    // suffix (stresses Lancaster's repeating-suffix rule).
+    // long word (stresses the working buffer + region scan) and a long
+    // repeating suffix (stresses Lancaster's repeating-suffix rule).
     let long = "x".repeat(1000);
     let long_ing = "ing".repeat(300);
     let docs = [long.as_str(), long_ing.as_str(), "ordinary text here"];
@@ -139,11 +139,10 @@ fn long_and_repeating_runs() {
 }
 
 #[test]
-fn carry_prototype_suffixes() {
-    // The crate's one documented behavioural divergence from the reference lives in
-    // these exact suffixes (see tests/parity.rs::carry_prototype); the parallel
-    // path must reproduce whatever the sequential path does for them, not
-    // "the correct" reference-free-of-quirks answer.
+fn carry_property_shaped_words() {
+    // Words shaped like object property names are ordinary words to Carry (see
+    // `src/carry.rs::property_shaped_names_get_the_ordinary_stem`); the parallel
+    // path must agree with the sequential one on them like any other input.
     let docs = [
         "constructor __proto__ toString valueOf",
         "xxconstructor xx__proto__ xxtoString xxvalueOf",

@@ -16,8 +16,8 @@ algorithm for suffix stripping", *Program* 14(3), 1980, 130–137) and its
 Snowball successors, the Lancaster stemmer of Paice and Husk, and
 Sastrawi/Nazief–Adriani for Indonesian. **The text unit is the Unicode scalar
 value** — R1, R2 and RV, every short-word gate and every rule's removal `size`
-count scalars rather than UTF-16 code units, a correction applied across the
-whole crate: below `U+10000` the two readings coincide exactly and the crate
+count scalars rather than UTF-16 code units, in every stemmer here: below
+`U+10000` the two readings coincide exactly and the crate
 sweeps the Basic Multilingual Plane proving it, while above it they part, so
 `PorterStemmer::stem("😀s")` returns `"😀s"` untouched because two scalars do not
 clear Porter's three-letter gate. Stemming is total — every `&str` has a stem,

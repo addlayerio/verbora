@@ -15,14 +15,24 @@
 /// let index = builder.build();
 ///
 /// let mut found: Vec<_> = index.neighbors("kitten", 3).collect();
-/// // Ranking is the caller's: the index generates candidates, it does not rank.
-/// found.sort_by_key(|n| (n.distance, n.word));
+/// // Ranking is the caller's: the index generates candidates, it does not
+/// // rank. When the ranking wanted is the obvious one, it is this type's own.
+/// found.sort();
 /// assert_eq!(
 ///     found.iter().map(|n| (n.word, n.distance)).collect::<Vec<_>>(),
 ///     [("kitten", 0), ("mitten", 1), ("sitting", 3)]
 /// );
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// # Order
+///
+/// [`Ord`] is *nearest first*, then ascending word — the ranking a caller
+/// sorting neighbours actually wants. It is written out rather than derived
+/// because the derived order compares fields in declaration order, which puts
+/// `word` first and would rank an alphabetically early word ahead of an exact
+/// match. The order is total and consistent with `Eq`: two neighbours agreeing
+/// on word and distance agree on every field there is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Neighbor<'a> {
     /// The indexed word, borrowed from the index.
     pub word: &'a str,
@@ -30,4 +40,18 @@ pub struct Neighbor<'a> {
     /// ([`verbora_distance::damerau_levenshtein`], counted in Unicode
     /// scalars). Always `<= max_distance`.
     pub distance: u32,
+}
+
+impl Ord for Neighbor<'_> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.distance
+            .cmp(&other.distance)
+            .then_with(|| self.word.cmp(other.word))
+    }
+}
+
+impl PartialOrd for Neighbor<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }

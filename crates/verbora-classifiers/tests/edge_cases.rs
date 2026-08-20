@@ -1,9 +1,10 @@
 //! Boundary inputs, applied uniformly across the three classifiers.
 //!
-//! The parity suite already proves agreement with the reference on a large recorded
-//! corpus. What it does not do is state, in one readable place, what happens at
-//! the edges — and several of these answers are surprising enough that a future
-//! reader deserves to find them asserted rather than inferred:
+//! `train_parity.rs` and `predict_parity.rs` pin the fit and the prediction
+//! path bit for bit against in-tree oracles over randomized op sequences. What
+//! they do not do is state, in one readable place, what happens at the edges —
+//! and several of these answers are surprising enough that a future reader
+//! deserves to find them asserted rather than inferred:
 //!
 //! * an empty document is dropped in silence, and so is one made entirely of
 //!   stop words;

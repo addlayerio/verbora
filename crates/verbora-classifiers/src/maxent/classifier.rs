@@ -42,6 +42,84 @@ use crate::maxent::sample::{Event, Sample};
 /// assert_eq!(scores[0].label, "VB");
 /// assert!((scores.iter().map(|c| c.value).sum::<f64>() - 1.0).abs() < 1e-12);
 /// ```
+///
+/// # The model
+///
+/// A *context* `x` is the set of predicates one call supplies — to
+/// [`Self::add`] as training data, or to [`Self::classify`]/
+/// [`Self::get_classifications`] at prediction time. A *feature* is an
+/// indicator over one predicate `p` and one outcome `c`:
+///
+/// ```text
+/// f_{p,c}(x, y) = 1  if  p ∈ x  and  y = c
+///               = 0  otherwise
+/// ```
+///
+/// [`Self::train`] and [`Self::train_with`] fit the conditional exponential
+/// (log-linear) family of Berger, Della Pietra & Della Pietra, *A Maximum
+/// Entropy Approach to Natural Language Processing*, Computational Linguistics
+/// 22(1), 1996, §4:
+///
+/// ```text
+/// p(y | x) = exp( Σⱼ λⱼ fⱼ(x, y) ) / Z(x),
+/// Z(x)     = Σ_{y' ∈ Y} exp( Σⱼ λⱼ fⱼ(x, y') )
+/// ```
+///
+/// Every score [`Self::get_classifications`] and [`MaxEntModel::distribution`]
+/// return is a member of that distribution: non-negative, and the scores over
+/// one context sum to `1`. There is no unnormalised score anywhere in the
+/// public surface.
+///
+/// The feature set is derived from the training sample and nothing else: a
+/// feature `f_{p,c}` exists exactly when some event passed to [`Self::add`]
+/// paired predicate `p` with outcome `c`. A predicate that never co-occurred
+/// with an outcome contributes no parameter, which is what keeps a fitted
+/// model sparse.
+///
+/// # Training
+///
+/// Parameters are fitted by generalised iterative scaling — Darroch &
+/// Ratcliff, *Generalized iterative scaling for log-linear models*, Annals of
+/// Mathematical Statistics 43(5), 1972, in the conditional form Berger et al.
+/// give in §6.1. Writing `N` for the sample size:
+///
+/// ```text
+/// Ẽ[fⱼ]  = (1/N) Σᵢ fⱼ(xᵢ, yᵢ)                    the empirical expectation
+/// E[fⱼ]  = (1/N) Σᵢ Σ_y p(y | xᵢ) fⱼ(xᵢ, y)       the model expectation
+///
+/// λⱼ ← λⱼ + (1/C) · log( Ẽ[fⱼ] / E[fⱼ] )
+/// ```
+///
+/// starting from `λ = 0` — the uniform distribution — where `C` is
+/// [`TrainingReport::scaling_constant`]. What [`Gis::tolerance`] and
+/// [`Gis::max_iterations`] control, and what [`TrainingReport::stop`] reports
+/// when fitting stops, are documented on [`Gis`] and [`TrainingReport`]
+/// directly.
+///
+/// The fit is deterministic: expectations and the log-likelihood accumulate
+/// over the sample's events in insertion order, so [`Self::train_with`] over
+/// an unchanged sample always reproduces the same weights bit for bit. Nothing
+/// here is ordered by a hash — outcomes keep the sample's first-appearance
+/// order ([`Sample::outcomes`]) and so do a fitted model's predicates
+/// ([`MaxEntModel::predicates`]) — which is what makes that reproducibility
+/// meaningful rather than coincidental.
+///
+/// # No `NaN`, no infinities, no sentinels
+///
+/// No public method on this type or on [`MaxEntModel`] returns a `NaN`, an
+/// infinity, or an out-of-band value standing in for one. Every feature is
+/// created from an observed event, so its empirical expectation is never zero,
+/// and `p(y | x) > 0` for every outcome at finite parameters, so the model
+/// expectation a training step divides by is never zero either — the one case
+/// a step would still compute something non-finite is discarded rather than
+/// accepted, see [`StopReason::NumericalLimit`](crate::StopReason::NumericalLimit).
+/// A persisted weight that is not finite is refused at load time rather than
+/// let through — see
+/// [`ModelDefect::NonFiniteWeight`](crate::ModelDefect::NonFiniteWeight) — and
+/// [`MaxEntModel::distribution`] turns even an out-of-range restored weight
+/// into an ordinary probability rather than propagating it. [`Self::classify`]
+/// has no abstention sentinel either; see its own documentation for how a tie
+/// is resolved.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MaxEntClassifier {
     sample: Sample,

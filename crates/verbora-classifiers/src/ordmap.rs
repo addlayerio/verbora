@@ -16,19 +16,16 @@ use rustc_hash::FxHashMap;
 /// known and leaves every previously learned index exactly where it was; the
 /// model stays valid, and only the new slot is untrained.
 ///
-/// # History
+/// Any order derived from the key *text* would be the wrong contract here. An
+/// order that put integer-like keys first, for instance, would hoist a newly
+/// added `"99"` to slot 0 and shift every learned index by one, silently
+/// scrambling a trained model.
 ///
-/// Verbora's classifiers began as a port, and this type used to reproduce the
-/// source runtime's own-property enumeration order: integer-index keys first in
-/// ascending numeric order, then everything else in insertion order. That is a
-/// defect, not a feature — under it, adding `"99"` to a trained classifier
-/// hoisted it to slot 0 and shifted every learned index by one, silently
-/// scrambling the model. Verbora specifies insertion order instead.
-///
-/// Models saved before the change are unaffected, and no compatibility stamp
-/// bump was needed: they were serialised in the order their own slots were in,
-/// and a restore replays that order as insertion order, which reproduces the
-/// same slots. See [`SCHEMA`](crate::stamp::SCHEMA).
+/// The same contract is what carries a slot layout across a save: `features`
+/// is serialised in slot order and restored by inserting those keys in the
+/// order they appear, so a restored model lands on exactly the slots it was
+/// saved with — whatever order the saving build produced them in. See
+/// [`SCHEMA`](crate::stamp::SCHEMA).
 ///
 /// Cloning is deliberately cheap in behaviour, not in bytes: these maps are
 /// small (one entry per distinct token) and are cloned only at snapshot points.

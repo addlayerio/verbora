@@ -1,50 +1,41 @@
-//! The Spanish Snowball stemmer, ported from
-//! The reference `porter_stemmer_es`.
+//! The Spanish Snowball stemmer.
 //!
 //! # `stem` does not lowercase
 //!
-//! Line 99 of the reference is `word.toLowerCase()` — a statement whose result is
-//! thrown away. Because `isVowel` carries `/i` while every suffix comparison is
-//! case-sensitive, uppercase input flows through the region machinery and then
-//! matches nothing: `stem("ÁRBOL")` is `"ÁRBOL"`, `stem("Efecto")` is `"Efect"`,
-//! `stem("campa")` is `"camp"`. Adding the "obviously missing" fold changes
-//! results for every caller that reaches `stem` directly rather than through
-//! `tokenizeAndStem` (which folds separately).
+//! The vowel test is case-insensitive while every suffix comparison is
+//! case-sensitive, so uppercase input flows through the region machinery and
+//! then matches nothing: `stem("ÁRBOL")` is `"ÁRBOL"`, `stem("Efecto")` is
+//! `"Efect"`, `stem("campa")` is `"camp"`. Verbora keeps it that way rather
+//! than folding inside `stem`: the fold would change the stem of every
+//! non-lowercase token for callers who reach `stem` directly, and
+//! [`TokenizeAndStem`] already lowercases the document before tokenizing.
 //!
-//! # Two more traps
+//! # One more trap
 //!
-//! `removeAccent` calls `String.prototype.replace` with a **string** pattern, so
-//! it rewrites only the first occurrence of each accented vowel:
-//! `removeAccent("ááéé")` is `"aáeé"`. Rust's `str::replace` replaces all.
-//!
-//! The step-2b verb list contains the entry `"  aseis"` — with two leading
-//! spaces. It is dead as written, and it is preserved verbatim: "fixing" it to
-//! `"aseis"` would start matching real words.
+//! [`PorterStemmerEs::remove_accent`] rewrites only the **first** occurrence of
+//! each accented vowel, not every one: `remove_accent("ááéé")` is `"aáeé"`.
 //!
 //! # How `stem` searches its tables
 //!
-//! The reference walks every table linearly per step; this port routes each
-//! step through one [`crate::among`] binary search instead — the else-if
-//! chain's ten step-1 tables are merged into a single union search whose
-//! substring-link walk recovers each table's own longest region-valid match,
-//! and the chain fires the lowest-priority-id table exactly as the reference's
-//! branch order does. The conversion was measured to remove ~78% of the
-//! per-word cost and was verified byte-exact against the linear-scan
-//! implementation over 500k+ differential cases (the same oracle now lives in
-//! this module's test suite). Region slices become `lb` cursor limits — the
-//! search cannot match past them, which is the same restriction slicing
-//! enforced, without the `.to_vec()` snapshots.
+//! Each step goes through one [`crate::among`] binary search rather than a
+//! linear walk of its table: the else-if chain's ten step-1 tables are merged
+//! into a single union search whose substring-link walk recovers each table's
+//! own longest region-valid match, and the chain then fires the
+//! lowest-priority-id table, which is the branch order of the chain itself.
+//! That is worth ~78% of the per-word cost (`docs/PERFORMANCE_GAPS.md` entry
+//! 34), and it is byte-exact against the linear walk it replaced, which lives
+//! on in this module's tests as a differential oracle. Region slices become
+//! `lb` cursor limits — the search cannot match past them, the same restriction
+//! slicing enforced, without the `.to_vec()` snapshots.
 //!
 //! # The text unit
 //!
 //! Every position here is a **Unicode scalar value**: R1, R2 and RV, the
 //! `length < 2` gate, the `length > 3` guard on RV, the literal `rv = 3`, and
-//! every cut. See [`crate::units`] for why that is the faithful reading of a
-//! Snowball algorithm rather than a preference — the specification is written
-//! over *letters*, and the UTF-16 indices this port used to carry were an
-//! artefact of the host language it was transcribed through, not of the
-//! algorithm. `stem("😀iamos")` is `"😀iam"`: six letters, so RV starts at 3
-//! and leaves three of them, which the four-letter `-amos` does not fit.
+//! every cut. See [`crate::units`] for why a Snowball algorithm is specified
+//! over *letters* and why the scalar value is the letter. `stem("😀iamos")` is
+//! `"😀iam"`: six letters, so RV starts at 3 and leaves three of them, which
+//! the four-letter `-amos` does not fit.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -74,7 +65,7 @@ fn scalars(s: &str) -> Vec<char> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerEs;
 
-/// `isVowel`, over a whole character.
+/// The Spanish vowel class, over a whole character.
 ///
 /// [`is_es_vowel`] is stated over Basic Multilingual Plane code points and
 /// nothing in the set reaches `U+00FD`, so anything outside that plane is a
@@ -86,8 +77,8 @@ fn is_vowel(c: char) -> bool {
     (c as u32) < 0x1_0000 && is_es_vowel(c as u16)
 }
 
-/// `(r1, r2, rv)` for a word of length ≥ 2, exactly as the reference marks
-/// them, in scalar values. Callers must uphold the length precondition
+/// `(r1, r2, rv)` for a word of length ≥ 2, in scalar values. Callers must
+/// uphold the length precondition
 /// (`length - 1` underflows otherwise); `stem` returns early for shorter input.
 fn mark_regions(w: &[char]) -> (usize, usize, usize) {
     let length = w.len();
@@ -122,10 +113,10 @@ fn mark_regions(w: &[char]) -> (usize, usize, usize) {
 
 /// First-occurrence-of-each accent removal, in place.
 ///
-/// A single pass with five "already replaced" flags is equivalent to the
-/// reference's five independent first-occurrence `replace` calls: the five
-/// code points are distinct, so replacing one never creates or destroys an
-/// occurrence of another.
+/// A single pass with five "already replaced" flags is equivalent to five
+/// independent first-occurrence replacements: the five code points are
+/// distinct, so replacing one never creates or destroys an occurrence of
+/// another.
 fn remove_accent_inplace(w: &mut [char]) {
     let (mut a, mut e, mut i, mut o, mut u) = (false, false, false, false, false);
     for c in w.iter_mut() {
@@ -205,7 +196,7 @@ impl PorterStemmerEs {
         Self
     }
 
-    /// `isVowel` — case-insensitive, which is why uppercase words still get
+    /// The vowel test — case-insensitive, which is why uppercase words still get
     /// regions.
     #[allow(
         clippy::unused_self,
@@ -249,7 +240,7 @@ impl PorterStemmerEs {
             .unwrap_or(w.len())
     }
 
-    /// Whether `word` ends with `suffix`, guarding on length as the reference does.
+    /// Whether `word` ends with `suffix`, and is at least as long as it.
     #[allow(
         clippy::unused_self,
         reason = "every stemmer is zero-sized; `stem` is a method so the \
@@ -355,7 +346,7 @@ impl PorterStemmerEs {
 
         // --- Step 1: standard suffixes -------------------------------------
         //
-        // One union search replaces the reference's ten-table else-if chain.
+        // One union search answers the step's ten-table else-if chain at once.
         // The link-walk visits every matching entry longest-first; per table
         // id the longest entry that fits its region is recorded, and the
         // lowest id fires — which is exactly which branch of the chain would
@@ -561,11 +552,9 @@ impl TokenizeAndStem for PorterStemmerEs {
 /// Whether `c` is one of the letters [`gate_es`] accepts.
 ///
 /// The gate is stated over Basic Multilingual Plane code points and nothing in
-/// it reaches `U+00FD`, so scanning characters and scanning UTF-16 code units
-/// accept exactly the same tokens: a BMP character *is* its own code unit, and
-/// an astral character is neither in the set itself nor are the two surrogates
-/// it used to be scanned as. The scan is per character because that is the
-/// crate's unit, not because the answer moved.
+/// it reaches `U+00FD`, so an astral character is never a Spanish letter:
+/// neither the character itself nor either half of the surrogate pair encoding
+/// it is in the set.
 #[inline]
 fn is_spanish_letter(c: char) -> bool {
     (c as u32) < 0x1_0000 && gate_es(c as u16)
@@ -672,7 +661,7 @@ mod tests {
     /// and step 3's two-letter `-os` is what cuts: `"😀iam"`.
     ///
     /// `"ñiamos"` is the control, and it is a control rather than a decoration:
-    /// `ñ` is a Spanish letter that `isVowel` rejects, exactly as `😀` is
+    /// `ñ` is a Spanish letter that [`is_vowel`] rejects, exactly as `😀` is
     /// rejected, so the two words have the same letter classes in the same
     /// positions and the algorithm cannot tell them apart. Anything that makes
     /// their stems differ is the encoding leaking through, which is what this
@@ -701,13 +690,13 @@ mod tests {
         assert_eq!(es.next_consonant_position("ñcasa", 2), 3);
     }
 
-    /// The two predicates that used to be stated over UTF-16 code units answer
-    /// identically over characters, for every scalar value there is.
+    /// [`is_vowel`] and [`is_spanish_letter`] are unit-independent: they answer
+    /// identically over characters and over code units, for every scalar value
+    /// there is.
     ///
-    /// This is what makes converting [`is_vowel`] and [`is_spanish_letter`] a
-    /// no-op rather than a change to be argued about: `is_es_vowel` tops out at
-    /// `U+00FA` and `gate_es` at `U+00FC`, so neither an astral character nor
-    /// either half of the surrogate pair it encodes to is ever admitted.
+    /// `is_es_vowel` tops out at `U+00FA` and `gate_es` at `U+00FC`, so neither
+    /// an astral character nor either half of the surrogate pair it encodes to
+    /// is ever admitted by either one.
     /// Enumerated over the whole scalar range rather than sampled, because a
     /// set that reached into the surrogate range would fail on exactly the
     /// characters a spot check does not name.
@@ -733,7 +722,7 @@ mod tests {
     }
 
     /// A character that is inert for this algorithm and inside the Basic
-    /// Multilingual Plane: not in `isVowel`, not spelled in any rule table,
+    /// Multilingual Plane: not in [`is_vowel`], not spelled in any rule table,
     /// its own lower case, and untouched by accent removal.
     const INERT_TWIN: char = 'ж';
 
@@ -749,9 +738,9 @@ mod tests {
     /// neither is rewritten by the lower-casing or by accent removal. So the
     /// only thing that can possibly distinguish the two words is **how long
     /// each of them is** — one character each under the contract, one and two
-    /// under the code-unit reading this port used to carry. One build run over
-    /// both therefore measures the unit directly, and a divergence here is a
-    /// position that is still being counted in code units.
+    /// under a code-unit reading. One build run over both therefore measures
+    /// the unit directly, and a divergence here is a position being counted in
+    /// code units.
     ///
     /// # Why every entry and every position, rather than a sample
     ///
@@ -765,19 +754,19 @@ mod tests {
     /// the two ends. The counts are pinned by equality so that a walk which
     /// quietly stops enumerating cannot report a clean sweep of nothing.
     ///
-    /// # Red, then green
+    /// # What it catches
     ///
-    /// Against the code-unit reading this port used to carry, this walk reports
-    /// **233 of 138 335** probes measuring an astral character as more than one
-    /// letter. It reports **0** here. Every one of the 233 has the same shape:
+    /// Run against a code-unit reading, this walk reports **233 of 138 335**
+    /// probes measuring an astral character as more than one letter. It reports
+    /// **0** here. Every one of the 233 has the same shape:
     /// a word that opens with a non-vowel and whose second letter is a vowel,
     /// so that RV takes its third arm and is the literal `rv = 3`. That 3 is an
     /// absolute position rather than a relative one, so the extra code unit
     /// lengthened the region past it, and a suffix that does not fit the
     /// region by one letter fitted it by one code unit.
-    /// [`one_astral_character_is_one_letter`] states one such word
-    /// with its arithmetic written out; this walk is what shows the shape is the
-    /// only one, and that nothing else in the shipped data moved.
+    /// [`one_astral_character_is_one_letter`] states one such word with its
+    /// arithmetic written out; this walk is what shows the shape is the only
+    /// one, and that no other shipped entry can see the unit at all.
     #[test]
     fn every_shipped_entry_measures_the_same_under_either_unit() {
         let stemmer = PorterStemmerEs::new();
@@ -837,12 +826,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-find_among implementation, verbatim.
+    // Differential oracle: the same steps written as plain linear table scans.
     //
     // `stem` above is a restructuring of this code — the whole point is that
-    // the two are byte-identical on every input, so the old linear-scan port
-    // is kept here as the oracle and the tests below replay the bench word
-    // list, the documented edge cases and a seeded random corpus through both.
+    // the two are byte-identical on every input — so the linear-scan form is
+    // kept here as the oracle and the tests below replay the bench word list,
+    // the documented edge cases and a seeded random corpus through both.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
@@ -867,7 +856,10 @@ mod tests {
             out
         }
 
-        #[expect(clippy::too_many_lines, reason = "verbatim copy of the reference port")]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "the oracle is one straight-line transcription of the steps"
+        )]
         pub(super) fn stem(word: &str) -> String {
             let mut w = scalars(word);
             let length = w.len();

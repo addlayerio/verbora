@@ -104,6 +104,51 @@ pub struct DocumentScore {
 /// | `u32::MAX` distinct terms in one document | ingestion panics |
 /// | [`MAX_TERM_COUNT`](crate::MAX_TERM_COUNT) occurrences of one term in one document | the count saturates |
 ///
+/// # What a panic during ingestion leaves behind
+///
+/// Ingestion runs code the corpus does not own — the iterator handed to
+/// [`add_terms`](Self::add_terms), a [`Tokenize`](crate::Tokenize) installed on
+/// the [`Analyzer`] — and either may panic, as may the two limits above. A
+/// caller who catches such an unwind gets a corpus that is **incomplete but
+/// correct**:
+///
+/// * the document being ingested when the panic happened was not added;
+/// * every document added before it keeps exactly the counts it had;
+/// * every document added *after* it counts exactly as it would have if the
+///   panic had never happened.
+///
+/// The third point is the one worth stating, because it was once false. Counting
+/// borrows reusable per-corpus buffers, and a panic raised *between two terms* —
+/// which is where a caller's iterator raises one — unwound past their restore
+/// and left them holding the abandoned document's state, which the next
+/// document then mistook for its own: silently, with no wrong-looking number
+/// anywhere until a score came out wrong. The buffers are now restored while
+/// unwinding, so an interrupted ingestion cannot reach the next one.
+///
+/// ```
+/// use verbora_tfidf::TfIdf;
+///
+/// let mut corpus = TfIdf::new();
+/// corpus.add_terms(["a"]);
+///
+/// // An iterator that yields one term and then panics. (The default panic
+/// // hook is muted first: the panic below is the point of the example, not a
+/// // failure of it.)
+/// # let previous = std::panic::take_hook();
+/// # std::panic::set_hook(Box::new(|_| {}));
+/// let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+///     corpus.add_terms((0..2).map(|i| if i == 0 { "a" } else { panic!("caller's iterator") }));
+/// }));
+/// # std::panic::set_hook(previous);
+/// assert!(unwound.is_err());
+///
+/// // The abandoned document is not in the corpus, and the next one is right.
+/// assert_eq!(corpus.len(), 1);
+/// let d = corpus.add_terms(["b", "a", "a"]);
+/// assert_eq!(corpus.term_count(d, "a"), Some(2));
+/// assert_eq!(corpus.term_count(d, "b"), Some(1));
+/// ```
+///
 /// # Examples
 ///
 /// ```
@@ -186,6 +231,15 @@ impl TfIdf {
     /// `text` is run through [`Self::analyzer`]; see [`Analyzer`] for exactly
     /// what becomes a term. A document whose text yields no terms is still
     /// added, still occupies a position, and still counts towards `n`.
+    ///
+    /// # Panics
+    ///
+    /// Never on its own account below the limits in the type documentation —
+    /// but the analyzer may be carrying a caller-supplied
+    /// [`Tokenize`](crate::Tokenize), and a panic out of that propagates. The
+    /// corpus is left without this document and otherwise correct, including
+    /// for every document added afterwards; see "What a panic during ingestion
+    /// leaves behind" on [`TfIdf`].
     pub fn add_document(&mut self, text: &str) -> usize {
         let document = build_from_text(
             &mut self.interner,
@@ -225,6 +279,14 @@ impl TfIdf {
     /// can reach. `add_terms(["Node"])` on a lowercasing corpus stores `Node`,
     /// which `tfidf("Node", …)` will never find because the query is folded to
     /// `node`; use [`Self::tfidf_terms`] to query such a corpus.
+    ///
+    /// # Panics
+    ///
+    /// Never on its own account below the limits in the type documentation —
+    /// but it drives `terms`, which is the caller's, and a panic out of that
+    /// iterator propagates. The corpus is left without this document and
+    /// otherwise correct, including for every document added afterwards; see
+    /// "What a panic during ingestion leaves behind" on [`TfIdf`].
     pub fn add_terms<I, S>(&mut self, terms: I) -> usize
     where
         I: IntoIterator<Item = S>,
@@ -311,8 +373,14 @@ impl TfIdf {
     /// Never on its own account. A panic inside a custom
     /// [`Tokenize`](crate::Tokenize) propagates out of the offending Rayon
     /// worker under Rayon's own rules — and because that happens in the
-    /// parallel phase, before anything is pushed, the corpus is left completely
-    /// unchanged, which the sequential loop does not guarantee.
+    /// parallel phase, before anything is pushed, the corpus is left with
+    /// **none** of the batch added.
+    ///
+    /// [`Self::add_documents`] differs only in how much of the batch survives:
+    /// it pushes each document as it finishes, so a panic on the *k*th text
+    /// leaves the first *k - 1* in the corpus and the rest out. Both leave a
+    /// corpus that is correct for continued use — the guarantee is spelled out
+    /// under "What a panic during ingestion leaves behind" on [`TfIdf`].
     ///
     /// # Examples
     ///

@@ -187,10 +187,23 @@ fn parse_fingerprint(s: &str) -> Option<u64> {
 ///   version number would show.
 /// * The Unicode version, read at build time from
 ///   [`verbora_tokenizers::unicode_version`], which is whatever
-///   `unicode-segmentation` ships and is pinned in `Cargo.lock`. Both the
-///   `Word_Break` assignments the boundaries are computed from **and** the
-///   alphanumeric property the word filter tests come out of that crate's own
-///   tables, so one version number covers the whole of step one.
+///   `unicode-segmentation` ships and is pinned in `Cargo.lock`. The
+///   `Word_Break` assignments the boundaries are computed from are that crate's
+///   own tables. The alphanumeric property the word filter tests is *not*, or
+///   not always: `unicode-segmentation` compares its own Unicode version
+///   against the toolchain's `char::UNICODE_VERSION` and, when the two agree,
+///   calls `std`'s `char::is_alphabetic` and `char::is_numeric` instead of
+///   consulting its tables — falling back to them only when the versions
+///   differ. Either branch therefore yields the property *as of the version
+///   this field records*: the crate's tables are that version by construction,
+///   and `std`'s are used only on the branch that has just checked they are the
+///   same version. So one version number does cover the whole of step one — but
+///   because of that equality check, not because the filter reads a dependency
+///   table. Which branch a given build takes is observable: compare
+///   [`verbora_tokenizers::unicode_version`] with `char::UNICODE_VERSION`. Under
+///   the toolchain and lockfile this crate is developed against both report
+///   17.0.0, so the delegating branch is the live one and no divergence exists
+///   to be found.
 /// * [`lowercase_fingerprint`] — a fingerprint of what `str::to_lowercase`
 ///   actually does in this build. That mapping is `std`'s, not a dependency's,
 ///   so it moves with the Rust toolchain and `Cargo.lock` records nothing about

@@ -25,25 +25,32 @@ use crate::stemmer::Stemmer;
 /// `4` is the first bump for a change in *behaviour* rather than in the stamp's
 /// own shape. `verbora-stemmers` moved its text unit from the UTF-16 code unit
 /// to the Unicode scalar value, which moves every region bound, length gate and
-/// cut position in every Snowball port, and so re-keys any document carrying a
-/// character outside the basic multilingual plane. Nothing in a schema-3 stamp
+/// cut position in every Snowball stemmer, and so re-keys any document carrying
+/// a character outside the basic multilingual plane. Nothing in a schema-3 stamp
 /// records which unit produced its features — see [`STEMMER_PROBES`] for why
 /// the fingerprint could not — so schema-3 models are refused rather than
 /// silently rekeyed.
 ///
-/// # Why correcting the feature slot order did *not* bump this
+/// # A change to live enumeration order does not by itself bump this
 ///
-/// [`OrderedMap`](crate::OrderedMap) used to enumerate integer-like keys ahead
-/// of every other key, and the feature vector's layout is that enumeration; it
-/// now enumerates in insertion order. That moves slots in memory, which sounds
-/// like exactly the hazard this constant exists for — but it does not move them
-/// in a *saved* model. A model is serialised with its `features` written in slot
-/// order, and restored by inserting those keys in the order they appear, so the
-/// restored slot order is whatever the saving build wrote. A schema-4 model from
-/// before the change replays its own hoisted order as insertion order and lands
-/// on the identical layout; `a_model_saved_before_the_slot_order_changed_restores_to_the_same_slots`
-/// pins that against recorded bytes. The invariant that keeps this true is in
-/// the JSON writer, which must never reorder object keys — see `write_json`.
+/// [`OrderedMap`](crate::OrderedMap) governs how a *live, in-memory* model
+/// lays its features out, and a change to that order — for example, whether
+/// integer-like keys enumerate ahead of every other key or in plain insertion
+/// order — is not on its own a reason to bump [`SCHEMA`]. What is saved and
+/// restored is not that live order: a model is serialised with its `features`
+/// written in slot order, and restored by inserting those keys in the order
+/// they appear in the file, so a restored model's slot order is always
+/// whatever build *saved* it, never whatever order the *current* build's map
+/// would produce for the same keys. Only the two facts in the bullets above —
+/// the saved shape, and which feature keys a build derives from a document —
+/// are the contract; how a live map lays keys out internally is not one of
+/// them.
+///
+/// `a_model_saved_before_the_slot_order_changed_restores_to_the_same_slots`
+/// pins exactly that: a schema-4 model restores to the identical layout
+/// regardless of how the current build's [`OrderedMap`](crate::OrderedMap)
+/// would enumerate the same keys. The invariant that keeps it true is in the
+/// JSON writer, which must never reorder object keys — see `write_json`.
 pub const SCHEMA: u32 = 4;
 
 /// The JSON member the stamp is written to and read from.
@@ -384,7 +391,7 @@ fn parse_fingerprint(s: &str) -> Option<u64> {
 ///
 /// `verbora-stemmers` moved its text unit from the UTF-16 code unit to the
 /// Unicode scalar value. Every region bound, length gate and cut position in
-/// every Snowball port is stated in that unit, so the same document yields
+/// every Snowball stemmer is stated in that unit, so the same document yields
 /// different stems whenever it carries a character outside the basic
 /// multilingual plane — and 97,491 astral scalars are `Alphabetic`, so such
 /// documents are ordinary text rather than a curiosity. `"fli𝕳es"` keys as
@@ -457,8 +464,9 @@ fn parse_fingerprint(s: &str) -> Option<u64> {
 /// which is the response the user actually needs.
 ///
 /// A pre-stamp model cannot accidentally *look* stamped: the top-level members
-/// a saved classifier has ever had are the fixed set the reference's
-/// `JSON.stringify` emits, and no feature name can reach the top level.
+/// a saved classifier has ever had are a fixed set chosen by the writer, and no
+/// feature name can reach the top level — every feature key lives inside the
+/// `features` object.
 ///
 /// # Why this duplicates `verbora-tfidf`'s module of the same name
 ///

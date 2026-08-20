@@ -235,18 +235,20 @@ let index = builder.build();
 
 // Each hit carries the exact edit distance the index already computed to
 // decide it was a hit, so ranking needs no second pass over a metric.
-let mut hits: Vec<(&str, u32)> = index
-    .neighbors("Smith", 2)
-    .map(|n| (n.word, n.distance))
-    .collect();
-hits.sort_by_key(|&(word, distance)| (distance, word));
+// `Neighbor`'s own ordering is nearest first, then alphabetical, so
+// sorting the collected neighbors directly is the ranking.
+let mut hits: Vec<_> = index.neighbors("Smith", 2).collect();
+hits.sort();
 
-assert_eq!(hits, [("Smith", 0), ("Smithe", 1), ("Smyth", 1)]);
-assert!(!hits.iter().any(|&(word, _)| word == "Jones"));
+assert_eq!(
+    hits.iter().map(|n| (n.word, n.distance)).collect::<Vec<_>>(),
+    [("Smith", 0), ("Smithe", 1), ("Smyth", 1)]
+);
+assert!(!hits.iter().any(|n| n.word == "Jones"));
 ```
 
 `neighbors` is lazy and its order is depth-first from the root, not ranked — sort
-by `Neighbor::distance` at the call site, as above, when you want a ranking.
+the collected neighbors, as above, when you want a ranking.
 
 The two bucketing strategies are complementary, not competing: phonetic
 bucketing catches "sounds the same, spelled differently"; edit-distance

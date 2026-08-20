@@ -1,47 +1,37 @@
-//! The Italian Snowball stemmer, ported from
-//! The reference `porter_stemmer_it`.
+//! The Italian Snowball stemmer.
 //!
 //! # First match, not longest match
 //!
-//! Italian's `endsinArr` returns the **first** suffix in array order that
-//! matches, unlike the Spanish, French and Dutch helpers of the same name, which
-//! return the longest. Every Italian table is therefore hand-ordered longest
-//! first, and that order is the algorithm. Sorting the tables, or reusing a
-//! shared longest-match helper, changes results.
+//! Italian's suffix lookup takes the **first** entry in table order that
+//! matches, where Spanish, French and Dutch take the longest. Every Italian
+//! table is therefore hand-ordered longest first, and that order is the
+//! algorithm. Sorting the tables, or reusing a shared longest-match helper,
+//! changes results.
 //!
 //! `stem` still routes every table through one [`crate::among`] longest-match
 //! binary search (`docs/PERFORMANCE_GAPS.md` entry 34): in every shipped
 //! table, whenever one entry is a proper suffix of another the longer one is
-//! listed first, so first-listed and longest coincide — the region limit
-//! excludes an entry exactly when the sliced `endsinArr` would fail to see it.
-//! That table property is pinned by
-//! `tables_are_ordered_longest_first_within_nests` below, and the
-//! pre-conversion implementation is kept in the tests as the byte-exactness
-//! oracle.
+//! listed first, so first-listed and longest coincide — and the region limit
+//! excludes an entry exactly when a first-match scan restricted to the same
+//! region would fail to see it. That table property is pinned by
+//! `tables_are_ordered_longest_first_within_nests` below, and the first-match
+//! linear scan is kept in the tests as a differential oracle.
 //!
 //! # Off-by-one on purpose
 //!
-//! `getNextVowelPos` starts scanning at `start + 1`, where the Spanish and
-//! Portuguese equivalents start at `start`. The Italian caller compensates by
+//! Italian's next-vowel scan starts at `start + 1`, where the Spanish and
+//! Portuguese ones start at `start`, and the Italian caller compensates by
 //! passing 1 where they pass 2. Sharing one helper across the three languages
 //! without preserving the call-site arguments shifts every Italian RV by one.
-//!
-//! # `Yamo`
-//!
-//! The step-2 verb list contains `"Yamo"`, which `vowelMarking` can never
-//! produce — it only uppercases `i` and `u`. It is dead, and it is kept.
 //!
 //! # The text unit
 //!
 //! Every position here is a **Unicode scalar value**: R1, R2 and RV, the
 //! `length < 3` gate the prelude runs ahead of, the `len > 3` guard on RV, the
-//! literal `rv = 3`, and every cut. See [`crate::units`] for why that is the
-//! faithful reading of a Snowball algorithm rather than a preference — the
-//! specification is written over *letters*, and the UTF-16 indices this port
-//! used to carry were an artefact of the host language it was transcribed
-//! through, not of the algorithm. `stem("😀eato")` is `"😀eat"`: five letters,
-//! so RV starts at 3 and leaves two of them, which the three-letter step-2
-//! entry `-ato` does not fit.
+//! literal `rv = 3`, and every cut. See [`crate::units`] for why a Snowball
+//! algorithm is specified over *letters* and why the scalar value is the
+//! letter. `stem("😀eato")` is `"😀eat"`: five letters, so RV starts at 3 and
+//! leaves two of them, which the three-letter step-2 entry `-ato` does not fit.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -77,7 +67,7 @@ fn cut(buf: &mut Buf<char>, n: usize, tail: &str) {
 }
 
 /// The lowercased, acute-to-grave, `qU`/`I`/`U`-marked form of `t` — the
-/// reference's prelude, shared by `stem` and the test oracle.
+/// prelude, shared by `stem` and the test oracle.
 ///
 /// One character in, one character out at every position, which is why it can
 /// run in place on the working buffer.
@@ -107,7 +97,7 @@ fn prelude(t: &mut [char]) {
     while i + 2 < t.len() {
         if is_vowel(t[i]) && (t[i + 1] == 'i' || t[i + 1] == 'u') && is_vowel(t[i + 2]) {
             // The guard has just established that this is `i` or `u`, so the
-            // ASCII fold is the reference's `charCodeAt - 32` exactly.
+            // ASCII fold is exactly the upper-casing the rule asks for.
             t[i + 1] = t[i + 1].to_ascii_uppercase();
             i += 3;
         } else {
@@ -116,8 +106,7 @@ fn prelude(t: &mut [char]) {
     }
 }
 
-/// `(r1, r2, rv)` exactly as the reference marks them, in scalar values, for
-/// `t.len() >= 3`.
+/// `(r1, r2, rv)` in scalar values, for `t.len() >= 3`.
 fn mark_regions(t: &[char]) -> (usize, usize, usize) {
     let len = t.len();
     let (mut r1, mut r2, mut rv) = (len, len, len);
@@ -139,7 +128,7 @@ fn mark_regions(t: &[char]) -> (usize, usize, usize) {
     }
     if len > 3 {
         if !is_vowel(t[1]) {
-            // getNextVowelPos(token, 1) starts its scan at index 2.
+            // The next-vowel scan from 1 starts at index 2 (module docs).
             rv = (2..len).find(|&i| is_vowel(t[i])).unwrap_or(len) + 1;
         } else if is_vowel(t[0]) && is_vowel(t[1]) {
             rv = (2..len).find(|&i| !is_vowel(t[i])).unwrap_or(len) + 1;
@@ -248,8 +237,8 @@ impl PorterStemmerIt {
             let n = tb.pronoun.len_at(i);
             let start = rv.min(len);
             let head_end = start + (len - start).saturating_sub(n);
-            // Two consecutive `if`s in the reference, not an if/else. The two
-            // lists are disjoint, so a double truncation cannot actually happen.
+            // Two consecutive tests, not an if/else. The two lists are
+            // disjoint, so a double truncation cannot actually happen.
             let pre1 = tb.ando_endo.longest(t.as_slice(), head_end, start) > 0;
             let pre2 = tb.ar_er_ir.longest(t.as_slice(), head_end, start) > 0;
             if pre1 {
@@ -263,20 +252,20 @@ impl PorterStemmerIt {
         }
 
         // --- Step 1: standard suffixes -------------------------------------
-        // One `find_among` search per table of the reference's else-if chain,
-        // each limited to its region via `lb`.
+        // One `find_among` search per table of the step's else-if chain, each
+        // limited to its region via `lb`.
         let len = t.len();
         let lb2 = r2.min(len);
         let lb1 = r1.min(len);
         let lbv = rv.min(len);
         // Expressed as a labeled block with one early exit per rule: the
         // first rule whose (region-limited) search hits fires and ends the
-        // step, which is exactly the reference's else-if ladder.
+        // step, which is exactly what the else-if ladder does.
         // One union search answers every step-1 table at once: the walk of
         // its substring links records, per rule table, the lengths of that
         // table's entries that are suffixes of the word, and each rule reads
         // its own region-restricted longest match out of that mask. The
-        // ladder below is otherwise the reference's, unchanged and in order.
+        // ladder below is otherwise the step's own, in order.
         let mut lm = [0u32; STEP1_TABLES];
         tb.step1.length_masks(t.as_slice(), len, &mut lm);
         let (av1, av2, avv) = (len - lb1, len - lb2, len - lbv);
@@ -393,12 +382,11 @@ static STEP1_ICATIVA: &[&str] = &[
 ];
 /// The verb list.
 ///
-/// It used to carry `"Yamo"`, which nothing could ever match: `stem`
-/// lowercases the token before [`prelude`] runs, and `prelude` writes only
-/// `I` and `U`, so no `Y` can be in the buffer when this table is searched.
-/// Removing a suffix that cannot occur changes no stem, and
-/// `no_capital_but_i_or_u_survives_the_prelude` pins the reason rather than
-/// the removal.
+/// Every entry is spelled in characters the prelude can actually produce.
+/// `stem` lowercases the token before [`prelude`] runs, and `prelude` writes
+/// only `I` and `U`, so an entry containing any other capital could never
+/// match anything and would be dead weight rather than a rule.
+/// `no_capital_but_i_or_u_survives_the_prelude` pins that invariant.
 static STEP2: &[&str] = &[
     "erebbero", "irebbero", "assero", "assimo", "eranno", "erebbe", "eremmo", "ereste", "eresti",
     "essero", "iranno", "irebbe", "iremmo", "ireste", "iresti", "iscano", "iscono", "issero",
@@ -433,11 +421,9 @@ impl TokenizeAndStem for PorterStemmerIt {
 /// Whether `c` is one of the letters [`gate_it`] accepts.
 ///
 /// The gate is stated over Basic Multilingual Plane code points and nothing in
-/// it reaches `U+00FA`, so scanning characters and scanning UTF-16 code units
-/// accept exactly the same tokens: a BMP character *is* its own code unit, and
-/// an astral character is neither in the set itself nor are the two surrogates
-/// it used to be scanned as. The scan is per character because that is the
-/// crate's unit, not because the answer moved.
+/// it reaches `U+00FA`, so an astral character is never an Italian letter:
+/// neither the character itself nor either half of the surrogate pair encoding
+/// it is in the set.
 #[inline]
 fn is_italian_letter(c: char) -> bool {
     (c as u32) < 0x1_0000 && gate_it(c as u16)
@@ -537,7 +523,7 @@ mod tests {
     /// step 2 declines and step 3's one-letter `-o` is what cuts: `"😀eat"`.
     ///
     /// `"ñeato"` is the control, and it is a control rather than a decoration:
-    /// `ñ` is outside `isVowel` exactly as `😀` is, so the two words have the
+    /// `ñ` is outside [`is_vowel`] exactly as `😀` is, so the two words have the
     /// same letter classes in the same positions and the algorithm cannot tell
     /// them apart. Anything that makes their stems differ is the encoding
     /// leaking through.
@@ -547,13 +533,13 @@ mod tests {
         assert_eq!(s("ñeato"), "ñeat");
     }
 
-    /// The two predicates that used to be stated over UTF-16 code units answer
-    /// identically over characters, for every scalar value there is.
+    /// [`is_vowel`] and [`is_italian_letter`] are unit-independent: they answer
+    /// identically over characters and over code units, for every scalar value
+    /// there is.
     ///
-    /// This is what makes converting [`is_vowel`] and [`is_italian_letter`] a no-op
-    /// rather than a change to be argued about: the vowel set tops out at
-    /// `U+00F9` and `gate_it` at `U+00FA`, so neither an astral character
-    /// nor either half of the surrogate pair it encodes to is ever admitted.
+    /// The vowel set tops out at `U+00F9` and `gate_it` at `U+00FA`, so neither
+    /// an astral character nor either half of the surrogate pair it encodes to
+    /// is ever admitted by either one.
     /// Enumerated over the whole scalar range rather than sampled, because a
     /// set that reached into the surrogate range would fail on exactly the
     /// characters a spot check does not name.
@@ -578,7 +564,7 @@ mod tests {
     }
 
     /// A character that is inert for this algorithm and inside the Basic
-    /// Multilingual Plane: not in `isVowel`, not spelled in any rule table,
+    /// Multilingual Plane: not in [`is_vowel`], not spelled in any rule table,
     /// its own lower case, and untouched by the acute-to-grave and `qU`/`I`/`U`
     /// marking of the prelude.
     const INERT_TWIN: char = 'ж';
@@ -595,14 +581,14 @@ mod tests {
     /// neither is rewritten by the lower-casing or by the prelude's markings.
     /// So the only thing that can possibly distinguish the two words is **how
     /// long each of them is** — one character each under the contract, one and
-    /// two under the code-unit reading this port used to carry. One build run
-    /// over both therefore measures the unit directly, and a divergence here is
-    /// a position that is still being counted in code units.
+    /// two under a code-unit reading. One build run over both therefore
+    /// measures the unit directly, and a divergence here is a position being
+    /// counted in code units.
     ///
     /// # Why every entry and every position, rather than a sample
     ///
     /// This is the shape of defect that has already cost this crate 116 Swedish
-    /// stop words and this module's own dead `"Yamo"` rule: a stage transforms
+    /// stop words and one dead Italian verb rule: a stage transforms
     /// text before a later stage measures or looks it up, and the entries that
     /// die are exactly the ones a spot check does not name. So the walk is over
     /// every entry of every table and of the stop-word list, behind every
@@ -612,11 +598,11 @@ mod tests {
     /// equality so that a walk which quietly stops enumerating cannot report a
     /// clean sweep of nothing.
     ///
-    /// # Red, then green
+    /// # What it catches
     ///
-    /// Against the code-unit reading this port used to carry, this walk reports
-    /// **677 of 1 473 028** probes measuring an astral character as more than one
-    /// letter. It reports **0** here. Every one of the 677 has the same shape:
+    /// Run against a code-unit reading, this walk reports **677 of 1 473 028**
+    /// probes measuring an astral character as more than one letter. It reports
+    /// **0** here. Every one of the 677 has the same shape:
     /// a word that opens with a non-vowel and whose second letter is a vowel,
     /// so that RV takes its third arm and is the literal `rv = 3`. That 3 is an
     /// absolute position rather than a relative one, so the extra code unit
@@ -684,7 +670,7 @@ mod tests {
     }
 
     /// `I` and `U` are the only characters the tables may be spelled with that
-    /// are not already lower case — the invariant removing `"Yamo"` rests on.
+    /// are not already lower case.
     ///
     /// Checked rather than asserted, and enumerated rather than sampled.
     /// `Buf::fill_lowercase` runs `str::to_lowercase`, after which every
@@ -755,8 +741,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-find_among implementation, verbatim
-    // (the linear first-match scans over region slices).
+    // Differential oracle: the same steps written as linear first-match scans
+    // over region slices.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;

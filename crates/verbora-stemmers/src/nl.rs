@@ -1,11 +1,10 @@
-//! The Dutch Snowball stemmer, ported from
-//! The reference `porter_stemmer_nl`.
+//! The Dutch Snowball stemmer.
 //!
 //! # The sticky flag
 //!
-//! `step2` sets `this.suffixeRemoved = true` when it deletes an `e`. **Nothing
-//! ever resets it**, and `step3b`'s `bar` rule reads it — on a module-level
-//! singleton. Stemming is therefore order dependent:
+//! Step 2 sets `suffix_e_removed` when it deletes an `e`. **Nothing ever resets
+//! it**, and step 3b's `bar` rule reads it. Stemming is therefore order
+//! dependent:
 //!
 //! ```
 //! use verbora_stemmers::PorterStemmerNl;
@@ -15,16 +14,16 @@
 //! assert_eq!(s.stem("onaantastbar"), "onaantast");    // hot
 //! ```
 //!
-//! Over the reference's own 45,669-word corpus this is the difference between
-//! **237** mismatches — the number the reference spec asserts — and 235 with a
-//! fresh instance per word. The two order-dependent words are `jongensgebaren`
-//! and `molenwiekgebaren`. A pure-function port silently re-baselines the
-//! reference test suite, so the flag is reproduced: [`PorterStemmerNl`] owns a
-//! `Cell<bool>` initialised to `false` at construction and never cleared.
+//! The flag is part of the contract, not an accident of implementation, so it
+//! is kept and made observable: [`PorterStemmerNl`] owns a `Cell<bool>`
+//! initialised to `false` at construction and never cleared, and
+//! [`PorterStemmerNl::suffix_e_removed`] reports its state. Only the `bar`
+//! rule of step 3b consults it, so the words whose stem can move are those that
+//! reach that step ending in `bar` with the `bar` inside R2 —
+//! `jongensgebaren` and `molenwiekgebaren` are the pinned cases.
 //!
-//! Because the state lives in the value rather than in a process global, a caller
-//! who *wants* determinism can construct a fresh stemmer per word — which is a
-//! choice the reference does not offer.
+//! Because the state lives in the value rather than in a process global, a
+//! caller who wants determinism constructs a fresh stemmer per word.
 //!
 //! # Case sensitivity
 //!
@@ -37,7 +36,7 @@
 //!
 //! R1, R2, every suffix position and the `r1 < 3` clamp count **Unicode scalar
 //! values** — the unit [`crate::units`] states for the whole crate, and the one
-//! `markRegions` is written in: R1 is *"the region after the first non-vowel
+//! region marking is written in: R1 is *"the region after the first non-vowel
 //! following a vowel"*, a statement about letters. So a cut here can only ever
 //! land on a character boundary.
 
@@ -59,11 +58,11 @@ use crate::units::{ends_with, longest_suffix, slen, text_lowercase};
 /// stemmer per word; see [`Self::suffix_e_removed`].
 #[derive(Debug, Clone, Default)]
 pub struct PorterStemmerNl {
-    /// `this.suffixeRemoved` — set by step 2, read by step 3b, never reset.
+    /// Set by step 2 when it deletes an `e`, read by step 3b, never reset.
     suffix_e_removed: Cell<bool>,
 }
 
-/// `vowels = 'aeiouèy'`.
+/// The Dutch vowel class: `aeiouèy`.
 #[inline]
 fn is_vowel(c: char) -> bool {
     matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'è' | 'y')
@@ -77,16 +76,15 @@ fn is_vowel_at(w: &[char], i: usize) -> bool {
 /// Whether `c` is one of the letters [`gate_nl`] accepts.
 ///
 /// The gate is stated over Basic Multilingual Plane code points and its
-/// highest member is `ü` (`U+00FC`), so scanning characters and scanning
-/// UTF-16 code units admit exactly the same tokens: a BMP character *is* its
-/// own code unit, and an astral character is neither in the set itself nor are
-/// the two surrogates it used to be scanned as.
+/// highest member is `ü` (`U+00FC`), so an astral character is never a Dutch
+/// letter: neither the character itself nor either half of the surrogate pair
+/// encoding it is in the set.
 #[inline]
 fn is_dutch_letter(c: char) -> bool {
     (c as u32) < 0x1_0000 && gate_nl(c as u16)
 }
 
-/// `undoubleEnding`: drop the last letter when the word ends `kk`, `tt` or `dd`.
+/// Drops the last letter when the word ends `kk`, `tt` or `dd`.
 fn undouble_ending(w: &mut Buf<char>) {
     let s = w.as_slice();
     if UNDOUBLE.iter().any(|d| ends_with(s, d)) {
@@ -113,7 +111,7 @@ impl PorterStemmerNl {
         self.suffix_e_removed.get()
     }
 
-    /// `replaceAccentedCharacters`: ten fixed mappings, applied in one pass.
+    /// Accent folding: ten fixed mappings, applied in one pass.
     fn replace_accented(w: &mut [char]) {
         for c in w {
             match *c {
@@ -127,11 +125,10 @@ impl PorterStemmerNl {
         }
     }
 
-    /// `handleYI`: initial `y`, `y` after a vowel, and `i` between vowels.
+    /// Marks initial `y`, `y` after a vowel, and `i` between vowels.
     ///
-    /// The `é` in the reference's character classes is dead — `replaceAccented`
-    /// has already turned every `é` into `e` — and is left out for that reason,
-    /// not overlooked.
+    /// The vowel class here has no `é`: accent folding runs first and has
+    /// already turned every `é` into `e`, so an `é` can never reach this pass.
     fn handle_yi(w: &mut [char]) {
         if w.first() == Some(&'y') {
             w[0] = 'Y';
@@ -161,7 +158,7 @@ impl PorterStemmerNl {
         }
     }
 
-    /// `markRegions`. Unlike German, R1 is adjusted **before** R2 is scanned.
+    /// Region marking. Unlike German, R1 is adjusted **before** R2 is scanned.
     fn mark_regions(w: &[char]) -> (usize, usize) {
         let len = w.len();
         let mut r1 = len;
@@ -228,8 +225,7 @@ impl PorterStemmerNl {
         }
     }
 
-    /// `!result.match(/[js]se?$/)` — the reference's own note says a preceding
-    /// `s` means the suffix should stay.
+    /// The `/[js]se?$/` guard: a preceding `s` (or `j`) means the suffix stays.
     fn se_guard(w: &[char]) -> bool {
         // `[js]se?$` is either `[js]s` or `[js]se` at the end.
         let tail = |n: usize| -> Option<&[char]> { w.len().checked_sub(n).map(|i| &w[i..]) };
@@ -363,7 +359,7 @@ impl PorterStemmerNl {
 // through the prelude that guards them. An inline literal is a table no audit
 // can enumerate.
 
-/// `undoubleEnding`'s doubled consonants.
+/// The doubled consonants the undoubling step looks for.
 static UNDOUBLE: &[&str] = &["kk", "tt", "dd"];
 /// Step 1a's suffix, rewritten to [`HEID`].
 static HEDEN: &[&str] = &["heden"];
@@ -501,8 +497,8 @@ mod tests {
     ///
     /// `U+1F600` is one Unicode scalar value and two UTF-16 code units;
     /// `U+4E2D` is one of each. Nothing in this file distinguishes them: the
-    /// vowel class is `[aeiouèy]`, `replaceAccentedCharacters` maps only ten
-    /// Latin-1 letters, `handleYI` looks only for `y` and `i` beside
+    /// vowel class is `[aeiouèy]`, accent folding maps only ten
+    /// Latin-1 letters, the `y`/`i` marking looks only for `y` and `i` beside
     /// `[aeiou]`, step 4's consonant list is `b`–`z`, `se_guard` looks for
     /// `j`, `s` and `e`, every rule table is ASCII, and `str::to_lowercase`
     /// leaves both alone. Neither is in any of those sets, so the only thing
@@ -604,15 +600,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-`Buf` implementation, verbatim.
+    // Differential oracle: the same algorithm over an owned `Vec<char>`, with
+    // a closing `text(&w).to_lowercase()` instead of the in-place fold.
     //
-    // The conversion above moved the whole algorithm from an owned
-    // `Vec<char>` onto the stack buffer and replaced the closing
-    // `text(&w).to_lowercase()` with the in-place fold. Neither is meant to
-    // change a byte, and the sticky flag makes that claim stronger than
-    // usual: the oracle carries its own flag and the test below drives both
-    // implementations through the *same word sequence*, so a divergence in
-    // when the flag is set shows up as a divergence in a later stem.
+    // Neither difference is meant to change a byte, and the sticky flag makes
+    // that claim stronger than usual: the oracle carries its own flag and the
+    // test below drives both implementations through the *same word sequence*,
+    // so a divergence in when the flag is set shows up as a divergence in a
+    // later stem.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;

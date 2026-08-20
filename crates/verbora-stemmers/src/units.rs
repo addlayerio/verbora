@@ -10,12 +10,11 @@
 //! gate this crate inherits is stated as a count of letters. Not one of those
 //! sentences names a code unit, a byte, or any other unit of storage.
 //!
-//! The UTF-16 indices this crate used to carry are therefore a property of the
-//! *host language* of the port these algorithms were transcribed through, not
-//! a property of the algorithm. Reading every position as a Unicode scalar
-//! value is the faithful reading; reading it as a UTF-16 code unit is the
-//! transcription artefact. This module states the faithful one, so the choice
-//! is a correction rather than a trade-off.
+//! A UTF-16 code unit has no standing in any of that. It is a property of one
+//! storage format, and half of a surrogate pair is not a letter that any of
+//! these rules has an opinion about. Reading every position as a Unicode
+//! scalar value is therefore what the published rules ask for, and this module
+//! measures in nothing else.
 //!
 //! # Why the scalar value and not the grapheme cluster
 //!
@@ -346,8 +345,7 @@ pub(crate) const fn set_hi(chars: &[u16]) -> u128 {
 /// # Unit independence
 ///
 /// Every set is below U+0100, and an astral scalar value is neither below
-/// U+0100 nor — under the transitional UTF-16 reading — either half of a
-/// surrogate pair below it. So this predicate answers the same for a word
+/// U+0100 nor — read as UTF-16 — either half of a surrogate pair below it. So this predicate answers the same for a word
 /// under both units, character for character, and converting a caller from
 /// `u16` to [`char`] cannot change an answer.
 #[inline]
@@ -404,7 +402,7 @@ pub(crate) fn text<U: Unit>(w: &[U]) -> String {
 /// construction on the fast path and equal by delegation on the slow one;
 /// `text_agrees_with_from_utf16_lossy` fuzzes both, surrogates included.
 ///
-/// The surrogate arm is why the scalar unit is a correction and not a
+/// The surrogate arm is why the scalar unit is load-bearing and not a
 /// preference: a `u16` buffer can be cut between the halves of a pair — not
 /// only by a suffix length, which the BMP rule tables do bound, but by region
 /// arithmetic, which they do not — and the caller then receives a `U+FFFD`
@@ -498,7 +496,7 @@ pub(crate) fn borrowed_prefix(
 ///
 /// # Why a range table rather than `char::to_lowercase`
 ///
-/// Nine of the twelve Snowball ports open with `token.to_lowercase()`, and
+/// Nine of the twelve Snowball stemmers open with `token.to_lowercase()`, and
 /// `char::to_lowercase` is a binary search through Unicode's conversion
 /// tables on every character. That is invisible for ASCII (which the search
 /// short-circuits) but not for Cyrillic: the Russian stemmer spent 82 µs per
@@ -695,10 +693,10 @@ pub(crate) fn at<U: Unit>(w: &[U], i: usize) -> Option<U> {
 
 /// The longest suffix of `w` drawn from `suffixes`, or `None`.
 ///
-/// This is the **longest-match** policy used by the Spanish, French and Dutch
-/// `endsinArr` helpers. Italian and Portuguese deliberately use first-match
-/// instead ([`first_suffix`]); sharing one helper between them would silently
-/// change two languages, which is why there are two.
+/// This is the **longest-match** policy the Spanish, French and Dutch suffix
+/// lookups are specified with. Italian and Portuguese use first-match instead
+/// ([`first_suffix`]); sharing one helper between them would silently change
+/// two languages, which is why there are two.
 ///
 /// # Two rewrites tried here, both measured and rejected
 ///

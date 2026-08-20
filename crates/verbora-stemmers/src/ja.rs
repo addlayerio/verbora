@@ -8,14 +8,11 @@
 //!
 //! # No tokenization here
 //!
-//! This stemmer stems one token; it does not cut text into tokens. The
-//! `stems`/`tokenize_and_stem` pair that used to live here was built on a
-//! TinySegmenter whose 1,480-line weight table had no version, no checksum, no
-//! upstream URL and no generator anywhere in the repository, so its output was
-//! unauditable and could not be defended as a specification. UAX #29 §4 states
-//! outright that its default rules do not segment Japanese, so
-//! [`verbora_tokenizers::WordTokenizer`] is not a substitute and none is
-//! offered: **the caller supplies the segmentation** and calls
+//! This stemmer stems one token; it does not cut text into tokens, and it is
+//! the one stemmer here that does not implement [`crate::TokenizeAndStem`].
+//! UAX #29 §4 states outright that its default word rules do not segment
+//! Japanese, so [`verbora_tokenizers::WordTokenizer`] is not a substitute and
+//! none is offered: **the caller supplies the segmentation** and calls
 //! [`StemmerJa::stem`] on each token.
 //!
 //! An attributable Japanese segmenter — a cited model, a checked-in generator,
@@ -53,7 +50,8 @@ impl StemmerJa {
     /// The range is inclusive at both ends, so the middle dot `・`, the iteration
     /// marks `ヽ ヾ` and `ヿ` all count as katakana — and the prolonged sound mark
     /// itself does too, which is what lets `ーーーー` be stemmed to `ーーー`.
-    /// An empty string is **not** katakana: The reference's `+` needs one match.
+    /// An empty string is **not** katakana: the rule requires at least one
+    /// character in the range.
     #[allow(
         clippy::unused_self,
         reason = "every stemmer is zero-sized; `stem` is a method so the \
@@ -67,8 +65,8 @@ impl StemmerJa {
     pub fn stem_katakana<'a>(&self, token: &'a str) -> Cow<'a, str> {
         // The length gate counts scalar values, like the rest of this crate;
         // every katakana scalar is inside the BMP, so the two readings of
-        // "four" coincide for any input this rule can fire on. Then
-        // `isKatakana`. Katakana are all BMP, so for any string that passes the
+        // "four" coincide for any input this rule can fire on. Then the
+        // katakana test. Katakana are all BMP, so for any string that passes the
         // second test the two length notions agree; the order of the tests makes
         // the difference unobservable rather than merely unlikely.
         if slen(token) >= 4 && token.ends_with(MARK) && self.is_katakana(token) {

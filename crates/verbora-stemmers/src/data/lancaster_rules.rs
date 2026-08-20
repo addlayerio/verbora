@@ -895,7 +895,7 @@ static SECTION_Z: &[Rule] = &[
 /// The rule section for a word's final character, or an empty slice.
 ///
 /// Sections `k o q w x` and every non-`[a-z]` character are absent from the
-/// reference table, so they short-circuit to "no rules apply".
+/// Paice/Husk rule table, so they short-circuit to "no rules apply".
 pub(crate) fn section(last: char) -> &'static [Rule] {
     match last {
         'a' => SECTION_A,

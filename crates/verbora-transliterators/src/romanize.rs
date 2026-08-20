@@ -212,7 +212,13 @@ impl<'a> Rewrites<'a> {
                 // mark with nothing left to lengthen.
                 to = long;
                 end = skip_prolonged(self.text, end + next.len_utf8());
-            } else if lengthens(vowel, next) {
+            } else if lengthens(vowel, next) && !begins_a_mora(self.text, end) {
+                // A scalar that could lengthen the vowel is only a lengthener
+                // when it is not the start of a mora of its own. `ウィ` after a
+                // mora reading `-u` is the case that separates the two: `ロウ`
+                // then `ィン` reads `rowin`, not `rō` swallowing the `ィ` and
+                // dropping the syllable. Leftmost-longest is the rule the scan
+                // documents, and consuming past a key here broke it.
                 to = long;
                 end += next.len_utf8();
             }
@@ -225,6 +231,20 @@ impl<'a> Rewrites<'a> {
             to,
         }
     }
+}
+
+/// Whether a mora key starts at `at` — the guard that keeps vowel lengthening
+/// from consuming the first scalar of a two-scalar mora.
+fn begins_a_mora(text: &str, at: usize) -> bool {
+    crate::scan::longest_at(text, at).is_some_and(|(len, _)| {
+        // A one-scalar match is the scalar we were about to treat as a
+        // lengthener, which is exactly what lengthening is for. Only a longer
+        // key means a syllable would be lost.
+        text[at..]
+            .chars()
+            .next()
+            .is_some_and(|c| len > c.len_utf8())
+    })
 }
 
 impl<'a> Iterator for Rewrites<'a> {
@@ -596,6 +616,33 @@ pub fn transliterate_ja_normalized(text: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
+    /// Vowel lengthening must not consume the first scalar of a mora.
+    ///
+    /// `ロウ` reads `-u`, and `ウ` lengthens an `o`, so a lengthener that does
+    /// not check for a longer key eats the `ィ` of `ウィ` and drops the whole
+    /// syllable: `ハロウィン` came out `harōin` rather than `harowin`. Six keys
+    /// collide this way (`うぃ うぇ うぉ ウィ ウェ ウォ`), after any of the
+    /// morae whose reading ends in `o` or `u`.
+    ///
+    /// The crate's own `no_romanization_leaves_a_romanizable_kana_behind` could
+    /// not catch it: no kana survived, the reading was simply wrong.
+    #[test]
+    fn a_lengthener_never_swallows_the_start_of_a_mora() {
+        assert_eq!(transliterate_ja("ハロウィン"), "harowin");
+        assert_eq!(transliterate_ja("スウェーデン"), "suwēden");
+        assert_eq!(transliterate_ja("クウェート"), "kuwēto");
+        assert_eq!(transliterate_ja("ミルウォーキー"), "miruwōkī");
+    }
+
+    /// The guard above must not cost legitimate lengthening, where the next
+    /// scalar begins no key of its own.
+    #[test]
+    fn a_lengthener_still_lengthens_when_no_mora_starts_there() {
+        assert_eq!(transliterate_ja("とうきょう"), "tōkyō");
+        assert_eq!(transliterate_ja("コーヒー"), "kōhī");
+        assert_eq!(transliterate_ja("おかあさん"), "okāsan");
+    }
+
     use super::*;
     use crate::syllabary::{HIRAGANA, HIRAGANA_ONLY, KATAKANA_ONLY};
 

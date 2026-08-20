@@ -1,23 +1,24 @@
-//! The Swedish stemmer, ported from
-//! The reference `porter_stemmer_sv`.
+//! The Swedish stemmer.
 //!
 //! # Rebuilt from `rest`, not truncated
 //!
-//! Steps 1a and 3 do not cut the token; they return `regions.rest +
-//! r1.slice(0, match.index)`. `rest` is `str.slice(0, str.length - r1.length)`,
-//! which is only the same thing as "the token minus R1" when R1 really is a
-//! suffix — and it need not be, because the capture class `[a-zåäö]` excludes
-//! digits, `-`, `ü` and every uppercase letter, so R1 stops early on
-//! `"björk-1"`. The reference's arithmetic is reproduced literally rather than
-//! simplified into a truncation: `stem` takes the truncation fast path exactly
-//! when `rest` ends where R1 starts (the common case), and materialises the
-//! two-slice paste otherwise.
+//! Steps 1a and 3 do not cut the token; they return `rest + r1[..match_start]`,
+//! where `rest` is the token minus R1's *length* (`len - r1.len()`). That is
+//! only the same thing as "the token minus R1" when R1 really is a suffix — and
+//! it need not be, because R1's capture class `[a-zåäö]` excludes digits, `-`,
+//! `ü` and every uppercase letter, so R1 stops early on `"björk-1"`. The
+//! arithmetic is what the rule says, so it is what runs: `stem` takes the
+//! truncation fast path exactly when `rest` ends where R1 starts (the common
+//! case), and materialises the two-slice paste otherwise.
 //!
-//! # `getRegions` has a comment admitting it is unexplained
+//! # R1's short-word special case
 //!
-//! `if (match.index + 2 < 3) r1 = str.slice(3)` carries the note *"Not clear why
-//! we need this! Algorithm does not describe this part!"*. It fires exactly when
-//! the match starts at index 0, and it is kept.
+//! When the region match starts at index 0, R1 is taken from position 3
+//! (`if match_start + 2 < 3 { r1 = token[3..] }`) rather than from
+//! `match_start + 2`. Nothing in the published Swedish algorithm asks for that;
+//! it is part of the rule set Verbora ships and the tests pin, and it is kept
+//! rather than quietly normalised — dropping it would move R1 from 3 to 2 for
+//! every word that opens with a vowel followed by a consonant.
 //!
 //! # The unit
 //!
@@ -33,9 +34,8 @@
 //! # Step 1 keeps the shorter of 1a and 1b
 //!
 //! Like Norwegian, and with the same strict `<`: on a tie step 1b wins. Unlike
-//! Norwegian, both branches share one `getRegions` call, so the regions are those
-//! of the *input*; steps 2 and 3 recompute them from their own argument through
-//! The reference's default-parameter evaluation.
+//! Norwegian, both branches share one region scan, so the regions are those of
+//! the *input*; steps 2 and 3 scan their own argument afresh.
 //!
 //! # Longest suffix, via `find_among`
 //!
@@ -43,9 +43,8 @@
 //! start at which some alternative reaches `$`). `stem` computes it with one
 //! [`crate::among`] binary search per step instead of a linear scan per
 //! alternative (`docs/PERFORMANCE_GAPS.md` entry 34), passing R1 as
-//! `(lb, cursor)` limits so no slice is snapshotted. The pre-conversion
-//! implementation is kept verbatim in this module's tests as the
-//! byte-exactness oracle.
+//! `(lb, cursor)` limits so no slice is snapshotted. The linear-scan form is
+//! kept in this module's tests as a differential oracle.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -111,31 +110,30 @@ fn is_r1_char(c: char) -> bool {
     matches!(c, 'a'..='z' | 'å' | 'ä' | 'ö')
 }
 
-/// `getRegions`, as indices into `t`: R1 is `t[r1s..r1e]` (empty when the
-/// pattern does not match), and `rest_len` is the reference's
-/// `str.length - r1.length` — a *length*, not R1's start, which is the whole
-/// point of the "rebuilt from `rest`" note in the module docs.
+/// The regions as indices into `t`: R1 is `t[r1s..r1e]` (empty when the pattern
+/// does not match), and `rest_len` is `t.len() - r1.len()` — a *length*, not
+/// R1's start, which is the whole point of the "rebuilt from `rest`" note in
+/// the module docs.
 struct RegionIx {
     r1s: usize,
     r1e: usize,
     rest_len: usize,
 }
 
-/// `getRegions`, freshly scanned. `stem` goes through [`RegionScan`]
-/// instead; this remains as the definition the cached form is checked
-/// against.
+/// The regions, freshly scanned. `stem` goes through [`RegionScan`] instead;
+/// this remains as the definition the cached form is checked against.
 #[cfg(test)]
 fn region_ix_uncached(t: &[char]) -> RegionIx {
     RegionScan::of(t).at_len(t.len())
 }
 
-/// A scan of `getRegions`' match, kept so the later steps can re-derive R1
-/// after a truncation instead of rescanning the word.
+/// A scan of the region match, kept so the later steps can re-derive R1 after
+/// a truncation instead of rescanning the word.
 ///
 /// # Why this is exact
 ///
-/// The reference calls `getRegions(token)` afresh in every step, and the
-/// steps below only ever *truncate* — except the paste arm of [`rebuild`],
+/// Every step is specified to scan the regions afresh, and the steps below
+/// only ever *truncate* — except the paste arm of [`rebuild`],
 /// which `stem` marks and rescans after. For a truncation the question is
 /// what a rescan of a prefix would return. The match position is the first
 /// `i` with `vowel(t[i]) && !vowel(t[i+1]) && r1char(t[i+2])`; truncating to
@@ -167,7 +165,7 @@ impl RegionScan {
             };
         };
         if index == 0 {
-            // The unexplained special case: `r1 = str.slice(3)`.
+            // The short-word special case: R1 starts at 3, not at 2.
             return RegionScan {
                 index: Some(0),
                 start: 3,
@@ -184,7 +182,7 @@ impl RegionScan {
         }
     }
 
-    /// What `getRegions` would return for the same word truncated to `len`.
+    /// What a region scan would return for the same word truncated to `len`.
     #[inline]
     fn at_len(self, len: usize) -> RegionIx {
         let (r1s, r1e) = match self.index {
@@ -252,8 +250,8 @@ fn ends_consonant_pair(w: &[char], cursor: usize, lb: usize) -> bool {
     }
 }
 
-/// `regions.rest + r1.slice(0, idx)`: a plain truncation when `rest` ends
-/// exactly where R1 starts, the literal two-slice paste otherwise.
+/// `rest + r1[..idx]`: a plain truncation when `rest` ends exactly where R1
+/// starts, the literal two-slice paste otherwise.
 ///
 /// The paste arm's result is never longer than the buffer already is
 /// (`rest_len + idx <= len` by construction), so it moves R1's kept prefix
@@ -306,7 +304,7 @@ impl PorterStemmerSv {
         let (mut buf, ascii_lower) = Buf::<char>::fill_lowercase_tracked(token);
         let mut rewrote = false;
         let t = buf.as_slice();
-        // One scan of `getRegions`' match serves all three steps; see
+        // One scan of the region match serves all three steps; see
         // `RegionScan` for why re-deriving it after a truncation is exact.
         let mut scan = RegionScan::of(t);
 
@@ -434,7 +432,7 @@ impl TokenizeAndStem for PorterStemmerSv {
     // `prepare` is deliberately *not* overridden: the trait's identity default
     // is the specified behaviour. See `PorterStemmerSv`'s own documentation,
     // "`å`, `ä` and `ö` are letters, so nothing is folded", for the reasoning
-    // and for the 116 stop words a fold here used to delete.
+    // and for the 116 stop words a fold here would delete.
 
     fn is_stop_word(word: &str) -> bool {
         Language::Sv.contains(word)
@@ -595,7 +593,7 @@ mod tests {
         assert!(ends_consonant_pair(&scalars("😀dt"), 3, 0));
     }
 
-    /// `RegionScan::at_len` must agree with a fresh `getRegions` of the
+    /// `RegionScan::at_len` must agree with a fresh region scan of the
     /// truncated word at every truncation point, which is what lets `stem`
     /// scan once.
     #[test]
@@ -815,7 +813,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-find_among implementation, verbatim.
+    // Differential oracle: the same steps written as linear alternation scans.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;

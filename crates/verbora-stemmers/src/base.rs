@@ -14,7 +14,7 @@ use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 pub enum Casing {
     /// The token exactly as the tokenizer produced it.
     Raw,
-    /// `token.toLowerCase()`.
+    /// The token lowercased.
     Lower,
 }
 
@@ -392,7 +392,7 @@ pub trait TokenizeAndStem {
     /// collects them; rayon's `par_iter().map().collect()` is order-preserving,
     /// so `out[i]` is always `docs[i]`'s result. `Self` must be `Sync`, because
     /// every task borrows it: this is why [`crate::PorterStemmerNl`], whose sticky
-    /// `suffixeRemoved` flag lives in a `Cell`, does not get this method —
+    /// `suffix_e_removed` flag lives in a `Cell`, does not get this method —
     /// running it from multiple threads at once would make that stemmer's output
     /// depend on scheduling order, and the type system refuses it instead of
     /// letting that happen silently. Construct one [`PorterStemmerNl`][crate::PorterStemmerNl]

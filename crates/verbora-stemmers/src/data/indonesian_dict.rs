@@ -5,7 +5,7 @@
 //! [`crate::TokenizeAndStem::HYPHEN_JOINS_LETTERS`] exists. Naming a published
 //! source for the word list is an open item of the stemmers' own migration.
 
-/// The dictionary in file order — what `StemmerId.dictionary` exposes.
+/// The dictionary in file order — what [`crate::StemmerId::dictionary`] returns.
 pub static WORDS: &[&str] = &[
     "aba",
     "abad",

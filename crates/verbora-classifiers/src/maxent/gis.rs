@@ -78,6 +78,15 @@ pub enum StopReason {
     Converged,
     /// [`Gis::max_iterations`] iterations ran without the tolerance being met.
     /// The parameters are the best found so far, not a converged fit.
+    ///
+    /// One shape of sample reports this forever, and it is a property of the
+    /// data rather than of the fit: a predicate observed with **exactly one**
+    /// outcome sets a constraint of `p = 1`, whose maximum-likelihood weight is
+    /// unbounded. GIS approaches it only logarithmically — the weight grows
+    /// like `log(iterations)` — so no finite [`Gis::max_iterations`] reaches a
+    /// tolerance for it, even though every iteration up to that point is a
+    /// perfectly usable fit. A caller who needs convergence reported adds
+    /// events so the predicate is no longer deterministic.
     MaxIterations,
     /// An iteration would have produced a parameter that is not a finite
     /// number, so it was discarded and the previous parameters kept.

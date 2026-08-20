@@ -39,9 +39,9 @@ pub use languages::{Language, LanguageSet};
 use engine::{OnUnmatched, PhonemeBuilder, RuleTable, merge_by_text};
 use rule::{Line, Rule, parse_line};
 
-/// Which family-naming convention's rule tables to apply. See this module's
-/// own doc comment for why this is a real choice, not a formality: it picks
-/// which language-specific rule files exist to draw from at all (Generic:
+/// Which family-naming convention's rule tables to apply. This is a real
+/// choice, not a formality: it picks which language-specific rule files exist
+/// to draw from at all (Generic:
 /// 18 languages: arabic, cyrillic, czech, dutch, english, french, german,
 /// greek, greeklatin, hebrew, hungarian, italian, polish, portuguese,
 /// romanian, russian, spanish, turkish. Ashkenazi: 10 of those. Sephardic:
@@ -67,12 +67,12 @@ impl NameType {
     }
 
     /// Leading words (`"van Beethoven"`, `"de la Cruz"`) that a name is
-    /// conventionally split around rather than encoded as one run — matches
-    /// every reference implementation's own fixed list per name type (not
-    /// derived from the rule corpus itself, since these are a naming-
-    /// convention fact, not a phonetic one). Note `"de la"` is itself a
-    /// two-word entry: the prefix check below matches it as one literal
-    /// string against the *unsplit* input, before word-splitting happens.
+    /// conventionally split around rather than encoded as one run. The list is
+    /// fixed per name type and is deliberately not derived from the rule
+    /// corpus: which words are name prefixes is a naming-convention fact, not
+    /// a phonetic one. Note `"de la"` is itself a two-word entry: the prefix
+    /// check below matches it as one literal string against the *unsplit*
+    /// input, before word-splitting happens.
     const fn name_prefixes(self) -> &'static [&'static str] {
         match self {
             Self::Generic => &[
@@ -88,17 +88,13 @@ impl NameType {
     }
 }
 
-/// How wide a net the final refinement pass casts. See this module's own
-/// doc comment section on terminology — these are the two real, documented
-/// engine parameters (not the "genealogical/phonetic" framing floated
-/// early in this feature's own design discussion and dropped once it
-/// didn't check out against any primary source).
+/// How wide a net the final refinement pass casts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuleType {
     /// Casts the widest net across plausible historical/cross-language
-    /// spelling drift — the default in every reference implementation
-    /// surveyed, and the mode that produces Beider-Morse's actual
-    /// selling point over a single-language algorithm.
+    /// spelling drift, which is what Beider-Morse offers over a
+    /// single-language algorithm; choose it unless an exact-match index is
+    /// the goal.
     Approx,
     /// A narrower refinement pass, closer to "how the name reads today" —
     /// smaller candidate sets, useful where an exact-match index is the
@@ -379,12 +375,12 @@ pub struct BeiderMorseCode {
     /// multi-word result — see [`BeiderMorse::encode`]'s own doc comment
     /// for when each case applies. When `true`, [`Self::spellings`] holds
     /// exactly one already-composed string like `"(krus|crus)-(dilakrus)"`
-    /// (literal parens/pipes/hyphens are part of that one string, matching
-    /// every reference implementation's own single-`String` return shape
-    /// for these cases), not independent candidates — treat it as one
-    /// opaque compound key, not a set to iterate. When `false` (the common
-    /// case), every element of `spellings` is an independent candidate as
-    /// usual.
+    /// (the parentheses, pipes and hyphens are literal characters of that one
+    /// string: each parenthesised group is one part of the name, and the pipes
+    /// separate that part's own candidates), not independent candidates —
+    /// treat it as one opaque compound key, not a set to iterate. When `false`
+    /// (the common case), every element of `spellings` is an independent
+    /// candidate as usual.
     pub compound: bool,
 }
 
@@ -448,12 +444,9 @@ pub struct BeiderMorse {
 const DEFAULT_MAX_PHONEMES: usize = 20;
 
 impl BeiderMorse {
-    /// A Beider-Morse encoder for `name_type`/`rule_type`, with the
-    /// reference implementations' own defaults: candidate cap 20, `concat`
-    /// on (see [`Self::with_concat`] — every reference implementation's own
-    /// builder defaults to `true` despite what its doc comment claims;
-    /// confirmed against the actual default-constructor source, not the
-    /// comment).
+    /// A Beider-Morse encoder for `name_type`/`rule_type`, with a candidate
+    /// cap of 20 and `concat` on (see [`Self::with_concat`] for what that
+    /// second default decides).
     #[must_use]
     pub const fn new(name_type: NameType, rule_type: RuleType) -> Self {
         Self {
@@ -482,34 +475,32 @@ impl BeiderMorse {
     }
 
     /// Encodes `word`, first guessing which language(s) it's plausibly
-    /// spelled under from the spelling itself — matching every reference
-    /// implementation's own default behavior. The guess is the `*_lang.txt`
-    /// heuristic layer: it starts from every language this [`NameType`] has
-    /// and narrows one rule at a time, in file order, an "accept" rule
-    /// intersecting the running guess down to just its own listed languages
-    /// when its pattern matches and a "reject" rule removing its listed
-    /// languages instead. A guess that narrows all the way to nothing falls
-    /// back to the full set, since "no candidate spelling is plausible under
-    /// any language" is never the intent of the heuristic. A
+    /// spelled under from the spelling itself; [`Self::encode_language`] is
+    /// the variant that takes the caller's word for it instead. The guess is
+    /// the `*_lang.txt` heuristic layer: it starts from every language this
+    /// [`NameType`] has and narrows one rule at a time, in file order, an
+    /// "accept" rule intersecting the running guess down to just its own
+    /// listed languages when its pattern matches and a "reject" rule removing
+    /// its listed languages instead. A guess that narrows all the way to
+    /// nothing falls back to the full set, since "no candidate spelling is
+    /// plausible under any language" is never the intent of the heuristic. A
     /// confident single-language guess (e.g. `"Renault"` → French) loads
     /// that language's own rule file and starts every candidate phoneme
     /// pre-filtered to it; an ambiguous guess falls back to the `"any"` file
     /// with the (possibly still narrowed) guessed set as the starting
     /// languages, same as [`Self::encode_language`] never running.
     ///
-    /// Also handles what every reference implementation calls the
-    /// "genealogical" surname shapes: a leading `d'` (`"d'Angelo"`) or a
-    /// [`NameType`]-specific name prefix (`"van Gogh"`, `"de la Cruz"` —
+    /// Also handles the compound surname shapes: a leading `d'` (`"d'Angelo"`)
+    /// or a [`NameType`]-specific name prefix (`"van Gogh"`, `"de la Cruz"` —
     /// Generic only) splits the name into `(without-the-prefix)-(with-the-
     /// prefix-fused-on)`, each re-encoded independently; a name with more
     /// than one word (and [`Self::with_concat`]`(false)`) encodes each word on
     /// its own and hyphen-joins the results, rather than treating the whole
     /// string as one phonetic run. In both cases the returned
     /// [`BeiderMorseCode::compound`] is `true` and `spellings` holds exactly
-    /// one already-composed string (matching every reference
-    /// implementation's own single-`String` return shape for these cases),
-    /// not independent candidates — check `compound` before iterating
-    /// `spellings` as a candidate set; see that field's own doc comment.
+    /// one already-composed string rather than independent candidates — check
+    /// `compound` before iterating `spellings` as a candidate set; see that
+    /// field's own doc comment.
     #[must_use]
     pub fn encode(&self, word: &str) -> BeiderMorseCode {
         self.encode_top(word, None)
@@ -520,10 +511,10 @@ impl BeiderMorse {
     /// [`Self::encode`], since only that language's own rule file (plus the
     /// shared `common` rules) is consulted, and every phoneme is
     /// pre-filtered to just that language throughout. Prefix- and
-    /// multi-word-splitting (see [`Self::encode`]) still apply; matching
-    /// every reference implementation, the *split-off parts* are always
-    /// re-guessed from scratch rather than inheriting `language` — only the
-    /// base case (a single already-split word) actually restricts to it.
+    /// multi-word-splitting (see [`Self::encode`]) still apply, and the
+    /// *split-off parts* are always re-guessed from scratch rather than
+    /// inheriting `language` — only the base case (a single already-split
+    /// word) actually restricts to it.
     ///
     /// Returns `None` if `language` is not one of this encoder's
     /// [`NameType`]'s own known languages.
@@ -704,9 +695,11 @@ impl BeiderMorse {
 }
 
 /// Runs one final-rule table over every candidate's own phoneme *text*
-/// (not the original word) — the refinement pass operates on what the
-/// Rules pass already produced, per every reference implementation's own
-/// two-stage shape (see `engine.rs`'s own doc comment).
+/// (not the original word): the refinement pass operates on what the Rules
+/// pass already produced, which is the two-stage shape the rule corpus is
+/// written for: its `*_approx_*`/`*_exact_*` files match phoneme text, not
+/// spelling. `engine.rs` holds the rule-application machinery both passes
+/// share.
 fn apply_final_pass(
     candidates: &[engine::Phoneme],
     table: &RuleTable,

@@ -1,29 +1,19 @@
-//! The Indonesian (Sastrawi/Nazief–Adriani) stemmer, ported from
-//! The reference `indonesian` module.
+//! The Indonesian stemmer — Nazief–Adriani, as refined by Sastrawi.
 //!
-//! # It writes to `globalThis`
+//! # One rule, one [`RuleResult`]
 //!
-//! `suffix_rules` and `prefix_rules` are **non-strict** modules whose rule
-//! bodies call `createResultObject` and `runDisambiguator` as bare functions. In
-//! sloppy mode a bare call binds `this` to the global object, so every rule
-//! stores its `removal` and `currentWord` on `globalThis` and then *returns*
-//! `globalThis`. `StemmerId.a('hancurlah') === globalThis` is literally
-//! true, and the driver reads the result back off the object it was handed.
-//!
-//! This port models the returned object as [`RuleResult`] — the two fields the
-//! driver actually reads. Nothing else about `globalThis` is observable, because
-//! both writers always set both fields before returning, so no stale value can
-//! ever be read. **Divergence:** identity with a global object is not
-//! reproducible in Rust and is not reproduced.
+//! Each affix-removal rule reports two things: the removal it recorded, if any,
+//! and the word as it left it. [`RuleResult`] is that pair, and the driver reads
+//! nothing else off a rule.
 //!
 //! # Per-call state is reset once, not per sub-word
 //!
-//! `stem()` clears the module-level `removals` array, and then `stemPluralWord`
-//! calls `stemSingularWord` two or three times **without** clearing it again. The
-//! second sub-word therefore inherits the first's removals, and
-//! `loopRestorePrefixes` will happily restore a prefix that was stripped from a
-//! different half of the word. [`StemmerId::stem`] threads exactly that: one list per
-//! `stem` call, shared by every sub-word inside it.
+//! The removals list is cleared once per [`StemmerId::stem`] call. A
+//! reduplicated word then runs the singular stemmer two or three times
+//! **without** clearing it again, so the second sub-word inherits the first's
+//! removals and the prefix-restore step will happily restore a prefix that was
+//! stripped from a different half of the word. That is the specified behaviour:
+//! one list per `stem` call, shared by every sub-word inside it.
 //!
 //! # Regexes that are not anchored
 //!
@@ -39,25 +29,26 @@
 //!
 //! # `[g|h|q|k]`
 //!
-//! Rule 16's character class contains a literal `|` — it was written as if `[…]`
-//! were an alternation. `"meng|foo"` therefore matches it and reduces to
-//! `"|foo"`. This is preserved.
+//! Rule 16's character class contains a literal `|`, so `"meng|foo"` matches it
+//! and reduces to `"|foo"`. Verbora keeps the class as written: reading it as
+//! the alternation it resembles would drop `|` from the class and change which
+//! words rule 16 fires on.
 //!
-//! # `runDisambiguator` keeps the LAST attempt, not the first that matched
+//! # Disambiguation keeps the LAST attempt, not the first that matched
 //!
-//! The loop assigns `result` on every iteration and only *breaks* when the value
-//! is in the dictionary. When nothing hits, what survives is whatever the final
-//! sub-rule returned — including `undefined`, which turns the whole rule into a
-//! no-op. That makes rules 17 and 30 behave differently on the same shape:
+//! A disambiguated rule tries its sub-rules in order, keeping each sub-rule's
+//! result and stopping early only when that result is in the dictionary. When
+//! nothing hits, what survives is whatever the **final** sub-rule produced —
+//! including "no result at all", which turns the whole rule into a no-op. That
+//! makes rules 17 and 30 behave differently on the same shape:
 //!
 //! ```text
-//! rule 17 ("mengasahxyz")  17a,17b miss; 17c (^menge) undefined; 17d -> "ngasahxyz"
-//! rule 30 ("pengasahxyz")  30a,30b miss; 30c (^penge) undefined  -> no-op
+//! rule 17 ("mengasahxyz")  17a,17b miss; 17c (^menge) no result; 17d -> "ngasahxyz"
+//! rule 30 ("pengasahxyz")  30a,30b miss; 30c (^penge) no result  -> no-op
 //! ```
 //!
-//! Both were verified against the reference. A port that treats "no sub-rule
-//! matched" as the only `undefined` case, or that returns the first sub-rule that
-//! matched, loses this.
+//! Both are pinned by test. Treating "no sub-rule matched" as the only
+//! empty-result case, or returning the first sub-rule that matched, loses this.
 //!
 //! # The text unit
 //!
@@ -66,7 +57,7 @@
 //! this module — every `w[3]`, every `w[p + 8..]`, `MAX_ROOT_LEN`, and
 //! `stem_singular`'s `len() > 3` gate — counts characters.
 //!
-//! Indonesian is the one stemmer here whose *output* the change of unit cannot
+//! Indonesian is the one stemmer here whose *output* the choice of unit cannot
 //! move, and the reason is worth stating because it is a proof rather than an
 //! absence of evidence. Two filters stand in front of everything:
 //!
@@ -84,10 +75,10 @@
 //! `an_astral_character_cannot_move_an_indonesian_answer` enumerates the claim
 //! instead of asserting it.
 //!
-//! `U+002D` is one character and was one code unit, so reduplication —
-//! [`split_last_hyphen`], [`is_plural_units`], [`stem_plural`] — is untouched
-//! by the change, and every cut those make lands *on* the hyphen, which is a
-//! character boundary under both readings.
+//! `U+002D` is one character under either reading, so reduplication —
+//! [`split_last_hyphen`], [`is_plural_units`], [`stem_plural`] — is
+//! unit-independent too, and every cut those make lands *on* the hyphen, which
+//! is a character boundary either way.
 
 use std::borrow::Cow;
 
@@ -167,7 +158,7 @@ impl RemovalKind {
         }
     }
 
-    /// `isSuffixRemovals`: everything except a derivational prefix.
+    /// Whether this is a suffix removal: everything except a derivational prefix.
     #[must_use]
     pub const fn is_suffix(self) -> bool {
         !matches!(self, Self::DerivationalPrefix)
@@ -184,17 +175,17 @@ pub struct Removal {
 }
 
 impl Removal {
-    /// `getOriginalWord()`.
+    /// The word as it stood before this removal.
     #[must_use]
     pub fn original_word(&self) -> String {
         text(&self.original)
     }
-    /// `getResult()`.
+    /// The word as this removal left it.
     #[must_use]
     pub fn result(&self) -> String {
         text(&self.result)
     }
-    /// `getRemovedPart()`.
+    /// The part this removal took out.
     ///
     /// Computed as `word.replace(result, '')` — the **first** occurrence of the
     /// result *anywhere* in the word, deleted. For a prefix rule that rewrites
@@ -206,7 +197,7 @@ impl Removal {
     pub fn removed_part(&self) -> String {
         text(&self.removed)
     }
-    /// `getAffixType()`.
+    /// Which kind of affix this removal took out.
     #[must_use]
     pub const fn affix_type(&self) -> RemovalKind {
         self.kind
@@ -259,7 +250,7 @@ fn find(w: &[char]) -> bool {
 }
 
 /// The length of the longest dictionary root, pinned by
-/// `the_dictionary_is_the_reference_size`.
+/// `the_dictionary_is_the_expected_size`.
 ///
 /// Every root is ASCII, so this one number is the entry's length in bytes and
 /// in characters alike — which is what lets [`find`] compare it against a
@@ -413,7 +404,7 @@ fn cls16(c: char) -> bool {
     matches!(c, 'g' | '|' | 'h' | 'q' | 'k')
 }
 
-/// How far `.` can run from `at`: to the first the reference line terminator.
+/// How far `.` can run from `at`: to the first line terminator.
 fn dot_end(w: &[char], at: usize) -> usize {
     (at..w.len())
         .find(|&i| matches!(w[i], '\n' | '\r' | '\u{2028}' | '\u{2029}'))
@@ -515,13 +506,13 @@ fn plain_suffix(w: &[char], alts: &[&str]) -> Option<usize> {
     best
 }
 
-/// `suffix_rules`'s `createResultObject`: no removal when nothing changed.
+/// A suffix rule's result: no removal when nothing changed.
 ///
 /// Takes the cut point rather than an already-built result so that the
 /// unchanged case — by far the common one, since each rule is tried against
-/// every word — costs no allocation at all. `word[..cut]` equals `word`
-/// exactly when `cut` is `word.len()`, so the test is the same one the
-/// reference's `result === word` makes.
+/// every word — costs no allocation at all. `word[..cut]` equals `word` exactly
+/// when `cut` is `word.len()`, so comparing the cut point against the length is
+/// the same test as comparing the two words.
 fn suffix_result(
     cut: usize,
     word: &[char],
@@ -591,7 +582,7 @@ type SubRule = fn(&[char]) -> Option<Vec<char>>;
 enum PrefixRule {
     /// `RemovePlainPrefix` — the only one that can record *no* removal.
     Plain,
-    /// A `runDisambiguator` rule over an ordered list of attempts.
+    /// A disambiguated rule over an ordered list of attempts.
     Dis(&'static [SubRule]),
 }
 
@@ -870,9 +861,9 @@ fn r36(w: &[char]) -> Option<Vec<char>> {
 /// `^(C)(XY[aiueo])(.*)$` for the four `CerV`/`CelV`/`CemV`/`CinV` pairs.
 ///
 /// The `a` variant re-emits the word unchanged; the `b` variant drops the
-/// infix. Returning the input verbatim still creates a `Removal` — the prefix
-/// `createResultObject` is unconditional — whose removed part is `""`, and that
-/// non-empty `removals` list is what stops `checkPrefixRules`.
+/// infix. Returning the input unchanged still records a `Removal` — a prefix
+/// rule records one unconditionally — whose removed part is `""`, and that
+/// non-empty removals list is what stops the prefix-rule walk.
 fn infix(w: &[char], infix: &str, keep: bool) -> Option<Vec<char>> {
     if !(w.len() > 3 && cons(w[0]) && lit_at(w, 1, infix) && v(w[3]) && dot_to_end(w, 4)) {
         return None;
@@ -914,8 +905,8 @@ fn r42(w: &[char]) -> Option<Vec<char>> {
     (lit_at(w, 0, "kau") && dot_to_end(w, 3)).then(|| w[3..].to_vec())
 }
 
-/// `PrefixRules.rules`, in push order. Rule 22, 33 and 43 do not exist in the
-/// reference either — the numbering has gaps.
+/// The prefix rules, in order. Rules 22, 33 and 43 do not exist — the
+/// published numbering has gaps.
 static PREFIX_RULES: &[PrefixRule] = &[
     PrefixRule::Plain,
     PrefixRule::Dis(&[r1a, r1b]),
@@ -966,19 +957,19 @@ impl PrefixRule {
     ///
     /// # Why the word is optional
     ///
-    /// `checkPrefixRules` runs every rule in turn until one records a
+    /// The prefix-rule walk runs every rule in turn until one records a
     /// removal, so a word is tried against dozens of rules that do not match
     /// it. Returning the unchanged word by value made each of those a full
     /// copy of the buffer, and they dominated: the stemmer allocated 40.4
-    /// times per word where the Snowball ports allocate 0.1 to 0.4. `None`
-    /// says "keep what you have", and the driver then simply does not
+    /// times per word where the Snowball stemmers here allocate 0.1 to 0.4.
+    /// `None` says "keep what you have", and the driver then simply does not
     /// assign.
     fn apply(&self, w: &[char]) -> (Option<Removal>, Option<Vec<char>>) {
         match self {
             Self::Plain => {
                 // `word.replace(/^(di|ke|se)/, '')`. A matched prefix always
-                // shortens the word by two characters, so the reference's
-                // `result === word` test is exactly "nothing matched".
+                // shortens the word by two characters, so "the word changed"
+                // and "a prefix matched" are the same question.
                 if !PLAIN_PREFIXES.iter().any(|p| lit_at(w, 0, p)) {
                     return (None, None);
                 }
@@ -1007,7 +998,7 @@ impl PrefixRule {
                 let Some(result) = result else {
                     return (None, None);
                 };
-                // The prefix `createResultObject` is unconditional: it records a
+                // A prefix rule records a removal unconditionally: it records a
                 // removal even when the result equals the input.
                 let removed = delete_first(w, &result);
                 (
@@ -1028,7 +1019,7 @@ impl PrefixRule {
 // The driver
 // ---------------------------------------------------------------------------
 
-/// The module-level `removals`, `originalWord` and `currentWord`, per call.
+/// The removals list, the original word and the current word, per `stem` call.
 struct State {
     removals: Vec<Removal>,
     original: Vec<char>,
@@ -1040,7 +1031,7 @@ impl State {
         find(&self.current)
     }
 
-    /// `removeSuffixes`.
+    /// Suffix removal: particle, then possessive, then derivational suffix.
     fn remove_suffixes(&mut self) {
         for rule in SUFFIX_RULES {
             let (removal, next) = rule(&self.current);
@@ -1056,7 +1047,7 @@ impl State {
         }
     }
 
-    /// `removePrefixes`: three passes of `checkPrefixRules`.
+    /// Prefix removal: three passes of [`Self::check_prefix_rules`].
     fn remove_prefixes(&mut self) {
         for _ in 0..3 {
             self.check_prefix_rules();
@@ -1066,7 +1057,7 @@ impl State {
         }
     }
 
-    /// `checkPrefixRules`: stop at the first rule that records a removal.
+    /// Stops at the first rule that records a removal.
     fn check_prefix_rules(&mut self) {
         let before = self.removals.len();
         for rule in PREFIX_RULES {
@@ -1083,11 +1074,10 @@ impl State {
         }
     }
 
-    /// `restorePrefix`: rewind to the last removal's original word, then forget
+    /// Rewinds to the last removal's original word, then forgets
     /// every prefix removal.
     fn restore_prefix(&mut self) {
-        // The reference loops over every removal assigning `currentWord`, with a
-        // commented-out `break`, so the LAST one wins.
+        // The rewind assigns from every removal in turn, so the LAST one wins.
         if let Some(last) = self.removals.last() {
             self.current = last.original.clone();
         }
@@ -1095,14 +1085,14 @@ impl State {
             .retain(|r| r.kind != RemovalKind::DerivationalPrefix);
     }
 
-    /// `loopRestorePrefixes`: the ECS restore loop.
+    /// The ECS restore loop.
     fn loop_restore_prefixes(&mut self) {
         self.restore_prefix();
         self.removals.reverse();
         let temp = self.current.clone();
 
         // `for (const i in reversedRemovals)` snapshots the index keys, so the
-        // removals that `removePrefixes` appends below are never visited.
+        // removals that [`Self::remove_prefixes`] appends below are never visited.
         let n = self.removals.len();
         for i in 0..n {
             // The kind is `Copy`, so the skip is decided before anything is
@@ -1130,7 +1120,7 @@ impl State {
         }
     }
 
-    /// `stemmingProcess` — steps 2 through 5.
+    /// The stemming process — steps 2 through 5.
     fn stemming_process(&mut self) {
         if self.found() {
             return;
@@ -1158,7 +1148,7 @@ impl State {
         self.loop_restore_prefixes();
     }
 
-    /// `stemSingularWord`.
+    /// Stems one non-reduplicated word.
     ///
     /// The `> 3` gate is the module's only absolute length, and it counts
     /// **characters**: a three-letter word is a root or nothing, so there is
@@ -1180,7 +1170,7 @@ impl State {
     }
 }
 
-/// `precedenceAdjustmentSpecification`: six `^X(.*)Y$` probes.
+/// The precedence-adjustment specification: six `^X(.*)Y$` probes.
 fn precedence_adjustment(w: &[char]) -> bool {
     [
         ("be", "lah"),
@@ -1252,17 +1242,18 @@ impl StemmerId {
         Self
     }
 
-    /// The 29,932 root words, in file order — `StemmerId.dictionary`.
+    /// The 29,932 root words, in file order.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's property-shaped API"
+        reason = "every stemmer is zero-sized; the dictionary is exposed as a \
+                  method so it shares the call shape of the rest of the API"
     )]
     #[must_use]
     pub const fn dictionary(&self) -> &'static [&'static str] {
         indonesian_dict::WORDS
     }
 
-    /// `isPlural`.
+    /// Whether the token is a reduplicated (hyphenated) plural.
     #[allow(
         clippy::unused_self,
         reason = "every stemmer is zero-sized; `stem` is a method so the \
@@ -1280,9 +1271,9 @@ impl StemmerId {
     )]
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        // The lowered characters land straight in the working vector: the
-        // reference's `toLowerCase()` string is never materialised, and
-        // `is_plural` reads the buffer rather than walking the token again.
+        // The lowered characters land straight in the working vector: no
+        // intermediate lowercased `String` is materialised, and `is_plural`
+        // reads the buffer rather than walking the token again.
         // `token.len()` is a byte count and so an upper bound on the number
         // of characters, which is all a capacity hint needs to be.
         let mut w: Vec<char> = Vec::with_capacity(token.len());
@@ -1301,11 +1292,11 @@ impl StemmerId {
         Cow::Owned(text(&out))
     }
 
-    /// `RemoveInflectionalParticle`, the rule the reference exports as
-    /// `StemmerId.a`.
+    /// The inflectional-particle rule: strips a trailing `lah`, `kah`, `tah`
+    /// or `pun`, along with any hyphens immediately before it.
     ///
-    /// In the reference this returns `globalThis`; here it returns the two fields
-    /// the driver reads off it. See the module documentation.
+    /// Returns the removal it recorded and the word as it left it. See
+    /// [`RuleResult`].
     #[allow(
         clippy::unused_self,
         reason = "every stemmer is zero-sized; `stem` is a method so the \
@@ -1317,8 +1308,7 @@ impl StemmerId {
         let (removal, current) = remove_particle(&w);
         RuleResult {
             removal,
-            // `None` is the rule reporting that it left the word alone, which
-            // the reference expresses by storing the word back unchanged.
+            // `None` is the rule reporting that it left the word alone.
             current_word: text(current.as_deref().unwrap_or(&w)),
         }
     }
@@ -1351,7 +1341,7 @@ impl StemmerId {
     }
 }
 
-/// `stemPluralWord`.
+/// Stems a reduplicated (hyphenated) word.
 fn stem_plural(w: &[char], st: &mut State) -> Vec<char> {
     let Some(at) = split_last_hyphen(w) else {
         return w.to_vec();
@@ -1513,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn the_dictionary_is_the_reference_size() {
+    fn the_dictionary_is_the_expected_size() {
         assert_eq!(StemmerId::new().dictionary().len(), 29932);
     }
 

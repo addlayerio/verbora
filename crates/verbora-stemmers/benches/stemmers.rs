@@ -3,15 +3,15 @@
 // here.
 #![allow(missing_docs)]
 
-//! Criterion benchmarks for the seventeen stemmers.
+//! Criterion benchmarks for the sixteen stemmers.
 //!
 //! Four things are measured, because they answer four different questions.
 //!
 //! * **Cross-stemmer cost** — every algorithm over a word list in its own
 //!   language, reported per word. This is the number that shows what the design
-//!   choices cost: the Snowball ports build a `Vec<u16>` per word, Lancaster and
-//!   Carry stay on `&str`, and Indonesian does a binary search into a
-//!   29,932-word dictionary on every rule application.
+//!   choices cost: the Snowball stemmers fill a stack buffer of characters per
+//!   word, Lancaster and Carry stay on `&str`, and Indonesian does a binary
+//!   search into a 29,932-word dictionary on every rule application.
 //! * **Scaling** — `tokenize_and_stem` over documents spanning three orders of
 //!   magnitude, as throughput, so a per-byte regression cannot hide inside a
 //!   per-call number.
@@ -20,9 +20,9 @@
 //!   primitive and the `Vec` form is `collect()`, so the lazy form must be the
 //!   cheaper of the two.
 //! * **Worst cases** — the inputs whose *cost* is unusual rather than whose
-//!   result is: an Indonesian reduplication (three `stemSingularWord` passes and
+//!   result is: an Indonesian reduplication (three singular-stemming passes and
 //!   a prefix-restore loop), a long word that no rule matches, and the
-//!   `keepStops` flag, which decides whether the stop-word list is consulted at
+//!   `keep_stops` flag, which decides whether the stop-word list is consulted at
 //!   all.
 //!
 //! Word lists are embedded rather than read from an external tree, so the
@@ -364,7 +364,7 @@ fn api_shape(c: &mut Criterion) {
     group.bench_function("tokenize-and-stem", |b| {
         b.iter(|| s.tokenize_and_stem(black_box(&doc), false).len());
     });
-    // `keepStops` skips the membership test entirely and emits more tokens.
+    // `keep_stops` skips the membership test entirely and emits more tokens.
     group.bench_function("tokenize-and-stem-keep-stops", |b| {
         b.iter(|| s.tokenize_and_stem(black_box(&doc), true).len());
     });
@@ -387,7 +387,7 @@ fn worst_cases(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("worst-case");
 
-    // Reduplication runs `stemSingularWord` two or three times and can reach the
+    // Reduplication runs the singular stemmer two or three times and can reach the
     // prefix-restore loop, which re-runs the whole prefix table per removal.
     group.bench_function("id-reduplication", |b| {
         b.iter(|| StemmerId::new().stem(black_box("meniru-nirukan")).len());

@@ -1,11 +1,10 @@
-//! The Ukrainian stemmer, ported from
-//! The reference `porter_stemmer_uk`.
+//! The Ukrainian stemmer.
 //!
-//! Structurally a copy of the Russian stemmer with Ukrainian tables, so the
-//! scanners live in [`crate::ru`] and only the tables and one rule differ. Read
-//! the Russian module documentation first — the longest-suffix reading of the
-//! anchored alternations, the falsy `||`, and the line-terminator behaviour of
-//! `.` all carry over unchanged. Ukrainian does **not** fold `ё`.
+//! Structurally the Russian stemmer with Ukrainian tables, so the scanners live
+//! in [`crate::ru`] and only the tables and one rule differ. Read the Russian
+//! module documentation first — the longest-suffix reading of the anchored
+//! alternations, the empty-result fallback, and the line-terminator behaviour
+//! of `.` all carry over unchanged. Ukrainian does **not** fold `ё`.
 //!
 //! # The one rule with a lookbehind
 //!
@@ -28,31 +27,30 @@
 //! * `.*` is the only part that rejects line terminators, so a `\n` before the
 //!   `ост` merely constrains how far left the preceding vowel may sit.
 //!
-//! Scanning left to right for the first start position that satisfies all three
-//! reproduces the leftmost-match rule the engine applies.
+//! Scanning left to right for the first start position that satisfies all
+//! three is therefore exactly the leftmost match the regex specifies.
 //!
 //! # The text unit, and the one rule it moves
 //!
 //! Positions here are indices in **Unicode scalar values** — see
-//! [`crate::units`] for why that is the faithful reading of an algorithm
-//! published over letters. Ukrainian is the only stemmer in this group whose
-//! output the unit actually changes, and [`derivational`] is the whole of it.
+//! [`crate::units`] for why an algorithm published over letters is measured
+//! that way. Ukrainian is the only stemmer in this group whose output the unit
+//! actually changes, and [`derivational`] is the whole of it.
 //!
 //! Every *other* rule in this module compares two positions in the same
 //! buffer, so re-indexing moves both sides alike (see [`crate::ru`]'s note).
 //! [`derivational`] does not: it walks the word looking for the first position
-//! where a non-vowel is followed by a run of vowels, and under the old UTF-16
-//! reading a single astral character was **two** non-vowel positions — a high
-//! surrogate whose successor is also a non-vowel, and a low surrogate. The
-//! scan therefore skipped the first and matched at the second, and returned a
-//! prefix that ended *between the halves of one character*. Decoding it
-//! replaced the orphan, so `stem` handed back a `U+FFFD` the caller never
-//! supplied: `stem("ео𝟎етост")` was `"ео\u{FFFD}"` where the algorithm says
-//! `"ео"`. A `char` buffer has no such state to be in, which is the concrete
-//! form the unit correction takes here.
+//! where a non-vowel is followed by a run of vowels. Under a UTF-16 reading a
+//! single astral character is **two** non-vowel positions — a high surrogate
+//! whose successor is also a non-vowel, and a low surrogate — so the scan would
+//! skip the first, match at the second, and return a prefix ending *between the
+//! halves of one character*. Decoding that replaces the orphan with `U+FFFD`,
+//! which the caller never supplied: `stem("ео𝟎етост")` is `"ео"`, where
+//! counting code units would give `"ео\u{FFFD}"`. A `char` buffer has no such
+//! state to be in.
 //!
 //! The two absolute lengths in [`derivational`] — `len >= 4` and `len >= 3` —
-//! are now counts of characters. Neither is observable: each guards a test
+//! are counts of characters. Neither is observable: each guards a test
 //! that four (or three) named Cyrillic characters sit at the end of the word,
 //! which already implies the length, so the guard is a bounds check rather
 //! than a rule.
@@ -89,10 +87,9 @@ fn is_vowel(c: char) -> bool {
 /// Whether `c` is one of the characters [`gate_uk`] accepts.
 ///
 /// The gate is stated over Basic Multilingual Plane code points and nothing in
-/// it reaches `U+1D80`, so scanning characters and scanning UTF-16 code units
-/// accept exactly the same tokens: a BMP character *is* its own code unit, and
-/// an astral character is neither in the set itself nor are the two surrogates
-/// it used to be scanned as.
+/// it reaches `U+1D80`, so an astral character is never a Ukrainian letter:
+/// neither the character itself nor either half of the surrogate pair encoding
+/// it is in the set.
 #[inline]
 fn is_ukrainian_letter(c: char) -> bool {
     (c as u32) < 0x1_0000 && gate_uk(c as u16)
@@ -268,7 +265,8 @@ impl PorterStemmerUk {
         // branch is taken instead of being cloned up front.
         let derived =
             if r2_tail.is_some_and(|tail| !tail.is_empty() && derivational(tail).is_some()) {
-                // As in Russian, the reference throws when this second call is null.
+                // As in Russian, the guard passing does not guarantee this
+                // second search hits; the string is kept as it stands.
                 derivational(&result).unwrap_or(result)
             } else {
                 result

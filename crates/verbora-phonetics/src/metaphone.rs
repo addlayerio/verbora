@@ -11,7 +11,7 @@ use crate::letters::{is_ascii_vowel, letters_into};
 /// per-letter rewrite rules plus four word-initial exceptions; Verbora
 /// implements that table and nothing else. Where the article is silent —
 /// notably on what to do with a character outside `A`–`Z` — Verbora states its
-/// own rule below rather than importing one from another implementation.
+/// own rule below, and the contract section says which rules those are.
 ///
 /// # The contract
 ///

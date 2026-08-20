@@ -82,9 +82,9 @@
 //!
 //! **Maximum entropy is the exception, and deliberately so.** No
 //! [`MaxEntClassifier`] or [`MaxEntModel`] API returns a `NaN`, an infinity, or
-//! a sentinel standing in for one — see that module's own "No `NaN`, no
-//! infinities, no sentinels" section for the four facts that make it
-//! structural. The rows above are about Bayes and logistic regression.
+//! a sentinel standing in for one — see [`MaxEntClassifier`]'s own "No `NaN`,
+//! no infinities, no sentinels" section for what makes it structural rather
+//! than aspirational. The rows above are about Bayes and logistic regression.
 //!
 //! The consequence worth stating plainly: **a `NaN` score can be returned as
 //! the winner.** The comparator treats an unorderable difference as a tie and
@@ -155,27 +155,22 @@
 //! stamp is still written and checked, because a caller should not have to know
 //! which classifier wrote a file to know whether it is safe to read.
 //!
-//! # Maximum entropy
+//! # Choosing among the three
 //!
-//! [`MaxEntClassifier`] models `p(outcome | context)` where a context is a
-//! **set of contextual predicates the caller supplies** — not a document this
-//! crate tokenises. Training events go in through [`Sample`]/[`Event`],
-//! [`Gis`] settings control the fit, and [`TrainingReport`] says what it did.
-//! Everything it returns is a probability: the scores over one context are
-//! non-negative and sum to `1`.
-//!
-//! It is owned rather than shared: fitting reads the sample and produces a new
-//! [`MaxEntModel`], mutating nothing the caller still holds and memoising
-//! nothing, so both types are `Send + Sync` and a fitted model can be shared
-//! across threads behind an `Arc` with no lock. Refitting always restarts from
-//! the uniform model, so training twice over an unchanged sample is
-//! bit-identical and training after the sample grew fits the sample as it now
-//! stands.
-//!
-//! The maximum-entropy contract — the model, the GIS update, why there is no
-//! stored slack feature, what convergence is measured on, and the summation
-//! orders — is stated in full on the [`MaxEntClassifier`] module's own
-//! documentation.
+//! [`BayesClassifier`] and [`LogisticRegressionClassifier`] both learn from
+//! *documents*: hand them text and a label and this crate's tokenizer, case
+//! fold and stemmer turn it into features for you. [`MaxEntClassifier`] is the
+//! odd one out — it never touches this crate's tokenizer, stemmer or case
+//! fold, because a context is **whatever set of predicates the caller
+//! supplies**, training events go in through [`Sample`]/[`Event`], and
+//! everything it returns is a probability: the scores over one context are
+//! non-negative and sum to `1`. That makes it the right choice whenever the
+//! useful signal is not "which stems appeared" — surrounding words,
+//! part-of-speech tags or other structural flags the caller already knows
+//! about, several correlated outcomes drawn from one predicate set, or a
+//! vocabulary too unstructured for a stem count to represent well.
+//! [`MaxEntClassifier`]'s own documentation states the model, the training
+//! objective and its guarantees in full.
 //!
 //! # Limits
 //!

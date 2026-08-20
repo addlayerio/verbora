@@ -60,7 +60,7 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 use verbora_distance::damerau_levenshtein;
 
-use crate::deletions::{distinct_deletions, to_scalars};
+use crate::deletions::{for_each_deletion, to_scalars};
 use crate::neighbor::Neighbor;
 
 /// Returned by [`DeletionIndex::neighbors`] when the requested distance is
@@ -127,12 +127,17 @@ impl DeletionIndexBuilder {
             return;
         }
         let index = self.words.len() as u32;
-        for variant in distinct_deletions(&units, self.max_distance) {
-            self.deletions
-                .entry(variant.into_boxed_slice())
-                .or_default()
-                .push(index);
-        }
+        let deletions = &mut self.deletions;
+        for_each_deletion(&units, self.max_distance, |variant| {
+            let bucket = deletions.entry(variant.into()).or_default();
+            // A word that repeats a scalar reaches one sequence by more than
+            // one position set, and generation does not dedupe. This word is
+            // the bucket's most recent writer, so checking the tail keeps the
+            // bucket free of repeats.
+            if bucket.last() != Some(&index) {
+                bucket.push(index);
+            }
+        });
         self.words.push(word.into());
     }
 
@@ -246,11 +251,11 @@ impl DeletionIndex {
         let units = to_scalars(query);
 
         let mut candidates: Vec<u32> = Vec::new();
-        for variant in distinct_deletions(&units, max_distance) {
-            if let Some(indices) = self.deletions.get(variant.as_slice()) {
+        for_each_deletion(&units, max_distance, |variant| {
+            if let Some(indices) = self.deletions.get(variant) {
                 candidates.extend_from_slice(indices);
             }
-        }
+        });
         // Sorting by index is what makes the documented order *insertion*
         // order rather than "whichever deletion sequence happened to hash
         // first" — and the dedup that follows needs the sort anyway.

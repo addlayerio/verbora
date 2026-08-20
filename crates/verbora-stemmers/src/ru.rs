@@ -1,23 +1,22 @@
-//! The Russian stemmer, ported from
-//! The reference `porter_stemmer_ru`.
+//! The Russian stemmer.
 //!
-//! # Regex shapes, and why they are hand-written
+//! # Rule shapes, and why they are hand-written scans
 //!
-//! Every rule is `pattern.test(token)` followed by `token.replace(pattern, repl)`
-//! on an anchored alternation. Three shapes appear, and each reduces to a scan:
+//! Every rule is an anchored alternation, tested and then applied. Three shapes
+//! appear, and each reduces to a scan:
 //!
-//! | the reference | What it computes |
+//! | Rule shape | What it computes |
 //! |---|---|
 //! | `/(a\|bb\|ccc)$/ → ''` | delete the **longest** listed suffix |
 //! | `/([ая])(ла\|на\|…)$/ → '$1'` | delete the longest listed suffix that is preceded by `а` or `я`, keeping that letter |
 //! | `/(н)н/g → '$1'` | collapse every `нн` to `н`, left to right, non-overlapping |
 //!
-//! The first shape is *longest*, not first-listed, even though the alternation is
-//! ordered: the engine takes the earliest start position at which some
+//! The first shape is *longest*, not first-listed, even though the alternation
+//! is ordered: a regex takes the earliest start position at which some
 //! alternative reaches `$`, and since every alternative is a distinct literal
-//! anchored at the end, the earliest start is the longest suffix. Porting the
-//! order as if it were first-match — the Italian convention — would give
-//! `"важностию"` a different stem.
+//! anchored at the end, the earliest start is the longest suffix. Reading the
+//! order as first-match — the Italian convention — would give `"важностию"` a
+//! different stem.
 //!
 //! `stem` computes the first two shapes with one [`crate::among`] binary
 //! search per rule group instead of a linear scan per alternative
@@ -25,16 +24,16 @@
 //! `find_among_b` returns natively, and the preceded-by-`[ая]` shape is the
 //! link-walk with a condition ([`crate::among::AmongTable::longest_where`]).
 //! Every rule is a tail truncation of RV, so the whole pipeline runs as one
-//! shrinking end cursor over a single buffer — the per-rule `to_vec()`
-//! snapshots are gone. The pre-conversion implementation is kept in this
-//! module's tests as the byte-exactness oracle.
+//! shrinking end cursor over a single buffer, with no per-rule `to_vec()`
+//! snapshot. The linear-scan form is kept in this module's tests as a
+//! differential oracle.
 //!
-//! # `||` is falsy, not null-ish
+//! # Two rules fall back on an empty result
 //!
-//! `reflexive(RV) || RV` and `superlative(x) || x` fall back when the rule
-//! returns the **empty string** as well as when it returns `null`. Stemming
-//! `"ся"` therefore returns `"ся"` rather than `""`, and a naive `??` port
-//! changes it. Both sites are marked in the code.
+//! The reflexive and superlative rules fall back to their input when the rule
+//! leaves the **empty string**, not only when it fails to match. Stemming
+//! `"ся"` therefore returns `"ся"` rather than `""`. Both sites are marked in
+//! the code.
 //!
 //! # `.` does not match a line terminator
 //!
@@ -42,15 +41,17 @@
 //! `\r`, U+2028 or U+2029 cannot match it at any offset, so the whole algorithm
 //! is skipped and the lowercased, `ё`-folded token is returned unchanged.
 //!
-//! # One unreachable `TypeError`
+//! # The second derivational test is guarded on the original word
 //!
-//! When R2's tail ends in `ост`/`ость` but the working string does not, the
-//! reference assigns `null` to `derivationalResult` and then calls `.replace` on
-//! it, which throws. No word in the reference's corpora, and none of 200,000
-//! randomised Cyrillic probes, reaches it — the `ь` that `noun` always strips
-//! from `ость` leaves `ост` behind, which matches. Rather than panic on input no
-//! caller can construct, this port keeps the un-derivationalised string. See
-//! `deviations` in the crate's parity report.
+//! The derivational rule is *selected* by looking at R2's tail of the word as
+//! it was marked, and then *applied* to the shrunken working string. Those two
+//! can disagree: R2's tail can end in `ост`/`ость` when the working string no
+//! longer does. Verbora's contract for that case is to keep the
+//! un-derivationalised string rather than fail — the alternative is an error
+//! return on an input nobody can actually construct. It is not reachable in
+//! practice: the `ь` that the noun rule always strips from `ость` leaves `ост`
+//! behind, which matches, and 200,000 randomised Cyrillic probes find no word
+//! that separates the two.
 //!
 //! # The text unit
 //!
@@ -69,8 +70,8 @@
 //! marked regions. Re-indexing the buffer moves both sides of each of those by
 //! the same amount, so every one of them answers alike. There is no absolute
 //! length gate anywhere in the algorithm — no `if rv > 3`, no minimum word
-//! length — which is exactly what the other Snowball ports have and Russian
-//! does not. `an_astral_character_cannot_move_a_russian_answer` enumerates
+//! length — which is exactly what the other Snowball stemmers here have and
+//! Russian does not. `an_astral_character_cannot_move_a_russian_answer` enumerates
 //! that claim rather than resting on it.
 
 use std::borrow::Cow;
@@ -103,12 +104,9 @@ fn is_vowel(c: char) -> bool {
 /// Whether `c` is one of the characters [`gate_ru`] accepts.
 ///
 /// The gate is stated over Basic Multilingual Plane code points and nothing in
-/// it reaches `U+1D80`, so scanning characters and scanning UTF-16 code units
-/// accept exactly the same tokens: a BMP character *is* its own code unit, and
-/// an astral character is neither in the set itself nor are the two surrogates
-/// it used to be scanned as. See `crate::data::gates`' own "Unit independence"
-/// note; the scan is per character because that is the crate's unit, not
-/// because the answer moved.
+/// it reaches `U+1D80`, so an astral character is never a Russian letter:
+/// neither the character itself nor either half of the surrogate pair encoding
+/// it is in the set. See `crate::data::gates`' own "Unit independence" note.
 #[inline]
 fn is_russian_letter(c: char) -> bool {
     (c as u32) < 0x1_0000 && gate_ru(c as u16)
@@ -118,11 +116,13 @@ fn is_russian_letter(c: char) -> bool {
 // Shared scanners, also used by the Ukrainian stemmer
 // ---------------------------------------------------------------------------
 
-/// The four code points a JavaScript `.` refuses to match.
+/// The four code points a regex `.` refuses to match.
 ///
-/// Retained because the region split is transcribed from a regular expression
-/// that carried this restriction; it has no basis in the Snowball Russian
-/// algorithm, which knows nothing about line terminators. See
+/// The region split is specified as a regular expression, and this restriction
+/// comes with it: a token containing one of these characters does not match the
+/// split at any offset, so the algorithm is skipped. Snowball's own Russian
+/// knows nothing about line terminators; Verbora keeps the restriction because
+/// the split it ships is the regex one and the two must agree. See
 /// [`split_at_first_vowel`].
 #[inline]
 pub(crate) fn is_line_terminator(c: char) -> bool {
@@ -218,9 +218,9 @@ pub(crate) fn or_falsy(value: Option<Vec<char>>, fallback: &[char]) -> Vec<char>
 // ---------------------------------------------------------------------------
 //
 // Every rule reads `t[rv..end]` and, on a match, moves `end` left. The
-// `Option<usize>`/`or_falsy` shapes of the reference are preserved exactly:
-// `None` is "the rule's regex did not match", `Some(rv)` is "it matched and
-// left the empty string" — the two outcomes the falsy fallbacks distinguish.
+// `Option<usize>` shape keeps the two outcomes the fallbacks distinguish
+// apart: `None` is "the rule's pattern did not match", `Some(rv)` is "it
+// matched and left the empty string".
 
 /// The sorted search tables, built once from the rule tables below.
 struct RuTables {
@@ -255,10 +255,10 @@ static TABLES: LazyLock<RuTables> = LazyLock::new(|| RuTables {
     derivational: AmongTable::build(DERIVATIONAL),
 });
 
-/// `perfectiveGerund` over `t[rv..end]`: the new end, or `None`.
+/// The perfective-gerund rule over `t[rv..end]`: the new end, or `None`.
 fn perfective_gerund_end(t: &[char], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     // `/[ая]в(ши|шись)$/` first, unconditionally preferred over the plain
-    // alternatives when it matches — the reference tests it first.
+    // alternatives when it matches: it is the first rule of the group.
     //
     // `end - n >= rv + 2` is `end - n - 2 >= rv`: the position of the `[ая]`
     // must lie inside RV. Both sides are positions in `t`, so the test reads
@@ -361,7 +361,8 @@ impl PorterStemmerRu {
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        // `.toLowerCase().replace(/ё/g, 'е')` — global, so every ё folds.
+        // Lowercased, with every `ё` folded to `е` — every occurrence, not
+        // just the first.
         // The lowered characters go straight into a stack buffer: Cyrillic
         // lowercasing through `String` was measured at 82 µs per 1024 bench
         // words, over a third of this stemmer's total.
@@ -403,9 +404,9 @@ impl PorterStemmerRu {
         }
 
         // The guard reads R2's tail *of the original word*, not the shrunken
-        // working string — the regions were marked once. The reference throws
-        // when this second `derivational` misses; keeping the string as-is is
-        // the documented divergence (see the module docs).
+        // working string — the regions were marked once. When the guard passes
+        // but this second search misses, the string is kept as it stands (see
+        // the module docs).
         if r2.is_some_and(|r2s| full > r2s && tb.derivational.longest(t, full, r2s) > 0) {
             let d = tb.derivational.longest(t, end, rv);
             if d > 0 {
@@ -588,7 +589,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-find_among implementation, verbatim.
+    // Differential oracle: the same rules written as linear alternation scans.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;

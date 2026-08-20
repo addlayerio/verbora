@@ -1,4 +1,4 @@
-//! The Carry French stemmer, ported from the reference `Carry` module.
+//! The Carry French stemmer.
 //!
 //! Three passes over a suffix table. Each pass tries the **longest** suffix
 //! first, and within a suffix length tries the "minimum radix 1" table before the
@@ -6,42 +6,31 @@
 //! the number of vowel-to-consonant transitions — exceeds that minimum. If a
 //! suffix is present in the first table but fails the size test, the second table
 //! is tried for the **same** suffix before moving on to a shorter one. That is
-//! why `acteur` stems to `ac` via `act` rather than directly: `wordSize("ac")` is
-//! 1, which is not greater than 1.
+//! why `acteur` stems to `ac` via `act` rather than directly: the word size of
+//! `"ac"` is 1, which is not greater than 1.
 //!
 //! Two details a reader will not guess:
 //!
-//! * The suffix loop starts at `word.length - 1`, so the whole word is never a
-//!   candidate suffix and a word of one character or less is never transformed.
+//! * The suffix loop starts one character short of the whole word, so the whole
+//!   word is never a candidate suffix and a word of one character or less is
+//!   never transformed.
 //! * The input is **not** lowercased, so the all-lowercase tables never fire on
-//!   `ÉTUDE` — while `getWordSize`'s vowel regex *does* carry `/i`, so uppercase
-//!   letters still count as vowels. `stem("étude")` is `"étud"`; `stem("ÉTUDE")`
-//!   is `"ÉTUDE"`.
+//!   `ÉTUDE` — while the vowel class the word size counts over *is*
+//!   case-insensitive, so uppercase letters still count as vowels.
+//!   `stem("étude")` is `"étud"`; `stem("ÉTUDE")` is `"ÉTUDE"`.
 //!
 //! # The unit
 //!
 //! Lengths and suffix boundaries here are **Unicode scalar values**, the unit
-//! [`crate::units`] states for the whole crate. Carry was already the closest
-//! of the sixteen stemmers to that reading — it slices at `char_indices`
-//! offsets and counts transitions per `chars()` — so converting it was a
-//! matter of saying so and of replacing the one remaining UTF-16 scan, the
-//! gate. Both of the constructs that touched code units are shown below to
-//! answer identically under either reading, so this file's stems did not
-//! change: it is the reasoning that moved onto firm ground, not the behaviour.
+//! [`crate::units`] states for the whole crate: the word size counts
+//! transitions per `chars()`, suffixes are cut at `char_indices` offsets, and
+//! the gate scans characters. The vowel class tops out at `U+0153` and the
+//! gate at `U+00FC`, so no astral character is ever a vowel or a French
+//! letter — a fact the suite pins over every scalar value there is.
 //!
-//! # Divergence: `Object.prototype`
-//!
-//! The reference looks suffixes up with `transformations[suffix]` on a plain
-//! object, so twelve suffixes reach `Object.prototype` and return a function or
-//! `Object.prototype` itself, which is then string-concatenated:
-//! `stem("xxconstructor")` is `"xxfunction Object() { [native code] }"`.
-//! The twelve are `constructor`, `__proto__`, `toString`, `valueOf`,
-//! `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`, `toLocaleString`,
-//! `__defineGetter__`, `__defineSetter__`, `__lookupGetter__` and
-//! `__lookupSetter__`. The strings are the reference engine's `Function.prototype.toString` output
-//! and are not reproducible portably, so this port returns the ordinary stem
-//! instead (`"xxconstructo"`). The parity suite records the reference values and
-//! asserts that this is the *only* place the two disagree.
+//! Suffix lookup is a binary search of a sorted, fixed table, so only the
+//! suffixes actually listed in it are ever transformed: `stem("xxconstructor")`
+//! is `"xxconstructo"`, the ordinary stem, and nothing about a name is special.
 
 use std::borrow::Cow;
 
@@ -63,16 +52,14 @@ use crate::stopwords::Language;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CarryStemmerFr;
 
-/// `getWordSize` — the count of vowel-to-consonant transitions.
+/// The word size: the count of vowel-to-consonant transitions.
 ///
-/// Reads the module-level `defaultConf.vowels`, never the instance's `conf`;
-/// that latent bug is unobservable because only one instance is ever built.
+/// The vowel class is fixed for the whole stemmer and case-insensitive; there
+/// is nothing per-instance to configure.
 ///
-/// The scan is per character, which is the unit this crate measures in. It was
-/// already the answer under the code-unit reading too: Carry's vowel set tops
-/// out at `œ` (`U+0153`), so an astral character is not a vowel, and neither is
-/// either half of the surrogate pair it used to decompose into — and a run of
-/// non-vowels contributes one transition however long it is.
+/// The scan is per character, which is the unit this crate measures in. Carry's
+/// vowel set tops out at `œ` (`U+0153`), so an astral character is a consonant,
+/// and a run of consonants contributes one transition however long it is.
 fn word_size(word: &str) -> usize {
     let mut prev_vowel = false;
     let mut groups = 0;
@@ -99,11 +86,8 @@ fn is_vowel(c: char) -> bool {
 /// Whether `c` is one of the letters [`gate_fr`] accepts.
 ///
 /// The gate is stated over BMP code points and nothing in it reaches `U+00FD`,
-/// so scanning characters and scanning UTF-16 code units accept exactly the
-/// same tokens: a BMP character *is* its own code unit, and an astral
-/// character is neither in the set itself nor are the two surrogates it used
-/// to be scanned as. The scan is per character because that is the crate's
-/// unit, not because the answer moved.
+/// so an astral character is never a French letter: neither the character
+/// itself nor either half of the surrogate pair encoding it is in the set.
 #[inline]
 fn is_french_letter(c: char) -> bool {
     (c as u32) < 0x1_0000 && gate_fr(c as u16)
@@ -117,13 +101,13 @@ fn lookup(table: &[(&str, &'static str)], suffix: &str) -> Option<&'static str> 
         .map(|i| table[i].1)
 }
 
-/// `tranform(word, stepConf)` — one of the three passes.
+/// One of the three passes.
 fn transform(word: &str, step: &[&[(&str, &'static str)]]) -> Option<String> {
     // Character offsets, so a suffix boundary is a scalar-value boundary and
     // never splits a character.
     let offsets: Vec<usize> = word.char_indices().map(|(i, _)| i).collect();
     let n = offsets.len();
-    // `for (let suffixLength = word.length - 1; suffixLength > 0; …)`
+    // The whole word is never a candidate suffix: the loop starts one short.
     for suffix_len in (1..n).rev() {
         let cut = offsets[n - suffix_len];
         let suffix = &word[cut..];
@@ -245,15 +229,15 @@ mod tests {
     }
 
     #[test]
-    fn prototype_names_get_the_ordinary_stem() {
-        // Documented divergence: the reference splices the reference engine's function source in here.
+    fn property_shaped_names_get_the_ordinary_stem() {
+        // Suffix lookup is a binary search of a sorted table, so a name is only
+        // ever transformed when the table actually lists the suffix.
         assert_eq!(s("xxconstructor"), "xxconstructo");
-        // No Carry suffix matches any tail of "__proto__", so the whole word
-        // survives; the reference instead returns "xx[object Object]".
+        // No Carry suffix matches any tail of "__proto__", so the word survives.
         assert_eq!(s("xx__proto__"), "xx__proto__");
         assert_eq!(s("xxvalueOf"), "xxvalueOv");
-        // A bare property name never leaks even in the reference: the suffix loop
-        // starts at `length - 1`, so the whole word is never looked up.
+        // The suffix loop starts at `length - 1`, so the whole word is never
+        // looked up at all.
         assert_eq!(s("__proto__"), "__proto__");
         assert_eq!(s("valueOf"), "valueOv");
     }
@@ -298,13 +282,12 @@ mod tests {
         }
     }
 
-    /// The two constructs that used to be stated in UTF-16 code units answer
-    /// identically over characters, for every scalar value there is.
+    /// The two character scans are unit-independent, for every scalar value
+    /// there is.
     ///
-    /// This is the whole justification for converting this file without
-    /// changing a stem: `is_carry_vowel` tops out at `U+0153` and `gate_fr` at
-    /// `U+00FC`, so neither an astral character nor either half of the
-    /// surrogate pair it encodes to is ever admitted.
+    /// `is_carry_vowel` tops out at `U+0153` and `gate_fr` at `U+00FC`, so
+    /// neither an astral character nor either half of the surrogate pair it
+    /// encodes to is ever admitted by either one.
     #[test]
     fn the_character_scans_agree_with_the_code_unit_scans() {
         let mut buf = [0u16; 2];

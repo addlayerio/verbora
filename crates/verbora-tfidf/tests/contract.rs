@@ -482,3 +482,71 @@ fn a_utf8_file_can_be_ingested_and_a_non_utf8_one_cannot() {
 
     std::fs::remove_dir_all(&dir).expect("clean up");
 }
+
+/// A panic in a caller-supplied iterator must not corrupt the *next* document.
+///
+/// `add_terms` drives an iterator the crate does not own; when that iterator
+/// panics part-way, the reusable ingest scratch has already recorded the terms
+/// seen so far. If those slots are not restored, the next document's counter
+/// mistakes them for its own entries and every count it produces is wrong,
+/// with no error and no diagnostic — see `document.rs`'s scratch invariant.
+#[test]
+fn a_panic_in_a_caller_supplied_iterator_leaves_the_next_document_correct() {
+    struct Exploding(u32);
+    impl Iterator for Exploding {
+        type Item = &'static str;
+        fn next(&mut self) -> Option<&'static str> {
+            self.0 += 1;
+            match self.0 {
+                1 => Some("a"),
+                _ => panic!("a caller's iterator may panic"),
+            }
+        }
+    }
+
+    let mut corpus = TfIdf::new();
+    corpus.add_terms(["a"]);
+
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        corpus.add_terms(Exploding(0));
+    }));
+    assert!(unwound.is_err(), "the iterator's panic propagates");
+
+    let i = corpus.add_terms(["b", "a", "a"]);
+    assert_eq!(corpus.term_count(i, "a"), Some(2));
+    assert_eq!(corpus.term_count(i, "b"), Some(1));
+    assert_eq!(corpus.document(i).expect("just added").total_terms(), 3);
+}
+
+/// The same guarantee for the other entry point that runs foreign code.
+///
+/// A [`Tokenize`] that panics does not currently interrupt counting — the
+/// analyzer collects every token before the first is counted — so this document
+/// is abandoned before a single term is recorded. The assertion is here because
+/// that ordering lives in another module: if it ever changes, the corpus must
+/// still come out of the unwind correct, not merely usable.
+#[test]
+fn a_panic_in_a_custom_tokenizer_leaves_the_next_document_correct() {
+    #[derive(Debug)]
+    struct Exploding;
+    impl Tokenize for Exploding {
+        fn tokenize_into(&self, text: &str, out: &mut Vec<String>) {
+            out.push(text.to_owned());
+            panic!("a caller's tokenizer may panic");
+        }
+    }
+
+    let mut corpus = TfIdf::with_analyzer(Analyzer::new().with_tokenizer(Arc::new(Exploding)));
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        corpus.add_document("a");
+    }));
+    assert!(unwound.is_err(), "the tokenizer's panic propagates");
+    assert_eq!(corpus.len(), 0, "the abandoned document was never pushed");
+
+    // The corpus is still usable, and counts the next document correctly —
+    // through the path that does not run the exploding tokenizer.
+    let i = corpus.add_terms(["b", "a", "a"]);
+    assert_eq!(corpus.term_count(i, "a"), Some(2));
+    assert_eq!(corpus.term_count(i, "b"), Some(1));
+    assert_eq!(corpus.document(i).expect("just added").total_terms(), 3);
+}

@@ -1,39 +1,40 @@
-//! The Norwegian stemmer, ported from
-//! The reference `porter_stemmer_no`.
+//! The Norwegian stemmer.
 //!
 //! # Not the Snowball algorithm
 //!
-//! This is Kristoffer Brabrand's own reading of it, and it differs from Snowball
-//! proper in one structural way that dominates the output: [`PorterStemmerNo::step1`]
-//! runs 1a, 1b and 1c **independently on the same input** and keeps whichever
-//! result is shortest, rather than applying them in sequence. Ties go to the
-//! *later* step — `a.len() < b.len()` is strict — so 1c beats 1b beats 1a
-//! whenever two agree.
+//! Verbora's Norwegian stemmer differs from Snowball's Norwegian in one
+//! structural way that dominates the output: [`PorterStemmerNo::step1`] runs
+//! 1a, 1b and 1c **independently on the same input** and keeps whichever result
+//! is shortest, rather than applying them in sequence. Ties go to the *later*
+//! step — `a.len() < b.len()` is strict — so 1c beats 1b beats 1a whenever two
+//! agree. That is the contract this crate ships and the tests pin; a caller who
+//! needs Snowball's sequential Norwegian needs a different stemmer.
 //!
-//! # `getR1` returns three different things
+//! # R1 has three outcomes, not two
 //!
-//! `/[aeiouyæåø][^aeiouyæåø]([A-Za-z0-9_æøåÆØÅäÄöÖüÜ]+)/` either fails (`null`),
-//! matches at index 0 (R1 becomes `token.slice(3)`, which is `""` for a
-//! three-letter word), or matches later (R1 is the captured run). Every step then
-//! opens with `if (!r1) return token`, and `""` is falsy in the reference — so
-//! "matched at index 0 on a short word" and "did not match at all" take the same
-//! branch, while `null` and `""` are distinguishable through the exported
-//! `getR1`. [`PorterStemmerNo::get_r1`] therefore returns `Option<String>` and
-//! the steps test `is_none_or(str::is_empty)`.
+//! R1 is found with `/[aeiouyæåø][^aeiouyæåø]([A-Za-z0-9_æøåÆØÅäÄöÖüÜ]+)/`,
+//! which either fails, matches at index 0 (R1 is then the token from position
+//! 3, which is `""` for a three-letter word), or matches later (R1 is the
+//! captured run). Every step bails out on both the failure and the empty
+//! string, so "matched at index 0 on a short word" and "did not match at all"
+//! take the same branch — but they are distinguishable through
+//! [`PorterStemmerNo::get_r1`], which returns `Option<String>`: `None` for no
+//! match, `Some("")` for the short-word case. The steps test
+//! `is_none_or(str::is_empty)`.
 //!
 //! Note also that the captured run is **not** guaranteed to reach the end of the
-//! token: the class excludes `-`, so `getR1("ab-cder")` is `null` and R1 for a
+//! token: the class excludes `-`, so `get_r1("ab-cder")` is `None` and R1 for a
 //! hyphenated word stops at the hyphen. The suffix found in R1 is then removed
 //! from the *token*, which silently does nothing when the two ends disagree.
 //!
 //! # Longest suffix, not first alternative
 //!
-//! Each step matches `/(a|e|ede|…)$/` against R1. The engine takes the earliest
-//! start position at which some alternative reaches `$`; because every
-//! alternative is a distinct literal and all must end at `$`, that is exactly
-//! "the longest suffix of R1 that appears in the list". The order inside the
-//! alternation is therefore not load-bearing here, which is worth stating because
-//! it *is* load-bearing in the Italian and Portuguese tables.
+//! Each step matches `/(a|e|ede|…)$/` against R1: the earliest start position at
+//! which some alternative reaches `$`. Because every alternative is a distinct
+//! literal and all must end at `$`, that is exactly "the longest suffix of R1
+//! that appears in the list". The order inside the alternation is therefore not
+//! load-bearing here, which is worth stating because it *is* load-bearing in the
+//! Italian and Portuguese tables.
 //!
 //! # The unit
 //!
@@ -156,8 +157,8 @@ fn longest_listed_suffix<'s>(w: &[char], alternatives: &[&'s str]) -> Option<&'s
 
 /// Removes `suffix` from the end of `w`, if it is there.
 ///
-/// `token.replace(new RegExp(m + '$'), '')` in the reference — which does
-/// nothing when R1's end and the token's end disagree, as they can.
+/// This does nothing when R1's end and the token's end disagree, as they can:
+/// the suffix is found in R1 but removed from the whole token.
 fn strip(w: &[char], suffix: &str) -> Vec<char> {
     if ends_with(w, suffix) {
         w[..w.len() - slen(suffix)].to_vec()
@@ -166,7 +167,7 @@ fn strip(w: &[char], suffix: &str) -> Vec<char> {
     }
 }
 
-/// `getR1` as a character range into `t`, or `None` for the reference's `null`.
+/// R1 as a character range into `t`, or `None` when the pattern does not match.
 ///
 /// The range form is what `stem`'s `find_among` searches consume: R1 is an
 /// *interior* slice of the token (the capture class excludes `-`, so it can
@@ -177,14 +178,13 @@ fn r1_range(t: &[char]) -> Option<(usize, usize)> {
     R1Scan::of(t).at_len(t.len())
 }
 
-/// A scan of `getR1`'s match, kept so the later steps can re-derive R1 after
-/// a truncation instead of rescanning the word.
+/// A scan of R1's match, kept so the later steps can re-derive R1 after a
+/// truncation instead of rescanning the word.
 ///
 /// # Why this is exact
 ///
-/// The reference calls `getR1(token)` afresh in every step, and steps 2 and 3
-/// only ever *truncate* — so the question is what a rescan of a prefix would
-/// return. The match position is the first `i` with
+/// Every step is specified to compute R1 afresh, and steps 2 and 3 only ever
+/// *truncate* — so the question is what a rescan of a prefix would return. The match position is the first `i` with
 /// `vowel(t[i]) && !vowel(t[i+1]) && r1char(t[i+2])`; truncating to `len'`
 /// changes none of those three characters for any `i` with `i + 2 < len'`, and
 /// removes exactly the positions with `i + 2 >= len'` from consideration. So
@@ -199,7 +199,7 @@ fn r1_range(t: &[char]) -> Option<(usize, usize)> {
 /// invalidates this and rescans; `stem` marks those sites.
 #[derive(Clone, Copy)]
 struct R1Scan {
-    /// The match position, or `None` for the reference's `null`.
+    /// The match position, or `None` when the pattern does not match.
     index: Option<usize>,
     /// R1's start, already carrying the `index == 0` special case.
     start: usize,
@@ -219,9 +219,9 @@ impl R1Scan {
             };
         };
         if index == 0 {
-            // `preR1Length = index + 2` is 2, which is `< 3`, so the reference
-            // substitutes `token.slice(3)` — the empty string for a
-            // three-character token.
+            // The two characters before R1 are fewer than three, so R1 is
+            // taken from position 3 — the empty string for a three-character
+            // token.
             return R1Scan {
                 index: Some(0),
                 start: 3,
@@ -238,7 +238,7 @@ impl R1Scan {
         }
     }
 
-    /// What `getR1` would return for the same word truncated to `len`
+    /// What an R1 scan would return for the same word truncated to `len`
     /// characters.
     #[inline]
     fn at_len(self, len: usize) -> Option<(usize, usize)> {
@@ -250,7 +250,7 @@ impl R1Scan {
     }
 }
 
-/// `getR1` over characters. `None` is the reference's `null`.
+/// R1 over characters. `None` when the pattern does not match.
 ///
 /// Returns a slice borrowed from `t` rather than an owned snapshot: every
 /// call site either only checks [`falsy`] or feeds the result straight into
@@ -262,23 +262,22 @@ fn r1_units(t: &[char]) -> Option<&[char]> {
     r1_range(t).map(|(start, end)| &t[start..end])
 }
 
-/// Whether a step should bail out: `if (!r1) return token`, where `""` is falsy.
+/// Whether a step should bail out: no R1 match, or an empty R1.
 #[inline]
 fn falsy(r1: Option<&[char]>) -> bool {
     r1.is_none_or(<[char]>::is_empty)
 }
 
 /// The sorted search tables `stem` uses, built once from the alternations
-/// below. The per-step public methods keep the linear scans — they are the
-/// reference-shaped API and the test oracle — while `stem` routes the same
-/// tables through the `find_among` binary search
-/// (`docs/PERFORMANCE_GAPS.md` entry 34).
+/// below. The per-step public methods keep the linear scans — they are both
+/// public API and the test oracle — while `stem` routes the same tables through
+/// the `find_among` binary search (`docs/PERFORMANCE_GAPS.md` entry 34).
 ///
 /// # Why only two tables for four alternations
 ///
-/// Steps 1a and 1c interrogate the *same* region of the *same* word — the
-/// reference recomputes R1 for each, but both run on step 1's untouched
-/// input — so their tables are merged and one search answers both, the link
+/// Steps 1a and 1c interrogate the *same* region of the *same* word — R1 is
+/// recomputed for each, but both run on step 1's untouched input — so their
+/// tables are merged and one search answers both, the link
 /// walk recovering each alternation's own longest match (see
 /// [`crate::among::UnionTable`]). Steps 2 and 3 run after step 1 has already
 /// truncated, so they cannot join that search; step 2's `(dt|vt)` is instead
@@ -332,10 +331,10 @@ impl PorterStemmerNo {
         Self
     }
 
-    /// `getR1`: the token after the first non-vowel that follows a vowel.
+    /// R1: the token after the first non-vowel that follows a vowel.
     ///
-    /// `None` is the reference's `null`; `Some("")` is the distinct outcome of
-    /// matching at index 0 on a token shorter than four characters.
+    /// `None` means the pattern did not match; `Some("")` is the distinct
+    /// outcome of matching at index 0 on a token shorter than four characters.
     #[allow(
         clippy::unused_self,
         reason = "every stemmer is zero-sized; `stem` is a method so the \
@@ -416,10 +415,10 @@ impl PorterStemmerNo {
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
         // The lowered characters land straight in a stack buffer: no `String`
-        // for `toLowerCase`'s result, no `Vec<char>` for the working copy.
+        // for the lowercased `String`, no `Vec<char>` for the working copy.
         let (mut b, ascii_lower) = Buf::<char>::fill_lowercase_tracked(token);
         let t = b.as_slice();
-        // One scan of `getR1`'s match serves all three steps; see `R1Scan`
+        // One scan of the R1 match serves all three steps; see `R1Scan`
         // for why re-deriving it after a truncation is exact.
         let mut scan = R1Scan::of(t);
 
@@ -672,7 +671,7 @@ impl TokenizeAndStem for PorterStemmerNo {
     // `prepare` is deliberately *not* overridden: the trait's identity default
     // is the specified behaviour. See `PorterStemmerNo`'s own documentation,
     // "`æ`, `ø` and `å` are letters, so nothing is folded", for the reasoning
-    // and for the 8 stop words a fold here used to delete.
+    // and for the 8 stop words a fold here would delete.
 
     fn is_stop_word(word: &str) -> bool {
         Language::No.contains(word)
@@ -713,8 +712,7 @@ impl verbora_core::Stemmer for PorterStemmerNo {
 impl PorterStemmerNo {
     /// Appends a stop word to the **process-global Norwegian list**.
     ///
-    /// `stemmer_no` exposes `addStopWord` and `addStopWords` but no remover;
-    /// the missing methods are missing here too.
+    /// Stop words can be added but not removed.
     pub fn add_stop_word(&self, word: impl Into<String>) {
         Language::No.add(word);
     }
@@ -976,7 +974,7 @@ mod tests {
         assert_eq!(probes, 1_674, "the probe corpus changed size");
     }
 
-    /// `R1Scan::at_len` must agree with a fresh `getR1` of the truncated
+    /// `R1Scan::at_len` must agree with a fresh R1 scan of the truncated
     /// word at every truncation point, which is what lets `stem` scan once.
     #[test]
     fn a_cached_scan_matches_a_rescan_of_every_prefix() {
@@ -995,11 +993,11 @@ mod tests {
         }
     }
 
-    /// The bitmask forms must agree with the literal classes the reference
-    /// writes, for **every** Unicode scalar value — not just the Basic
-    /// Multilingual Plane, since the buffer now holds whole characters and an
-    /// astral one has to answer `false` to both on its own account rather than
-    /// through a surrogate half.
+    /// The bitmask forms must agree with the literal character classes the
+    /// rules are written over, for **every** Unicode scalar value — not just
+    /// the Basic Multilingual Plane, since the buffer holds whole characters
+    /// and an astral one has to answer `false` to both on its own account
+    /// rather than through a surrogate half.
     #[test]
     fn character_classes_match_the_literal_sets() {
         for cp in 0..=0x10_FFFFu32 {
@@ -1142,8 +1140,8 @@ mod tests {
         assert_eq!(PorterStemmerNo::new().step1c("erte"), "erte");
     }
 
-    /// The pre-`find_among` pipeline, which still exists verbatim as the
-    /// public per-step methods: `stem` must equal running them in sequence.
+    /// The per-step public methods, which are the linear-scan form of the same
+    /// rules: `stem` must equal running them in sequence.
     fn oracle(token: &str) -> String {
         let lower = token.to_lowercase();
         let t: Vec<char> = lower.chars().collect();

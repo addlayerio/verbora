@@ -420,12 +420,12 @@ fn encode_branches(token: &str) -> Vec<Branch> {
 /// The ASCII folding list, applied after lowercasing.
 ///
 /// The coding chart is stated over unaccented Latin letters and does not
-/// define a fold; this list is taken verbatim from the machine-readable rule
-/// file distributed with Apache Commons Codec (`dmrules.txt`), which is cited
-/// here as the reference of record for it rather than presented as a chart
-/// rule. It is closed and deliberately not extended: `ü`, `ě`, `œ` and other
-/// plausible candidates are absent there and therefore absent here, encoding
-/// as rule-less (skipped) characters. `every_folded_scalar_reaches_a_bucket`
+/// define a fold at all; this list is taken verbatim from the machine-readable
+/// rule file distributed with Apache Commons Codec (`dmrules.txt`), the only
+/// source of record for one, and is cited as that rather than presented as a
+/// chart rule. It is closed and deliberately not extended: `ü`, `ě`, `œ` and
+/// other plausible candidates are absent there and therefore absent here,
+/// encoding as rule-less (skipped) characters. `every_folded_scalar_reaches_a_bucket`
 /// checks that every entry actually lands on a chart row.
 const fn fold(ch: char) -> char {
     match ch {
