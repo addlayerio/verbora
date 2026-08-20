@@ -376,14 +376,14 @@ impl Trie {
         //
         // It is a *hint* and not a bound, though — `Iterator::size_hint` is
         // explicitly not a correctness contract, and a safe iterator may report
-        // `usize::MAX` — so it is clamped to a count this trie could actually
-        // reach before it reaches an allocator. Beyond `u32::MAX` nodes
-        // `child_or_insert` refuses to allocate an index at all, so reserving
-        // past that is waste by construction rather than by policy.
-        let hint = it
-            .size_hint()
-            .0
-            .min((u32::MAX as usize).saturating_sub(self.nodes.len()));
+        // `usize::MAX`. Clamping to what the trie could *index* is not enough:
+        // `u32::MAX` nodes is tens of gigabytes of real allocation, so an
+        // overstated hint would trade a fast panic for exhausting the machine,
+        // which is strictly worse. A hint only ever buys the first few
+        // doublings — `Vec` growth is amortised past that — so it is clamped to
+        // a size whose reservation is cheap whether or not the hint was honest.
+        const MAX_HINT: usize = 4096;
+        let hint = it.size_hint().0.min(MAX_HINT);
         // Fallible even after the clamp: an honest hint of a billion words is
         // in range and still larger than some machines can hand out, and a
         // pre-size that cannot be honoured must degrade to ordinary growth
