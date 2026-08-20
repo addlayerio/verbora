@@ -15,9 +15,27 @@
 //!   sub-alphabet at three, plus the shapes a binary search is most likely to
 //!   step over: prefix chains, adjacent keys differing in the last byte, the
 //!   first and last lines of the file, and keys far longer than the rest;
-//! * the real Princeton dictionary, when one is installed — it is separately
-//!   licensed and deliberately not vendored, so that section reports itself as
-//!   skipped rather than silently passing.
+//! * the real Princeton dictionary, which is separately licensed and
+//!   deliberately not vendored.
+//!
+//! # Why the real-dictionary tests are `#[ignore]`d
+//!
+//! They cannot pass without data that is not in this repository, and a test
+//! that returns early when its subject is absent is *worse* than no test: it
+//! reports as a pass and is counted as coverage. `#[ignore = "…"]` is the one
+//! mechanism the harness reports itself — every run prints the test name
+//! followed by `ignored` and the reason, and the summary line says `N ignored`
+//! rather than counting it among the passes. A `println!` inside a returning
+//! test says the same thing into a buffer the harness discards unless somebody
+//! remembered `--nocapture`.
+//!
+//! So absence is reported by the harness, and inside the test absence is a
+//! panic: run with `--ignored` and no dictionary, and it fails. There is no
+//! path on which these tests pass without having read Princeton WordNet.
+//!
+//! ```text
+//! WORDNET_DB_PATH=/usr/share/wordnet cargo test -p verbora-wordnet -- --ignored --nocapture
+//! ```
 //!
 //! Counts are printed (`cargo test -p verbora-wordnet -- --nocapture`) so the
 //! size of what was enumerated is visible rather than asserted in the dark.
@@ -321,32 +339,37 @@ fn every_generated_key_is_reachable_from_its_uppercase_and_padded_spellings() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The real dictionary, when installed. Separately licensed (Princeton
-/// University) and not vendored, so this reports itself as skipped rather than
-/// passing silently.
-fn real_dict_dir() -> Option<PathBuf> {
+/// Reason attached to every `#[ignore]` in this file, and the panic message
+/// when one of those tests is run anyway without a dictionary.
+const NEEDS_DICT: &str = "needs the separately-licensed Princeton WordNet database, which is not \
+                          vendored: point $WORDNET_DB_PATH (or $VERBORA_WORDNET_DICT) at a \
+                          directory holding index.noun and its seven siblings, or drop one at \
+                          ./dict, then re-run with --ignored";
+
+/// The installed dictionary, or a panic naming what is missing.
+///
+/// Deliberately not an `Option`: a caller that could handle `None` would handle
+/// it by returning, and a test that returns early because its subject is absent
+/// is counted as a pass. See this file's "Why the real-dictionary tests are
+/// `#[ignore]`d".
+fn real_dict_dir() -> PathBuf {
     for var in ["VERBORA_WORDNET_DICT", "WORDNET_DB_PATH"] {
         if let Some(value) = std::env::var_os(var) {
             let dir = PathBuf::from(value);
             if dir.join("index.noun").is_file() {
-                return Some(dir);
+                return dir;
             }
         }
     }
     let local = Path::new("dict");
-    local.join("index.noun").is_file().then(|| local.to_owned())
+    assert!(local.join("index.noun").is_file(), "{NEEDS_DICT}");
+    local.to_owned()
 }
 
 #[test]
+#[ignore = "needs the separately-licensed Princeton WordNet database; set $WORDNET_DB_PATH and re-run with --ignored"]
 fn every_entry_of_the_real_dictionary_is_reachable() {
-    let Some(dir) = real_dict_dir() else {
-        println!(
-            "enumeration: real-dictionary section SKIPPED — no WordNet database found. \
-             It is separately licensed (Princeton University) and not vendored; point \
-             $WORDNET_DB_PATH at a directory holding index.noun and its seven siblings."
-        );
-        return;
-    };
+    let dir = real_dict_dir();
 
     let wn = WordNet::open(&dir).unwrap();
     let mut total = 0usize;
@@ -382,11 +405,9 @@ fn every_entry_of_the_real_dictionary_is_reachable() {
 /// Every synset in the real dictionary must parse, and every pointer must
 /// resolve to a synset that exists.
 #[test]
+#[ignore = "needs the separately-licensed Princeton WordNet database; set $WORDNET_DB_PATH and re-run with --ignored"]
 fn every_synset_of_the_real_dictionary_parses() {
-    let Some(dir) = real_dict_dir() else {
-        println!("enumeration: real-dictionary synset scan SKIPPED — no WordNet database found.");
-        return;
-    };
+    let dir = real_dict_dir();
 
     let wn = WordNet::open(&dir).unwrap();
     let mut synsets = 0usize;
@@ -400,4 +421,161 @@ fn every_synset_of_the_real_dictionary_parses() {
     }
     println!("enumeration: {synsets} synsets parsed, {pointers} pointers");
     assert!(synsets > 0);
+}
+
+// ---------------------------------------------------------------------------
+// The normalisation path, on input where it is not the identity
+// ---------------------------------------------------------------------------
+
+/// A dictionary whose lemmas are legal index keys, but whose *spellings* a user
+/// would type are not.
+///
+/// The generated alphabet above is deliberately made of strings `index_key`
+/// leaves alone, which is what makes it a fair test of reachability — and what
+/// makes it no test at all of the transform itself. These keys are chosen so
+/// that every probe below has to be rewritten before it can match: an ASCII
+/// case fold, a whitespace run collapsed to one `_`, an edge trimmed, or all
+/// three at once.
+const NORMALISED_KEYS: &[&str] = &[
+    "'tween",
+    "a_a",
+    "b-52",
+    // Not lower case, and not ASCII: `index_key` folds case in ASCII only, so
+    // `É` survives and this key is reachable from `CAFÉ` and from nothing else.
+    "cafÉ",
+    "entity",
+    "new_york",
+    "new_york_city",
+    "st._louis",
+    "u.s.a.",
+    "x-ray",
+];
+
+/// `(spelling a user might type, the key it must normalise to)`.
+///
+/// Every left-hand side is asserted to be *changed* by `index_key`, so a
+/// regression that made the function the identity would fail here rather than
+/// quietly agreeing with every case.
+const SPELLINGS: &[(&str, &str)] = &[
+    // ASCII case only.
+    ("ENTITY", "entity"),
+    ("EnTiTy", "entity"),
+    ("'TWEEN", "'tween"),
+    ("B-52", "b-52"),
+    // Case in ASCII, and not beyond it.
+    ("CAFÉ", "cafÉ"),
+    // Edges trimmed.
+    ("  entity  ", "entity"),
+    ("\tentity\n", "entity"),
+    // One space is one `_`.
+    ("new york", "new_york"),
+    ("A A", "a_a"),
+    // A run of whitespace is still one `_`.
+    ("new   york", "new_york"),
+    ("new \t york", "new_york"),
+    // Whitespace is Unicode's definition, not ASCII's: a non-breaking space
+    // between two words is still a word boundary.
+    ("new\u{00A0}york", "new_york"),
+    ("new\u{3000}york", "new_york"),
+    ("new\u{2003}york", "new_york"),
+    // Case, trimming, a run and a non-ASCII space, all in one string.
+    ("\u{2003}NEW \t york\u{00A0}CITY \n", "new_york_city"),
+    ("  U.S.A.  ", "u.s.a."),
+    ("ST. LOUIS", "st._louis"),
+    (" X-Ray ", "x-ray"),
+];
+
+/// Spellings whose normalised form is not a key in the dictionary, so that the
+/// transform is not being credited for finding neighbours.
+const ABSENT_SPELLINGS: &[&str] = &[
+    "NEW YORK CITIES",
+    "  entities  ",
+    "café",      // lower-case `é`: a different key from `cafÉ`
+    "CAFE",      // no accent at all
+    "_new_york", // a leading `_` is not what trimming produces
+    "new__york", // a doubled `_` is not what a run collapses to
+    "X RAY",     // the stored key is hyphenated, not underscored
+];
+
+#[test]
+fn index_key_normalisation_reaches_entries_no_verbatim_key_would() {
+    let keys: Vec<String> = {
+        let mut k: Vec<String> = NORMALISED_KEYS.iter().map(|s| (*s).to_owned()).collect();
+        // Index files are sorted in the ASCII collating sequence, which for
+        // `String` is exactly its `Ord`.
+        k.sort();
+        k
+    };
+    let dir = build_dictionary(&keys);
+
+    for storage in [
+        Storage::Resident,
+        Storage::Indexed,
+        Storage::LazyResident,
+        Storage::Pread,
+    ] {
+        let wn = WordNet::open_with(&dir, &Config::new(storage)).unwrap();
+        let index = wn.index_file(PartOfSpeech::Noun);
+
+        for (spelling, key) in SPELLINGS {
+            // The point of the whole test: this input is *not* a fixed point.
+            assert_ne!(
+                index_key(spelling),
+                **spelling,
+                "{storage:?}: {spelling:?} is unchanged by index_key, so it tests nothing"
+            );
+            assert_eq!(index_key(spelling), **key, "{storage:?}: {spelling:?}");
+            // Idempotent: normalising a key again is a no-op.
+            assert_eq!(
+                index_key(&index_key(spelling)),
+                **key,
+                "{storage:?}: {spelling:?}"
+            );
+
+            // A *word* is normalised, so the spelling reaches the entry...
+            let expected = index
+                .entry(key)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{storage:?}: {key:?} must be present"));
+            let found = wn
+                .index_entry(spelling, PartOfSpeech::Noun)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{storage:?}: {spelling:?} should reach {key:?}"));
+            assert_eq!(found, expected, "{storage:?}: {spelling:?}");
+            assert_eq!(found.lemma, **key, "{storage:?}: {spelling:?}");
+
+            // ...and a *key* is not, so the same string used verbatim is a
+            // miss. That split is the contract, not an accident of the search.
+            assert!(
+                index.entry(spelling).unwrap().is_none(),
+                "{storage:?}: IndexFile::entry({spelling:?}) must not normalise its argument"
+            );
+
+            // The full pipeline, not just the index layer.
+            let senses = wn.senses(spelling, PartOfSpeech::Noun).unwrap();
+            assert_eq!(senses.len(), sense_count(key), "{storage:?}: {spelling:?}");
+            assert!(
+                senses.iter().all(|s| s.lemma() == "thing"),
+                "{storage:?}: {spelling:?}"
+            );
+        }
+
+        for spelling in ABSENT_SPELLINGS {
+            assert!(
+                wn.index_entry(spelling, PartOfSpeech::Noun)
+                    .unwrap()
+                    .is_none(),
+                "{storage:?}: {spelling:?} normalises to {:?}, which is not a stored key",
+                index_key(spelling)
+            );
+        }
+    }
+
+    println!(
+        "enumeration: {} rewritten spellings over {} keys, {} absent, on 4 backends",
+        SPELLINGS.len(),
+        keys.len(),
+        ABSENT_SPELLINGS.len()
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

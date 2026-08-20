@@ -377,3 +377,47 @@ fn every_corpus_entry_round_trips_under_folding() {
         expected
     );
 }
+
+// ---------------------------------------------------------------------------
+// Hostile iterators
+// ---------------------------------------------------------------------------
+
+/// Yields `items`, but reports a `size_hint` of `(usize::MAX, None)`.
+///
+/// Nothing about this is unusual enough to be exotic: `Iterator::size_hint`'s
+/// own contract says an implementation "should not be trusted to be correct",
+/// and a safe iterator may return any bounds at all. Filters, custom adaptors
+/// and generators all under- or over-report in practice.
+struct LyingHint<I>(I);
+
+impl<I: Iterator> Iterator for LyingHint<I> {
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (usize::MAX, None)
+    }
+}
+
+/// `insert_all` pre-sizes from `size_hint`, which is an optimisation and not a
+/// contract, so an overstated hint must cost at most a few growth doublings —
+/// never the capacity-overflow panic that `Vec::reserve` raises on a request
+/// past `isize::MAX` bytes. The crate promises nothing panics for any input.
+#[test]
+fn insert_all_survives_an_overstated_size_hint() {
+    let mut t = Trie::new();
+    t.insert_all(LyingHint(["alpha", "beta", "gamma"].into_iter()));
+    assert_eq!(t.keys_with_prefix(""), ["alpha", "beta", "gamma"]);
+    assert_eq!(t.len(), 3);
+    assert!(t.contains("beta"));
+
+    // The same route through `Extend`/`FromIterator`, which both funnel here.
+    let mut e = Trie::new();
+    e.extend(LyingHint(["delta"].into_iter()));
+    assert!(e.contains("delta"));
+    let f: Trie = LyingHint(["epsilon"].into_iter()).collect();
+    assert!(f.contains("epsilon"));
+}

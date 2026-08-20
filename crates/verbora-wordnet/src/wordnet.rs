@@ -107,8 +107,8 @@ impl WordNet {
     ///
     /// [`Error::Io`] if a file cannot be opened, [`Error::Prebuilt`] if a
     /// configured sidecar does not describe the dictionary on disk, or
-    /// [`Error::FileTooLarge`] for [`Storage::Indexed`] on a file of 4 GiB or
-    /// more.
+    /// [`Error::FileTooLarge`] for any storage but [`Storage::Pread`] on a file
+    /// of 4 GiB or more.
     pub fn open_with(dict_dir: impl AsRef<Path>, config: &Config) -> Result<Self> {
         let dir = dict_dir.as_ref();
 

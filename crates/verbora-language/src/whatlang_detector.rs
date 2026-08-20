@@ -126,8 +126,7 @@ impl LanguageDetector for WhatlangDetector {
             // candidate, not an error.
             return LanguageDetection::none();
         };
-        // Out of range or NaN is an abstention, never a fabricated number.
-        let Some(confidence) = Confidence::new(info.confidence() as f32) else {
+        let Some(confidence) = narrow_confidence(info.confidence()) else {
             return LanguageDetection::none();
         };
         let confidence = if info.is_reliable() {
@@ -139,10 +138,72 @@ impl LanguageDetector for WhatlangDetector {
     }
 }
 
+/// `whatlang` reports confidence as `f64`; [`Confidence`] holds `f32`.
+///
+/// The range check happens in `f64`, **before** the narrowing, because
+/// narrowing first would launder an out-of-range value into an in-range
+/// one: every `f64` in `(1.0, 1.0 + 2^-24]` rounds to exactly `1.0f32`,
+/// so an `f32`-side `0.0..=1.0` guard would accept it and this crate
+/// would report a number no detector produced. Out of range or `NaN` is
+/// an abstention, never a fabricated number.
+///
+/// Narrowing an `f64` already in `0.0..=1.0` cannot leave that interval
+/// (the rounding is to nearest and both endpoints are exactly
+/// representable), so the [`Confidence::new`] below never actually
+/// returns `None` — it stays because the invariant belongs to that
+/// constructor, not to this function's reasoning.
+fn narrow_confidence(raw: f64) -> Option<Confidence> {
+    // `contains` is `start <= raw && raw <= end`, both of which `NaN`
+    // fails — so this rejects `NaN` without a separate branch.
+    if !(0.0..=1.0).contains(&raw) {
+        return None;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "deliberate: the value is range-checked as f64 first, which \
+                  is the whole point of this function"
+    )]
+    Confidence::new(raw as f32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Script, TransliterationAdvice, apply_transliteration, detect_script};
+
+    #[test]
+    fn confidence_is_range_checked_before_it_is_narrowed() {
+        // Every f64 in (1.0, 1.0 + 2^-24] narrows to exactly 1.0f32, so a
+        // guard applied after the cast lets it through. Same on the low
+        // side: a tiny negative f64 narrows to -0.0f32, which a
+        // `0.0..=1.0` check accepts.
+        let just_over_one = 1.0f64 + f64::from(f32::EPSILON) / 2.0;
+        assert!(just_over_one > 1.0, "fixture must be out of range in f64");
+        assert_eq!(
+            (just_over_one as f32).to_bits(),
+            1.0f32.to_bits(),
+            "fixture must launder to exactly 1.0 once narrowed"
+        );
+        assert_eq!(narrow_confidence(just_over_one), None);
+
+        let tiny_negative = -f64::MIN_POSITIVE;
+        assert!(tiny_negative < 0.0, "fixture must be out of range in f64");
+        assert_eq!(
+            (tiny_negative as f32).to_bits(),
+            (-0.0f32).to_bits(),
+            "fixture must launder to -0.0 once narrowed"
+        );
+        assert_eq!(narrow_confidence(tiny_negative), None);
+
+        assert_eq!(narrow_confidence(f64::NAN), None);
+        assert_eq!(narrow_confidence(2.0), None);
+        assert_eq!(narrow_confidence(-1.0), None);
+
+        // In-range values still pass through, endpoints included.
+        assert_eq!(narrow_confidence(0.0), Some(Confidence::ZERO));
+        assert_eq!(narrow_confidence(1.0), Some(Confidence::CERTAIN));
+        assert_eq!(narrow_confidence(0.5), Confidence::new(0.5));
+    }
 
     fn c(value: f32) -> Confidence {
         Confidence::new(value).expect("test value is in 0.0..=1.0")

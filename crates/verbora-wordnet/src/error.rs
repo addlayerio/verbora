@@ -60,14 +60,19 @@ pub enum Error {
         file_len: u64,
     },
 
-    /// A file is too large for [`Storage::Indexed`](crate::Storage::Indexed)'s
-    /// `u32` line-start table.
+    /// A file is too large to be held in memory.
+    ///
+    /// Every strategy but [`Storage::Pread`](crate::Storage::Pread) reads the
+    /// whole file, and [`Storage::Indexed`](crate::Storage::Indexed)
+    /// additionally records line starts as `u32`; both cap a file at 4 GiB. A
+    /// file past the cap is reported here rather than handed to an allocator,
+    /// because a dictionary path is caller-supplied and so is its size.
     FileTooLarge {
         /// The file in question.
         path: PathBuf,
         /// Its length in bytes.
         len: u64,
-        /// The largest length that can be indexed.
+        /// The largest length that can be read into memory.
         limit: u64,
     },
 
@@ -210,8 +215,8 @@ impl fmt::Display for Error {
             ),
             Self::FileTooLarge { path, len, limit } => write!(
                 f,
-                "{}: {len} bytes exceeds the {limit}-byte limit for an indexed file; \
-                 use Storage::Resident instead",
+                "{}: {len} bytes exceeds the {limit}-byte limit for a file read into \
+                 memory; use Storage::Pread, which holds one line at a time",
                 path.display()
             ),
             Self::Prebuilt { path, reason } => {

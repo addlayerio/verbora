@@ -2,7 +2,7 @@
 //!
 //! `verbora-tagger` never tokenizes, so which lexicon keys a program can ever
 //! reach is decided by whatever produced its tokens. These tests walk **every**
-//! bundled key — 104,360 of them across the two languages — through two
+//! bundled key — 104,237 of them across the two languages — through two
 //! producers and pin the result, so the coupling breaks a test rather than
 //! silently costing hits.
 //!
@@ -51,7 +51,7 @@ fn every_bundled_key_is_one_whitespace_delimited_token() {
 fn uax29_word_segmentation_cannot_reach_one_english_key_in_six() {
     let expected = [
         // (language, dropped entirely, split, hyphen-caused splits)
-        (Language::English, 35usize, 15_631usize, 14_430usize),
+        (Language::English, 34usize, 15_509usize, 14_417usize),
         (Language::Dutch, 19, 294, 230),
     ];
     for (language, want_dropped, want_split, want_hyphen) in expected {
@@ -79,11 +79,48 @@ fn uax29_word_segmentation_cannot_reach_one_english_key_in_six() {
     // The headline figures the crate documentation quotes, recomputed here so
     // the prose and the data cannot drift apart.
     let english = Lexicon::bundled(Language::English);
-    assert_eq!(english.len(), 92_661);
-    assert_eq!(35 + 15_631, 15_666);
+    assert_eq!(english.len(), 92_538);
+    assert_eq!(34 + 15_509, 15_543);
     let dutch = Lexicon::bundled(Language::Dutch);
     assert_eq!(dutch.len(), 11_699);
     assert_eq!(19 + 294, 313);
+}
+
+/// What actually causes the English splits, counted rather than asserted.
+///
+/// The hyphen dominates, but it is not the whole story, and the shorthand "it is
+/// the hyphens" hides more than half of the remainder. Every split key is
+/// attributed to exactly one cause here — the first that applies, in the order
+/// below — so the buckets sum to the split count above.
+#[test]
+fn the_english_splits_are_attributed_to_a_cause_each() {
+    let english = Lexicon::bundled(Language::English);
+    let (mut hyphen, mut dot, mut slash, mut ampersand, mut dollar, mut rest) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    for (key, _) in english.entries() {
+        let tokens: Vec<&str> = key.unicode_words().collect();
+        if tokens.is_empty() || (tokens.len() == 1 && tokens[0] == key) {
+            continue;
+        }
+        if key.contains('-') {
+            hyphen += 1;
+        } else if key.contains('&') {
+            ampersand += 1;
+        } else if key.contains('$') {
+            dollar += 1;
+        } else if key.contains('/') {
+            slash += 1;
+        } else if key.contains('.') {
+            dot += 1;
+        } else {
+            rest += 1;
+        }
+    }
+    assert_eq!(
+        [hyphen, dot, slash, ampersand, dollar, rest],
+        [14_417, 864, 151, 49, 9, 19]
+    );
+    assert_eq!(hyphen + dot + slash + ampersand + dollar + rest, 15_509);
 }
 
 /// The mechanism, spelled out on the concrete keys the counts above are made of.

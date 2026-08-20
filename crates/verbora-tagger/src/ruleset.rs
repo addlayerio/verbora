@@ -78,7 +78,7 @@ impl RuleSet {
     /// # Panics
     ///
     /// Never: every bundled rule string is parsed by
-    /// `tests::every_bundled_rule_parses`, which enumerates all 313 of them.
+    /// `tests::every_bundled_rule_parses`, which enumerates all 302 of them.
     #[must_use]
     pub fn bundled(language: Language) -> Self {
         Self::parse_lines(language.rule_strings())
@@ -218,7 +218,7 @@ mod tests {
     use crate::language::brill_paper_rule_strings;
 
     /// Every bundled rule string parses, and every one of them round-trips
-    /// through its canonical form. Enumerated over all 313 strings, which is
+    /// through its canonical form. Enumerated over all 302 strings, which is
     /// what makes `RuleSet::bundled`'s `# Panics` note true.
     #[test]
     fn every_bundled_rule_parses() {
@@ -239,9 +239,9 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 18 + 285 + 10);
+        assert_eq!(checked, 18 + 274 + 10);
         assert_eq!(RuleSet::bundled(Language::English).len(), 18);
-        assert_eq!(RuleSet::bundled(Language::Dutch).len(), 285);
+        assert_eq!(RuleSet::bundled(Language::Dutch).len(), 274);
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         let rs = RuleSet::bundled(Language::Dutch);
         let text = rs.to_string();
         assert_eq!(text.parse::<RuleSet>().unwrap(), rs);
-        assert_eq!(text.lines().count(), 285);
+        assert_eq!(text.lines().count(), 274);
     }
 
     #[test]

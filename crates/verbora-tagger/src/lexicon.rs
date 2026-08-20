@@ -45,15 +45,14 @@ impl std::error::Error for LexiconError {}
 ///
 /// A `Lexicon` key is a **token**: non-empty, and containing no scalar with the
 /// Unicode `White_Space` property. [`Lexicon::insert`] rejects anything else,
-/// and the crate's build script filters the bundled JSON against exactly the
-/// same rule — one English source entry, the key `""`, is dropped by it.
+/// and the crate's build script holds the bundled JSON to exactly the same rule.
 ///
 /// That contract is this crate's half of a coupling that would otherwise go
 /// unstated: **this crate never tokenizes**, so whatever produced the tokens
 /// decides which keys can ever be hit. Verbora's bundled dictionaries are keyed
 /// by the whitespace-delimited tokens of the corpora they were derived from —
-/// `well-known`, `A.A.U.` and `%CHG` are each a single key — so a producer that
-/// splits inside those keys simply never reaches them.
+/// `well-known`, `A.A.U.`, `%CHG` and `Asia/Pacific` are each a single key — so a
+/// producer that splits inside those keys simply never reaches them.
 ///
 /// This is measured, not asserted. Feeding every bundled key through [UAX #29]
 /// word segmentation, which is what `verbora_tokenizers::WordTokenizer`
@@ -61,15 +60,16 @@ impl std::error::Error for LexiconError {}
 ///
 /// | Lexicon | keys | never emitted whole by a UAX #29 word tokenizer | share |
 /// |---|---|---|---|
-/// | English | 92,661 | 15,666 | 16.9% |
+/// | English | 92,538 | 15,543 | 16.8% |
 /// | Dutch | 11,699 | 313 | 2.7% |
 ///
-/// U+002D HYPHEN-MINUS is `Word_Break=Other`, so `well-known` segments as
-/// `["well", "known"]`; that alone accounts for 14,430 of the English figure.
-/// The rest are `&`, `$`, `/`, leading apostrophes, and keys that are pure
-/// punctuation and so are dropped entirely. `tests/tokenization.rs` walks
-/// **every** bundled key and pins those counts, so a change on either side
-/// breaks a test instead of quietly costing one key in six.
+/// The English figure breaks down as: 14,417 keys containing U+002D
+/// HYPHEN-MINUS, which is `Word_Break=Other`, so `well-known` segments as
+/// `["well", "known"]`; 864 containing a full stop (`A.A.U.`); 151 containing
+/// `/` (`Asia/Pacific`); 49 containing `&`; 9 containing `$`; 34 that are pure
+/// punctuation and are dropped entirely; and 19 others. `tests/tokenization.rs`
+/// walks **every** bundled key, pins those counts and pins the breakdown, so a
+/// change on either side breaks a test instead of quietly costing one key in six.
 ///
 /// The guidance follows from the numbers:
 ///
@@ -437,12 +437,28 @@ mod tests {
     #[test]
     fn bundled_sizes_and_defaults() {
         let en = Lexicon::bundled(Language::English);
-        assert_eq!(en.len(), 92_661);
+        assert_eq!(en.len(), 92_538);
         assert_eq!(en.default_tag(), &tag("NN"));
         assert_eq!(en.capitalized_default_tag(), &tag("NNP"));
         let nl = Lexicon::bundled(Language::Dutch);
         assert_eq!(nl.len(), 11_699);
         assert_eq!(nl.default_tag(), &tag("N(soort,ev,neut)"));
+    }
+
+    /// A bundled token whose own text contains `/` or `*` is reachable by that
+    /// text. The source corpora escape both characters, because a bare `/`
+    /// separates a token from its tag; the packed keys carry the token, not the
+    /// escape.
+    #[test]
+    fn tokens_containing_a_slash_or_a_star_are_reachable_by_their_text() {
+        let en = Lexicon::bundled(Language::English);
+        assert_eq!(en.tag_of("Asia/Pacific"), tag("JJ"));
+        assert_eq!(en.tag_of("producer/director"), tag("NN"));
+        assert_eq!(en.tag_of("M*A*S*H"), tag("NNP"));
+        // ...and the markup spellings are gone.
+        for gone in ["Asia\\/Pacific", "Asia\\", "me/PRP", "W/NNP.R.G."] {
+            assert!(!en.contains(gone), "{gone:?} is still a key");
+        }
     }
 
     #[test]

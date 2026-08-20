@@ -8,8 +8,9 @@ use std::str::FromStr;
 
 /// Why a [`Tag`] or a [`Word`] was rejected.
 ///
-/// Both literal types accept exactly the same strings — see [`Tag`] for the
-/// contract — so both produce this error.
+/// The two literal types share all of this error except
+/// [`LiteralError::Wildcard`], which only a [`Tag`] can produce — see [`Tag`]
+/// for the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum LiteralError {
@@ -22,6 +23,14 @@ pub enum LiteralError {
         /// The first offending scalar.
         found: char,
     },
+    /// The string was `*`, which a rule string spells the wildcard pattern with.
+    ///
+    /// Only a [`Tag`] produces this. A `*` written where a rule's old tag goes
+    /// reads back as "any tag", so a tag `*` could be written but never read,
+    /// and a rule over it would silently widen into a rule over everything. A
+    /// [`Word`] is unaffected: `*` is an ordinary token, and the bundled English
+    /// lexicon keys it.
+    Wildcard,
 }
 
 impl fmt::Display for LiteralError {
@@ -33,13 +42,14 @@ impl fmt::Display for LiteralError {
                 "a tag or word literal may not contain whitespace (found U+{:04X})",
                 *found as u32
             ),
+            Self::Wildcard => f.write_str("a tag may not be \"*\", which is the wildcard pattern"),
         }
     }
 }
 
 impl std::error::Error for LiteralError {}
 
-/// Checks the shared literal contract.
+/// Checks the contract both literals share.
 fn check(s: &str) -> Result<(), LiteralError> {
     if s.is_empty() {
         return Err(LiteralError::Empty);
@@ -50,8 +60,17 @@ fn check(s: &str) -> Result<(), LiteralError> {
     }
 }
 
+/// [`check`], plus the one string a [`Tag`] may not be.
+fn check_tag(s: &str) -> Result<(), LiteralError> {
+    check(s)?;
+    if s == "*" {
+        return Err(LiteralError::Wildcard);
+    }
+    Ok(())
+}
+
 macro_rules! literal_type {
-    ($name:ident, $what:literal) => {
+    ($name:ident, $what:literal, $check:path, $extra:literal) => {
         impl $name {
             /// Builds the literal, checking the contract.
             ///
@@ -61,12 +80,13 @@ macro_rules! literal_type {
             ///
             /// # Errors
             ///
-            /// [`LiteralError::Empty`] for the empty string, and
+            /// [`LiteralError::Empty`] for the empty string,
             /// [`LiteralError::Whitespace`] when any scalar has the Unicode
-            /// `White_Space` property.
+            /// `White_Space` property, and
+            #[doc = $extra]
             pub fn new(value: impl Into<Cow<'static, str>>) -> Result<Self, LiteralError> {
                 let value = value.into();
-                check(&value)?;
+                $check(&value)?;
                 Ok(Self(value))
             }
 
@@ -145,22 +165,26 @@ macro_rules! literal_type {
 /// A part-of-speech label, such as `NN` or `Adj(attr,stell,onverv)`.
 ///
 /// Verbora attaches no meaning to a tag beyond string identity: the tag set is
-/// whatever the lexicon and the rules agree on. The bundled English data uses
-/// the Penn Treebank tag set plus the Verbora-defined `URL`; the bundled Dutch
-/// data uses the tag set of its own source lexicon.
+/// whatever the lexicon and the rules agree on. See [`Language`](crate::Language)
+/// for what each bundled lexicon actually holds.
 ///
 /// # The literal contract
 ///
 /// A `Tag` and a [`Word`] are both *literals*: short strings that appear
 /// verbatim in a rule string, where fields are separated by whitespace. Both are
-/// therefore constrained the same way — **non-empty, and containing no scalar
-/// with the Unicode `White_Space` property** ([UAX #44]).
+/// therefore **non-empty, and contain no scalar with the Unicode `White_Space`
+/// property** ([UAX #44]). A `Tag` carries one further restriction: it may not
+/// be `*`, the string a rule string spells the wildcard pattern with.
 ///
-/// The constraint is not decoration. It is exactly what makes
+/// The constraints are not decoration. Together they are exactly what makes
 /// `rule.to_string().parse::<Rule>() == Ok(rule)` hold for every rule that can
-/// be built, and [`RuleSet`](crate::RuleSet)'s round-trip test asserts that over
-/// all 313 bundled rules. Both constructors return [`Result`], so a value that
-/// would break the round trip cannot be constructed at all.
+/// be built — including rules assembled through [`Rule::new`](crate::Rule::new),
+/// which never sees a rule string at all. Whitespace would split one field into
+/// two; `*` in the old-tag position would read back as [`TagPattern::Any`],
+/// turning a rule over one tag into a rule over every tag. Both constructors
+/// return [`Result`], so neither value can be built in the first place.
+/// [`RuleSet`](crate::RuleSet)'s round-trip test asserts the property over all
+/// 302 bundled rules, and `rule::tests` asserts it over constructed ones.
 ///
 /// ```
 /// use verbora_tagger::{LiteralError, Tag, Word};
@@ -169,6 +193,11 @@ macro_rules! literal_type {
 /// assert!(Word::new(",").is_ok());
 /// assert_eq!(Tag::new(""), Err(LiteralError::Empty));
 /// assert_eq!(Word::new("a b"), Err(LiteralError::Whitespace { found: ' ' }));
+/// // `*` is the wildcard pattern, so it is not a tag — but it is a token, and
+/// // therefore a perfectly ordinary `Word`.
+/// assert_eq!(Tag::new("*"), Err(LiteralError::Wildcard));
+/// assert!(Word::new("*").is_ok());
+/// assert!(Tag::new("**").is_ok());
 /// // The property, not an ad-hoc set: U+00A0 has White_Space and is rejected,
 /// // U+FEFF does not and is accepted.
 /// assert!(Tag::new("a\u{00a0}b").is_err());
@@ -179,19 +208,21 @@ macro_rules! literal_type {
 /// the tag `İ`.
 ///
 /// [UAX #44]: https://www.unicode.org/reports/tr44/#White_Space
+/// [`TagPattern::Any`]: crate::TagPattern::Any
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Tag(Cow<'static, str>);
 
-literal_type!(Tag, "Tag");
+literal_type!(Tag, "Tag", check_tag, "[`LiteralError::Wildcard`] for `*`.");
 
 impl Tag {
     /// Borrows a `&'static str` **without checking the literal contract**.
     ///
     /// Crate-private, and used only for two families of value whose conformance
     /// is established elsewhere: the tags packed by `build.rs`, which rejects
-    /// any that would violate the contract and whose output `data.rs` re-checks
-    /// entry by entry, and the four default tags named in `language.rs`, checked
-    /// by `language::tests::bundled_defaults_satisfy_the_literal_contract`.
+    /// any that would violate the contract and whose output
+    /// `data::tests::every_packed_entry_satisfies_the_contract` re-checks entry
+    /// by entry, and the four default tags named in `language.rs`, checked by
+    /// `language::tests::bundled_defaults_satisfy_the_literal_contract`.
     pub(crate) const fn from_static(value: &'static str) -> Self {
         Self(Cow::Borrowed(value))
     }
@@ -202,11 +233,19 @@ impl Tag {
 /// Most conditions compare a `Word` against a whole token; the one exception is
 /// [`Condition::CurrentWordEndsWith`](crate::Condition::CurrentWordEndsWith),
 /// where it is a suffix. Both are literal text that must survive being written
-/// into a rule string, hence the same contract — documented in full on [`Tag`].
+/// into a rule string, hence almost the same contract as a [`Tag`], documented
+/// in full there: non-empty and free of `White_Space`. A `Word` is *not* barred
+/// from being `*` — the wildcard is a pattern over tags, and a token may be an
+/// asterisk like any other.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Word(Cow<'static, str>);
 
-literal_type!(Word, "Word");
+literal_type!(
+    Word,
+    "Word",
+    check,
+    "never [`LiteralError::Wildcard`] — `*` is an ordinary token."
+);
 
 /// One token with the tag currently assigned to it.
 ///
@@ -300,6 +339,25 @@ mod tests {
         // U+FEFF ZERO WIDTH NO-BREAK SPACE does *not* have White_Space, so it is
         // accepted — the contract is the Unicode property, not an ad-hoc set.
         assert!(Tag::new("a\u{feff}b").is_ok());
+    }
+
+    /// `*` is the wildcard pattern in a rule string, so it is not available as a
+    /// tag. It stays a perfectly ordinary [`Word`]: the bundled English lexicon
+    /// keys an asterisk token.
+    #[test]
+    fn the_wildcard_is_not_a_tag_but_is_a_word() {
+        assert_eq!(Tag::new("*"), Err(LiteralError::Wildcard));
+        assert_eq!("*".parse::<Tag>(), Err(LiteralError::Wildcard));
+        assert_eq!(Tag::try_from("*"), Err(LiteralError::Wildcard));
+        assert_eq!(
+            LiteralError::Wildcard.to_string(),
+            "a tag may not be \"*\", which is the wildcard pattern"
+        );
+        assert!(Word::new("*").is_ok());
+        // Only the bare wildcard is reserved; a tag that merely contains one is
+        // written and read back unchanged.
+        assert!(Tag::new("**").is_ok());
+        assert!(Tag::new("*x").is_ok());
     }
 
     #[test]

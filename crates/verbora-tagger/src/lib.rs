@@ -38,7 +38,7 @@
 //! produced them. That matters more than it sounds: the bundled dictionaries are
 //! keyed by whitespace-delimited corpus tokens, so `well-known` and `A.A.U.` are
 //! single keys, and a tokenizer that splits inside them cannot reach them —
-//! measured at **15,666 of 92,661 English keys (16.9%)** for a [UAX #29] word
+//! measured at **15,543 of 92,538 English keys (16.8%)** for a [UAX #29] word
 //! tokenizer such as `verbora_tokenizers::WordTokenizer`. [`Lexicon`]'s module
 //! documentation gives the full table and the guidance that follows from it;
 //! `tests/tokenization.rs` walks every bundled key and pins the numbers.
@@ -69,16 +69,21 @@
 //!
 //! | Language | Lexicon entries | Rules |
 //! |---|---|---|
-//! | [`Language::English`] | 92,661 | 18 |
-//! | [`Language::Dutch`] | 11,699 | 285 |
+//! | [`Language::English`] | 92,538 | 18 |
+//! | [`Language::Dutch`] | 11,699 | 274 |
 //!
 //! Plus [`brill_paper_rule_strings`], the ten rules of Brill (1992), Table 1.
 //! All of it is packed at build time and read in place from the executable, so
 //! constructing a [`Lexicon`] parses nothing and allocates nothing.
 //!
-//! One English source entry is **not** bundled: the key `""`, whose tag list was
-//! also empty. It satisfies neither the token contract nor the entry contract,
-//! and `build.rs` rejects it; `data::tests` asserts the count is exactly one.
+//! The English source JSON holds 92,662 entries and 124 of them are not
+//! bundled. Its keys are written in the escaped notation of the tagged corpus
+//! they came from, where a `/` inside a token appears as `\/` because a bare `/`
+//! separates a token from its tag; `build.rs` decodes that, so `Asia\/Pacific`
+//! ships as the key `Asia/Pacific`. 122 keys turn out to be markup rather than
+//! tokens and are dropped, one (`\*`) decodes onto a key already held, and one
+//! (the key `""`, whose tag list was also empty) violates the entry contract.
+//! Each count is a constant `data::tests` asserts, per language and per reason.
 //!
 //! # References
 //!

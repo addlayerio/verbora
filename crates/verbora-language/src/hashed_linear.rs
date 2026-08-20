@@ -177,17 +177,43 @@ pub fn hashed_features(text: &str, mut emit: impl FnMut(u32)) {
 }
 
 /// Case-folds one codepoint for [`hashed_features_cyrillic`]: ASCII via
-/// `to_ascii_lowercase`, the Cyrillic uppercase ranges (А–Я and the
-/// Ё/Є/І/Ї/… extensions block) via their fixed Unicode offsets, anything
-/// else unchanged. A tiny closed mapping instead of `char::to_lowercase`
-/// so the hot loop stays a couple of compares, and so the mapping is
-/// trivially auditable against the Unicode Cyrillic block layout.
+/// `to_ascii_lowercase`, every cased letter of `U+0400..=U+052F` via the
+/// Unicode Cyrillic block layout, anything else unchanged. A tiny closed
+/// mapping instead of `char::to_lowercase` so the hot loop stays a
+/// handful of compares, and so the mapping is trivially auditable against
+/// that layout.
+///
+/// The range is exactly the one [`Script::of`](crate::Script::of) routes
+/// to the Cyrillic model, and the block is not laid out uniformly, so one
+/// offset cannot serve all of it:
+///
+/// * `U+0410..=U+042F` (А–Я) and `U+0400..=U+040F` (Ѐ–Џ, including
+///   Ё/Є/І/Ї) are contiguous uppercase runs at a fixed distance from
+///   their lowercase runs.
+/// * The historic and supplement letters are laid out as adjacent
+///   uppercase/lowercase *pairs*: even-then-odd in `U+0460..=U+0481`,
+///   `U+048A..=U+04BF` and `U+04D0..=U+052F`, but odd-then-even in
+///   `U+04C1..=U+04CE` — the parity flips because `U+04C0` Ӏ PALOCHKA
+///   takes the even slot ahead of them and pairs with `U+04CF` ӏ instead.
+///
+/// `fold_maps_every_cyrillic_letter_to_its_unicode_lowercase` pins this
+/// against `char::to_lowercase` over the whole range, so a missed
+/// sub-block is a test failure rather than silently lost signal — which
+/// is what an earlier version of this function had: 100 uppercase letters
+/// went unfolded, including `U+0490` Ґ, one of the four
+/// Ukrainian-versus-Russian discriminators this model leans on.
 #[inline(always)]
 fn fold_cyrillic(chr: char) -> u32 {
     let cp = chr as u32;
     match cp {
         0x0410..=0x042F => cp + 0x20, // А..=Я -> а..=я
         0x0400..=0x040F => cp + 0x50, // Ѐ..=Џ -> ѐ..=џ (incl. Ё Є І Ї)
+        // Adjacent pairs, uppercase on the even codepoint: Ѡ/ѡ..Ҁ/ҁ,
+        // Ҋ/ҋ..Ҿ/ҿ, Ӑ/ӑ..Ԯ/ԯ (this last run holds Ґ/ґ at U+0490/U+0491).
+        0x0460..=0x0481 | 0x048A..=0x04BF | 0x04D0..=0x052F => cp | 1,
+        0x04C0 => 0x04CF, // Ӏ -> ӏ, the block's one non-adjacent pair
+        // Adjacent pairs, uppercase on the *odd* codepoint: Ӂ/ӂ..Ӎ/ӎ.
+        0x04C1..=0x04CE => cp + (cp & 1),
         _ => chr.to_ascii_lowercase() as u32,
     }
 }
@@ -820,6 +846,74 @@ mod tests {
             result.detection.best().map(|c| c.language),
             Some(Language::German)
         );
+    }
+
+    #[test]
+    fn fold_maps_every_cyrillic_letter_to_its_unicode_lowercase() {
+        // The whole range `Script::of` routes to the Cyrillic model, not
+        // just the two contiguous uppercase runs. `char::to_lowercase` is
+        // the oracle; the hand-written fold exists only for speed, so any
+        // codepoint where the two disagree is lost model capacity.
+        let mut folded_something = 0u32;
+        for cp in 0x0400..=0x052Fu32 {
+            let chr = char::from_u32(cp).expect("BMP scalar");
+            if !chr.is_alphabetic() {
+                continue;
+            }
+            let mut lower = chr.to_lowercase();
+            let first = lower.next().expect("to_lowercase yields at least one");
+            assert!(
+                lower.next().is_none(),
+                "U+{cp:04X} lowercases to more than one scalar; the fold's \
+                 one-codepoint-in/one-out shape cannot express that"
+            );
+            assert_eq!(
+                fold_cyrillic(chr),
+                first as u32,
+                "fold_cyrillic(U+{cp:04X} {chr:?}) must equal its Unicode lowercase U+{:04X}",
+                first as u32
+            );
+            if first != chr {
+                folded_something += 1;
+            }
+        }
+        // Guards the guard: a fold that returned its input unchanged
+        // would satisfy every lowercase codepoint above and nothing else.
+        // 148 uppercase letters live in this range; the two contiguous
+        // runs this function originally handled cover 48 of them, so the
+        // other 100 are exactly what the defect was losing.
+        assert_eq!(
+            folded_something, 148,
+            "expected 148 cased letters in U+0400..=U+052F"
+        );
+    }
+
+    #[test]
+    fn cyrillic_detection_is_case_invariant() {
+        // The Cyrillic model folds case before hashing, so the same text
+        // in any case must produce a bit-identical detection. Uppercase
+        // Cyrillic is ordinary in headlines and in all-caps names.
+        let d = HashedLinearDetector::new();
+        for input in [
+            "родина мова слово",
+            "ґудзик на ґанку ґрунтовно ґречно",
+            "это русский текст про погоду",
+            "щоденник української мови",
+        ] {
+            let upper: String = input.chars().flat_map(char::to_uppercase).collect();
+            let lower = d.detect(input);
+            let upcased = d.detect(&upper);
+            assert_eq!(
+                lower.best().map(|c| c.language),
+                upcased.best().map(|c| c.language),
+                "case changed the answer for {input:?} (upper {upper:?})"
+            );
+            assert_eq!(
+                lower.best().map(|c| c.confidence.get().to_bits()),
+                upcased.best().map(|c| c.confidence.get().to_bits()),
+                "case changed the confidence for {input:?}"
+            );
+        }
     }
 
     #[test]

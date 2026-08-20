@@ -34,8 +34,9 @@ pub enum RuleParseError {
     },
     /// A field violated the [`Tag`]/[`Word`] literal contract.
     ///
-    /// Only reachable for the empty field, since whitespace is what separates
-    /// fields in the first place — but it is reported rather than assumed away.
+    /// Whitespace is what separates fields in the first place, so the reachable
+    /// causes are a `*` written where a [`Tag`] belongs — anywhere but the old-tag
+    /// field, where `*` is the wildcard — and, in principle, an empty field.
     InvalidLiteral {
         /// Zero-based index of the offending field.
         field: usize,
@@ -395,6 +396,33 @@ mod tests {
                 found: 1
             })
         );
+    }
+
+    /// `*` is the wildcard in the old-tag field and nowhere else: written where
+    /// a tag belongs, it is an error rather than a rule that quietly rewrites
+    /// everything.
+    #[test]
+    fn the_wildcard_is_a_pattern_not_a_tag() {
+        assert_eq!(
+            Rule::from_str("* B PREV-TAG X").unwrap().from,
+            TagPattern::Any
+        );
+        for (source, field) in [
+            ("A * PREV-TAG X", 1),
+            ("A B PREV-TAG *", 3),
+            ("A B SURROUND-TAG X *", 4),
+        ] {
+            assert_eq!(
+                Rule::from_str(source),
+                Err(RuleParseError::InvalidLiteral {
+                    field,
+                    cause: LiteralError::Wildcard
+                }),
+                "{source:?}"
+            );
+        }
+        // A word argument may be `*`: it is a token, not a pattern.
+        assert!(Rule::from_str("A B CURRENT-WORD-IS *").is_ok());
     }
 
     #[test]

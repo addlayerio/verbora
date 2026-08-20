@@ -352,6 +352,10 @@ impl Trie {
 
     /// Inserts every string in `list`.
     ///
+    /// The iterator's `size_hint` is used to pre-size, but only as a hint: an
+    /// iterator that overstates its length costs a few growth reallocations
+    /// during the load and nothing else.
+    ///
     /// ```
     /// # use verbora_trie::Trie;
     /// let mut t = Trie::new();
@@ -366,11 +370,25 @@ impl Trie {
     {
         let it = list.into_iter();
         // A word contributes at least one node unless it duplicates an existing
-        // prefix entirely, so the item count is a safe lower bound: enough to
+        // prefix entirely, so the item count is a good lower bound: enough to
         // skip the first few doublings of a bulk load without over-reserving for
         // callers who pass one string at a time.
-        let hint = it.size_hint().0;
-        self.nodes.reserve(hint);
+        //
+        // It is a *hint* and not a bound, though — `Iterator::size_hint` is
+        // explicitly not a correctness contract, and a safe iterator may report
+        // `usize::MAX` — so it is clamped to a count this trie could actually
+        // reach before it reaches an allocator. Beyond `u32::MAX` nodes
+        // `child_or_insert` refuses to allocate an index at all, so reserving
+        // past that is waste by construction rather than by policy.
+        let hint = it
+            .size_hint()
+            .0
+            .min((u32::MAX as usize).saturating_sub(self.nodes.len()));
+        // Fallible even after the clamp: an honest hint of a billion words is
+        // in range and still larger than some machines can hand out, and a
+        // pre-size that cannot be honoured must degrade to ordinary growth
+        // rather than abort a load that would otherwise have fit.
+        let _ = self.nodes.try_reserve(hint);
         // Pre-slotting the membership table the same way spares the bulk load
         // its incremental rehashes; key bytes stay amortized (their total
         // length is unknowable from a count).
@@ -527,11 +545,28 @@ impl Trie {
     /// buffer and one stack frame per level, so an early `take`/`find` stops
     /// paying for the rest of the subtree. Counting is better still:
     /// `iter_keys_with_prefix(p).count()` reads the maintained subtree word
-    /// count after the `p`-length descent — O(|prefix|), no traversal, no
-    /// allocation — so it is the way to ask "how many words start with `p`?".
+    /// count after the `p`-length descent — O(|prefix|), and no part of the
+    /// subtree is visited — so it is the way to ask "how many words start with
+    /// `p`?".
+    ///
+    /// # What counting costs
+    ///
+    /// Not nothing, and the difference matters when choosing between this and
+    /// [`Trie::keys_with_prefix`]. Constructing the iterator seeds its path
+    /// buffer with the prefix, because every word it yields is that prefix plus
+    /// stored edge labels — **one heap allocation, the size of the folded
+    /// prefix**, made whether or not the iterator is then advanced. It is one
+    /// and not two: the folded prefix is moved into the buffer rather than
+    /// copied into it.
+    ///
+    /// So counting is one allocation and a descent, against the whole subtree
+    /// plus a `String` per word for `keys_with_prefix(p).len()`. Two cases cost
+    /// nothing at all: an empty prefix ([`Trie::keys`]), and a prefix no stored
+    /// word starts with — neither can spell a word out, so neither takes a
+    /// buffer.
     #[must_use]
     pub fn iter_keys_with_prefix(&self, prefix: &str) -> KeysWithPrefix<'_> {
-        KeysWithPrefix::new(self, &fold(self.handling, prefix))
+        KeysWithPrefix::new(self, fold(self.handling, prefix))
     }
 
     /// Every stored word, in ascending scalar order.

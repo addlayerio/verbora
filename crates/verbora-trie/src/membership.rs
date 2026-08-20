@@ -123,18 +123,47 @@ impl HashIndex {
 
     /// Pre-sizes for `keys` more insertions totalling about `bytes` of key
     /// data, so a bulk load pays no incremental rehashes or blob doublings.
+    ///
+    /// Every step is best-effort. `keys` reaches here from
+    /// [`Trie::insert_all`](crate::Trie::insert_all), whose only source for it
+    /// is an iterator's `size_hint` — a number any safe iterator may overstate,
+    /// up to `usize::MAX`. This table is a pure accelerator over the arena, so
+    /// a reservation that cannot be satisfied is dropped: the load then pays
+    /// the rehashes it would have paid without this call, which is the cost of
+    /// an optimisation not applying, not a failure.
     pub(crate) fn reserve(&mut self, keys: usize, bytes: usize) {
-        let want = ((self.len + keys) * 2 + 1).next_power_of_two().max(64);
+        // `insert_folded` refuses to store more than `u32::MAX` keys, so
+        // headroom above that can never be filled and pre-sizing for it is
+        // waste by construction.
+        let keys = keys.min((u32::MAX as usize).saturating_sub(self.len));
+        let want = (self.len + keys)
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .and_then(usize::checked_next_power_of_two)
+            .map_or(0, |n| n.max(64));
         if want > self.slots.len() {
-            self.rebuild_slots(want);
+            // Sized fallibly rather than through `rebuild_slots`: the table it
+            // would build for a load of billions of keys is tens of gigabytes,
+            // and failing to widen the table only lengthens probe chains.
+            #[expect(
+                clippy::slow_vector_initialization,
+                reason = "`vec![0; want]` is the infallible form this is avoiding: \
+                          `want` derives from an untrusted `size_hint`, so the allocation \
+                          has to be able to fail without aborting"
+            )]
+            let mut slots = Vec::new();
+            if slots.try_reserve_exact(want).is_ok() {
+                slots.resize(want, 0);
+                self.reslot_into(slots);
+            }
         }
-        self.hashes.reserve(keys);
-        self.blob.reserve(bytes);
+        let _ = self.hashes.try_reserve(keys);
+        let _ = self.blob.try_reserve(bytes);
         if self.offs.is_empty() {
-            self.offs.reserve(keys + 1);
+            let _ = self.offs.try_reserve(keys.saturating_add(1));
             self.offs.push(0);
         } else {
-            self.offs.reserve(keys);
+            let _ = self.offs.try_reserve(keys);
         }
     }
 
@@ -235,8 +264,14 @@ impl HashIndex {
     /// Re-slots every stored key into a table of `new_cap` slots (a power of
     /// two ≥ the current size), using the remembered hashes.
     fn rebuild_slots(&mut self, new_cap: usize) {
-        let mask = new_cap - 1;
-        let mut slots = vec![0u32; new_cap];
+        self.reslot_into(vec![0u32; new_cap]);
+    }
+
+    /// [`HashIndex::rebuild_slots`] over an already-allocated, all-zero table,
+    /// so a caller that needs the allocation to be fallible can make it so and
+    /// still share the re-slotting.
+    fn reslot_into(&mut self, mut slots: Vec<u32>) {
+        let mask = slots.len() - 1;
         for (k, &h) in self.hashes.iter().enumerate() {
             let mut i = (h as usize) & mask;
             while slots[i] != 0 {

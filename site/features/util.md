@@ -59,8 +59,21 @@ addressable both ways — `distance` / `path` take a `VertexId`, `distance_of` /
   `GraphError::NonFiniteWeight`, and a path total that would leave the finite
   range fails the build with `PathError::Overflow` naming the vertex. Nothing
   this crate returns can poison a comparison or a sort.
+- **A graph refuses to overflow its own indices, rather than silently
+  truncating one.** Vertex ids and edge indices are both stored as `u32`;
+  `add` returns `GraphError::VertexLimit` before minting a vertex beyond
+  `u32::MAX`, and `GraphError::EdgeLimit` before indexing an edge beyond
+  `u32::MAX + 1`, instead of wrapping an index and pointing adjacency at the
+  wrong edge.
 - **Building a tree over a cyclic graph is an error**, not a partial answer:
   `PathError::Cyclic` carries the `Cycle` that was found.
+- **Ties keep the edge added first.** When two paths to a vertex cost exactly
+  the same, `ShortestPathTree` and `LongestPathTree` both arrive by whichever
+  tying edge has the lower index in `EdgeWeightedDigraph::edges` — a property
+  of the graph itself, fixed at construction, not of the order relaxation
+  happens to visit vertices in. The same rule applies at every vertex along a
+  path, so a tie in the middle of a route is pinned exactly as one at its end
+  is.
 
 ## Abbreviations and stop words
 

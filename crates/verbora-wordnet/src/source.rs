@@ -7,13 +7,30 @@ use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
 
-/// The largest dictionary file [`Storage::Indexed`] can build a line table for.
+/// The largest dictionary file this crate will hold in memory.
 ///
-/// Line starts are stored as `u32`, so a file must fit in 4 GiB. WordNet 3.1's
-/// largest file, `data.noun`, is about 16 MB — four thousand times smaller —
-/// but the limit is checked rather than assumed, because truncating an offset
-/// would silently return the wrong line.
-pub(crate) const MAX_INDEXED_FILE_LEN: u64 = u32::MAX as u64;
+/// Two reasons meet at the same number. [`Storage::Indexed`] stores line starts
+/// as `u32`, so a file it indexes must fit in 4 GiB or an offset would be
+/// truncated and silently return the wrong line. And the three resident
+/// strategies each commit the whole file to memory, where the file's length is
+/// an *input* — [`WordNet::open`](crate::WordNet::open) takes a caller-supplied
+/// path — so it is a number to check rather than to hand to an allocator.
+///
+/// WordNet 3.1's largest file, `data.noun`, is about 16 MB: four thousand times
+/// smaller, which is why the limit costs nothing to respect. A file past it is
+/// still readable with [`Storage::Pread`], which holds one line at a time.
+pub(crate) const MAX_FILE_LEN: u64 = u32::MAX as u64;
+
+/// How much of a file's reported length [`read_all`] will reserve before it
+/// starts reading.
+///
+/// `metadata().len()` is what the filesystem said a moment ago, not a promise
+/// about what the read will yield: the file may be sparse, may be truncated
+/// between the two calls, or may simply be larger than this process can hold.
+/// So the reported length sizes the buffer only up to this ceiling, above which
+/// the read grows the buffer as it actually fills it. Every real dictionary file
+/// is orders of magnitude below the ceiling and is still allocated exactly once.
+const MAX_READ_RESERVE: u64 = 64 * 1024 * 1024;
 
 /// How a dictionary file's bytes are obtained.
 ///
@@ -93,8 +110,9 @@ impl Source {
     /// # Errors
     ///
     /// [`Error::Io`] if the file cannot be opened, or read when the strategy
-    /// preloads it; [`Error::FileTooLarge`] if [`Storage::Indexed`] is asked to
-    /// index a file of 4 GiB or more.
+    /// preloads it; [`Error::FileTooLarge`] if any strategy that holds the file
+    /// in memory — every one but [`Storage::Pread`] — is given a file of 4 GiB
+    /// or more.
     pub(crate) fn open(path: &Path, storage: Storage) -> Result<Self> {
         let len = std::fs::metadata(path)
             .map_err(|e| Error::io(path, e))?
@@ -106,6 +124,17 @@ impl Source {
                 // is read yet: a dictionary that reports success at open and
                 // fails at the first query is harder to diagnose, not easier.
                 File::open(path).map_err(|e| Error::io(path, e))?;
+                // A file too large to ever become resident is the same kind of
+                // failure, known at the same moment, so it is reported at the
+                // same moment — `read_all` would refuse it at the first query
+                // regardless.
+                if len > MAX_FILE_LEN {
+                    return Err(Error::FileTooLarge {
+                        path: path.to_path_buf(),
+                        len,
+                        limit: MAX_FILE_LEN,
+                    });
+                }
                 Kind::Lazy(OnceLock::new())
             }
             Storage::Resident => Kind::Memory {
@@ -323,16 +352,44 @@ fn strip_cr(line: &[u8]) -> &[u8] {
 }
 
 /// Reads a whole file into an exactly-sized boxed slice.
+///
+/// # Errors
+///
+/// [`Error::Io`] if the file cannot be opened or read;
+/// [`Error::FileTooLarge`] if it is longer than [`MAX_FILE_LEN`], either as
+/// reported before the read or as observed during it.
 fn read_all(path: &Path) -> Result<Box<[u8]>> {
     let mut file = File::open(path).map_err(|e| Error::io(path, e))?;
-    let len = file
-        .metadata()
-        .map_err(|e| Error::io(path, e))?
-        .len()
-        .try_into()
-        .unwrap_or(usize::MAX);
-    let mut buf = Vec::with_capacity(len);
-    file.read_to_end(&mut buf).map_err(|e| Error::io(path, e))?;
+    let len = file.metadata().map_err(|e| Error::io(path, e))?.len();
+    let too_large = |len: u64| Error::FileTooLarge {
+        path: path.to_path_buf(),
+        len,
+        limit: MAX_FILE_LEN,
+    };
+    if len > MAX_FILE_LEN {
+        return Err(too_large(len));
+    }
+
+    // Capped, because `len` is a report about the file rather than a promise
+    // about the read — see `MAX_READ_RESERVE`. Below the cap it is exact, so
+    // every real dictionary file is still one allocation. Fallible, and the
+    // failure is ignored, because a reservation is an optimisation: without it
+    // the read below grows the buffer as it fills.
+    let reserve = usize::try_from(len.min(MAX_READ_RESERVE)).unwrap_or(0);
+    let mut buf = Vec::new();
+    let _ = buf.try_reserve_exact(reserve);
+
+    // One byte past the limit, so a file that grew between the metadata call
+    // and the read is refused on what was actually read rather than on what was
+    // promised. `read_to_end` grows the buffer itself past `reserve`.
+    let read = file
+        .by_ref()
+        .take(MAX_FILE_LEN + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| Error::io(path, e))?;
+    if read as u64 > MAX_FILE_LEN {
+        return Err(too_large(read as u64));
+    }
     Ok(buf.into_boxed_slice())
 }
 
@@ -343,11 +400,11 @@ fn read_all(path: &Path) -> Result<Box<[u8]>> {
 /// [`Error::FileTooLarge`] when `bytes` is 4 GiB or larger, which `u32` offsets
 /// cannot address.
 pub(crate) fn build_line_starts(path: &Path, bytes: &[u8]) -> Result<Box<[u32]>> {
-    if bytes.len() as u64 > MAX_INDEXED_FILE_LEN {
+    if bytes.len() as u64 > MAX_FILE_LEN {
         return Err(Error::FileTooLarge {
             path: path.to_path_buf(),
             len: bytes.len() as u64,
-            limit: MAX_INDEXED_FILE_LEN,
+            limit: MAX_FILE_LEN,
         });
     }
     // A capacity estimate from a typical dictionary line width avoids most
@@ -531,6 +588,56 @@ mod tests {
     fn sources_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Source>();
+    }
+
+    /// A dictionary file's length is an *input*: [`WordNet::open`] takes a
+    /// caller-supplied path, so `metadata().len()` is a number the caller
+    /// chose. A strategy that hands it straight to an allocator therefore
+    /// aborts the process on a file it should have refused with an error.
+    ///
+    /// A sparse file makes the case cheaply — no blocks are written, only the
+    /// recorded length changes.
+    #[test]
+    fn an_oversized_file_is_an_error_for_every_resident_backend() {
+        const HUGE: u64 = 1 << 40; // 1 TiB
+        let path = temp_file("huge", b"aaa line\n");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(HUGE)
+            .ok();
+        if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(HUGE) {
+            eprintln!(
+                "SKIPPED an_oversized_file_is_an_error_for_every_resident_backend: this \
+                 filesystem would not report a {HUGE}-byte sparse file, so the input this \
+                 test is about cannot be constructed here."
+            );
+            return;
+        }
+
+        for s in [Storage::Resident, Storage::LazyResident, Storage::Indexed] {
+            let opened = Source::open(&path, s);
+            assert!(
+                matches!(
+                    opened,
+                    Err(Error::FileTooLarge {
+                        len: HUGE,
+                        limit: MAX_FILE_LEN,
+                        ..
+                    })
+                ),
+                "{s:?} accepted a {HUGE}-byte file"
+            );
+        }
+
+        // `Pread` reads a line at a time and is bounded by nothing but the
+        // file, so it is the strategy that still works at this size.
+        let pread = Source::open(&path, Storage::Pread).unwrap();
+        assert_eq!(pread.len(), HUGE);
+        assert_eq!(line(&pread, 0), Some((b"aaa line".to_vec(), 9)));
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

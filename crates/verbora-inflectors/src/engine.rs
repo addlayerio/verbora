@@ -685,7 +685,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 80, "rule count changed; update the enumeration");
+        assert_eq!(count, 81, "rule count changed; update the enumeration");
     }
 
     /// **The reachability enumeration.** For every rule of every table, the
@@ -774,12 +774,26 @@ mod tests {
             if rules_only(&FR_FORMS.plural, word) == *word {
                 fr_redundant_in_plural += 1;
             }
+            // The singular direction is where the list earns its place, so
+            // measure it rather than assume it: an entry the singular rules
+            // would already leave alone does nothing at all, since the plural
+            // direction is redundant for every entry. 149 such entries (all 37
+            // in `-z` and 112 of the 139 in `-x`) were carried until the rules
+            // were walked; the guard rule now states their invariance instead.
+            assert_ne!(
+                rules_only(&FR_FORMS.singular, word),
+                **word,
+                "fr INVARIANT: {word:?} is redundant — the singular rules already \
+                 leave it alone, and the plural direction needs no entry at all"
+            );
             assert_eq!(fr.pluralize(word), *word);
             assert_eq!(fr.singularize(word), *word);
         }
         // Every French entry is redundant in the plural direction, because the
         // `-s`/`-x`/`-z` guard rule already covers it. The list exists for the
-        // singular direction alone.
+        // singular direction alone — which the `assert_ne!` above now proves
+        // entry by entry, so "redundant in one direction" can never quietly
+        // become "redundant in both".
         assert_eq!(fr_redundant_in_plural, data::fr::INVARIANT.len());
 
         let ja = NounInflectorJa::new();
@@ -796,6 +810,68 @@ mod tests {
         for word in data::verb::INVARIANT {
             assert_eq!(verb.singularize(word), *word);
             assert_eq!(verb.pluralize(word), *word);
+        }
+    }
+
+    /// A sample of the 149 entries `fr::INVARIANT` used to carry and no longer
+    /// does: French nouns in a plain `-x` or in `-z`, which no rule in either
+    /// direction rewrites, so enumerating them changed nothing. They must
+    /// still be invariant in both directions — now because `PLURAL_REGULAR`'s
+    /// `(s|x|z)$` guard and `SINGULAR_REGULAR`'s `(x|z)$` guard say so, not
+    /// because a lexicon lists them.
+    ///
+    /// The sample spans every shape those entries had: bare `-x`, `-yx`,
+    /// `-ax`, `-ex`, an `-oux` that the `-ou → -oux` alternation does not
+    /// claim, hyphenated compounds, and `-z`. Mixed case is included because
+    /// the lexical lists are keyed on the lowercase form while the rules are
+    /// not, so the two paths could disagree.
+    #[test]
+    fn french_nouns_in_plain_x_or_z_are_invariant_by_rule_not_by_lexicon() {
+        let fr = NounInflectorFr::new();
+        for word in [
+            "afflux",
+            "anthrax",
+            "apex",
+            "aptéryx",
+            "silex",
+            "index",
+            "lynx",
+            "prix",
+            "choix",
+            "époux",
+            "abat-voix",
+            "allume-gaz",
+            "quartz",
+            "assez",
+            "gaz",
+            "nez",
+            "riz",
+            "jazz",
+        ] {
+            assert!(
+                !FR_FORMS.plural.is_invariant(word) && !FR_FORMS.singular.is_invariant(word),
+                "{word:?} is back on the lexical list; the point is that it needs no entry"
+            );
+            assert_eq!(fr.pluralize(word), word, "plural of {word:?}");
+            assert_eq!(fr.singularize(word), word, "singular of {word:?}");
+            assert_eq!(rules_only(&FR_FORMS.plural, word), word);
+            assert_eq!(rules_only(&FR_FORMS.singular, word), word);
+        }
+        // Case restoration must not smuggle a change in either.
+        assert_eq!(fr.pluralize("AFFLUX"), "AFFLUX");
+        assert_eq!(fr.singularize("Anthrax"), "Anthrax");
+
+        // The `-x` forms a singular rule *does* claim still need their entries,
+        // and the guard must not shadow those rules by sitting before them.
+        for (plural, singular) in [("chevaux", "cheval"), ("cadeaux", "cadeau")] {
+            assert_eq!(fr.singularize(plural), singular);
+        }
+        for invariant in ["faux", "vieux", "taux", "chaux"] {
+            assert!(
+                FR_FORMS.singular.is_invariant(invariant),
+                "{invariant:?} must stay on the list: `aux$`/`(eau|eu|œu)x$` would rewrite it"
+            );
+            assert_eq!(fr.singularize(invariant), invariant);
         }
     }
 

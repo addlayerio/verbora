@@ -106,9 +106,10 @@ impl<'g, V> Topological<'g, V> {
     /// [`Cycle`] if the graph is not acyclic. A self-loop is a cycle.
     pub fn new(graph: &'g EdgeWeightedDigraph<V>) -> Result<Self, Cycle> {
         let n = graph.vertex_count();
-        // `usize` rather than `u32`: the edge count is bounded by memory, not by
-        // the vertex-id width, so a `u32` counter could in principle wrap on a
-        // graph with more than `u32::MAX` edges into one vertex. A wrapped
+        // `usize` rather than `u32`: the in-degree counts edges, and
+        // `EdgeWeightedDigraph` admits up to `u32::MAX + 1` of them
+        // (`GraphError::EdgeLimit` refuses the next), so a `u32` counter could
+        // wrap on a graph whose edges all point into one vertex. A wrapped
         // counter would emit a vertex early and silently produce a non-order.
         let mut in_degree = vec![0usize; n];
         for edge in graph.edges() {

@@ -11,10 +11,23 @@ use crate::tag::Tag;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Language {
-    /// English: 92,661 lexicon entries (Penn Treebank tags plus Verbora's
-    /// `URL`) and 18 transformation rules.
+    /// English: 92,538 lexicon entries and 18 transformation rules.
+    ///
+    /// The lexicon's tag set is 122 strings, and only 48 of them are single
+    /// tags: the Penn Treebank word classes (`NN`, `VBD`, `JJR`, …), a set of
+    /// punctuation labels (`.`, `,`, `:`, `;`, `!`, `#`, `$`, `(`, `)`, and two
+    /// quote marks), and `JJSS` and `PRP$R`, which the Penn tag set does not
+    /// define. The remaining 74 are `|`-joined **ambiguity classes** — `JJ|NN`,
+    /// `NNPS|VBZ`, `IN|RB` — recording that the source annotation could not
+    /// choose between two tags. They are not parts of speech, and a token that
+    /// takes one has not been disambiguated.
+    ///
+    /// Two tags the rules assign are absent from the lexicon: `CD`, and
+    /// Verbora's own `URL`. A token receives either one only by a rule firing on
+    /// it, never from the initial-state annotator.
     English,
-    /// Dutch: 11,699 lexicon entries and 285 transformation rules.
+    /// Dutch: 11,699 lexicon entries (194 tags, none of them ambiguity classes)
+    /// and 274 transformation rules.
     Dutch,
 }
 
@@ -103,10 +116,102 @@ mod tests {
         }
     }
 
+    /// Every bundled rule can fire.
+    ///
+    /// A rule is dead when its `from` pattern names a tag nothing in the
+    /// language's own configuration can produce, or when one of its condition's
+    /// **tag** arguments does: `Condition::holds` is then false at every site,
+    /// for every input, and the rule costs a full pass over each sentence to
+    /// change nothing.
+    ///
+    /// The tags a configuration can produce are exactly: the primary tag of some
+    /// lexicon entry (what the initial-state annotator assigns), the two
+    /// defaults, and the `to` tag of some rule. Secondary lexicon tags are not
+    /// among them — [`Lexicon::tag_of`](crate::Lexicon::tag_of) reads the first
+    /// tag of an entry and no other.
+    ///
+    /// Word arguments are not checked: a word is compared against
+    /// caller-supplied token text, which the bundled data does not constrain.
+    #[test]
+    fn every_bundled_rule_can_fire() {
+        use crate::rule::TagPattern;
+        use std::collections::BTreeSet;
+
+        for lang in [Language::English, Language::Dutch] {
+            let lex = lang.lexicon();
+            let rules = crate::ruleset::RuleSet::bundled(lang);
+            let mut producible: BTreeSet<&str> = BTreeSet::new();
+            for i in 0..lex.len() {
+                if let Some(primary) = lex.tags(i).next() {
+                    producible.insert(primary);
+                }
+            }
+            let defaults = [lang.default_tag(), lang.capitalized_default_tag()];
+            for d in &defaults {
+                producible.insert(d.as_str());
+            }
+            for rule in rules.rules() {
+                producible.insert(rule.to.as_str());
+            }
+
+            for rule in rules.rules() {
+                if let TagPattern::Is(t) = &rule.from {
+                    assert!(
+                        producible.contains(t.as_str()),
+                        "{lang:?}: {rule} rewrites {t}, which nothing produces"
+                    );
+                }
+                for t in rule.condition.tag_arguments().into_iter().flatten() {
+                    assert!(
+                        producible.contains(t.as_str()),
+                        "{lang:?}: {rule} tests for {t}, which nothing produces"
+                    );
+                }
+            }
+        }
+    }
+
+    /// What the bundled lexicons' tag sets actually are.
+    ///
+    /// Pinned because [`Language`]'s own documentation describes them, and a
+    /// description of a data file goes stale silently.
+    #[test]
+    fn the_bundled_lexicon_tag_sets_are_as_documented() {
+        use std::collections::BTreeSet;
+
+        let lex = Language::English.lexicon();
+        let mut tags: BTreeSet<&str> = BTreeSet::new();
+        for i in 0..lex.len() {
+            tags.extend(lex.tags(i));
+        }
+        assert_eq!(tags.len(), 122);
+        assert_eq!(tags.iter().filter(|t| t.contains('|')).count(), 74);
+        // The two tags the rules assign and the lexicon never does.
+        assert!(!tags.contains("URL"));
+        assert!(!tags.contains("CD"));
+        for produced_by_rules in ["URL", "CD"] {
+            assert!(
+                Language::English
+                    .rule_strings()
+                    .iter()
+                    .any(|r| r.split_whitespace().nth(1) == Some(produced_by_rules)),
+                "{produced_by_rules} is not produced by a rule either"
+            );
+        }
+        // The Dutch tag set is 194 strings and holds no ambiguity class.
+        let nl = Language::Dutch.lexicon();
+        let mut nl_tags: BTreeSet<&str> = BTreeSet::new();
+        for i in 0..nl.len() {
+            nl_tags.extend(nl.tags(i));
+        }
+        assert_eq!(nl_tags.len(), 194);
+        assert!(!nl_tags.iter().any(|t| t.contains('|')));
+    }
+
     #[test]
     fn rule_string_counts() {
         assert_eq!(Language::English.rule_strings().len(), 18);
-        assert_eq!(Language::Dutch.rule_strings().len(), 285);
+        assert_eq!(Language::Dutch.rule_strings().len(), 274);
         assert_eq!(brill_paper_rule_strings().len(), 10);
     }
 }

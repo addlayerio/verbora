@@ -2,7 +2,7 @@
 //!
 //! `build.rs` packs the two lexicon JSON files into a compact index that this
 //! module reads *in place*: no parsing, no allocation, and no lazily-initialised
-//! 92,662-entry hash map. Start-up cost is the cost of slicing a byte array.
+//! 104,237-entry hash map. Start-up cost is the cost of slicing a byte array.
 //!
 //! Entries are stored sorted by key bytes, which for well-formed UTF-8 is the
 //! same order as by Unicode scalar value, so a lookup is a binary search over
@@ -122,7 +122,7 @@ impl StaticLexicon {
     /// `n` is never caller-supplied either — it is read out of `val_ids`, which
     /// `build.rs` populates only from its own `tag_ids` map, so every stored id
     /// indexes a tag that exists. `every_packed_entry_satisfies_the_contract`
-    /// drains this for all 104,360 shipped entries.
+    /// drains this for all 104,237 shipped entries.
     #[inline]
     fn tag(self, n: usize) -> &'static str {
         let lo = self.tag_bytes + u32_at(self.blob, self.tag_off + n * 4);
@@ -186,25 +186,46 @@ impl ExactSizeIterator for StaticTags {}
 mod tests {
     use super::*;
 
-    /// The build script rejects exactly the entries the lexicon entry contract
-    /// forbids, and nothing else. As of the bundled data that is one English
-    /// entry — the key `""`, whose tag list is also empty — and no Dutch one.
+    /// Every source entry the crate does not ship, counted by reason.
+    ///
+    /// The English source holds 92,662 entries and the crate ships 92,538. The
+    /// 124 that do not survive are, exactly:
+    ///
+    /// | Reason | English | Dutch |
+    /// |---|---:|---:|
+    /// | key was corpus markup, not a token | 122 | 0 |
+    /// | key decoded onto a key already held (`\*` onto `*`) | 1 | 0 |
+    /// | entry contract (the key `""`, whose tag list is also empty) | 1 | 0 |
+    ///
+    /// The 122 markup keys are 86 with a `\` escaping nothing, 36 carrying the
+    /// corpus's own word/tag separator and the tag after it; `build.rs`'s
+    /// `decode_key` documents both shapes.
     #[test]
-    fn build_rejected_exactly_the_contract_violations() {
+    fn every_dropped_source_entry_is_accounted_for() {
+        assert_eq!(ENGLISH_SOURCE_ENTRIES, 92_662);
+        assert_eq!(ENGLISH_KEYS_NOT_TOKENS, 122);
+        assert_eq!(ENGLISH_KEYS_MERGED, 1);
         assert_eq!(ENGLISH_ENTRIES_REJECTED, 1);
-        assert_eq!(DUTCH_ENTRIES_REJECTED, 0);
         assert_eq!(
             StaticLexicon::english().len(),
-            92_662 - ENGLISH_ENTRIES_REJECTED
+            ENGLISH_SOURCE_ENTRIES
+                - ENGLISH_KEYS_NOT_TOKENS
+                - ENGLISH_KEYS_MERGED
+                - ENGLISH_ENTRIES_REJECTED
         );
-        assert_eq!(
-            StaticLexicon::dutch().len(),
-            11_699 - DUTCH_ENTRIES_REJECTED
-        );
+        assert_eq!(StaticLexicon::english().len(), 92_538);
+
+        assert_eq!(DUTCH_SOURCE_ENTRIES, 11_699);
+        assert_eq!(DUTCH_KEYS_NOT_TOKENS, 0);
+        assert_eq!(DUTCH_KEYS_MERGED, 0);
+        assert_eq!(DUTCH_ENTRIES_REJECTED, 0);
+        assert_eq!(StaticLexicon::dutch().len(), 11_699);
     }
 
-    /// Every packed key and every packed tag satisfies the literal contract, and
-    /// every entry carries at least one tag. Enumerated, not sampled.
+    /// Every packed key and every packed tag satisfies the literal contract —
+    /// including the one restriction only a tag carries, that it is not the
+    /// wildcard `*` — and every entry carries at least one tag. Enumerated, not
+    /// sampled.
     #[test]
     fn every_packed_entry_satisfies_the_contract() {
         for lex in [StaticLexicon::english(), StaticLexicon::dutch()] {
@@ -223,13 +244,14 @@ mod tests {
                         !t.chars().any(char::is_whitespace),
                         "tag {t:?} on {key:?} contains whitespace"
                     );
+                    assert_ne!(t, "*", "the wildcard is a tag on {key:?}");
                 }
             }
         }
     }
 
     /// Keys are stored in strictly ascending byte order, and every one of them
-    /// is findable at its own index. Enumerated over all 104,360 entries.
+    /// is findable at its own index. Enumerated over all 104,237 entries.
     #[test]
     fn keys_are_sorted_and_every_key_is_findable() {
         for lex in [StaticLexicon::english(), StaticLexicon::dutch()] {
@@ -245,6 +267,34 @@ mod tests {
         }
     }
 
+    /// No packed key still carries a corpus escape.
+    ///
+    /// `\` is not a character any of these corpora put inside a token — it is
+    /// only ever the escape marker — so one surviving in a packed key means a
+    /// key that no conforming token can equal. A `/` *is* legitimate token text
+    /// once decoded (`Asia/Pacific`), so it is not part of this check; the keys
+    /// that carried a bare separator are counted instead, by
+    /// `every_dropped_source_entry_is_accounted_for`.
+    #[test]
+    fn no_packed_key_carries_corpus_markup() {
+        for lex in [StaticLexicon::english(), StaticLexicon::dutch()] {
+            for i in 0..lex.len() {
+                let key = lex.key(i);
+                assert!(
+                    !key.contains('\\'),
+                    "key {key:?} still carries a corpus escape"
+                );
+            }
+        }
+        let en = StaticLexicon::english();
+        for markup in ["Asia\\/Pacific", "Asia\\", "Vale\\", "me/PRP", "W/NNP.R.G."] {
+            assert_eq!(en.find(markup), None, "{markup:?} is still a key");
+        }
+        // ...and the tokens those entries were spelled from are reachable.
+        assert_eq!(en.primary_tag("Asia/Pacific"), Some("JJ"));
+        assert_eq!(en.primary_tag("M*A*S*H"), Some("NNP"));
+    }
+
     #[test]
     fn the_empty_key_is_gone() {
         assert_eq!(StaticLexicon::english().find(""), None);
@@ -254,7 +304,7 @@ mod tests {
     #[test]
     fn rule_tables_have_the_recorded_sizes() {
         assert_eq!(ENGLISH_RULES.len(), 18);
-        assert_eq!(DUTCH_RULES.len(), 285);
+        assert_eq!(DUTCH_RULES.len(), 274);
         assert_eq!(BRILL_PAPER_RULES.len(), 10);
         assert_eq!(ENGLISH_RULES[12], "* RB CURRENT-WORD-ENDS-WITH ly");
     }

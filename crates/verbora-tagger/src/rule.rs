@@ -188,6 +188,39 @@ mod tests {
         }
     }
 
+    /// The round-trip property holds for every rule that can be **built**, not
+    /// only for every rule that can be parsed. A rule assembled through
+    /// [`Rule::new`] never prints as a different rule than the one it is.
+    #[test]
+    fn every_constructible_rule_round_trips() {
+        // Every string the `Tag` contract admits is fair game as a `from`
+        // pattern; the ones it rejects cannot reach `Rule::new` at all.
+        for candidate in [
+            "NN",
+            "Adj(attr,stell,onverv)",
+            "*",
+            "**",
+            "-LRB-",
+            "PRP$",
+            "JJ|NN",
+            "?",
+        ] {
+            let Ok(from) = Tag::new(candidate) else {
+                continue;
+            };
+            let rule = Rule::new(
+                TagPattern::Is(from),
+                Tag::new("VB").unwrap(),
+                Condition::PrevTag(Tag::new("TO").unwrap()),
+            );
+            assert_eq!(
+                rule.to_string().parse::<Rule>().unwrap(),
+                rule,
+                "{candidate:?} does not round-trip"
+            );
+        }
+    }
+
     #[test]
     fn reach_is_the_conditions_reach() {
         let rule = Rule::new(

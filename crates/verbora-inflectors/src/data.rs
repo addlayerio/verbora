@@ -443,6 +443,12 @@ pub(crate) mod fr {
         rule("(?i)^œils$", "œil", "œils", "œil"),
         rule("(?i)(eau|eu|œu)x$", "${1}", "cadeaux", "cadeau"),
         rule("(?i)aux$", "al", "chevaux", "cheval"),
+        // Anything still ending in `-x` or `-z` is its own singular: no French
+        // plural is formed by adding a bare `-x` or a `-z`, so nothing here is
+        // an inflection to undo. Stated as a guard rather than left to the
+        // absence of a matching rule, mirroring `PLURAL_REGULAR`'s
+        // `(s|x|z)$` — and so that `INVARIANT` need not enumerate these.
+        guard("(?i)(x|z)$", "afflux"),
         rule("(?i)s$", "", "chats", "chat"),
     ];
 }

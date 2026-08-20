@@ -81,8 +81,9 @@ impl PrebuiltIndex {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if a file cannot be read, or [`Error::FileTooLarge`] if
-    /// one is too large for `u32` offsets.
+    /// [`Error::Io`] if a file cannot be read, or [`Error::FileTooLarge`] if one
+    /// is 4 GiB or more — too large to hold in memory, and too large for the
+    /// `u32` offsets this sidecar records.
     pub fn build(dict_dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dict_dir.as_ref();
         let mut entries = Vec::with_capacity(FILES.len());

@@ -656,7 +656,7 @@ fn run_golden() {
             Some(c) => println!(
                 "({input:?}, Some((Language::{:?}, {:#010X}))),",
                 c.language,
-                c.confidence.to_bits()
+                c.confidence.get().to_bits()
             ),
         }
     }

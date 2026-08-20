@@ -161,12 +161,18 @@ pub struct KeysWithPrefix<'t> {
 
 impl<'t> KeysWithPrefix<'t> {
     /// Positions the iterator at an already-folded `prefix`.
-    pub(crate) fn new(trie: &'t Trie, folded: &str) -> Self {
-        let start = trie.descend_folded(folded);
+    ///
+    /// `folded` is taken by value so that a prefix the fold already had to
+    /// rewrite — the case-insensitive path — is moved into the path buffer
+    /// instead of being copied into a second one.
+    pub(crate) fn new(trie: &'t Trie, folded: Cow<'_, str>) -> Self {
+        let start = trie.descend_folded(&folded);
         Self {
             trie,
+            // A miss yields nothing, so it never spells a word out and never
+            // needs the prefix; `String::new` does not allocate.
             buf: if start.is_some() {
-                String::from(folded)
+                folded.into_owned()
             } else {
                 String::new()
             },

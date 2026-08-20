@@ -170,8 +170,15 @@ pub type LongestPathTree<'g, V> = PathTree<'g, V, Longest>;
 /// * **A reported path exists.** [`PathTree::path`] returns `None` when the
 ///   target is unreachable and never manufactures a prefix. For the source it is
 ///   `Some(vec![source])` — the empty path, of length zero.
-/// * **Ties keep the first winner.** When two paths tie exactly, the one whose
-///   final edge was relaxed first — that is, added first — is kept.
+/// * **Ties keep the edge added first.** When two paths to a vertex tie
+///   exactly, the tree arrives by whichever of their final edges was added to
+///   the graph first — the lower index in [`EdgeWeightedDigraph::edges`]. This
+///   is a property of the graph alone, not of the traversal: it does *not*
+///   mean "relaxed first". Relaxation visits tails in topological order, so an
+///   edge added first is often relaxed after one added later, and the rule is
+///   enforced by comparing edge indices on an exact tie rather than left to
+///   fall out of the visit order. Applied at every vertex, it also pins the
+///   whole path, since each step of [`PathTree::path`] is one such choice.
 ///
 /// Building is O(V + E) after the topological ordering it delegates to, and
 /// holds two `Vec`s of length V.
@@ -244,6 +251,10 @@ impl<'g, V, R: Relaxation> PathTree<'g, V, R> {
     /// This is the one-step primitive [`PathTree::path`] walks. Reach for it
     /// when a single question — "how did the tree get here?" — is all you need,
     /// rather than materialising a whole path to ask it.
+    ///
+    /// Among the in-edges that achieve `id`'s reported distance, this is
+    /// always the one added to the graph first — see the tie-break bullet on
+    /// [`PathTree`].
     pub fn edge_to(&self, id: VertexId) -> Option<&'g DirectedEdge> {
         let index = self.edge_to.get(id.index()).copied().flatten()?;
         self.graph.edges().get(index as usize)
@@ -354,7 +365,18 @@ impl<'g, V: Eq + Hash + Clone, R: Relaxation> PathTree<'g, V, R> {
                 }
                 let better = match dist[head] {
                     None => true,
-                    Some(incumbent) => R::is_better(incumbent, candidate),
+                    // On an exact tie, the smaller edge index wins — the
+                    // edge added first, per the type's tie-break contract.
+                    // Relaxation order alone would not give that: it visits
+                    // tails in topological order, so an edge added first can
+                    // be relaxed after one added later and lose a tie it
+                    // should win. The comparison costs nothing on the common
+                    // path, since `is_better` short-circuits it.
+                    Some(incumbent) => {
+                        R::is_better(incumbent, candidate)
+                            || (candidate == incumbent
+                                && edge_to[head].is_some_and(|kept| index < kept))
+                    }
                 };
                 if better {
                     dist[head] = Some(candidate);
@@ -418,6 +440,10 @@ mod tests {
             g.add(&a, &b, w).unwrap();
         }
         g
+    }
+
+    fn id(g: &EdgeWeightedDigraph<u32>, label: u32) -> VertexId {
+        g.vertex_id(&label).expect("label is a vertex of the graph")
     }
 
     fn labels(path: Option<Vec<&u32>>) -> Vec<u32> {
@@ -675,9 +701,61 @@ mod tests {
     }
 
     #[test]
-    fn ties_keep_the_edge_relaxed_first() {
-        // Both paths to 3 weigh 2.0; 0->1->3 relaxes before 0->2->3 because
-        // vertex 1 precedes vertex 2 in the topological order.
+    fn ties_keep_the_edge_added_first_even_when_it_relaxes_last() {
+        // "Relaxed first" and "added first" are different rules, and this
+        // graph separates them. Both routes to `t` weigh 2.0. The edge
+        // `a->t` is added FIRST (index 0), but `b` precedes `a` in the
+        // topological order, so `b->t` is RELAXED first. A "relaxed
+        // first" tree keeps `b->t`; the documented "added first" rule
+        // keeps `a->t`.
+        let g = graph(&[
+            (10, 99, 1.0), // index 0: a -> t, added first
+            (1, 20, 1.0),  // index 1: s -> b
+            (20, 99, 1.0), // index 2: b -> t, added third
+            (1, 10, 1.0),  // index 3: s -> a
+        ]);
+        let order: Vec<u32> = crate::Topological::new(&g)
+            .unwrap()
+            .order()
+            .iter()
+            .map(|&v| *g.label(v).unwrap())
+            .collect();
+        let position = |label: u32| order.iter().position(|&v| v == label).unwrap();
+        assert!(
+            position(20) < position(10),
+            "fixture is only a discriminator while b precedes a in the \
+             topological order; got {order:?}"
+        );
+
+        let shortest = ShortestPathTree::new(&g, &1).unwrap();
+        let longest = LongestPathTree::new(&g, &1).unwrap();
+        for tree_edge in [shortest.edge_to(id(&g, 99)), longest.edge_to(id(&g, 99))] {
+            let edge = tree_edge.expect("t is reachable");
+            assert_eq!(
+                (*g.label(edge.from()).unwrap(), *g.label(edge.to()).unwrap()),
+                (10, 99),
+                "the tying edge added first must win, not the one relaxed first"
+            );
+        }
+        // Swapping the kept edge on a tie must swap the stored distance with
+        // it, or the tree would report a distance that is not the sum along
+        // the path it also reports.
+        for (distance, path) in [
+            (shortest.distance_of(&99), shortest.path_labels_of(&99)),
+            (longest.distance_of(&99), longest.path_labels_of(&99)),
+        ] {
+            assert_eq!(distance, Some(2.0));
+            assert_eq!(labels(path), vec![1, 10, 99]);
+        }
+        assert_eq!(weight_along(&g, &[1, 10, 99]), 2.0);
+    }
+
+    #[test]
+    fn ties_keep_the_edge_added_first() {
+        // Both paths to 3 weigh 2.0; 1->3 was added before 2->3, so the tree
+        // arrives by it. (Here the two rules happen to agree — vertex 1 also
+        // precedes vertex 2 in the topological order; the test above is the
+        // one that separates them.)
         let g = graph(&[(0, 1, 1.0), (0, 2, 1.0), (1, 3, 1.0), (2, 3, 1.0)]);
         let tree = ShortestPathTree::new(&g, &0).unwrap();
         assert_eq!(tree.distance_of(&3), Some(2.0));

@@ -3,7 +3,7 @@
 //! # Why a build script
 //!
 //! The bundled dictionaries are 4.6 MB of JSON: 92,662 English entries and
-//! 11,699 Dutch ones. Three shipping strategies were considered:
+//! 11,699 Dutch ones, of which 92,538 and 11,699 survive to be packed. Three shipping strategies were considered:
 //!
 //! | Strategy | Binary size | Startup |
 //! |---|---|---|
@@ -18,15 +18,26 @@
 //! interned (316 distinct tags cover both languages) and the JSON's punctuation
 //! disappears.
 //!
+//! # Source keys become tokens here
+//!
+//! The source dictionaries were derived from tagged corpora, and their keys are
+//! written in the corpus's own escaped notation rather than as plain tokens: a
+//! `/` inside a token appears as `\/`, because a bare `/` separates a token from
+//! its tag, and a `*` appears as `\*`. [`decode_key`] undoes that, so the packed
+//! key is the token text a caller can actually look up — `Asia/Pacific`, not
+//! `Asia\/Pacific`. A key that decoding shows to be markup rather than a token
+//! is dropped; see [`decode_key`] for the two shapes of that.
+//!
 //! # The entry contract is enforced here
 //!
 //! `verbora_tagger::Lexicon` accepts a key only when it is non-empty and
 //! contains no Unicode `White_Space` scalar, and accepts an entry only when it
-//! carries at least one tag. The source JSON is filtered against exactly that
-//! contract, and the number of rejected entries per language is emitted as a
-//! constant so the crate's own tests can assert it rather than trust it. As of
-//! the bundled data that number is 1 for English (the key `""`, which maps to an
-//! empty tag list) and 0 for Dutch.
+//! carries at least one tag, none of which is `*`. The decoded entries are
+//! filtered against exactly that contract.
+//!
+//! Every entry the source had and the crate does not ship is counted, per
+//! language and per reason, into a constant `data::tests` asserts — so the loss
+//! is a number in a test rather than a claim in a comment.
 //!
 //! # Layout
 //!
@@ -89,21 +100,112 @@ fn is_valid_literal(s: &str) -> bool {
     !s.is_empty() && !s.chars().any(char::is_whitespace)
 }
 
-/// Splits the source entries into the ones the crate will ship and the ones the
-/// entry contract rejects.
-fn filter(entries: Vec<(String, Vec<String>)>) -> (Vec<(String, Vec<String>)>, Vec<String>) {
-    let mut kept = Vec::with_capacity(entries.len());
-    let mut rejected = Vec::new();
-    for (key, tags) in entries {
-        let ok =
-            is_valid_literal(&key) && !tags.is_empty() && tags.iter().all(|t| is_valid_literal(t));
-        if ok {
-            kept.push((key, tags));
-        } else {
-            rejected.push(key);
+/// [`is_valid_literal`], plus the restriction only a tag carries: `*` is the
+/// wildcard pattern of a rule string, so it is not available as a tag.
+fn is_valid_tag(s: &str) -> bool {
+    is_valid_literal(s) && s != "*"
+}
+
+/// Decodes one source key out of the escaped notation the source corpora write
+/// their tokens in.
+///
+/// A tagged corpus separates a token from its tag with `/` and marks a null
+/// element with `*`, so a token whose own text contains either character writes
+/// it escaped: `Asia\/Pacific` is the token `Asia/Pacific`, and `M\*A\*S\*H`
+/// is `M*A*S*H`. Decoding is the inverse, and nothing else is escaped.
+///
+/// `None` means the key is not a token at all but a piece of the corpus's own
+/// markup, and there are two shapes of that:
+///
+/// * a `\` with nothing escapable after it. That is what the left half of an
+///   `A\/B` token looks like once something has truncated it at the `/`, and
+///   the tags on it belong to the whole compound (`Asia\` carries `JJ`, the tag
+///   of `Asia\/Pacific`), not to the fragment.
+/// * a bare `/` with text on both sides — the corpus's own word/tag separator,
+///   left in the key together with the tag it introduced: `me/PRP`, `na/TO`,
+///   `W/NNP.R.G.`. Those tags contradict the entry's own tag list, so neither
+///   half of such an entry can be trusted. A lone `/` is not a separator (a
+///   separator has a word before it and a tag after it); it is the punctuation
+///   token, and it is kept.
+fn decode_key(key: &str) -> Option<String> {
+    let mut out = String::with_capacity(key.len());
+    let mut chars = key.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\\' => match chars.peek() {
+                Some(&(_, escaped @ ('/' | '*'))) => {
+                    out.push(escaped);
+                    chars.next();
+                }
+                _ => return None,
+            },
+            '/' if at > 0 && at + 1 < key.len() => return None,
+            _ => out.push(c),
         }
     }
-    (kept, rejected)
+    Some(out)
+}
+
+/// What packing one dictionary produced, and everything the source lost on the
+/// way, so the crate can assert the counts instead of trusting them.
+struct Prepared {
+    entries: Vec<(String, Vec<String>)>,
+    /// Source keys that were corpus markup rather than tokens.
+    not_tokens: Vec<String>,
+    /// Source keys that decoded onto a key another entry already held.
+    merged: Vec<String>,
+    /// Source keys the lexicon entry contract rejected.
+    rejected: Vec<String>,
+}
+
+/// Decodes, de-duplicates and filters one dictionary's source entries.
+///
+/// When two source keys decode onto the same token the entry that needed no
+/// decoding wins, and the decoded one is dropped rather than merged. Merging
+/// would have to concatenate two tag lists whose relative frequencies are not
+/// recorded anywhere, and the order of a lexicon entry *is* its frequency
+/// ranking — `Lexicon::primary_tag` reads the first tag. Inventing that order is
+/// worse than keeping the entry that was already spelled as its own token.
+fn prepare(entries: Vec<(String, Vec<String>)>) -> Prepared {
+    let mut decoded = Vec::with_capacity(entries.len());
+    let mut not_tokens = Vec::new();
+    for (key, tags) in entries {
+        match decode_key(&key) {
+            Some(token) => decoded.push((token, key, tags)),
+            None => not_tokens.push(key),
+        }
+    }
+    // Sort so that within one decoded key the entry that needed no decoding
+    // comes first, and the rest in a source order that does not depend on the
+    // JSON reader.
+    decoded.sort_by(|a, b| {
+        a.0.as_bytes()
+            .cmp(b.0.as_bytes())
+            .then_with(|| (a.0 != a.1).cmp(&(b.0 != b.1)))
+            .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+    });
+
+    let mut kept: Vec<(String, Vec<String>)> = Vec::with_capacity(decoded.len());
+    let mut merged = Vec::new();
+    let mut rejected = Vec::new();
+    for (token, source, tags) in decoded {
+        if kept.last().is_some_and(|(k, _)| *k == token) {
+            merged.push(source);
+        } else if is_valid_literal(&token)
+            && !tags.is_empty()
+            && tags.iter().all(|t| is_valid_tag(t))
+        {
+            kept.push((token, tags));
+        } else {
+            rejected.push(source);
+        }
+    }
+    Prepared {
+        entries: kept,
+        not_tokens,
+        merged,
+        rejected,
+    }
 }
 
 /// Serialises one dictionary into the packed index format.
@@ -223,41 +325,60 @@ fn main() {
 
     let mut generated = String::from("// @generated by build.rs — do not edit.\n");
 
-    for (src, dst, name) in [
+    for (src, dst, prefix) in [
         (
             "English/lexicon_from_reference.json",
             "english.lex",
-            "ENGLISH_ENTRIES_REJECTED",
+            "ENGLISH",
         ),
-        (
-            "Dutch/brill_Lexicon.json",
-            "dutch.lex",
-            "DUTCH_ENTRIES_REJECTED",
-        ),
+        ("Dutch/brill_Lexicon.json", "dutch.lex", "DUTCH"),
     ] {
         let entries: Entries = serde_json::from_str(&read(&data.join(src)))
             .unwrap_or_else(|e| panic!("cannot parse {src}: {e}"));
-        let (kept, rejected) = filter(entries.0);
-        if !rejected.is_empty() {
+        let source_count = entries.0.len();
+        let prepared = prepare(entries.0);
+        let dropped = prepared.not_tokens.len() + prepared.merged.len() + prepared.rejected.len();
+        if dropped > 0 {
             println!(
-                "cargo:warning={src}: {} entries rejected by the lexicon entry contract: {:?}",
-                rejected.len(),
-                rejected
+                "cargo:warning={src}: packed {} of {source_count} entries \
+                 ({} corpus markup, {} merged by decoding, {} rejected by the entry contract)",
+                prepared.entries.len(),
+                prepared.not_tokens.len(),
+                prepared.merged.len(),
+                prepared.rejected.len(),
             );
         }
-        writeln!(
-            generated,
-            "/// Source entries of `{src}` that the lexicon entry contract rejected."
-        )
-        .unwrap();
-        writeln!(generated, "#[allow(dead_code)] // read by `data::tests`.").unwrap();
-        writeln!(
-            generated,
-            "pub(crate) const {name}: usize = {};",
-            rejected.len()
-        )
-        .unwrap();
-        std::fs::write(out.join(dst), pack(kept)).expect("write packed lexicon");
+        for (name, doc, value) in [
+            (
+                "SOURCE_ENTRIES",
+                "Entries in the source JSON, before anything was dropped.",
+                source_count,
+            ),
+            (
+                "KEYS_NOT_TOKENS",
+                "Source keys that were corpus markup rather than tokens.",
+                prepared.not_tokens.len(),
+            ),
+            (
+                "KEYS_MERGED",
+                "Source keys that decoded onto a key another entry already held.",
+                prepared.merged.len(),
+            ),
+            (
+                "ENTRIES_REJECTED",
+                "Source entries that the lexicon entry contract rejected.",
+                prepared.rejected.len(),
+            ),
+        ] {
+            writeln!(generated, "/// {doc} (`{src}`)").unwrap();
+            writeln!(generated, "#[allow(dead_code)] // read by `data::tests`.").unwrap();
+            writeln!(
+                generated,
+                "pub(crate) const {prefix}_{name}: usize = {value};"
+            )
+            .unwrap();
+        }
+        std::fs::write(out.join(dst), pack(prepared.entries)).expect("write packed lexicon");
     }
 
     for (src, name, doc) in [
@@ -269,7 +390,7 @@ fn main() {
         (
             "Dutch/brill_CONTEXTRULES.json",
             "DUTCH_RULES",
-            "The 285 bundled Dutch transformation rules (`data/Dutch/brill_CONTEXTRULES.json`).",
+            "The 274 bundled Dutch transformation rules (`data/Dutch/brill_CONTEXTRULES.json`).",
         ),
         (
             "English/tr_from_brill_paper.json",

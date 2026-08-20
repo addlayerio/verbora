@@ -28,8 +28,8 @@ impl DataFile {
     /// # Errors
     ///
     /// [`Error::Io`] if the file cannot be opened or read;
-    /// [`Error::FileTooLarge`] for [`Storage::Indexed`] on a file of 4 GiB or
-    /// more.
+    /// [`Error::FileTooLarge`] for any storage but [`Storage::Pread`] on a file
+    /// of 4 GiB or more.
     pub fn open(path: impl AsRef<Path>, pos: PartOfSpeech, storage: Storage) -> Result<Self> {
         let path = path.as_ref();
         Ok(Self {

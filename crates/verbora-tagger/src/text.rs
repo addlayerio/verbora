@@ -162,32 +162,42 @@ fn grouped_digits(b: &[u8], i: &mut usize) -> usize {
 /// Whether a token *looks like* a URL under Verbora's deliberately small
 /// heuristic.
 ///
-/// The token must contain a `U+002E FULL STOP` that is neither its first nor its
-/// last scalar, **and** two consecutive ASCII letters somewhere. That is the
-/// whole rule; it is a Verbora heuristic, not an implementation of [RFC 3986],
-/// and it is stated here so that the bundled `NN URL CURRENT-WORD-IS-URL YES`
-/// rule has a definition to point at.
+/// The token must contain **some** `U+002E FULL STOP` that is neither its first
+/// nor its last scalar, **and** two consecutive ASCII letters somewhere. That is
+/// the whole rule; it is a Verbora heuristic, not an implementation of
+/// [RFC 3986], and it is stated here so that the bundled
+/// `NN URL CURRENT-WORD-IS-URL YES` rule has a definition to point at.
+///
+/// The dot test is *existential* on purpose. A whitespace-delimited token
+/// carries whatever punctuation abutted it, so a URL at the end of a sentence
+/// arrives as `www.example.com.` — the single commonest shape a URL takes in
+/// tokenized text. Requiring the token's *last* dot to be interior would reject
+/// exactly that case, which is the one the rules exist for.
 ///
 /// | Token | URL-like | Why |
 /// |---|---|---|
 /// | `"www.example.com"`, `"example.org"` | yes | interior dot, `ww`/`ex` |
+/// | `"www.example.com."`, `".www.example.com"` | yes | the dot at `www.` is still interior |
+/// | `"Ph.D."` | yes | an accepted false positive: interior dot, and `Ph` |
 /// | `"3.14"` | no | no two adjacent ASCII letters |
-/// | `"e.g."` | no | trailing dot, and no adjacent letters |
-/// | `"A.A.U."` | no | no two adjacent letters |
-/// | `".com"`, `"com."` | no | the dot is not interior |
+/// | `"e.g."`, `"A.A.U."`, `"U.S."` | no | no two adjacent letters |
+/// | `".com"`, `"com."`, `"etc."` | no | the only dot is first or last |
 /// | `"日本.語"` | no | the letters are not ASCII |
+///
+/// The two-adjacent-letters requirement is what keeps the initialisms out;
+/// `Ph.D.` is the one common abbreviation that clears it, and it is admitted
+/// rather than special-cased, because a list of exceptions is not a heuristic.
 ///
 /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
 #[must_use]
 pub(crate) fn looks_like_url(token: &str) -> bool {
-    let interior_dot = match (token.find('.'), token.rfind('.')) {
-        (Some(first), Some(last)) => first > 0 && last + 1 < token.len(),
-        _ => false,
-    };
+    let b = token.as_bytes();
+    // A dot is interior exactly when it lies in `b[1..len-1]`: `.` is one byte,
+    // and a UTF-8 continuation byte is never `.`, so this cannot match inside a
+    // multi-byte scalar and cannot miss a dot that starts one.
+    let interior_dot = b.len() > 2 && b[1..b.len() - 1].contains(&b'.');
     interior_dot
-        && token
-            .as_bytes()
-            .windows(2)
+        && b.windows(2)
             .any(|w| w[0].is_ascii_alphabetic() && w[1].is_ascii_alphabetic())
 }
 
@@ -291,19 +301,41 @@ mod tests {
         }
     }
 
+    /// The contract is *existential*: a token is URL-like when it contains a
+    /// full stop that is neither its first nor its last scalar. A sentence-final
+    /// URL therefore still qualifies — which is the case whitespace tokenization
+    /// produces most often.
+    #[test]
+    fn a_sentence_final_url_still_has_an_interior_dot() {
+        assert!(looks_like_url("www.example.com."));
+        assert!(looks_like_url(".www.example.com"));
+        assert!(looks_like_url(".www.example.com."));
+    }
+
     #[test]
     fn url_heuristic() {
-        for yes in ["www.example.com", "example.org", "a.bc.d", "naïve.com"] {
+        for yes in [
+            "www.example.com",
+            "example.org",
+            "a.bc.d",
+            "naïve.com",
+            "Ph.D.",
+        ] {
             assert!(looks_like_url(yes), "{yes:?}");
         }
         for no in [
             "3.14",
             "e.g.",
             "A.A.U.",
+            "U.S.",
+            "etc.",
             ".com",
             "com.",
             "日本.語",
             "",
+            ".",
+            "..",
+            "a.",
             "abc",
             "a.b",
             "1.2",

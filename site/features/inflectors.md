@@ -18,7 +18,7 @@ and <strong>11</strong> doctests.
 | Type | Language | Job |
 |---|---|---|
 | `NounInflector` | English | Noun singular ⇄ plural |
-| `NounInflectorFr` | French | Noun singular ⇄ plural, 744 invariant nouns |
+| `NounInflectorFr` | French | Noun singular ⇄ plural, 595 invariant nouns |
 | `NounInflectorJa` | Japanese | Appends/strips `たち`, `達`, `等`, `共`, `方`; reduplicates a short irregular list |
 | `PresentVerbInflector` | English | Present tense: base form ⇄ third-person singular |
 | `OrdinalInflector` | English | Ordinal numerals (`1st`, `2nd`, `3rd`, `11th`) |
@@ -90,7 +90,7 @@ fn main() {
 the invariant list — are built once per process behind a `LazyLock` and shared by
 every instance, so constructing an inflector copies a couple of pointers and
 allocates nothing until you add a rule. `NounInflectorFr::new()` costs the same as
-`NounInflector::new()` despite French's 744-entry invariant list.
+`NounInflector::new()` despite French's 595-entry invariant list.
 
 ## Choosing the right API
 
@@ -658,8 +658,11 @@ do all `add_*` calls (which need `&mut self`) before sharing the instance.
   lengthen the string: uppercasing `ß` gives `SS`. Both Greek sigmas map to `Σ`.
 - **Pattern case folding is Unicode simple case folding**, the `regex` crate's own,
   so `(?i)s` matches `ſ` and `(?i)k` matches `K` (U+212A).
-- **French** carries 744 invariant nouns (mostly `-s`, `-x`, `-z` endings) plus
-  irregulars such as `œil` → `yeux` and `bijou` → `bijoux`.
+- **French** carries 595 invariant nouns, almost all in `-s` (`abus`, `chassis`)
+  plus a smaller set in `-aux`/`-eaux`/`-eux` (`faux`, `vieux`) that the singular
+  rules would otherwise mis-rewrite; plain `-x` and `-z` endings (`afflux`,
+  `quartz`) are invariant by rule rather than by lexical entry. Irregulars such
+  as `œil` → `yeux` and `bijou` → `bijoux` are a separate table.
 - **Japanese** does not normally mark number. `pluralize` appends `たち` to anything
   via a single `$ → たち` rule; twelve nouns instead reduplicate with the iteration
   mark (`人` → `人々`), and `友達` and its compounds are on the invariant list.

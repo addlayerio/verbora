@@ -92,7 +92,7 @@ fn english_apis_agree_across_the_block_boundary() {
 
 #[test]
 fn dutch_apis_agree_across_the_block_boundary() {
-    // 285 rules, so `context_span` is wide and the streaming margin matters.
+    // 274 rules, so `context_span` is wide and the streaming margin matters.
     for n in [0, 1, 2, 27, 100, 1023, 1024, 1025, 2049] {
         check(Language::Dutch, &corpus_of(n));
     }

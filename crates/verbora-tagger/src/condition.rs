@@ -289,18 +289,24 @@ pub enum Condition {
     /// Whether the current word *looks like* a URL.
     ///
     /// Verbora's own condition, and a deliberately small heuristic: the token
-    /// must contain a `U+002E FULL STOP` that is neither its first nor its last
-    /// scalar, **and** two consecutive ASCII letters somewhere. That is the whole
-    /// rule. It is not an implementation of [RFC 3986]; it exists so that the
-    /// bundled `NN URL CURRENT-WORD-IS-URL YES` rule has a definition to point
-    /// at.
+    /// must contain **some** `U+002E FULL STOP` that is neither its first nor
+    /// its last scalar, **and** two consecutive ASCII letters somewhere. That is
+    /// the whole rule. It is not an implementation of [RFC 3986]; it exists so
+    /// that the bundled `NN URL CURRENT-WORD-IS-URL YES` rule has a definition
+    /// to point at.
+    ///
+    /// The dot test is existential, so a URL that arrives with the sentence's
+    /// full stop attached — `www.example.com.`, what whitespace tokenization
+    /// produces most often — still qualifies.
     ///
     /// | Token | URL-like | Why |
     /// |---|---|---|
     /// | `"www.example.com"`, `"example.org"` | yes | interior dot, `ww`/`ex` |
+    /// | `"www.example.com."`, `".www.example.com"` | yes | the dot at `www.` is still interior |
+    /// | `"Ph.D."` | yes | an accepted false positive: interior dot, and `Ph` |
     /// | `"3.14"` | no | no two adjacent ASCII letters |
-    /// | `"e.g."`, `"A.A.U."` | no | no two adjacent letters |
-    /// | `".com"`, `"com."` | no | the dot is not interior |
+    /// | `"e.g."`, `"A.A.U."`, `"U.S."` | no | no two adjacent letters |
+    /// | `".com"`, `"com."`, `"etc."` | no | the only dot is first or last |
     /// | `"日本.語"` | no | the letters are not ASCII |
     ///
     /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
@@ -486,6 +492,62 @@ impl Condition {
             Self::CurrentWordIsNumeral(_) => "CURRENT-WORD-IS-NUMBER",
             Self::CurrentWordLooksLikeUrl(_) => "CURRENT-WORD-IS-URL",
             Self::CurrentWordEndsWith(_) => "CURRENT-WORD-ENDS-WITH",
+        }
+    }
+}
+
+#[cfg(test)]
+impl Condition {
+    /// The tag arguments this condition compares a neighbour's tag against.
+    ///
+    /// Word arguments are deliberately excluded: a word argument is compared
+    /// against caller-supplied token text, which no bundled data constrains, so
+    /// it says nothing about whether a rule can fire. A tag argument does — a
+    /// tag no configuration can produce makes the condition false everywhere.
+    ///
+    /// Written as an exhaustive match so that a new variant has to declare its
+    /// arguments here rather than defaulting to "none".
+    pub(crate) const fn tag_arguments(&self) -> [Option<&Tag>; 2] {
+        match self {
+            Self::PrevTag(t)
+            | Self::NextTag(t)
+            | Self::PrevTag2(t)
+            | Self::NextTag2(t)
+            | Self::PrevTagWithin2(t)
+            | Self::NextTagWithin2(t)
+            | Self::PrevTagWithin3(t)
+            | Self::NextTagWithin3(t)
+            | Self::CurrentWordAndPrevTag { prev_tag: t, .. }
+            | Self::CurrentWordAndNextTag { next_tag: t, .. }
+            | Self::CurrentWordAndTag2Before {
+                tag_two_before: t, ..
+            }
+            | Self::CurrentWordAndTag2After {
+                tag_two_after: t, ..
+            } => [Some(t), None],
+            Self::SurroundingTags { prev: a, next: b }
+            | Self::PrevTagBigram {
+                two_before: a,
+                before: b,
+            }
+            | Self::NextTagBigram {
+                after: a,
+                two_after: b,
+            } => [Some(a), Some(b)],
+            Self::CurrentWord(_)
+            | Self::PrevWord(_)
+            | Self::NextWord(_)
+            | Self::PrevWordWithin2(_)
+            | Self::NextWordWithin2(_)
+            | Self::LeftWordBigram { .. }
+            | Self::RightWordBigram { .. }
+            | Self::CurrentWordAndWord2After { .. }
+            | Self::CurrentWordIsCapitalized(_)
+            | Self::NextWordIsCapitalized(_)
+            | Self::PrevWordIsCapitalized(_)
+            | Self::CurrentWordIsNumeral(_)
+            | Self::CurrentWordLooksLikeUrl(_)
+            | Self::CurrentWordEndsWith(_) => [None, None],
         }
     }
 }

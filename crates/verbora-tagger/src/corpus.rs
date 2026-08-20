@@ -5,7 +5,7 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 
 use crate::lexicon::{Lexicon, LexiconError};
-use crate::tag::{Tag, TaggedToken};
+use crate::tag::{LiteralError, Tag, TaggedToken};
 
 /// Why a Brown-format corpus did not parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,14 @@ pub enum CorpusParseError {
         /// The offending token.
         token: String,
     },
+    /// The text after the final `_` was `*`, which is the wildcard pattern and
+    /// so not a tag. See [`LiteralError::Wildcard`](crate::LiteralError::Wildcard).
+    WildcardTag {
+        /// One-based line number.
+        line: usize,
+        /// The offending token.
+        token: String,
+    },
 }
 
 impl fmt::Display for CorpusParseError {
@@ -49,6 +57,10 @@ impl fmt::Display for CorpusParseError {
             Self::EmptyTag { line, token } => {
                 write!(f, "line {line}: token {token:?} has an empty tag")
             }
+            Self::WildcardTag { line, token } => write!(
+                f,
+                "line {line}: token {token:?} is tagged \"*\", which is the wildcard pattern"
+            ),
         }
     }
 }
@@ -91,8 +103,8 @@ impl<'a> Corpus<'a> {
     ///
     /// # Errors
     ///
-    /// [`CorpusParseError`] for a token with no `_`, an empty word or an empty
-    /// tag. Nothing is silently dropped or silently retagged.
+    /// [`CorpusParseError`] for a token with no `_`, an empty word, an empty tag
+    /// or the tag `*`. Nothing is silently dropped or silently retagged.
     pub fn parse_brown(text: &'a str) -> Result<Self, CorpusParseError> {
         let mut sentences = Vec::new();
         for (n, line) in text.split('\n').enumerate() {
@@ -114,9 +126,17 @@ impl<'a> Corpus<'a> {
                         token: token.to_owned(),
                     });
                 }
-                let tag = Tag::new(tag.to_owned()).map_err(|_| CorpusParseError::EmptyTag {
-                    line: n + 1,
-                    token: token.to_owned(),
+                let tag = Tag::new(tag.to_owned()).map_err(|cause| match cause {
+                    LiteralError::Wildcard => CorpusParseError::WildcardTag {
+                        line: n + 1,
+                        token: token.to_owned(),
+                    },
+                    // Whitespace cannot occur: the token came from
+                    // `split_whitespace`. What is left is the empty tag.
+                    _ => CorpusParseError::EmptyTag {
+                        line: n + 1,
+                        token: token.to_owned(),
+                    },
                 })?;
                 sentence.push(TaggedToken::new(word, tag));
             }
@@ -311,6 +331,20 @@ mod tests {
                 line: 1,
                 token: "NN_".to_owned()
             })
+        );
+        // `*` is the wildcard pattern, not a tag, so a corpus that annotates a
+        // token with it is reported rather than turned into a rule that would
+        // rewrite every tag once trained.
+        assert_eq!(
+            Corpus::parse_brown("a_A\nx_*"),
+            Err(CorpusParseError::WildcardTag {
+                line: 2,
+                token: "x_*".to_owned()
+            })
+        );
+        assert_eq!(
+            Corpus::parse_brown("x_*").unwrap_err().to_string(),
+            "line 1: token \"x_*\" is tagged \"*\", which is the wildcard pattern"
         );
     }
 

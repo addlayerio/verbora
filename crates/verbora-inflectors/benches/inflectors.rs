@@ -18,7 +18,7 @@
 //!
 //! * **Construction.** The rule tables are compiled once per process and shared
 //!   by every instance, so `new()` should be flat and independent of language —
-//!   French has 744 lexical entries and English 49.
+//!   French has 595 lexical entries and English 49.
 //! * **Allocation.** `pluralize` allocates its result; `pluralize_into` appends
 //!   to a caller-owned buffer. The crate documentation says the difference is
 //!   allocation and nothing else; this is where that is checked.
@@ -275,7 +275,7 @@ fn bench_bulk(c: &mut Criterion) {
 
 /// Construction, which sharing the compiled tables is supposed to make free.
 ///
-/// French is the case to watch: its lexical list is 744 entries against
+/// French is the case to watch: its lexical list is 595 entries against
 /// English's 49. Flat across languages means the sharing works.
 fn bench_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("construct");

@@ -91,6 +91,16 @@ pub enum GraphError {
     /// It is an error rather than a panic because the alternative is a panic in
     /// a safe API on input the caller controls.
     VertexLimit,
+    /// The graph already holds `u32::MAX + 1` edges and cannot index another.
+    ///
+    /// Adjacency is stored as `u32` positions into
+    /// [`EdgeWeightedDigraph::edges`] — four bytes per edge rather than eight —
+    /// so the edge count is bounded by that width. Reaching the bound needs
+    /// roughly 85 GB of edge and adjacency storage, which is why no test
+    /// exercises this variant; it exists so that the bound is refused at the
+    /// door instead of silently truncating an index and pointing adjacency at
+    /// the wrong edge.
+    EdgeLimit,
 }
 
 impl fmt::Display for GraphError {
@@ -98,6 +108,7 @@ impl fmt::Display for GraphError {
         match self {
             Self::NonFiniteWeight => f.write_str("edge weight must be finite"),
             Self::VertexLimit => f.write_str("graph cannot hold more than u32::MAX vertices"),
+            Self::EdgeLimit => f.write_str("graph cannot hold more than u32::MAX + 1 edges"),
         }
     }
 }
@@ -280,7 +291,9 @@ impl<V: Eq + Hash + Clone> EdgeWeightedDigraph<V> {
     /// # Errors
     ///
     /// [`GraphError::NonFiniteWeight`] if `weight` is `NaN` or infinite;
-    /// [`GraphError::VertexLimit`] if a new vertex would exceed `u32::MAX`.
+    /// [`GraphError::VertexLimit`] if a new vertex would exceed `u32::MAX`;
+    /// [`GraphError::EdgeLimit`] if the edge would exceed the `u32` adjacency
+    /// index. Every one of them leaves the graph exactly as it was.
     ///
     /// ```
     /// use verbora_util::{EdgeWeightedDigraph, GraphError};
@@ -299,11 +312,15 @@ impl<V: Eq + Hash + Clone> EdgeWeightedDigraph<V> {
         if !weight.is_finite() {
             return Err(GraphError::NonFiniteWeight);
         }
+        // Checked before either endpoint is interned, so a refused call cannot
+        // leave a freshly minted vertex behind. `as u32` here would be a silent
+        // truncation on a graph past the bound, and adjacency would then point
+        // at the wrong edge rather than fail.
+        let index = u32::try_from(self.edges.len()).map_err(|_| GraphError::EdgeLimit)?;
         // Both ids are minted before anything is pushed, so a `VertexLimit`
         // leaves the graph exactly as it was.
         let from_id = self.intern(from)?;
         let to_id = self.intern(to)?;
-        let index = self.edges.len() as u32;
         self.edges.push(DirectedEdge {
             from: from_id,
             to: to_id,
@@ -505,6 +522,14 @@ mod tests {
             GraphError::VertexLimit.to_string(),
             "graph cannot hold more than u32::MAX vertices"
         );
+        // `EdgeLimit` needs ~85 GB of edges to provoke, so it is checked for
+        // shape only. What it replaces was an `as u32` that would have wrapped
+        // an adjacency index instead of failing.
+        assert_eq!(
+            GraphError::EdgeLimit.to_string(),
+            "graph cannot hold more than u32::MAX + 1 edges"
+        );
+        assert!(std::error::Error::source(&GraphError::EdgeLimit).is_none());
 
         // Signed zero is finite and therefore accepted, with its sign intact.
         g.add(&0, &1, -0.0).unwrap();

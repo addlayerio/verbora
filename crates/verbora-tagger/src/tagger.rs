@@ -230,7 +230,7 @@ impl<'a> BrillTagger<'a> {
     /// with exactly enough context on each side for those positions to come out
     /// identical to a whole-document run.
     ///
-    /// For the bundled English rules that is 4 tokens of context; for the 285
+    /// For the bundled English rules that is 4 tokens of context; for the 274
     /// Dutch rules it is larger but still a property of the rule set, not of the
     /// input.
     ///
@@ -666,7 +666,7 @@ mod tests {
         }
     }
 
-    /// The same equivalence, with the Dutch rule set — 285 rules, so the
+    /// The same equivalence, with the Dutch rule set — 274 rules, so the
     /// streaming context is far wider than the English one and the block logic
     /// is exercised properly.
     #[test]

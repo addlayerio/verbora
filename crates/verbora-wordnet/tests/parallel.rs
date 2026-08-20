@@ -64,18 +64,26 @@ fn tiny_dict() -> PathBuf {
     dir
 }
 
-/// The real WordNet dictionary, when installed; `None` skips the section that
-/// needs it.
-fn real_dict_dir() -> Option<PathBuf> {
+/// The installed WordNet dictionary, or a panic naming what is missing.
+///
+/// Not an `Option`, for the reason `tests/enumeration.rs` spells out: a test
+/// that returns early when its subject is absent reports as a pass and is
+/// counted as coverage. The test below is `#[ignore]`d instead, so the harness
+/// reports the skip and running it without a dictionary fails.
+fn real_dict_dir() -> PathBuf {
     for var in ["VERBORA_WORDNET_DICT", "WORDNET_DB_PATH"] {
         if let Some(value) = std::env::var_os(var) {
             let dir = PathBuf::from(value);
             if dir.join("index.noun").is_file() {
-                return Some(dir);
+                return dir;
             }
         }
     }
-    None
+    panic!(
+        "needs the separately-licensed Princeton WordNet database, which is not vendored: \
+         point $WORDNET_DB_PATH (or $VERBORA_WORDNET_DICT) at a directory holding index.noun \
+         and its seven siblings, then re-run with --ignored"
+    );
 }
 
 /// Asserts [`WordNet::par_lookup_batch`] agrees with the sequential
@@ -160,15 +168,9 @@ fn normalisation_matches_the_sequential_call() {
 }
 
 #[test]
+#[ignore = "needs the separately-licensed Princeton WordNet database; set $WORDNET_DB_PATH and re-run with --ignored"]
 fn agrees_with_the_sequential_loop_on_the_real_dictionary() {
-    let Some(dict) = real_dict_dir() else {
-        eprintln!(
-            "skipped: no WordNet dictionary found. It is separately licensed \
-             (Princeton University) and not vendored; point $WORDNET_DB_PATH at \
-             a directory holding index.noun and its seven siblings."
-        );
-        return;
-    };
+    let dict = real_dict_dir();
     let wn = WordNet::open(&dict).unwrap();
     // The word list `benches/wordnet.rs` uses: a common hit, the worst case
     // (`run`, senses across all four categories), a genuine miss, and a
