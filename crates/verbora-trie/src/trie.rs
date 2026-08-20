@@ -337,6 +337,10 @@ impl Trie {
             let mut n = ROOT;
             self.nodes[ROOT as usize].word_count -= 1;
             for scalar in folded.chars() {
+                // Present by construction: the forward walk above used
+                // `child_or_insert` over this same `folded` string, which
+                // creates any missing edge, and edges are only ever added —
+                // never removed or relabelled — so the whole path exists.
                 n = self.child(n, scalar).expect("path was just walked");
                 self.nodes[n as usize].word_count -= 1;
             }
@@ -778,7 +782,18 @@ impl Trie {
             Ok(i) => return self.nodes[node as usize].children[i].node,
             Err(i) => i,
         };
-        let new = u32::try_from(self.nodes.len()).expect("trie exceeds 2^32 nodes");
+        // One below `u32::MAX`, not at it: `freeze()` uses `u32::MAX` as its
+        // "absorbed into an edge label" sentinel (see `FrozenTrie::from_parts`),
+        // so a node carrying that index would be mis-compressed rather than
+        // rejected. The ceiling is therefore `u32::MAX` nodes, and the check is
+        // an assertion rather than a `try_from` because the conversion is not
+        // the tight bound.
+        assert!(
+            self.nodes.len() < u32::MAX as usize,
+            "trie exceeds its node ceiling of {} nodes",
+            u32::MAX
+        );
+        let new = self.nodes.len() as u32;
         self.nodes.push(Node::default());
         self.nodes[node as usize]
             .children

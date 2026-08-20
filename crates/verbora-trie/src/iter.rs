@@ -198,6 +198,14 @@ impl Iterator for KeysWithPrefix<'_> {
         }
 
         loop {
+            // Both `expect`s in this loop body rest on the `?` two lines down:
+            // an empty stack ends the iterator there, so reaching either one
+            // proves `last()` was `Some`. What keeps that proof valid is that
+            // nothing between the guard and the `expect` touches `self.stack`
+            // — `trie` was copied out of `self` above precisely so the reads
+            // below borrow the arena rather than the stack. A future edit that
+            // pops inside the `next >= children.len()` branch without
+            // `continue`ing back to the guard would break it silently.
             let (node, next) = {
                 let frame = self.stack.last()?;
                 (frame.node, frame.next)

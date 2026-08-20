@@ -3,7 +3,7 @@
 //!
 //! # The algorithm in one paragraph
 //!
-//! Look up the rule section for the token's **last code unit**. Walk that
+//! Look up the rule section for the token's **last scalar value**. Walk that
 //! section in order. A rule applies when the token ends with its pattern (and,
 //! for `intact` rules, when the token has not been modified yet). Chop `size`
 //! units off the end, append the rule's `appendage` if it has one, and test the
@@ -25,8 +25,9 @@
 //! `token.length - rules[i].size` works only through the reference's coercion. It is
 //! parsed once, at table-generation time.
 //!
-//! Lengths are UTF-16 code units. `stem("😀ing")` is `"😀ing"` because the
-//! candidate `"😀"` has length 2, which `acceptable` rejects.
+//! Lengths are Unicode scalar values, as everywhere in this crate.
+//! `stem("😀ing")` is `"😀ing"` because the candidate `"😀"` has length 1, and
+//! `acceptable` requires at least 2 before any rule may fire.
 
 use std::borrow::Cow;
 
@@ -39,7 +40,7 @@ use crate::units::slen;
 pub(crate) struct Rule {
     /// The suffix the token must end with.
     pub(crate) pattern: &'static str,
-    /// How many code units to remove. Zero makes this a stop rule.
+    /// How many scalar values to remove. Zero makes this a stop rule.
     pub(crate) size: usize,
     /// Text appended after the removal, if any.
     pub(crate) appendage: Option<&'static str>,
@@ -87,9 +88,9 @@ fn acceptable(candidate: &str) -> bool {
 /// call is always in tail position.
 fn apply_rule_sections(mut token: String, mut intact: bool) -> String {
     'outer: loop {
-        // `token.substr(-1)` is the last UTF-16 code unit. For an astral
-        // character that is a low surrogate, which no section is keyed by — the
-        // same outcome a `chars()` port reaches, by a different route.
+        // Sections are keyed by the token's last scalar value. No section is
+        // keyed by an astral character, so a token ending in one matches
+        // nothing and is returned whole.
         let Some(last) = token.chars().next_back() else {
             return token;
         };
@@ -242,6 +243,23 @@ mod tests {
         for w in ["ear", "seen", "miss", "consist", "simply", "ss", "gas"] {
             assert_eq!(s(w), w, "{w} should be left alone by its size-0 rule");
         }
+    }
+
+    /// One astral character is one scalar value, and `acceptable` needs a
+    /// candidate of at least two before any rule may fire.
+    ///
+    /// `"\u{1F600}es"` is the case that separates the two readings. The
+    /// candidate after chopping `s` is `"\u{1F600}e"`, whose first character is
+    /// not an ASCII vowel, so `acceptable` takes its `len > 2 && contains a
+    /// vowel` arm. Counting scalar values that length is 2, the arm rejects,
+    /// and the token is returned whole. Measuring the same text in UTF-16 code
+    /// units it was 3 — two surrogates plus `e` — the arm accepted, and the
+    /// stem came back `"\u{1F600}e"`. Every other language in this crate has a
+    /// test pinning this; without one here the unit could revert unnoticed.
+    #[test]
+    fn an_astral_character_counts_as_one_position() {
+        assert_eq!(s("\u{1F600}es"), "\u{1F600}es");
+        assert_eq!(s("\u{1D7CE}aal"), "\u{1D7CE}aal");
     }
 
     #[test]

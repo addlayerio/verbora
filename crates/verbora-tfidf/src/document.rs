@@ -53,6 +53,12 @@ impl Document {
     ) -> Self {
         let mut index: FxHashMap<TermId, u32> =
             FxHashMap::with_capacity_and_hasher(entries.len(), rustc_hash::FxBuildHasher);
+        // `position` is an index into `entries`, and both callers cap that
+        // vector below `u32::MAX`: `Counter::observe` asserts it directly, and
+        // `TfIdf::from_json` builds one entry per distinct `TermId`, which the
+        // interner refuses to issue more than `u32::MAX - 1` of. `from_parts`
+        // is `pub(crate)` and no public method accepts a `Document`, so no
+        // caller can hand this an over-long vector.
         for (position, (id, _)) in entries.iter().enumerate() {
             index.insert(
                 *id,
@@ -153,17 +159,24 @@ impl Counter<'_> {
         }
         let seen = self.slots[slot];
         if seen == 0 {
-            let position = u32::try_from(self.entries.len())
-                .expect("a document holds fewer than u32::MAX terms");
+            // One check, not two. The assertion is the tight bound — the tables
+            // store positions offset by one, so `u32::MAX` itself is not
+            // available — and `entries` grows by exactly one per call, so it
+            // fires at `u32::MAX` and the vector can never reach `u32::MAX + 1`.
+            // The `u32::try_from` that used to sit here could therefore never
+            // be the thing that failed: it was dead, and dead checks make the
+            // live one harder to find.
             assert!(
-                position < u32::MAX,
+                self.entries.len() < u32::MAX as usize,
                 "a document holds fewer than u32::MAX terms"
             );
+            let position = self.entries.len() as u32;
             self.entries.push((id, 1));
             self.slots[slot] = position + 1;
-            self.touched.push(
-                u32::try_from(slot).expect("term ids are u32 and this one came from the interner"),
-            );
+            // `slot` is `id.index()`, which is `TermId`'s own `u32` widened to
+            // `usize` — lossless in both directions by type width, on any
+            // target, independently of any capacity bound.
+            self.touched.push(id.as_u32());
         } else {
             let entry = &mut self.entries[(seen - 1) as usize];
             // Saturating, not wrapping: see [`MAX_TERM_COUNT`] for the limit

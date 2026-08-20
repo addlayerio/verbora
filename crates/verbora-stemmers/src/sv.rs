@@ -19,6 +19,17 @@
 //! we need this! Algorithm does not describe this part!"*. It fires exactly when
 //! the match starts at index 0, and it is kept.
 //!
+//! # The unit
+//!
+//! R1's two bounds, `rest`'s length, the unexplained `slice(3)` above and every
+//! cut below count **Unicode scalar values** — the unit [`crate::units`] states
+//! for the whole crate. That matters more here than anywhere else, because
+//! Swedish's cuts do *not* come from a matched suffix length: [`rebuild`] cuts
+//! at `rest_len`, an arithmetic value derived from the region scan that no rule
+//! table bounds. Only the buffer's own unit makes such a cut a character
+//! boundary, and with the scalar unit it is one by construction rather than by
+//! audit.
+//!
 //! # Step 1 keeps the shorter of 1a and 1b
 //!
 //! Like Norwegian, and with the same strict `<`: on a tie step 1b wins. Unlike
@@ -90,17 +101,14 @@ pub struct PorterStemmerSv;
 
 /// `[aeiouyäåö]` — lowercase only.
 #[inline]
-fn is_vowel(c: u16) -> bool {
-    matches!(
-        c,
-        0x61 | 0x65 | 0x69 | 0x6F | 0x75 | 0x79 | 0xE4 | 0xE5 | 0xF6
-    )
+fn is_vowel(c: char) -> bool {
+    matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'ä' | 'å' | 'ö')
 }
 
 /// `[a-zåäö]`, the class R1's captured run is drawn from.
 #[inline]
-fn is_r1_char(c: u16) -> bool {
-    matches!(c, 0x61..=0x7A | 0xE5 | 0xE4 | 0xF6)
+fn is_r1_char(c: char) -> bool {
+    matches!(c, 'a'..='z' | 'å' | 'ä' | 'ö')
 }
 
 /// `getRegions`, as indices into `t`: R1 is `t[r1s..r1e]` (empty when the
@@ -117,7 +125,7 @@ struct RegionIx {
 /// instead; this remains as the definition the cached form is checked
 /// against.
 #[cfg(test)]
-fn region_ix_uncached(t: &[u16]) -> RegionIx {
+fn region_ix_uncached(t: &[char]) -> RegionIx {
     RegionScan::of(t).at_len(t.len())
 }
 
@@ -131,8 +139,8 @@ fn region_ix_uncached(t: &[u16]) -> RegionIx {
 /// which `stem` marks and rescans after. For a truncation the question is
 /// what a rescan of a prefix would return. The match position is the first
 /// `i` with `vowel(t[i]) && !vowel(t[i+1]) && r1char(t[i+2])`; truncating to
-/// `len'` changes none of those three units for any `i` with `i + 2 < len'`,
-/// and removes exactly the positions with `i + 2 >= len'` from
+/// `len'` changes none of those three characters for any `i` with
+/// `i + 2 < len'`, and removes exactly the positions with `i + 2 >= len'` from
 /// consideration. So the same `i` is still the first match when
 /// `i + 2 < len'`, and there is no match at all otherwise. The captured
 /// run's end is the first non-R1 character at or after `i + 2`, or the
@@ -148,7 +156,7 @@ struct RegionScan {
 }
 
 impl RegionScan {
-    fn of(t: &[u16]) -> RegionScan {
+    fn of(t: &[char]) -> RegionScan {
         let Some(index) = (0..t.len().saturating_sub(2))
             .find(|&i| is_vowel(t[i]) && !is_vowel(t[i + 1]) && is_r1_char(t[i + 2]))
         else {
@@ -202,10 +210,10 @@ impl RegionScan {
 /// single search plus a link walk answers both (see
 /// [`crate::among::UnionTable`]).
 struct SvTables {
-    step1a: AmongTable,
+    step1a: AmongTable<char>,
     /// 0 = [`LOST_FULLT`] (`(lös|full)t`, checked first), 1 = [`LIG_IG_ELS`]
     /// (step 3's removable suffixes).
-    step3: UnionTable,
+    step3: UnionTable<char>,
 }
 
 static TABLES: LazyLock<SvTables> = LazyLock::new(|| SvTables {
@@ -226,20 +234,20 @@ static STEP2: &[&str] = &["dd", "gd", "nn", "dt", "gt", "kt", "tt"];
 /// Whether `w[lb..cursor]` ends in one of `dd`, `gd`, `nn`, `dt`, `gt`,
 /// `kt`, `tt` — step 2's alternation.
 ///
-/// Every alternative is exactly two units, so this is the same answer a
-/// table search would give, reached by reading the two units directly. The
-/// arms are grouped by the *final* unit because that is the one the region
-/// guarantees is present once the length check passes.
+/// Every alternative is exactly two characters, so this is the same answer a
+/// table search would give, reached by reading the two characters directly.
+/// The arms are grouped by the *final* character because that is the one the
+/// region guarantees is present once the length check passes.
 #[inline]
-fn ends_consonant_pair(w: &[u16], cursor: usize, lb: usize) -> bool {
+fn ends_consonant_pair(w: &[char], cursor: usize, lb: usize) -> bool {
     if cursor < lb + 2 {
         return false;
     }
     let (first, last) = (w[cursor - 2], w[cursor - 1]);
     match last {
-        0x64 => matches!(first, 0x64 | 0x67),               // dd, gd
-        0x6E => first == 0x6E,                              // nn
-        0x74 => matches!(first, 0x64 | 0x67 | 0x6B | 0x74), // dt, gt, kt, tt
+        'd' => matches!(first, 'd' | 'g'),             // dd, gd
+        'n' => first == 'n',                           // nn
+        't' => matches!(first, 'd' | 'g' | 'k' | 't'), // dt, gt, kt, tt
         _ => false,
     }
 }
@@ -255,7 +263,12 @@ fn ends_consonant_pair(w: &[u16], cursor: usize, lb: usize) -> bool {
 /// handle.
 /// Returns whether the paste arm ran — the caller's cached region scan is
 /// only invalidated by that arm, the other being a plain truncation.
-fn rebuild(buf: &mut Buf, r: &RegionIx, idx: usize) -> bool {
+///
+/// Both `keep` and `idx` are counts of characters, so neither the move nor the
+/// truncation can land inside one. That is the guarantee the scalar unit buys
+/// outright: these positions come from region arithmetic, not from a table
+/// entry's length, so no audit of the tables could ever have bounded them.
+fn rebuild(buf: &mut Buf<char>, r: &RegionIx, idx: usize) -> bool {
     if r.rest_len == r.r1s {
         buf.truncate(r.r1s + idx);
         return false;
@@ -290,7 +303,7 @@ impl PorterStemmerSv {
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let (mut buf, ascii_lower) = Buf::fill_lowercase_tracked(token);
+        let (mut buf, ascii_lower) = Buf::<char>::fill_lowercase_tracked(token);
         let mut rewrote = false;
         let t = buf.as_slice();
         // One scan of `getRegions`' match serves all three steps; see
@@ -314,25 +327,25 @@ impl PorterStemmerSv {
         let mut len_b = len;
         if r.r1e > r.r1s
             && len >= 2
-            && t[len - 1] == 0x73
+            && t[len - 1] == 's'
             && matches!(
                 t[len - 2],
-                0x62 | 0x63
-                    | 0x64
-                    | 0x66
-                    | 0x67
-                    | 0x68
-                    | 0x6A
-                    | 0x6B
-                    | 0x6C
-                    | 0x6D
-                    | 0x6E
-                    | 0x6F
-                    | 0x70
-                    | 0x72
-                    | 0x74
-                    | 0x76
-                    | 0x79
+                'b' | 'c'
+                    | 'd'
+                    | 'f'
+                    | 'g'
+                    | 'h'
+                    | 'j'
+                    | 'k'
+                    | 'l'
+                    | 'm'
+                    | 'n'
+                    | 'o'
+                    | 'p'
+                    | 'r'
+                    | 't'
+                    | 'v'
+                    | 'y'
             )
         {
             len_b = len - 1;
@@ -462,10 +475,14 @@ impl verbora_core::Stemmer for PorterStemmerSv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::units;
 
     fn s(t: &str) -> String {
         PorterStemmerSv::new().stem(t).into_owned()
+    }
+
+    /// A working buffer, the way `stem` builds one.
+    fn scalars(t: &str) -> Vec<char> {
+        t.chars().collect()
     }
 
     /// **Every** entry of the Swedish stop-word list must still be recognised
@@ -547,27 +564,35 @@ mod tests {
     }
 
     /// The hand-written step-2 matcher must answer exactly what a search of
-    /// [`STEP2`] would, for every region and every pair of code units in the
+    /// [`STEP2`] would, for every region and every pair of characters in the
     /// Latin-1 range the alternation lives in — otherwise the table it
     /// replaced would still be the specification and this would be a
     /// divergence rather than an optimisation.
     #[test]
     fn the_consonant_pair_matcher_agrees_with_its_table() {
-        let table = AmongTable::build(STEP2);
-        for a in 0..=0xFFu16 {
-            for b in 0..=0xFFu16 {
-                let w = [0x78, a, b];
+        let table: AmongTable<char> = AmongTable::build(STEP2);
+        for a in 0..=0xFFu32 {
+            for b in 0..=0xFFu32 {
+                let (ca, cb) = (
+                    char::from_u32(a).expect("U+0000-U+00FF are all scalar values"),
+                    char::from_u32(b).expect("U+0000-U+00FF are all scalar values"),
+                );
+                let w = ['x', ca, cb];
                 for lb in 0..=3usize {
                     for cursor in lb..=3usize {
                         assert_eq!(
                             ends_consonant_pair(&w, cursor, lb),
                             table.longest(&w, cursor, lb) > 0,
-                            "units {a:#06X},{b:#06X} region {lb}..{cursor}"
+                            "characters {a:#06X},{b:#06X} region {lb}..{cursor}"
                         );
                     }
                 }
             }
         }
+        // The pair is read as whole characters, so an astral one is one
+        // position and cannot half-match either alternative.
+        assert!(!ends_consonant_pair(&scalars("a😀t"), 3, 0));
+        assert!(ends_consonant_pair(&scalars("😀dt"), 3, 0));
     }
 
     /// `RegionScan::at_len` must agree with a fresh `getRegions` of the
@@ -578,7 +603,7 @@ mod tests {
         let mut rng = Rng(0xB7E1_5162_8AED_2A6B);
         for _ in 0..20_000 {
             let word = random_word(&mut rng).to_lowercase();
-            let t = units(&word);
+            let t = scalars(&word);
             let scan = RegionScan::of(&t);
             for len in 0..=t.len() {
                 let got = scan.at_len(len);
@@ -662,21 +687,148 @@ mod tests {
         assert_eq!(s(&"x".repeat(1000)).len(), 1000);
     }
 
+    /// The two characters this file cannot tell apart.
+    ///
+    /// `U+1F600` is one Unicode scalar value and two UTF-16 code units;
+    /// `U+4E2D` is one of each. Nothing in this file distinguishes them: the
+    /// vowel class is `[aeiouyäåö]`, R1's capture class is `[a-zåäö]`, step
+    /// 1b's consonant list and step 2's pairs are ASCII, every table entry is
+    /// drawn from `a`–`z` plus `ö`, and `str::to_lowercase` leaves both alone.
+    /// Neither is in any of those sets, so the only thing about either that
+    /// can influence the result is a position or a length — which is the unit
+    /// under test.
+    const ASTRAL: char = '😀';
+    /// The Basic Multilingual Plane twin of [`ASTRAL`]; see there.
+    const BMP_TWIN: char = '中';
+
+    /// Every entry of the Swedish stop-word list and of every rule table, with
+    /// one inert character inserted at every character position, paired with
+    /// the same insertion of its BMP twin.
+    fn inert_placements() -> Vec<(String, String)> {
+        let mut corpus: Vec<&str> = Language::Sv.defaults().to_vec();
+        for (_, table) in audit::TABLES {
+            corpus.extend_from_slice(table);
+        }
+        let mut out = Vec::new();
+        for w in corpus {
+            for at in w.char_indices().map(|(i, _)| i).chain([w.len()]) {
+                let (mut astral, mut bmp) = (w.to_owned(), w.to_owned());
+                astral.insert(at, ASTRAL);
+                bmp.insert(at, BMP_TWIN);
+                out.push((astral, bmp));
+            }
+        }
+        out
+    }
+
+    /// An inert character occupies **one** position, whichever plane it lives
+    /// on — enumerated over the whole stop-word list and every rule table
+    /// rather than sampled.
+    ///
+    /// Swedish is the language this matters most for. Its cuts do not come
+    /// from a matched suffix length but from region arithmetic — `RegionScan`'s
+    /// `start: 3`, and [`rebuild`]'s `rest_len` — which no table audit bounds,
+    /// so a buffer whose positions were not characters could be cut anywhere
+    /// at all.
+    #[test]
+    fn an_astral_character_occupies_one_position() {
+        let st = PorterStemmerSv::new();
+        let cases = inert_placements();
+        let twin = BMP_TWIN.to_string();
+        // Pinned so an enumeration that quietly walked nothing cannot pass:
+        // 428 stop words and 48 rule-table entries, each probed at every one of its
+        // `len + 1` character positions.
+        assert_eq!(cases.len(), 2745, "the enumerated corpus changed size");
+        let mut diverged: Vec<(String, String, String)> = Vec::new();
+        let mut invented: Vec<String> = Vec::new();
+        for (astral, bmp) in &cases {
+            let got = st.stem(astral).into_owned();
+            if got.contains('\u{FFFD}') {
+                invented.push(astral.clone());
+            }
+            let want = st.stem(bmp).into_owned();
+            if got.replace(ASTRAL, &twin) != want {
+                diverged.push((astral.clone(), got, want));
+            }
+        }
+        // One assertion for both defects, so a failing run reports both counts
+        // rather than stopping at the first.
+        assert!(
+            invented.is_empty() && diverged.is_empty(),
+            "of {} placements, {} come back carrying a replacement character \
+             the caller never supplied ({:?}) and {} measure an astral \
+             character as more than one position ({:?})",
+            cases.len(),
+            invented.len(),
+            &invented[..invented.len().min(3)],
+            diverged.len(),
+            &diverged[..diverged.len().min(3)]
+        );
+    }
+
+    /// Every character of a stem is a character of the input, so no cut can
+    /// invent one.
+    ///
+    /// This is the property a character buffer gives by construction and a
+    /// code-unit buffer could not: [`rebuild`]'s paste arm moves positions
+    /// with `copy_within` at `rest_len`, a length derived from the region scan
+    /// with no relation to any table entry, and truncates at `keep + idx`. The
+    /// corpus below is built to reach that arm — R1's capture class excludes
+    /// `-`, `ü` and digits, so those make `rest` and R1's start disagree.
+    #[test]
+    fn no_cut_can_split_a_character() {
+        let st = PorterStemmerSv::new();
+        let mut corpus: Vec<String> = Vec::new();
+        for stem in ["klok", "hus", "het", "björk", "stiftels", "gost"] {
+            for tail in ["a", "e", "en", "ens", "heten", "hetens", "ade", "ig", "els"] {
+                for filler in ["", "-", "ü", "1"] {
+                    corpus.push(format!("{stem}{filler}{tail}"));
+                }
+            }
+        }
+        let mut probes = 0usize;
+        for word in &corpus {
+            for at in word.char_indices().map(|(i, _)| i).chain([word.len()]) {
+                let mut probe = word.clone();
+                probe.insert(at, ASTRAL);
+                probes += 1;
+                let got = st.stem(&probe).into_owned();
+                assert!(
+                    !got.contains('\u{FFFD}'),
+                    "stem({probe:?}) = {got:?} — a character the caller never supplied"
+                );
+                // Every step here either truncates or moves characters down;
+                // none writes a character of its own. So every character of
+                // the stem is a character of the input — which is the strongest
+                // form of "nothing was invented", and the exact claim a cut
+                // between the halves of a surrogate pair breaks.
+                assert!(
+                    got.chars().all(|c| probe.contains(c)),
+                    "stem({probe:?}) = {got:?} holds a character the input does not"
+                );
+            }
+        }
+        // 6 stems x 9 tails x 4 fillers = 216 words, each probed at every one
+        // of its `len + 1` positions: 36*27 + 24*26 + 54*3 + 216 = 1974.
+        assert_eq!(corpus.len(), 6 * 9 * 4);
+        assert_eq!(probes, 1_974, "the probe corpus changed size");
+    }
+
     // -----------------------------------------------------------------------
     // Differential oracle: the pre-find_among implementation, verbatim.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
+        use crate::units::text;
         use crate::units::{ends_with, slen};
-        use crate::units::{text, units};
 
         struct Regions<'t> {
-            r1: &'t [u16],
+            r1: &'t [char],
             rest_len: usize,
         }
 
-        fn regions(t: &[u16]) -> Regions<'_> {
-            let mut r1: &[u16] = &[];
+        fn regions(t: &[char]) -> Regions<'_> {
+            let mut r1: &[char] = &[];
             if let Some(index) = (0..t.len().saturating_sub(2))
                 .find(|&i| is_vowel(t[i]) && !is_vowel(t[i + 1]) && is_r1_char(t[i + 2]))
             {
@@ -694,7 +846,7 @@ mod tests {
             }
         }
 
-        fn listed_suffix(w: &[u16], alternatives: &[&str]) -> Option<usize> {
+        fn listed_suffix(w: &[char], alternatives: &[&str]) -> Option<usize> {
             let mut best: Option<usize> = None;
             for a in alternatives {
                 if ends_with(w, a) {
@@ -707,7 +859,7 @@ mod tests {
             best
         }
 
-        fn step1a(t: &[u16], r: &Regions<'_>) -> Vec<u16> {
+        fn step1a(t: &[char], r: &Regions<'_>) -> Vec<char> {
             if r.r1.is_empty() {
                 return t.to_vec();
             }
@@ -721,28 +873,28 @@ mod tests {
             }
         }
 
-        fn step1b(t: &[u16], r: &Regions<'_>) -> Vec<u16> {
+        fn step1b(t: &[char], r: &Regions<'_>) -> Vec<char> {
             if !r.r1.is_empty()
                 && t.len() >= 2
-                && t[t.len() - 1] == 0x73
+                && t[t.len() - 1] == 's'
                 && matches!(
                     t[t.len() - 2],
-                    0x62 | 0x63
-                        | 0x64
-                        | 0x66
-                        | 0x67
-                        | 0x68
-                        | 0x6A
-                        | 0x6B
-                        | 0x6C
-                        | 0x6D
-                        | 0x6E
-                        | 0x6F
-                        | 0x70
-                        | 0x72
-                        | 0x74
-                        | 0x76
-                        | 0x79
+                    'b' | 'c'
+                        | 'd'
+                        | 'f'
+                        | 'g'
+                        | 'h'
+                        | 'j'
+                        | 'k'
+                        | 'l'
+                        | 'm'
+                        | 'n'
+                        | 'o'
+                        | 'p'
+                        | 'r'
+                        | 't'
+                        | 'v'
+                        | 'y'
                 )
             {
                 return t[..t.len() - 1].to_vec();
@@ -750,14 +902,14 @@ mod tests {
             t.to_vec()
         }
 
-        fn step1(t: &[u16]) -> Vec<u16> {
+        fn step1(t: &[char]) -> Vec<char> {
             let r = regions(t);
             let a = step1a(t, &r);
             let b = step1b(t, &r);
             if a.len() < b.len() { a } else { b }
         }
 
-        fn step2(t: &[u16]) -> Vec<u16> {
+        fn step2(t: &[char]) -> Vec<char> {
             let r = regions(t);
             if !r.r1.is_empty() && listed_suffix(r.r1, STEP2).is_some() {
                 return t[..t.len().saturating_sub(1)].to_vec();
@@ -765,7 +917,7 @@ mod tests {
             t.to_vec()
         }
 
-        fn step3(t: &[u16]) -> Vec<u16> {
+        fn step3(t: &[char]) -> Vec<char> {
             let r = regions(t);
             if r.r1.is_empty() {
                 return t.to_vec();
@@ -785,7 +937,8 @@ mod tests {
 
         pub(super) fn stem(token: &str) -> String {
             let lower = token.to_lowercase();
-            text(&step3(&step2(&step1(&units(&lower)))))
+            let t: Vec<char> = lower.chars().collect();
+            text(&step3(&step2(&step1(&t))))
         }
     }
 

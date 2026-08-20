@@ -299,6 +299,16 @@ impl Branch {
     /// The finished code. Call only after [`Branch::finish`].
     fn as_code(&self) -> &str {
         debug_assert_eq!(usize::from(self.len), MAX_LENGTH);
+        // Every byte of `code` is an ASCII digit or the `\0` it was
+        // initialised with, because the only writes are `finish`'s `b'0'`
+        // padding and `push`'s copy from a `&'static str` replacement — and
+        // every replacement literal in this file's rule tables is a digit
+        // string of one or two ASCII bytes. (The non-ASCII literals here are
+        // rule *patterns*, never replacements.) That is what keeps this total,
+        // including before `finish` has run. It is also the invariant that
+        // makes `push`'s `MAX_LENGTH - len` truncation safe: a multi-byte
+        // replacement added to the tables could be cut mid-character, and
+        // nothing but this comment says it must not be.
         std::str::from_utf8(&self.code).expect("codes are ASCII digits")
     }
 }

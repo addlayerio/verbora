@@ -30,6 +30,18 @@
 //!
 //! The step-2 verb list contains `"Yamo"`, which `vowelMarking` can never
 //! produce — it only uppercases `i` and `u`. It is dead, and it is kept.
+//!
+//! # The text unit
+//!
+//! Every position here is a **Unicode scalar value**: R1, R2 and RV, the
+//! `length < 3` gate the prelude runs ahead of, the `len > 3` guard on RV, the
+//! literal `rv = 3`, and every cut. See [`crate::units`] for why that is the
+//! faithful reading of a Snowball algorithm rather than a preference — the
+//! specification is written over *letters*, and the UTF-16 indices this port
+//! used to carry were an artefact of the host language it was transcribed
+//! through, not of the algorithm. `stem("😀eato")` is `"😀eat"`: five letters,
+//! so RV starts at 3 and leaves two of them, which the three-letter step-2
+//! entry `-ato` does not fit.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -38,7 +50,7 @@ use crate::among::{AmongTable, Buf, UnionTable, longest_at_most};
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_it;
 use crate::stopwords::Language;
-use crate::units::{ends_with, text_lowercase, u};
+use crate::units::{ends_with, text_lowercase};
 
 /// The Italian Snowball stemmer.
 ///
@@ -52,38 +64,39 @@ use crate::units::{ends_with, text_lowercase, u};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerIt;
 
-/// `a e i o u à è ì ò ù` — lowercase only, so the marked `I`/`U` are consonants.
+/// `a e i o u à è ì ò ù` — lowercase only, so the marked `I`/`U` are consonants,
+/// and so is every character outside the set, astral ones included.
 #[inline]
-fn is_vowel(c: u16) -> bool {
-    matches!(
-        c,
-        0x61 | 0x65 | 0x69 | 0x6F | 0x75 | 0xE0 | 0xE8 | 0xEC | 0xF2 | 0xF9
-    )
+fn is_vowel(c: char) -> bool {
+    matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'à' | 'è' | 'ì' | 'ò' | 'ù')
 }
 
-fn cut(buf: &mut Buf, n: usize, tail: &str) {
+fn cut(buf: &mut Buf<char>, n: usize, tail: &str) {
     buf.truncate(buf.len().saturating_sub(n));
     buf.push_str(tail);
 }
 
 /// The lowercased, acute-to-grave, `qU`/`I`/`U`-marked form of `t` — the
 /// reference's prelude, shared by `stem` and the test oracle.
-fn prelude(t: &mut [u16]) {
+///
+/// One character in, one character out at every position, which is why it can
+/// run in place on the working buffer.
+fn prelude(t: &mut [char]) {
     // Acute accents become grave ones (`/á/gi` etc., so every occurrence).
     for c in t.iter_mut() {
         match *c {
-            x if x == u('á') => *c = u('à'),
-            x if x == u('é') => *c = u('è'),
-            x if x == u('í') => *c = u('ì'),
-            x if x == u('ó') => *c = u('ò'),
-            x if x == u('ú') => *c = u('ù'),
+            'á' => *c = 'à',
+            'é' => *c = 'è',
+            'í' => *c = 'ì',
+            'ó' => *c = 'ò',
+            'ú' => *c = 'ù',
             _ => {}
         }
     }
     let mut i = 0;
     while i + 1 < t.len() {
-        if t[i] == u('q') && t[i + 1] == u('u') {
-            t[i + 1] = u('U');
+        if t[i] == 'q' && t[i + 1] == 'u' {
+            t[i + 1] = 'U';
             i += 2;
         } else {
             i += 1;
@@ -92,8 +105,10 @@ fn prelude(t: &mut [u16]) {
     // `/([aeiou])(i|u)([aeiou])/g` — non-overlapping, so "aiaia" is "aIaia".
     let mut i = 0;
     while i + 2 < t.len() {
-        if is_vowel(t[i]) && (t[i + 1] == u('i') || t[i + 1] == u('u')) && is_vowel(t[i + 2]) {
-            t[i + 1] -= 32; // ASCII uppercase
+        if is_vowel(t[i]) && (t[i + 1] == 'i' || t[i + 1] == 'u') && is_vowel(t[i + 2]) {
+            // The guard has just established that this is `i` or `u`, so the
+            // ASCII fold is the reference's `charCodeAt - 32` exactly.
+            t[i + 1] = t[i + 1].to_ascii_uppercase();
             i += 3;
         } else {
             i += 1;
@@ -101,8 +116,9 @@ fn prelude(t: &mut [u16]) {
     }
 }
 
-/// `(r1, r2, rv)` exactly as the reference marks them, for `t.len() >= 3`.
-fn mark_regions(t: &[u16]) -> (usize, usize, usize) {
+/// `(r1, r2, rv)` exactly as the reference marks them, in scalar values, for
+/// `t.len() >= 3`.
+fn mark_regions(t: &[char]) -> (usize, usize, usize) {
     let len = t.len();
     let (mut r1, mut r2, mut rv) = (len, len, len);
     for i in 0..len - 1 {
@@ -138,14 +154,14 @@ fn mark_regions(t: &[u16]) -> (usize, usize, usize) {
 struct ItTables {
     /// Every step-1 rule table merged into one search; the `T_*` constants
     /// name each table's slot in the mask array.
-    step1: UnionTable,
-    pronoun: AmongTable,
+    step1: UnionTable<char>,
+    pronoun: AmongTable<char>,
     /// `["ando", "endo"]` — the pre-pronoun gerund test.
-    ando_endo: AmongTable,
+    ando_endo: AmongTable<char>,
     /// `["ar", "er", "ir"]` — the pre-pronoun infinitive test.
-    ar_er_ir: AmongTable,
-    step2: AmongTable,
-    step3: AmongTable,
+    ar_er_ir: AmongTable<char>,
+    step2: AmongTable<char>,
+    step3: AmongTable<char>,
 }
 
 /// The step-1 rule tables, in chain order; their positions are the `T_*`
@@ -213,7 +229,7 @@ impl PorterStemmerIt {
     )]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let mut t = Buf::fill_lowercase(token);
+        let mut t: Buf<char> = Buf::fill_lowercase(token);
 
         // --- Prelude -------------------------------------------------------
         prelude(t.as_mut_slice());
@@ -406,12 +422,25 @@ impl TokenizeAndStem for PorterStemmerIt {
     }
 
     fn gate(token: &str) -> bool {
-        token.encode_utf16().any(gate_it)
+        token.chars().any(is_italian_letter)
     }
 
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// Whether `c` is one of the letters [`gate_it`] accepts.
+///
+/// The gate is stated over Basic Multilingual Plane code points and nothing in
+/// it reaches `U+00FA`, so scanning characters and scanning UTF-16 code units
+/// accept exactly the same tokens: a BMP character *is* its own code unit, and
+/// an astral character is neither in the set itself nor are the two surrogates
+/// it used to be scanned as. The scan is per character because that is the
+/// crate's unit, not because the answer moved.
+#[inline]
+fn is_italian_letter(c: char) -> bool {
+    (c as u32) < 0x1_0000 && gate_it(c as u16)
 }
 
 /// What [`crate::data::table_audit`] needs to walk this language's tables.
@@ -441,7 +470,7 @@ pub(crate) mod audit {
 
     /// The prelude `stem` runs before any table is consulted, in isolation.
     pub(crate) fn prelude(token: &str) -> String {
-        let mut t = Buf::fill_lowercase(token);
+        let mut t: Buf<char> = Buf::fill_lowercase(token);
         super::prelude(t.as_mut_slice());
         t.into_text()
     }
@@ -495,6 +524,165 @@ mod tests {
         assert_eq!(s("123"), "123");
     }
 
+    /// The text unit is the **Unicode scalar value**, and Italian's region
+    /// arithmetic makes the choice observable.
+    ///
+    /// Derived from the algorithm rather than recorded from it. `"😀eato"` is
+    /// five letters — `😀 e a t o` — and the prelude leaves every one of them
+    /// alone (no acute accent, no `qu`, and the `(vowel)(i|u)(vowel)` pattern
+    /// needs an `i` or a `u` in the middle). `t[1]` is `e`, a vowel, so RV
+    /// skips the first arm; `t[0]` is not a vowel, so it skips the second and
+    /// takes the literal **`rv = 3`**. RV therefore leaves `5 - 3 = 2`
+    /// letters, which the three-letter step-2 entry `-ato` does not fit, so
+    /// step 2 declines and step 3's one-letter `-o` is what cuts: `"😀eat"`.
+    ///
+    /// `"ñeato"` is the control, and it is a control rather than a decoration:
+    /// `ñ` is outside `isVowel` exactly as `😀` is, so the two words have the
+    /// same letter classes in the same positions and the algorithm cannot tell
+    /// them apart. Anything that makes their stems differ is the encoding
+    /// leaking through.
+    #[test]
+    fn one_astral_character_is_one_letter() {
+        assert_eq!(s("😀eato"), "😀eat");
+        assert_eq!(s("ñeato"), "ñeat");
+    }
+
+    /// The two predicates that used to be stated over UTF-16 code units answer
+    /// identically over characters, for every scalar value there is.
+    ///
+    /// This is what makes converting [`is_vowel`] and [`is_italian_letter`] a no-op
+    /// rather than a change to be argued about: the vowel set tops out at
+    /// `U+00F9` and `gate_it` at `U+00FA`, so neither an astral character
+    /// nor either half of the surrogate pair it encodes to is ever admitted.
+    /// Enumerated over the whole scalar range rather than sampled, because a
+    /// set that reached into the surrogate range would fail on exactly the
+    /// characters a spot check does not name.
+    #[test]
+    fn the_character_scans_agree_with_the_code_unit_scans() {
+        let mut buf = [0u16; 2];
+        for cp in 0..=0x10_FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let units = c.encode_utf16(&mut buf);
+            assert!(
+                !is_vowel(c) || cp < 0x1_0000,
+                "U+{cp:04X} vowel outside the plane the set covers"
+            );
+            assert_eq!(
+                is_italian_letter(c),
+                units.iter().any(|u| gate_it(*u)),
+                "U+{cp:04X} gate"
+            );
+        }
+    }
+
+    /// A character that is inert for this algorithm and inside the Basic
+    /// Multilingual Plane: not in `isVowel`, not spelled in any rule table,
+    /// its own lower case, and untouched by the acute-to-grave and `qU`/`I`/`U`
+    /// marking of the prelude.
+    const INERT_TWIN: char = 'ж';
+
+    /// Every entry of the Italian stop-word list and of every Italian rule
+    /// table, walked through `stem` with one astral character inserted at
+    /// **every** position, against the same word carrying an inert
+    /// Basic-Multilingual-Plane character instead.
+    ///
+    /// # What the twin proves, and why it needs no second implementation
+    ///
+    /// [`INERT_TWIN`] is inert for this algorithm in exactly the way an astral
+    /// character is: neither is a vowel, neither is spelled in any rule table,
+    /// neither is rewritten by the lower-casing or by the prelude's markings.
+    /// So the only thing that can possibly distinguish the two words is **how
+    /// long each of them is** — one character each under the contract, one and
+    /// two under the code-unit reading this port used to carry. One build run
+    /// over both therefore measures the unit directly, and a divergence here is
+    /// a position that is still being counted in code units.
+    ///
+    /// # Why every entry and every position, rather than a sample
+    ///
+    /// This is the shape of defect that has already cost this crate 116 Swedish
+    /// stop words and this module's own dead `"Yamo"` rule: a stage transforms
+    /// text before a later stage measures or looks it up, and the entries that
+    /// die are exactly the ones a spot check does not name. So the walk is over
+    /// every entry of every table and of the stop-word list, behind every
+    /// alphabetic entry of that same list — the probe construction
+    /// [`crate::data::table_audit`] uses — and the astral character goes in at
+    /// every position of each, including the two ends. The counts are pinned by
+    /// equality so that a walk which quietly stops enumerating cannot report a
+    /// clean sweep of nothing.
+    ///
+    /// # Red, then green
+    ///
+    /// Against the code-unit reading this port used to carry, this walk reports
+    /// **677 of 1 473 028** probes measuring an astral character as more than one
+    /// letter. It reports **0** here. Every one of the 677 has the same shape:
+    /// a word that opens with a non-vowel and whose second letter is a vowel,
+    /// so that RV takes its third arm and is the literal `rv = 3`. That 3 is an
+    /// absolute position rather than a relative one, so the extra code unit
+    /// lengthened the region past it, and a suffix that does not fit the
+    /// region by one letter fitted it by one code unit.
+    /// [`one_astral_character_is_one_letter`] states one such word
+    /// with its arithmetic written out; this walk is what shows the shape is the
+    /// only one, and that nothing else in the shipped data moved.
+    #[test]
+    fn every_shipped_entry_measures_the_same_under_either_unit() {
+        let stemmer = PorterStemmerIt::new();
+        let stops = Language::It.defaults();
+        let fillers: Vec<&str> = std::iter::once("")
+            .chain(
+                stops
+                    .iter()
+                    .copied()
+                    .filter(|w| !w.is_empty() && w.chars().all(char::is_alphabetic)),
+            )
+            .collect();
+        let mut entries: Vec<&str> = audit::TABLES
+            .iter()
+            .flat_map(|(_, table)| table.iter().copied())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            217,
+            "the Italian rule-table entry count moved"
+        );
+        entries.extend(stops.iter().copied());
+        assert_eq!(entries.len(), 507, "the Italian entry count moved");
+        assert_eq!(fillers.len(), 280, "the Italian filler count moved");
+
+        let twin = INERT_TWIN.to_string();
+        let mut probes = 0usize;
+        let mut diverging: Vec<String> = Vec::new();
+        for entry in &entries {
+            for filler in &fillers {
+                let word: Vec<char> = format!("{filler}{entry}").chars().collect();
+                for pos in 0..=word.len() {
+                    let mut astral: String = word[..pos].iter().collect();
+                    astral.push('\u{1F600}');
+                    astral.extend(&word[pos..]);
+                    let bmp = astral.replace('\u{1F600}', &twin);
+                    probes += 1;
+                    let from_astral = stemmer.stem(&astral).replace('\u{1F600}', &twin);
+                    let from_bmp = stemmer.stem(&bmp).into_owned();
+                    if from_astral != from_bmp {
+                        diverging.push(format!("{astral:?}: {from_astral:?} vs {from_bmp:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            diverging.is_empty(),
+            "{} of {probes} probes measure an astral character as more than one \
+             letter: {:#?}",
+            diverging.len(),
+            &diverging[..diverging.len().min(10)]
+        );
+        assert_eq!(
+            probes, 1_473_028,
+            "the number of probes this walk builds moved"
+        );
+    }
+
     /// `I` and `U` are the only characters the tables may be spelled with that
     /// are not already lower case — the invariant removing `"Yamo"` rests on.
     ///
@@ -527,7 +715,7 @@ mod tests {
                 format!("q{c}"),
                 format!("{c}a{c}a{c}"),
             ] {
-                let mut buf = Buf::fill_lowercase(&probe);
+                let mut buf: Buf<char> = Buf::fill_lowercase(&probe);
                 prelude(buf.as_mut_slice());
                 unfolded.extend(
                     buf.into_text()
@@ -572,20 +760,20 @@ mod tests {
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
-        use crate::units::{first_suffix, slen, text, units};
+        use crate::units::{first_suffix, slen, text};
 
         /// The pre-`Buf` `cut`, over the owned `Vec` the oracle still uses.
-        fn cut(w: &mut Vec<u16>, n: usize, tail: &str) {
+        fn cut(w: &mut Vec<char>, n: usize, tail: &str) {
             w.truncate(w.len().saturating_sub(n));
-            w.extend(tail.encode_utf16());
+            w.extend(tail.chars());
         }
 
-        fn from(w: &[u16], at: usize) -> &[u16] {
+        fn from(w: &[char], at: usize) -> &[char] {
             &w[at.min(w.len())..]
         }
 
         pub(super) fn stem(token: &str) -> String {
-            let mut t = units(&token.to_lowercase());
+            let mut t: Vec<char> = token.to_lowercase().chars().collect();
 
             prelude(&mut t);
             if t.len() < 3 {

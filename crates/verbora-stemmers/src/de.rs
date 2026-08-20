@@ -21,12 +21,22 @@
 //!
 //! # Suffix selection
 //!
-//! Each `word.search(/(a|b|c)$/)` returns the UTF-16 index where the match
-//! *starts*. Because the alternatives are distinct literals anchored at `$`, the
-//! earliest start is the longest suffix. The German code then does arithmetic on
-//! those indices (`c1Index++`, `b2Index += 4`, `b3Index++`) and picks the smallest
+//! Each `word.search(/(a|b|c)$/)` returns the index where the match *starts*.
+//! Because the alternatives are distinct literals anchored at `$`, the earliest
+//! start is the longest suffix. The German code then does arithmetic on those
+//! indices (`c1Index++`, `b2Index += 4`, `b3Index++`) and picks the smallest
 //! with a **strict** `<`, so a tie keeps the earlier option letter — and the
 //! option letter decides which follow-up rule runs.
+//!
+//! # The unit
+//!
+//! Every index above, both region bounds, the `r1 < 3` clamp and step 2's
+//! `.{3}` lookbehind count **Unicode scalar values** — the unit
+//! [`crate::units`] states for the whole crate, and the one the rules are
+//! written in: R1 is *"the region after the first non-vowel following a
+//! vowel"*, and a `.` in the reference's `/(.{3}[bdfghklmnt]st)$/` stands for
+//! a letter. Nothing in this file is spelled in any other unit, so a cut can
+//! only ever land on a character boundary.
 
 use std::borrow::Cow;
 
@@ -34,7 +44,7 @@ use crate::among::Buf;
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_de;
 use crate::stopwords::Language;
-use crate::units::{ends_with, slen, u};
+use crate::units::{ends_with, slen};
 
 /// Options for [`PorterStemmerDe::stem_with`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -57,38 +67,45 @@ pub struct PorterStemmerDe;
 
 /// `[aeiouyäöü]` — lowercase only, as written.
 #[inline]
-fn is_vowel(c: u16) -> bool {
-    matches!(
-        c,
-        0x61 | 0x65 | 0x69 | 0x6F | 0x75 | 0x79 | 0xE4 | 0xF6 | 0xFC
-    )
+fn is_vowel(c: char) -> bool {
+    matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'y' | 'ä' | 'ö' | 'ü')
 }
 
 /// `[bdfghklmnrt]`, the valid s-ending.
 #[inline]
-fn is_s_ending(c: u16) -> bool {
+fn is_s_ending(c: char) -> bool {
     matches!(
         c,
-        0x62 | 0x64 | 0x66 | 0x67 | 0x68 | 0x6B | 0x6C | 0x6D | 0x6E | 0x72 | 0x74
+        'b' | 'd' | 'f' | 'g' | 'h' | 'k' | 'l' | 'm' | 'n' | 'r' | 't'
     )
 }
 
 /// `[bdfghklmnt]`, the valid st-ending (the s-ending without `r`).
 #[inline]
-fn is_st_ending(c: u16) -> bool {
-    matches!(
-        c,
-        0x62 | 0x64 | 0x66 | 0x67 | 0x68 | 0x6B | 0x6C | 0x6D | 0x6E | 0x74
-    )
+fn is_st_ending(c: char) -> bool {
+    matches!(c, 'b' | 'd' | 'f' | 'g' | 'h' | 'k' | 'l' | 'm' | 'n' | 't')
 }
 
 #[inline]
-const fn is_line_terminator(c: u16) -> bool {
-    matches!(c, 0x0A | 0x0D | 0x2028 | 0x2029)
+const fn is_line_terminator(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
+}
+
+/// Whether `c` is one of the letters [`gate_de`] accepts.
+///
+/// The gate is stated over Basic Multilingual Plane code points and its
+/// highest member is `ẞ` (`U+1E9E`), so scanning characters and scanning
+/// UTF-16 code units admit exactly the same tokens: a BMP character *is* its
+/// own code unit, and an astral character is neither in the set itself nor are
+/// the two surrogates it used to be scanned as. The scan is per character
+/// because that is the crate's unit, not because the answer moved.
+#[inline]
+fn is_german_letter(c: char) -> bool {
+    (c as u32) < 0x1_0000 && gate_de(c as u16)
 }
 
 /// `word.search(/(alt|…)$/)`: the start index of the longest matching suffix.
-fn search_suffix(w: &[u16], alts: &[&str]) -> Option<usize> {
+fn search_suffix(w: &[char], alts: &[&str]) -> Option<usize> {
     let mut best: Option<usize> = None;
     for a in alts {
         let n = slen(a);
@@ -106,25 +123,26 @@ fn search_suffix(w: &[u16], alts: &[&str]) -> Option<usize> {
 /// consumed.
 /// `token.replace(/ß/g, 'ss')`, in place.
 ///
-/// The rewrite lengthens the word by one unit per `ß`, so it counts first and
-/// then copies backwards — no unit is overwritten before it has been read,
-/// and a word without `ß` (nearly all of them) never touches the buffer.
-fn expand_sharp_s(buf: &mut Buf) {
-    let extra = buf.as_slice().iter().filter(|&&c| c == u('ß')).count();
+/// The rewrite lengthens the word by one character per `ß`, so it counts first
+/// and then copies backwards — no position is overwritten before it has been
+/// read, and a word without `ß` (nearly all of them) never touches the buffer.
+/// The filler pushed to make room is never read as text.
+fn expand_sharp_s(buf: &mut Buf<char>) {
+    let extra = buf.as_slice().iter().filter(|&&c| c == 'ß').count();
     if extra == 0 {
         return;
     }
     let old_len = buf.len();
     for _ in 0..extra {
-        buf.push(0);
+        buf.push('\0');
     }
     let w = buf.as_mut_slice();
     let mut write = old_len + extra;
     for read in (0..old_len).rev() {
-        if w[read] == u('ß') {
+        if w[read] == 'ß' {
             write -= 2;
-            w[write] = u('s');
-            w[write + 1] = u('s');
+            w[write] = 's';
+            w[write + 1] = 's';
         } else {
             write -= 1;
             w[write] = w[read];
@@ -132,7 +150,7 @@ fn expand_sharp_s(buf: &mut Buf) {
     }
 }
 
-fn mark_between_vowels(w: &mut [u16], letter: u16, marked: u16) {
+fn mark_between_vowels(w: &mut [char], letter: char, marked: char) {
     let mut i = 0;
     while i + 2 < w.len() {
         if is_vowel(w[i]) && w[i + 1] == letter && is_vowel(w[i + 2]) {
@@ -145,7 +163,7 @@ fn mark_between_vowels(w: &mut [u16], letter: u16, marked: u16) {
 }
 
 /// The first index where a vowel is followed by a non-vowel.
-fn region_scan(w: &[u16], from: usize) -> Option<usize> {
+fn region_scan(w: &[char], from: usize) -> Option<usize> {
     (from..w.len().saturating_sub(1)).find(|&i| is_vowel(w[i]) && !is_vowel(w[i + 1]))
 }
 
@@ -183,14 +201,14 @@ impl PorterStemmerDe {
                   sixteen of them share one call shape"
     )]
     pub fn stem_with<'a>(&self, word: &'a str, options: PorterStemmerDeOptions) -> Cow<'a, str> {
-        let mut buf = Buf::fill(word);
+        let mut buf: Buf<char> = Buf::fill(word);
 
         // --- Prelude -------------------------------------------------------
         // `u` and `y` between vowels are marked so they stop counting as vowels.
         // The commented-out ae/oe/ue mappings in the reference stay omitted:
         // they cause trouble with diphthongs, as its comment says.
-        mark_between_vowels(buf.as_mut_slice(), u('u'), u('U'));
-        mark_between_vowels(buf.as_mut_slice(), u('y'), u('Y'));
+        mark_between_vowels(buf.as_mut_slice(), 'u', 'U');
+        mark_between_vowels(buf.as_mut_slice(), 'y', 'Y');
         expand_sharp_s(&mut buf);
         let w = buf.as_mut_slice();
 
@@ -208,7 +226,7 @@ impl PorterStemmerDe {
         // --- Step 1 --------------------------------------------------------
         let a1 = search_suffix(w, STEP1_A);
         let b1 = search_suffix(w, STEP1_B);
-        let c1 = (w.len() >= 2 && w[w.len() - 1] == u('s') && is_s_ending(w[w.len() - 2]))
+        let c1 = (w.len() >= 2 && w[w.len() - 1] == 's' && is_s_ending(w[w.len() - 2]))
             .then(|| w.len() - 1);
         if let Some((index1, option1)) = choose(&[(a1, 'a'), (b1, 'b'), (c1, 'c')])
             && let Some(r1) = r1_index
@@ -281,17 +299,17 @@ impl PorterStemmerDe {
         // --- Postlude ------------------------------------------------------
         for c in buf.as_mut_slice() {
             match *c {
-                x if x == u('U') => *c = u('u'),
-                x if x == u('Y') => *c = u('y'),
+                'U' => *c = 'u',
+                'Y' => *c = 'y',
                 _ => {}
             }
         }
         if !options.preserve_umlauts {
             for c in buf.as_mut_slice() {
                 match *c {
-                    x if x == u('ä') => *c = u('a'),
-                    x if x == u('ö') => *c = u('o'),
-                    x if x == u('ü') => *c = u('u'),
+                    'ä' => *c = 'a',
+                    'ö' => *c = 'o',
+                    'ü' => *c = 'u',
                     _ => {}
                 }
             }
@@ -303,11 +321,11 @@ impl PorterStemmerDe {
     ///
     /// The guard is "any character that is not `e`" — a negated class, so it
     /// matches line terminators too, unlike `.`.
-    fn search_non_e_prefixed(w: &[u16], alts: &[&str]) -> Option<usize> {
+    fn search_non_e_prefixed(w: &[char], alts: &[&str]) -> Option<usize> {
         let mut best: Option<usize> = None;
         for a in alts {
             let n = slen(a);
-            if w.len() > n && ends_with(w, a) && w[w.len() - n - 1] != u('e') {
+            if w.len() > n && ends_with(w, a) && w[w.len() - n - 1] != 'e' {
                 let start = w.len() - n - 1;
                 if best.is_none_or(|b| start < b) {
                     best = Some(start);
@@ -359,7 +377,7 @@ impl TokenizeAndStem for PorterStemmerDe {
     }
 
     fn gate(token: &str) -> bool {
-        token.encode_utf16().any(gate_de)
+        token.chars().any(is_german_letter)
     }
 
     fn stem_token(&self, token: &str) -> String {
@@ -377,7 +395,6 @@ impl verbora_core::Stemmer for PorterStemmerDe {
 #[cfg(test)]
 pub(crate) mod audit {
     use crate::among::Buf;
-    use crate::units::u;
 
     /// Every rule table, named.
     pub(crate) static TABLES: &[(&str, &[&str])] = &[
@@ -396,9 +413,9 @@ pub(crate) mod audit {
 
     /// The prelude `stem` runs before any table is consulted, in isolation.
     pub(crate) fn prelude(token: &str) -> String {
-        let mut buf = Buf::fill(token);
-        super::mark_between_vowels(buf.as_mut_slice(), u('u'), u('U'));
-        super::mark_between_vowels(buf.as_mut_slice(), u('y'), u('Y'));
+        let mut buf: Buf<char> = Buf::fill(token);
+        super::mark_between_vowels(buf.as_mut_slice(), 'u', 'U');
+        super::mark_between_vowels(buf.as_mut_slice(), 'y', 'Y');
         super::expand_sharp_s(&mut buf);
         buf.into_text()
     }
@@ -459,27 +476,147 @@ mod tests {
         assert_eq!(s("日本語"), "日本語");
     }
 
+    /// The two characters this file cannot tell apart.
+    ///
+    /// `U+1F600` is one Unicode scalar value and two UTF-16 code units;
+    /// `U+4E2D` is one of each. Nothing in this file distinguishes them: the
+    /// vowel class is `[aeiouyäöü]`, the s-ending and st-ending classes are
+    /// `[bdfghklmnrt]` and `[bdfghklmnt]`, the line-terminator class is
+    /// `\n \r U+2028 U+2029`, the prelude looks only for `u`, `y` and `ß`, the
+    /// postlude only for `U`, `Y`, `ä`, `ö` and `ü`, every rule table is ASCII,
+    /// and `str::to_lowercase` leaves both alone. Neither is in any of those
+    /// sets, so the *only* thing about them either can influence is a position
+    /// or a length — which is exactly the unit under test.
+    const ASTRAL: char = '😀';
+    /// The Basic Multilingual Plane twin of [`ASTRAL`]; see there.
+    const BMP_TWIN: char = '中';
+
+    /// Every entry of the German stop-word list and of every rule table, with
+    /// one inert character inserted at every character position, paired with
+    /// the same insertion of its BMP twin.
+    fn inert_placements() -> Vec<(String, String)> {
+        let mut corpus: Vec<&str> = Language::De.defaults().to_vec();
+        for (_, table) in audit::TABLES {
+            corpus.extend_from_slice(table);
+        }
+        let mut out = Vec::new();
+        for w in corpus {
+            for at in w.char_indices().map(|(i, _)| i).chain([w.len()]) {
+                let (mut astral, mut bmp) = (w.to_owned(), w.to_owned());
+                astral.insert(at, ASTRAL);
+                bmp.insert(at, BMP_TWIN);
+                out.push((astral, bmp));
+            }
+        }
+        out
+    }
+
+    /// An inert character occupies **one** position, whichever plane it lives
+    /// on — enumerated over the whole stop-word list and every rule table
+    /// rather than sampled.
+    ///
+    /// Because [`ASTRAL`] and [`BMP_TWIN`] are indistinguishable to every
+    /// predicate, every table and the case fold, the two stems must be the
+    /// same string up to the substitution. Anything else is a position or a
+    /// length counted in a unit that is not a character.
+    #[test]
+    fn an_astral_character_occupies_one_position() {
+        let st = PorterStemmerDe::new();
+        let cases = inert_placements();
+        let twin = BMP_TWIN.to_string();
+        // Pinned so an enumeration that quietly walked nothing cannot pass:
+        // 620 stop words and 23 rule-table entries, each probed at every one of its
+        // `len + 1` character positions.
+        assert_eq!(cases.len(), 3978, "the enumerated corpus changed size");
+        let mut diverged: Vec<(String, String, String)> = Vec::new();
+        let mut invented: Vec<String> = Vec::new();
+        for (astral, bmp) in &cases {
+            let got = st.stem(astral).into_owned();
+            if got.contains('\u{FFFD}') {
+                invented.push(astral.clone());
+            }
+            let want = st.stem(bmp).into_owned();
+            if got.replace(ASTRAL, &twin) != want {
+                diverged.push((astral.clone(), got, want));
+            }
+        }
+        // One assertion for both defects, so a failing run reports both counts
+        // rather than stopping at the first.
+        assert!(
+            invented.is_empty() && diverged.is_empty(),
+            "of {} placements, {} come back carrying a replacement character \
+             the caller never supplied ({:?}) and {} measure an astral \
+             character as more than one position ({:?})",
+            cases.len(),
+            invented.len(),
+            &invented[..invented.len().min(3)],
+            diverged.len(),
+            &diverged[..diverged.len().min(3)]
+        );
+    }
+
+    /// The German gate still admits the letters German is written with and
+    /// still rejects the Spanish ones it was once a copy of — enumerated over
+    /// the whole stop-word list, and through the public `gate` rather than the
+    /// raw predicate, because the scan over that predicate is what changed.
+    #[test]
+    fn the_gate_survives_the_character_scan() {
+        // The four letters the corrected set added, and the six Spanish ones
+        // it dropped. `.any()` makes an omission invisible in any word that
+        // also holds an a-z letter, so each is asked about on its own.
+        for c in "äöüßÄÖÜẞ".chars() {
+            assert!(
+                PorterStemmerDe::gate(&c.to_string()),
+                "the German gate rejects {c:?}, a letter German is written with"
+            );
+        }
+        for c in "áéíñóúÁÉÍÑÓÚ".chars() {
+            assert!(
+                !PorterStemmerDe::gate(&c.to_string()),
+                "the German gate admits {c:?}, which is Spanish"
+            );
+        }
+        // Nothing outside the Basic Multilingual Plane is a German letter, and
+        // scanning characters must not admit one through a surrogate half.
+        assert!(!PorterStemmerDe::gate("😀"));
+        assert!(!PorterStemmerDe::gate("日本語"));
+        assert!(PorterStemmerDe::gate("😀a"));
+        // Every entry of the list, through the gate the pipeline applies.
+        let rejected: Vec<&str> = Language::De
+            .defaults()
+            .iter()
+            .copied()
+            .filter(|w| !PorterStemmerDe::gate(&w.to_lowercase()))
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            "{} of {} German stop words are rejected by the German gate: {rejected:?}",
+            rejected.len(),
+            Language::De.defaults().len()
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Differential oracle: the pre-`Buf` implementation, verbatim — an owned
-    // `Vec<u16>` working buffer and a freshly allocated one for the `ß`
+    // `Vec<char>` working buffer and a freshly allocated one for the `ß`
     // expansion. The conversion above is meant to change nothing but where
-    // those bytes live.
+    // those characters live.
     // -----------------------------------------------------------------------
     fn oracle_stem(word: &str, options: PorterStemmerDeOptions) -> String {
-        use crate::units::{text, units};
-        let mut w = units(word);
+        use crate::units::text;
+        let mut w: Vec<char> = word.chars().collect();
 
         // --- Prelude -------------------------------------------------------
         // `u` and `y` between vowels are marked so they stop counting as vowels.
         // The commented-out ae/oe/ue mappings in the reference stay omitted:
         // they cause trouble with diphthongs, as its comment says.
-        mark_between_vowels(&mut w, u('u'), u('U'));
-        mark_between_vowels(&mut w, u('y'), u('Y'));
-        if w.contains(&u('ß')) {
+        mark_between_vowels(&mut w, 'u', 'U');
+        mark_between_vowels(&mut w, 'y', 'Y');
+        if w.contains(&'ß') {
             let mut expanded = Vec::with_capacity(w.len() + 2);
             for c in &w {
-                if *c == u('ß') {
-                    expanded.extend("ss".encode_utf16());
+                if *c == 'ß' {
+                    expanded.extend("ss".chars());
                 } else {
                     expanded.push(*c);
                 }
@@ -501,7 +638,7 @@ mod tests {
         // --- Step 1 --------------------------------------------------------
         let a1 = search_suffix(&w, STEP1_A);
         let b1 = search_suffix(&w, STEP1_B);
-        let c1 = (w.len() >= 2 && w[w.len() - 1] == u('s') && is_s_ending(w[w.len() - 2]))
+        let c1 = (w.len() >= 2 && w[w.len() - 1] == 's' && is_s_ending(w[w.len() - 2]))
             .then(|| w.len() - 1);
         if let Some((index1, option1)) = choose(&[(a1, 'a'), (b1, 'b'), (c1, 'c')])
             && let Some(r1) = r1_index
@@ -572,17 +709,17 @@ mod tests {
         // --- Postlude ------------------------------------------------------
         for c in &mut w {
             match *c {
-                x if x == u('U') => *c = u('u'),
-                x if x == u('Y') => *c = u('y'),
+                'U' => *c = 'u',
+                'Y' => *c = 'y',
                 _ => {}
             }
         }
         if !options.preserve_umlauts {
             for c in &mut w {
                 match *c {
-                    x if x == u('ä') => *c = u('a'),
-                    x if x == u('ö') => *c = u('o'),
-                    x if x == u('ü') => *c = u('u'),
+                    'ä' => *c = 'a',
+                    'ö' => *c = 'o',
+                    'ü' => *c = 'u',
                     _ => {}
                 }
             }

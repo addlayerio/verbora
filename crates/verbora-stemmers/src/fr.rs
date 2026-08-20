@@ -45,6 +45,35 @@
 //! semantics — no table-ordering caveat applies. The pre-conversion
 //! implementation, snapshots and all, is kept in this module's tests as the
 //! byte-exactness oracle.
+//!
+//! # The text unit
+//!
+//! Every position here is a **Unicode scalar value**: R1, R2 and RV, the
+//! `length == 1` gate, the `t[..3]` prefix the `par`/`col`/`tap` test reads,
+//! the literal `rv = 3`, and every cut. See [`crate::units`] for why that is
+//! the faithful reading of a Snowball algorithm rather than a preference — the
+//! specification is written over *letters*, and the UTF-16 indices this port
+//! used to carry were an artefact of the host language it was transcribed
+//! through, not of the algorithm.
+//!
+//! Two things make the choice visible, and the second is the one worth stating
+//! carefully because it is easy to argue oneself out of.
+//!
+//! [`PorterStemmerFr::regions`] hands the positions themselves to a caller who
+//! is holding a `&str`, so `regions("😀parler")` is `{ r1: 4, r2: 7, rv: 3 }` —
+//! offsets into the seven characters the caller can see, where the code-unit
+//! reading answered `{ 5, 8, 4 }` and put `r2` past the end of the word.
+//!
+//! `stem` is affected too. Most of its region checks are *relative* — a match
+//! length against `len - region` — and an inserted character shifts `len` and
+//! `region` together, so those cancel. RV's literal **`rv = 3`** does not
+//! cancel, because it is an absolute position: a word opening with two vowels,
+//! or with `par`/`col`/`tap`, gets that 3 whatever follows it, so under the
+//! code-unit reading an astral character anywhere later made RV one unit longer
+//! than the word had letters. Step 2a's "RV must be strictly longer than the
+//! match" test then read differently, and `stem("au😀îmes")` — seven letters,
+//! RV of four, against the four-letter `-îmes` — came back `"au😀"` where it is
+//! now `"au😀îm"`.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -53,7 +82,13 @@ use crate::among::{AmongTable, Buf, UnionTable, longest_at_most};
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_fr;
 use crate::stopwords::Language;
-use crate::units::{at, ends_with, longest_suffix, text, text_lowercase, u, units};
+use crate::units::{at, ends_with, longest_suffix, text, text_lowercase};
+
+/// The working buffer for a `&str`, in this crate's text unit.
+#[inline]
+fn scalars(s: &str) -> Vec<char> {
+    s.chars().collect()
+}
 
 /// The French Snowball stemmer.
 ///
@@ -67,7 +102,11 @@ use crate::units::{at, ends_with, longest_suffix, text, text_lowercase, u, units
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerFr;
 
-/// The R1, R2 and RV offsets a French word is divided into.
+/// The R1, R2 and RV offsets a French word is divided into, in **Unicode
+/// scalar values**.
+///
+/// Every field is an index into the word's characters, so a caller holding the
+/// `&str` reaches the region with `token.chars().skip(r.r1)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Regions {
     /// Start of R1.
@@ -81,40 +120,55 @@ pub struct Regions {
 /// The seventeen-way vowel test, transcribed exactly.
 ///
 /// There is no `á í ó ú ü œ`, and no uppercase form — which is precisely how the
-/// `U`, `I` and `Y` that `prelude` writes stop counting as vowels.
+/// `U`, `I` and `Y` that `prelude` writes stop counting as vowels. Nothing
+/// outside the Basic Multilingual Plane is in it either, so an astral character
+/// is a consonant to every region scan.
 #[inline]
-fn is_vowel(c: u16) -> bool {
+fn is_vowel(c: char) -> bool {
     matches!(
         c,
-        0x61 | 0x65 | 0x69 | 0x6F | 0x75 | 0x79 // a e i o u y
-        | 0xE2 | 0xE0 | 0xEB | 0xE9 | 0xEA | 0xE8 // â à ë é ê è
-        | 0xEF | 0xEE | 0xF4 | 0xFB | 0xF9 // ï î ô û ù
+        'a' | 'e'
+            | 'i'
+            | 'o'
+            | 'u'
+            | 'y'
+            | 'â'
+            | 'à'
+            | 'ë'
+            | 'é'
+            | 'ê'
+            | 'è'
+            | 'ï'
+            | 'î'
+            | 'ô'
+            | 'û'
+            | 'ù'
     )
 }
 
 #[inline]
-fn vowel_at(w: &[u16], i: usize) -> bool {
+fn vowel_at(w: &[char], i: usize) -> bool {
     at(w, i).is_some_and(is_vowel)
 }
 
-/// Removes `n` code units from the end and appends `tail`.
-fn cut(buf: &mut Buf, n: usize, tail: &str) {
+/// Removes `n` characters from the end and appends `tail`.
+fn cut(buf: &mut Buf<char>, n: usize, tail: &str) {
     buf.truncate(buf.len().saturating_sub(n));
     buf.push_str(tail);
 }
 
 /// `prelude` applied to a buffer that already holds the lowercased token.
 ///
-/// # Why the one-unit lag is needed
+/// # Why the one-character lag is needed
 ///
 /// Every test in `prelude` reads the **original** token, never the partly
 /// rewritten result, so an already-marked neighbour still counts as a vowel.
 /// Rewriting in place would destroy `t[i - 1]` before `t[i]` is decided, so
 /// the original left neighbour is carried in `prev`; the right neighbour is
 /// still untouched at that point and can be read from the buffer directly.
-/// The transform is one unit in, one unit out, which is what makes an
+/// The transform is one character in, one character out, which is what makes an
 /// in-place form possible at all and removes the `prelude` output `Vec`.
-fn prelude_in_place(buf: &mut Buf) {
+fn prelude_in_place(buf: &mut Buf<char>) {
     if buf.len() == 0 {
         // The empty token has nothing to mark. See `PorterStemmerFr::prelude`
         // for what used to happen here instead.
@@ -122,19 +176,21 @@ fn prelude_in_place(buf: &mut Buf) {
     }
     let w = buf.as_mut_slice();
     let n = w.len();
-    let mut prev = 0u16;
+    let mut prev = '\0';
     for i in 0..n {
         let c = w[i];
         let next_vowel = i + 1 < n && is_vowel(w[i + 1]);
         let prev_vowel = i > 0 && is_vowel(prev);
         w[i] = if i == 0 {
-            if c == u('y') && next_vowel { u('Y') } else { c }
-        } else if (c == u('u') || c == u('i')) && prev_vowel && next_vowel {
-            c - 32 // ASCII uppercase
-        } else if c == u('y') && (prev_vowel || next_vowel) {
-            u('Y')
-        } else if c == u('u') && prev == u('q') {
-            u('U')
+            if c == 'y' && next_vowel { 'Y' } else { c }
+        } else if (c == 'u' || c == 'i') && prev_vowel && next_vowel {
+            // The guard has just established that this is `u` or `i`, so the
+            // ASCII fold is the reference's `charCodeAt - 32` exactly.
+            c.to_ascii_uppercase()
+        } else if c == 'y' && (prev_vowel || next_vowel) {
+            'Y'
+        } else if c == 'u' && prev == 'q' {
+            'U'
         } else {
             c
         };
@@ -146,15 +202,15 @@ fn prelude_in_place(buf: &mut Buf) {
 struct FrTables {
     /// Every step-1 rule table merged into one search; the `T_*` constants
     /// name each table's slot in the mask array.
-    step1: UnionTable,
+    step1: UnionTable<char>,
     /// Also a step-1 table, kept standalone because one rule searches it
     /// again after a cut, when the merged mask no longer describes the word.
-    atif: AmongTable,
-    step2a: AmongTable,
-    step2b_e: AmongTable,
-    step2b_a: AmongTable,
-    ier: AmongTable,
-    undouble: AmongTable,
+    atif: AmongTable<char>,
+    step2a: AmongTable<char>,
+    step2b_e: AmongTable<char>,
+    step2b_a: AmongTable<char>,
+    ier: AmongTable<char>,
+    undouble: AmongTable<char>,
 }
 
 /// The step-1 rule tables, in chain order. Their positions are the `T_*`
@@ -226,16 +282,16 @@ impl PorterStemmerFr {
     /// basis in the algorithm; every other stemmer in this crate returns `""`
     /// for `""` and this one now does too.
     pub fn prelude(token: &str) -> String {
-        text(&Self::prelude_units(&units(&token.to_lowercase())))
+        text(&Self::prelude_units(&scalars(&token.to_lowercase())))
     }
 
-    fn prelude_units(t: &[u16]) -> Vec<u16> {
+    fn prelude_units(t: &[char]) -> Vec<char> {
         if t.is_empty() {
             return Vec::new();
         }
         let mut out = Vec::with_capacity(t.len());
-        out.push(if t[0] == u('y') && vowel_at(t, 1) {
-            u('Y')
+        out.push(if t[0] == 'y' && vowel_at(t, 1) {
+            'Y'
         } else {
             t[0]
         });
@@ -243,12 +299,12 @@ impl PorterStemmerFr {
             // Every test reads the ORIGINAL token, never the partly-rewritten
             // result, so an already-marked neighbour still counts as a vowel.
             let c = t[i];
-            if (c == u('u') || c == u('i')) && vowel_at(t, i - 1) && vowel_at(t, i + 1) {
-                out.push(c - 32); // ASCII uppercase
-            } else if c == u('y') && (vowel_at(t, i - 1) || vowel_at(t, i + 1)) {
-                out.push(u('Y'));
-            } else if c == u('u') && t[i - 1] == u('q') {
-                out.push(u('U'));
+            if (c == 'u' || c == 'i') && vowel_at(t, i - 1) && vowel_at(t, i + 1) {
+                out.push(c.to_ascii_uppercase());
+            } else if c == 'y' && (vowel_at(t, i - 1) || vowel_at(t, i + 1)) {
+                out.push('Y');
+            } else if c == 'u' && t[i - 1] == 'q' {
+                out.push('U');
             } else {
                 out.push(c);
             }
@@ -256,19 +312,23 @@ impl PorterStemmerFr {
         out
     }
 
-    /// The R1, R2 and RV offsets `token` is divided into, in UTF-16 code
-    /// units.
+    /// The R1, R2 and RV offsets `token` is divided into, in **Unicode scalar
+    /// values**.
     ///
     /// R1 is the region after the first non-vowel following a vowel, R2 the
     /// same taken inside R1, and RV the French-specific region every verb rule
     /// is checked against. Exposed because which region a suffix falls in is
     /// the whole reason a rule fires or does not, and a caller debugging an
     /// unexpected stem needs to see them.
+    ///
+    /// Each offset counts characters, so it indexes the same thing the caller's
+    /// own `token.chars()` does — `regions("😀parler").r2` is 7, the length of
+    /// a seven-character word, not the 8 a UTF-16 count would put past its end.
     pub fn regions(token: &str) -> Regions {
-        Self::regions_units(&units(token))
+        Self::regions_units(&scalars(token))
     }
 
-    fn regions_units(t: &[u16]) -> Regions {
+    fn regions_units(t: &[char]) -> Regions {
         let len = t.len();
         let (mut r1, mut r2, mut rv) = (len, len, len);
         for i in 0..len.saturating_sub(1) {
@@ -308,7 +368,7 @@ impl PorterStemmerFr {
 
     /// `PorterStemmerFr.endsinArr` — the **longest** matching suffix, or `""`.
     pub fn endsin_arr<'s>(token: &str, suffixes: &[&'s str]) -> &'s str {
-        longest_suffix(&units(token), suffixes).unwrap_or("")
+        longest_suffix(&scalars(token), suffixes).unwrap_or("")
     }
 
     /// Stems one token.
@@ -326,7 +386,7 @@ impl PorterStemmerFr {
         // Lowercase, prelude and working copy all land in one stack buffer:
         // the straightforward port allocated three `Vec`/`String`s before the
         // first rule ran, plus a fourth for the step-1 snapshot below.
-        let mut buf = Buf::fill_lowercase(token);
+        let mut buf: Buf<char> = Buf::fill_lowercase(token);
         prelude_in_place(&mut buf);
         if buf.len() == 1 {
             return Cow::Owned(buf.into_text());
@@ -570,7 +630,7 @@ impl PorterStemmerFr {
                     // deliberately — capture its length before the cut.
                     let rv_len_before = len - lbv;
                     cut(&mut buf, m, "");
-                    if buf.as_slice().last() == Some(&u('e')) && rv_len_before > m {
+                    if buf.as_slice().last() == Some(&'e') && rv_len_before > m {
                         buf.truncate(buf.len() - 1);
                     }
                 }
@@ -579,13 +639,13 @@ impl PorterStemmerFr {
 
         if buf.as_slice() != before_step1.as_slice() {
             // --- Step 3 ----------------------------------------------------
-            if buf.as_slice().last() == Some(&u('Y')) {
+            if buf.as_slice().last() == Some(&'Y') {
                 let n = buf.len();
-                buf.as_mut_slice()[n - 1] = u('i');
+                buf.as_mut_slice()[n - 1] = 'i';
             }
-            if buf.as_slice().last() == Some(&u('ç')) {
+            if buf.as_slice().last() == Some(&'ç') {
                 let n = buf.len();
-                buf.as_mut_slice()[n - 1] = u('c');
+                buf.as_mut_slice()[n - 1] = 'c';
             }
         } else {
             // --- Step 4: residual ------------------------------------------
@@ -595,10 +655,8 @@ impl PorterStemmerFr {
             } else {
                 None
             };
-            if last == Some(u('s'))
-                && !second_last.is_some_and(|c| {
-                    matches!(c, x if x == u('a') || x == u('i') || x == u('o') || x == u('u') || x == u('è') || x == u('s'))
-                })
+            if last == Some('s')
+                && !second_last.is_some_and(|c| matches!(c, 'a' | 'i' | 'o' | 'u' | 'è' | 's'))
             {
                 buf.truncate(buf.len() - 1);
             }
@@ -610,7 +668,7 @@ impl PorterStemmerFr {
                     } else {
                         None
                     };
-                    if before.is_some_and(|c| c == u('s') || c == u('t')) {
+                    if before.is_some_and(|c| c == 's' || c == 't') {
                         cut(&mut buf, 3, "");
                     }
                 }
@@ -627,21 +685,19 @@ impl PorterStemmerFr {
             {
                 let len = buf.len();
                 let lbv = regs.rv.min(len);
-                if len > lbv && buf.as_slice()[len - 1] == u('e') {
+                if len > lbv && buf.as_slice()[len - 1] == 'e' {
                     buf.truncate(len - 1);
                 }
             }
             {
                 let len = buf.len();
                 let lbv = regs.rv.min(len);
-                if len > lbv && buf.as_slice()[len - 1] == u('ë') {
+                if len > lbv && buf.as_slice()[len - 1] == 'ë' {
                     // `token.slice(token.length - 3, -1)`: a start argument
                     // below zero is treated as an offset from the end, not
                     // clamped, so for a token shorter than three units this
                     // can never be "gu".
-                    if len >= 3
-                        && buf.as_slice()[len - 3] == u('g')
-                        && buf.as_slice()[len - 2] == u('u')
+                    if len >= 3 && buf.as_slice()[len - 3] == 'g' && buf.as_slice()[len - 2] == 'u'
                     {
                         buf.truncate(len - 1);
                     }
@@ -660,8 +716,8 @@ impl PorterStemmerFr {
         while i > 0 {
             if !is_vowel(w[i]) {
                 i -= 1;
-            } else if i != w.len() - 1 && (w[i] == u('é') || w[i] == u('è')) {
-                w[i] = u('e');
+            } else if i != w.len() - 1 && (w[i] == 'é' || w[i] == 'è') {
+                w[i] = 'e';
                 break;
             } else {
                 break;
@@ -731,12 +787,25 @@ impl TokenizeAndStem for PorterStemmerFr {
     }
 
     fn gate(token: &str) -> bool {
-        token.encode_utf16().any(gate_fr)
+        token.chars().any(is_french_letter)
     }
 
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// Whether `c` is one of the letters [`gate_fr`] accepts.
+///
+/// The gate is stated over Basic Multilingual Plane code points and nothing in
+/// it reaches `U+00FD`, so scanning characters and scanning UTF-16 code units
+/// accept exactly the same tokens: a BMP character *is* its own code unit, and
+/// an astral character is neither in the set itself nor are the two surrogates
+/// it used to be scanned as. The scan is per character because that is the
+/// crate's unit, not because the answer moved.
+#[inline]
+fn is_french_letter(c: char) -> bool {
+    (c as u32) < 0x1_0000 && gate_fr(c as u16)
 }
 
 /// What [`crate::data::table_audit`] needs to walk this language's tables.
@@ -898,6 +967,223 @@ mod tests {
         assert_eq!(s("123"), "123");
     }
 
+    /// [`Regions`] are positions in **Unicode scalar values**, so they index
+    /// the same thing the caller's own `chars()` does.
+    ///
+    /// Derived from the algorithm rather than recorded from it. `"😀parler"` is
+    /// seven letters — `😀 p a r l e r`. R1 is the position after the first
+    /// non-vowel following a vowel: `a` at 2 is a vowel and `r` at 3 is not, so
+    /// R1 is 4. R2 repeats that inside R1: `e` at 5 is a vowel and `r` at 6 is
+    /// not, so R2 is 7, the length. RV takes neither special arm — `😀` is not
+    /// a vowel, and the first three letters are `😀pa`, not `par` — so the
+    /// fallback loop runs and stops at the first vowel after index 0, the `a`
+    /// at 2, giving `rv = 3`.
+    ///
+    /// The code-unit reading answered `{ r1: 5, r2: 8, rv: 4 }` for this word:
+    /// three offsets into a seven-character string, one of them past its end.
+    ///
+    /// `"ñparler"` is the control, and it is a control rather than a
+    /// decoration: `ñ` is outside `isVowel` exactly as `😀` is, and is not `p`,
+    /// so the two words divide identically. `"parler"` is the third row because
+    /// it is the same word without the extra letter, and shows each offset
+    /// moving by exactly one.
+    ///
+    /// See [`one_astral_character_is_one_letter`] for the same choice observed
+    /// through `stem`.
+    #[test]
+    fn regions_are_positions_in_scalar_values() {
+        assert_eq!(
+            PorterStemmerFr::regions("😀parler"),
+            Regions {
+                r1: 4,
+                r2: 7,
+                rv: 3
+            }
+        );
+        assert_eq!(
+            PorterStemmerFr::regions("ñparler"),
+            Regions {
+                r1: 4,
+                r2: 7,
+                rv: 3
+            }
+        );
+        assert_eq!(
+            PorterStemmerFr::regions("parler"),
+            Regions {
+                r1: 3,
+                r2: 6,
+                rv: 3
+            }
+        );
+    }
+
+    /// The same choice, observed through `stem` rather than through
+    /// [`PorterStemmerFr::regions`].
+    ///
+    /// Derived from the algorithm rather than recorded from it. `"au😀îmes"` is
+    /// seven letters — `a u 😀 î m e s` — and the prelude leaves them alone
+    /// (the `u` at 1 needs vowels on *both* sides, and `😀` is not one). RV
+    /// takes its first arm, because `a` and `u` are both vowels: the literal
+    /// **`rv = 3`**. The `par`/`col`/`tap` test then fails on `au😀`, and its
+    /// fallback loop is guarded by `rv === len`, which no longer holds, so
+    /// `rv` stays 3 and RV is `7 - 3 = 4` letters long.
+    ///
+    /// Step 2a finds the four-letter `-îmes` inside RV, preceded by the
+    /// non-vowel `😀` — but its last condition is that RV be **strictly
+    /// longer** than the match, and `4 > 4` is false. So step 2a declines,
+    /// step 2b finds nothing, the word is unchanged from before step 1, and
+    /// the residual step 4 runs instead: it drops the final `s` (the letter
+    /// before it is `e`, which is not one of `a i o u è s`), then drops the
+    /// exposed `e` inside RV. That leaves `"au😀îm"`.
+    ///
+    /// Under the code-unit reading RV measured five against the same
+    /// four-letter match, `5 > 4` held, step 2a cut `-îmes`, and the stem was
+    /// `"au😀"`.
+    ///
+    /// `"auжîmes"` is the control: `ж` is outside `isVowel` exactly as `😀` is,
+    /// so the two words divide identically and the algorithm cannot tell them
+    /// apart.
+    #[test]
+    fn one_astral_character_is_one_letter() {
+        assert_eq!(s("au😀îmes"), "au😀îm");
+        assert_eq!(s("auжîmes"), "auжîm");
+    }
+
+    /// The two predicates that used to be stated over UTF-16 code units answer
+    /// identically over characters, for every scalar value there is.
+    ///
+    /// This is what makes converting [`is_vowel`] and [`is_french_letter`] a no-op
+    /// rather than a change to be argued about: the vowel set tops out at
+    /// `U+00F9` and `gate_fr` at `U+00FC`, so neither an astral character
+    /// nor either half of the surrogate pair it encodes to is ever admitted.
+    /// Enumerated over the whole scalar range rather than sampled, because a
+    /// set that reached into the surrogate range would fail on exactly the
+    /// characters a spot check does not name.
+    #[test]
+    fn the_character_scans_agree_with_the_code_unit_scans() {
+        let mut buf = [0u16; 2];
+        for cp in 0..=0x10_FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let units = c.encode_utf16(&mut buf);
+            assert!(
+                !is_vowel(c) || cp < 0x1_0000,
+                "U+{cp:04X} vowel outside the plane the set covers"
+            );
+            assert_eq!(
+                is_french_letter(c),
+                units.iter().any(|u| gate_fr(*u)),
+                "U+{cp:04X} gate"
+            );
+        }
+    }
+
+    /// A character that is inert for this algorithm and inside the Basic
+    /// Multilingual Plane: not in `isVowel`, not spelled in any rule table,
+    /// its own lower case, and neither a trigger nor a target of the prelude's
+    /// `I`/`U`/`Y` marking.
+    const INERT_TWIN: char = 'ж';
+
+    /// Every entry of the French stop-word list and of every French rule table,
+    /// walked through `stem` with one astral character inserted at **every**
+    /// position, against the same word carrying an inert
+    /// Basic-Multilingual-Plane character instead.
+    ///
+    /// # What the twin proves, and why it needs no second implementation
+    ///
+    /// [`INERT_TWIN`] is inert for this algorithm in exactly the way an astral
+    /// character is: neither is a vowel, neither is spelled in any rule table,
+    /// neither is rewritten by the lower-casing or by the prelude. So the only
+    /// thing that can possibly distinguish the two words is **how long each of
+    /// them is** — one character each under the contract, one and two under the
+    /// code-unit reading this port used to carry. One build run over both
+    /// therefore measures the unit directly, and a divergence here is a
+    /// position that is still being counted in code units.
+    ///
+    /// # Red, then green
+    ///
+    /// Against the code-unit reading this port used to carry, this walk reports
+    /// **194 of 510 435** probes measuring an astral character as more than one
+    /// letter. It reports **0** here. Every one of the 194 has the same shape —
+    /// a word opening with two vowels, where RV's literal `rv = 3` is an
+    /// absolute position, followed by `-îmes` or `-ît` at the boundary where
+    /// step 2a's strict "RV longer than the match" test turns over. That shape
+    /// is what [`one_astral_character_is_one_letter`] states as one derived
+    /// case; this walk is what found it, after the module documentation had
+    /// argued — wrongly — that French's rules were all relative and could not
+    /// see the unit at all.
+    ///
+    /// # Why every entry and every position, rather than a sample
+    ///
+    /// This is the shape of defect that has already cost this crate 116 Swedish
+    /// stop words and two dead rules: a stage transforms text before a later
+    /// stage measures or looks it up, and the entries that die are exactly the
+    /// ones a spot check does not name. So the walk is over every entry of
+    /// every table and of the stop-word list, behind every alphabetic entry of
+    /// that same list — the probe construction [`crate::data::table_audit`]
+    /// uses — and the astral character goes in at every position of each,
+    /// including the two ends. The counts are pinned by equality so that a walk
+    /// which quietly stops enumerating cannot report a clean sweep of nothing.
+    #[test]
+    fn every_shipped_entry_measures_the_same_under_either_unit() {
+        let stemmer = PorterStemmerFr::new();
+        let stops = Language::Fr.defaults();
+        let fillers: Vec<&str> = std::iter::once("")
+            .chain(
+                stops
+                    .iter()
+                    .copied()
+                    .filter(|w| !w.is_empty() && w.chars().all(char::is_alphabetic)),
+            )
+            .collect();
+        let mut entries: Vec<&str> = audit::TABLES
+            .iter()
+            .flat_map(|(_, table)| table.iter().copied())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            154,
+            "the French rule-table entry count moved"
+        );
+        entries.extend(stops.iter().copied());
+        assert_eq!(entries.len(), 322, "the French entry count moved");
+        assert_eq!(fillers.len(), 169, "the French filler count moved");
+
+        let twin = INERT_TWIN.to_string();
+        let mut probes = 0usize;
+        let mut diverging: Vec<String> = Vec::new();
+        for entry in &entries {
+            for filler in &fillers {
+                let word: Vec<char> = format!("{filler}{entry}").chars().collect();
+                for pos in 0..=word.len() {
+                    let mut astral: String = word[..pos].iter().collect();
+                    astral.push('\u{1F600}');
+                    astral.extend(&word[pos..]);
+                    let bmp = astral.replace('\u{1F600}', &twin);
+                    probes += 1;
+                    let from_astral = stemmer.stem(&astral).replace('\u{1F600}', &twin);
+                    let from_bmp = stemmer.stem(&bmp).into_owned();
+                    if from_astral != from_bmp {
+                        diverging.push(format!("{astral:?}: {from_astral:?} vs {from_bmp:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            diverging.is_empty(),
+            "{} of {probes} probes measure an astral character as more than one \
+             letter: {:#?}",
+            diverging.len(),
+            &diverging[..diverging.len().min(10)]
+        );
+        assert_eq!(
+            probes, 510_435,
+            "the number of probes this walk builds moved"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Differential oracle: the pre-find_among implementation, verbatim —
     // owned `r2txt`/`rvtxt` snapshots, hand refreshes and all.
@@ -907,17 +1193,17 @@ mod tests {
         use crate::units::{longest_suffix, slen};
 
         /// The pre-`Buf` `cut`, over the owned `Vec` the oracle still uses.
-        fn cut(w: &mut Vec<u16>, n: usize, tail: &str) {
+        fn cut(w: &mut Vec<char>, n: usize, tail: &str) {
             w.truncate(w.len().saturating_sub(n));
-            w.extend(tail.encode_utf16());
+            w.extend(tail.chars());
         }
 
-        fn from(w: &[u16], at: usize) -> &[u16] {
+        fn from(w: &[char], at: usize) -> &[char] {
             &w[at.min(w.len())..]
         }
 
         /// `endsin(token, letterBefore + suffix)` without building a string.
-        fn ends_with_prefixed(w: &[u16], before: u16, suffix: &str) -> bool {
+        fn ends_with_prefixed(w: &[char], before: char, suffix: &str) -> bool {
             let n = slen(suffix);
             w.len() > n && w[w.len() - n - 1] == before && ends_with(w, suffix)
         }
@@ -929,7 +1215,7 @@ mod tests {
                       mirrors that uniformly, dead refreshes included"
         )]
         pub(super) fn stem(token: &str) -> String {
-            let mut t = PorterStemmerFr::prelude_units(&units(&token.to_lowercase()));
+            let mut t = PorterStemmerFr::prelude_units(&scalars(&token.to_lowercase()));
             if t.len() == 1 {
                 return text(&t);
             }
@@ -1083,7 +1369,7 @@ mod tests {
                 } else if let Some(sfx) = longest_suffix(&rvtxt, STEP2B_A) {
                     cut(&mut t, slen(sfx), "");
                     // `rvtxt` here is still the pre-deletion slice, deliberately.
-                    if t.last() == Some(&u('e')) && ends_with_prefixed(&rvtxt, u('e'), sfx) {
+                    if t.last() == Some(&'e') && ends_with_prefixed(&rvtxt, 'e', sfx) {
                         t.truncate(t.len() - 1);
                     }
                     r2txt = from(&t, regs.r2).to_vec();
@@ -1093,13 +1379,13 @@ mod tests {
 
             if t != before_step1 {
                 // --- Step 3 ------------------------------------------------
-                if t.last() == Some(&u('Y')) {
+                if t.last() == Some(&'Y') {
                     let n = t.len();
-                    t[n - 1] = u('i');
+                    t[n - 1] = 'i';
                 }
-                if t.last() == Some(&u('ç')) {
+                if t.last() == Some(&'ç') {
                     let n = t.len();
-                    t[n - 1] = u('c');
+                    t[n - 1] = 'c';
                 }
             } else {
                 // --- Step 4: residual --------------------------------------
@@ -1109,10 +1395,8 @@ mod tests {
                 } else {
                     None
                 };
-                if last == Some(u('s'))
-                    && !second_last.is_some_and(|c| {
-                        matches!(c, x if x == u('a') || x == u('i') || x == u('o') || x == u('u') || x == u('è') || x == u('s'))
-                    })
+                if last == Some('s')
+                    && !second_last.is_some_and(|c| matches!(c, 'a' | 'i' | 'o' | 'u' | 'è' | 's'))
                 {
                     t.truncate(t.len() - 1);
                     r2txt = from(&t, regs.r2).to_vec();
@@ -1124,7 +1408,7 @@ mod tests {
                     } else {
                         None
                     };
-                    if before.is_some_and(|c| c == u('s') || c == u('t')) {
+                    if before.is_some_and(|c| c == 's' || c == 't') {
                         cut(&mut t, 3, "");
                         r2txt = from(&t, regs.r2).to_vec();
                         rvtxt = from(&t, regs.rv).to_vec();
@@ -1157,8 +1441,8 @@ mod tests {
             while i > 0 {
                 if !is_vowel(t[i]) {
                     i -= 1;
-                } else if i != t.len() - 1 && (t[i] == u('é') || t[i] == u('è')) {
-                    t[i] = u('e');
+                } else if i != t.len() - 1 && (t[i] == 'é' || t[i] == 'è') {
+                    t[i] = 'e';
                     break;
                 } else {
                     break;

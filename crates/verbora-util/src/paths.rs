@@ -278,10 +278,25 @@ impl<'g, V, R: Relaxation> PathTree<'g, V, R> {
     ///
     /// As [`PathTree::path`], with one indexed label lookup per vertex.
     pub fn path_labels(&self, id: VertexId) -> Option<Vec<&'g V>> {
+        // The `?` is load-bearing, and is the whole reason the lookup below
+        // cannot fail. `path` starts with `self.distance(id)?`, which indexes
+        // `dist` — sized `graph.vertex_count()` at construction — so an
+        // out-of-range id leaves through the `?` before any label is read, and
+        // every other id on the returned path is an `edge.from()` of this same
+        // graph. Note what is *not* true: `VertexId` is public and `Copy`, and
+        // `graph.rs` documents that an id from another graph resolves silently
+        // to whatever sits at that index, so "minted by this graph" is not
+        // enforced anywhere. Mapping `label()` over caller-supplied ids without
+        // going through `path` would turn this into a live panic in safe public
+        // API.
         Some(
             self.path(id)?
                 .into_iter()
-                .map(|v| self.graph.label(v).expect("id minted by this graph"))
+                .map(|v| {
+                    self.graph
+                        .label(v)
+                        .expect("in range: `path` bounds-checked it")
+                })
                 .collect(),
         )
     }

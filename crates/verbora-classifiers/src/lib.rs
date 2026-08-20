@@ -67,8 +67,35 @@
 //!   descending with a *stable* sort, so classes scoring exactly equal come
 //!   back in the engine's own enumeration order. A `NaN` difference compares as
 //!   "equal" rather than panicking, so an unorderable score never aborts a
-//!   ranking; training from finite documents cannot produce one, but a
-//!   caller-restored model may contain anything.
+//!   ranking.
+//!
+//! ## `NaN` is computable, not merely restorable
+//!
+//! A `NaN` score is **not** confined to a corrupt saved model. Ordinary calls
+//! against ordinary inputs produce one, and this crate propagates it rather
+//! than rejecting it:
+//!
+//! | Path | How the `NaN` arises |
+//! |---|---|
+//! | [`BayesEngine::with_smoothing`] with a negative constant, then any observation bit unseen for a class | the per-class count falls back to the smoothing constant, so the class score takes `log` of a negative ratio |
+//! | [`Classifier::restore`] of a model whose stored count is negative | the same `log`, from a stamp-valid artifact |
+//! | [`Distribution`] with a negative alpha | `log_likelihood`, `entropy` and `kullback_liebler_distance` all return `Ok(NaN)` |
+//! | [`Distribution`] with an alpha of zero | `calculate_a_posteriori` returns `Ok(NaN)` from `0 / 0`, without `log` being involved at all |
+//!
+//! The consequence worth stating plainly: **a `NaN` score can be returned as
+//! the winner.** The comparator treats an unorderable difference as a tie and
+//! the sort is stable, so a class scoring `NaN` keeps its enumeration position
+//! and [`Classifier::classify`] returns it — `Ok(label)`, no error, no panic,
+//! and a score that is not a number. Compare `NaN` explicitly (`f64::is_nan`)
+//! if that matters to your caller; the ranking will not do it for you.
+//!
+//! None of this is an accident of the arithmetic primitives. [`log`] returns
+//! `NaN` for a negative argument because IEEE 754 requires it, and changing
+//! that would misreport the logarithm rather than fix anything: the `NaN`'s
+//! source is a negative *input*, admitted at the boundary. `with_smoothing`
+//! admits a negative constant deliberately — see its own documentation — so
+//! the boundary is where a caller who needs "no `NaN` escapes" has to stand.
+//! `negative_smoothing_computes_a_nan_score_that_can_win` pins the whole chain.
 //!
 //! ## What an empty, unseen or stale input answers
 //!
@@ -182,8 +209,21 @@ pub use maxent::{
 };
 pub use ordmap::{OrderedMap, is_array_index};
 pub use stamp::{
-    ArtifactStamp, CONTEXT_PROBES, SCHEMA, STAMP_PROPERTY, STEMMER_PROBES, StampError,
-    lowercase_fingerprint, stemmer_fingerprint, verify_stamp, verify_stamp_against,
+    // `StampMismatch` is exported because `StampError::Incompatible` carries
+    // one: a caller matching on that variant has to be able to name its
+    // payload, and the type was previously reachable only through pattern
+    // matching.
+    ArtifactStamp,
+    CONTEXT_PROBES,
+    SCHEMA,
+    STAMP_PROPERTY,
+    STEMMER_PROBES,
+    StampError,
+    StampMismatch,
+    lowercase_fingerprint,
+    stemmer_fingerprint,
+    verify_stamp,
+    verify_stamp_against,
 };
 pub use stemmer::{StemCache, Stemmer, StemmerOf, default_stemmer};
 pub use transcendental::{exp, log, pow, sigmoid};

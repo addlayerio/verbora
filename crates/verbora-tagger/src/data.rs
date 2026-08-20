@@ -115,6 +115,14 @@ impl StaticLexicon {
     }
 
     /// The `n`-th interned tag string.
+    ///
+    /// UTF-8 for the same reason [`StaticLexicon::key`] is: `build.rs` writes
+    /// `tag_bytes` from `&str` tags with an offset table of `n_tags + 1`
+    /// entries, so `[lo, hi)` is exactly one tag and never spans a boundary.
+    /// `n` is never caller-supplied either — it is read out of `val_ids`, which
+    /// `build.rs` populates only from its own `tag_ids` map, so every stored id
+    /// indexes a tag that exists. `every_packed_entry_satisfies_the_contract`
+    /// drains this for all 104,360 shipped entries.
     #[inline]
     fn tag(self, n: usize) -> &'static str {
         let lo = self.tag_bytes + u32_at(self.blob, self.tag_off + n * 4);

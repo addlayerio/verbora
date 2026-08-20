@@ -51,6 +51,27 @@
 //! from `ость` leaves `ост` behind, which matches. Rather than panic on input no
 //! caller can construct, this port keeps the un-derivationalised string. See
 //! `deviations` in the crate's parity report.
+//!
+//! # The text unit
+//!
+//! Every position here — `rv`, `end`, the region bounds, the arguments to
+//! [`alt_suffix`] and [`av_shi`] — is an index in **Unicode scalar values**,
+//! the unit [`crate::units`] states the crate's contract in. Russian is the
+//! one language in this crate where the change of unit provably cannot move
+//! an answer, and the reason is worth recording because it is *not* "Cyrillic
+//! is on the Basic Multilingual Plane" (a caller may hand this stemmer any
+//! text at all):
+//!
+//! **Every comparison this module makes against a constant is a comparison of
+//! two positions in the same buffer.** `end - n >= rv + 2` is
+//! `end - n - 2 >= rv`, the position of the `[ая]` against the start of RV;
+//! `end - n > rv` and `end > rv` are the same shape; `full > r2s` compares two
+//! marked regions. Re-indexing the buffer moves both sides of each of those by
+//! the same amount, so every one of them answers alike. There is no absolute
+//! length gate anywhere in the algorithm — no `if rv > 3`, no minimum word
+//! length — which is exactly what the other Snowball ports have and Russian
+//! does not. `an_astral_character_cannot_move_a_russian_answer` enumerates
+//! that claim rather than resting on it.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -75,11 +96,22 @@ pub struct PorterStemmerRu;
 
 /// `[аеиоюяуыиэ]` — the class the region split uses (`и` appears twice in it).
 #[inline]
-fn is_vowel(c: u16) -> bool {
-    matches!(
-        c,
-        0x0430 | 0x0435 | 0x0438 | 0x043E | 0x044E | 0x044F | 0x0443 | 0x044B | 0x044D
-    )
+fn is_vowel(c: char) -> bool {
+    matches!(c, 'а' | 'е' | 'и' | 'о' | 'ю' | 'я' | 'у' | 'ы' | 'э')
+}
+
+/// Whether `c` is one of the characters [`gate_ru`] accepts.
+///
+/// The gate is stated over Basic Multilingual Plane code points and nothing in
+/// it reaches `U+1D80`, so scanning characters and scanning UTF-16 code units
+/// accept exactly the same tokens: a BMP character *is* its own code unit, and
+/// an astral character is neither in the set itself nor are the two surrogates
+/// it used to be scanned as. See `crate::data::gates`' own "Unit independence"
+/// note; the scan is per character because that is the crate's unit, not
+/// because the answer moved.
+#[inline]
+fn is_russian_letter(c: char) -> bool {
+    (c as u32) < 0x1_0000 && gate_ru(c as u16)
 }
 
 // ---------------------------------------------------------------------------
@@ -93,12 +125,12 @@ fn is_vowel(c: u16) -> bool {
 /// algorithm, which knows nothing about line terminators. See
 /// [`split_at_first_vowel`].
 #[inline]
-pub(crate) fn is_line_terminator(c: u16) -> bool {
-    matches!(c, 0x000A | 0x000D | 0x2028 | 0x2029)
+pub(crate) fn is_line_terminator(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 
 /// `/(a|bb|ccc)$/`: the start index of the longest listed suffix of `w`.
-pub(crate) fn alt_suffix(w: &[u16], alts: &[&str]) -> Option<usize> {
+pub(crate) fn alt_suffix(w: &[char], alts: &[&str]) -> Option<usize> {
     let mut best: Option<usize> = None;
     for a in alts {
         if ends_with(w, a) {
@@ -117,14 +149,14 @@ pub(crate) fn alt_suffix(w: &[u16], alts: &[&str]) -> Option<usize> {
 /// `uk::GERUND_AV_SHI` there — rather than a literal written a second time
 /// inside this function, so each language's table stays the single place its
 /// own suffixes are spelled and `data::table_audit` can enumerate them.
-pub(crate) fn av_shi(w: &[u16], alts: &[&str]) -> Option<usize> {
+pub(crate) fn av_shi(w: &[char], alts: &[&str]) -> Option<usize> {
     let mut best: Option<usize> = None;
     for a in alts {
         let n = slen(a);
         if n + 2 <= w.len()
             && ends_with(w, a)
-            && w[w.len() - n - 1] == 0x0432 // в
-            && matches!(w[w.len() - n - 2], 0x0430 | 0x044F)
+            && w[w.len() - n - 1] == 'в'
+            && matches!(w[w.len() - n - 2], 'а' | 'я')
         {
             let start = w.len() - n - 2;
             if best.is_none_or(|b| start < b) {
@@ -136,7 +168,7 @@ pub(crate) fn av_shi(w: &[u16], alts: &[&str]) -> Option<usize> {
 }
 
 /// `/(н)н/g → '$1'`: collapse doubled `н`, non-overlapping, left to right.
-pub(crate) fn collapse_double(w: &[u16], letter: u16) -> Vec<u16> {
+pub(crate) fn collapse_double(w: &[char], letter: char) -> Vec<char> {
     let mut out = Vec::with_capacity(w.len());
     let mut i = 0;
     while i < w.len() {
@@ -152,7 +184,7 @@ pub(crate) fn collapse_double(w: &[u16], letter: u16) -> Vec<u16> {
 }
 
 /// `/^(.*?[V])(.*)$/`: `(head, tail)`, or `None` when the pattern cannot match.
-pub(crate) fn split_at_first_vowel(w: &[u16], vowel: fn(u16) -> bool) -> Option<(usize, usize)> {
+pub(crate) fn split_at_first_vowel(w: &[char], vowel: fn(char) -> bool) -> Option<(usize, usize)> {
     if w.iter().copied().any(is_line_terminator) {
         // `.` cannot cross a line terminator, and neither `.*?` nor `.*` may skip
         // one, so no offset can produce a match.
@@ -162,8 +194,8 @@ pub(crate) fn split_at_first_vowel(w: &[u16], vowel: fn(u16) -> bool) -> Option<
     Some((i + 1, i + 1))
 }
 
-/// Removes the last code unit when it is `c`; `/c$/` with an empty replacement.
-pub(crate) fn strip_final(w: &mut Vec<u16>, c: u16) {
+/// Removes the last character when it is `c`; `/c$/` with an empty replacement.
+pub(crate) fn strip_final(w: &mut Vec<char>, c: char) {
     if w.last() == Some(&c) {
         w.pop();
     }
@@ -174,7 +206,7 @@ pub(crate) fn strip_final(w: &mut Vec<u16>, c: u16) {
 /// The rule chain falls back to its input both when a rule does not match and
 /// when it matches but leaves nothing behind, which is why `stem("ся")` is
 /// `"ся"` rather than `""`.
-pub(crate) fn or_falsy(value: Option<Vec<u16>>, fallback: &[u16]) -> Vec<u16> {
+pub(crate) fn or_falsy(value: Option<Vec<char>>, fallback: &[char]) -> Vec<char> {
     match value {
         Some(v) if !v.is_empty() => v,
         _ => fallback.to_vec(),
@@ -193,20 +225,20 @@ pub(crate) fn or_falsy(value: Option<Vec<u16>>, fallback: &[u16]) -> Vec<u16> {
 /// The sorted search tables, built once from the rule tables below.
 struct RuTables {
     /// `(ши|шись)` — the alternation inside `/[ая]в(ши|шись)$/`.
-    shi: AmongTable,
+    shi: AmongTable<char>,
     /// The unconditional perfective-gerund alternatives.
-    gerund2: AmongTable,
-    reflexive: AmongTable,
-    adjective: AmongTable,
+    gerund2: AmongTable<char>,
+    reflexive: AmongTable<char>,
+    adjective: AmongTable<char>,
     /// The `[ая]`-conditioned participle alternatives.
-    part1: AmongTable,
-    part2: AmongTable,
+    part1: AmongTable<char>,
+    part2: AmongTable<char>,
     /// The `[ая]`-conditioned verb alternatives.
-    verb1: AmongTable,
-    verb2: AmongTable,
-    noun: AmongTable,
-    superlative: AmongTable,
-    derivational: AmongTable,
+    verb1: AmongTable<char>,
+    verb2: AmongTable<char>,
+    noun: AmongTable<char>,
+    superlative: AmongTable<char>,
+    derivational: AmongTable<char>,
 }
 
 static TABLES: LazyLock<RuTables> = LazyLock::new(|| RuTables {
@@ -224,11 +256,15 @@ static TABLES: LazyLock<RuTables> = LazyLock::new(|| RuTables {
 });
 
 /// `perfectiveGerund` over `t[rv..end]`: the new end, or `None`.
-fn perfective_gerund_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+fn perfective_gerund_end(t: &[char], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     // `/[ая]в(ши|шись)$/` first, unconditionally preferred over the plain
     // alternatives when it matches — the reference tests it first.
+    //
+    // `end - n >= rv + 2` is `end - n - 2 >= rv`: the position of the `[ая]`
+    // must lie inside RV. Both sides are positions in `t`, so the test reads
+    // the same whatever the buffer is indexed in.
     let n = tb.shi.longest_where(t, end, rv, |n| {
-        end - n >= rv + 2 && t[end - n - 1] == 0x0432 && matches!(t[end - n - 2], 0x0430 | 0x044F)
+        end - n >= rv + 2 && t[end - n - 1] == 'в' && matches!(t[end - n - 2], 'а' | 'я')
     });
     if n > 0 {
         return Some(end - n - 2);
@@ -238,9 +274,9 @@ fn perfective_gerund_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Opt
 }
 
 /// `participle`: the `[ая]`-conditioned list keeps the captured letter.
-fn participle_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+fn participle_end(t: &[char], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     let n = tb.part1.longest_where(t, end, rv, |n| {
-        end - n > rv && matches!(t[end - n - 1], 0x0430 | 0x044F)
+        end - n > rv && matches!(t[end - n - 1], 'а' | 'я')
     });
     if n > 0 {
         return Some(end - n);
@@ -250,7 +286,7 @@ fn participle_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usi
 }
 
 /// `adjectival`: adjective, then participle with the falsy fallback.
-fn adjectival_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+fn adjectival_end(t: &[char], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     let a = tb.adjective.longest(t, end, rv);
     if a == 0 {
         return None;
@@ -264,9 +300,9 @@ fn adjectival_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usi
 }
 
 /// `verb`: same two-list shape as `participle`.
-fn verb_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+fn verb_end(t: &[char], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     let n = tb.verb1.longest_where(t, end, rv, |n| {
-        end - n > rv && matches!(t[end - n - 1], 0x0430 | 0x044F)
+        end - n > rv && matches!(t[end - n - 1], 'а' | 'я')
     });
     if n > 0 {
         return Some(end - n);
@@ -275,7 +311,7 @@ fn verb_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     if m > 0 { Some(end - m) } else { None }
 }
 
-fn noun_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
+fn noun_end(t: &[char], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     let m = tb.noun.longest(t, end, rv);
     if m > 0 { Some(end - m) } else { None }
 }
@@ -326,13 +362,13 @@ impl PorterStemmerRu {
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
         // `.toLowerCase().replace(/ё/g, 'е')` — global, so every ё folds.
-        // The lowered units go straight into a stack buffer: Cyrillic
+        // The lowered characters go straight into a stack buffer: Cyrillic
         // lowercasing through `String` was measured at 82 µs per 1024 bench
         // words, over a third of this stemmer's total.
-        let mut b = Buf::fill_lowercase(token);
+        let mut b: Buf<char> = Buf::fill_lowercase(token);
         for c in b.as_mut_slice() {
-            if *c == 0x0451 {
-                *c = 0x0435;
+            if *c == 'ё' {
+                *c = 'е';
             }
         }
         let t = b.as_slice();
@@ -362,7 +398,7 @@ impl PorterStemmerRu {
             }
         };
         // /и$/ on the working string (the RV region).
-        if end > rv && t[end - 1] == 0x0438 {
+        if end > rv && t[end - 1] == 'и' {
             end -= 1;
         }
 
@@ -389,8 +425,8 @@ impl PorterStemmerRu {
             let mut write = rv;
             let mut read = rv;
             while read < end {
-                if t[read] == 0x043D && read + 1 < end && t[read + 1] == 0x043D {
-                    t[write] = 0x043D;
+                if t[read] == 'н' && read + 1 < end && t[read + 1] == 'н' {
+                    t[write] = 'н';
                     write += 1;
                     read += 2;
                 } else {
@@ -402,7 +438,7 @@ impl PorterStemmerRu {
             end = write;
         }
         // /ь$/.
-        if end > rv && b.as_slice()[end - 1] == 0x044C {
+        if end > rv && b.as_slice()[end - 1] == 'ь' {
             end -= 1;
         }
 
@@ -420,7 +456,7 @@ impl TokenizeAndStem for PorterStemmerRu {
     }
 
     fn gate(token: &str) -> bool {
-        token.encode_utf16().any(gate_ru)
+        token.chars().any(is_russian_letter)
     }
 
     fn stem_token(&self, token: &str) -> String {
@@ -451,16 +487,16 @@ pub(crate) mod audit {
     /// The prelude `stem` runs before any table is consulted, in isolation:
     /// lowercase, then fold every `ё` to `е`.
     pub(crate) fn prelude(token: &str) -> String {
-        let mut b = Buf::fill_lowercase(token);
+        let mut b: Buf<char> = Buf::fill_lowercase(token);
         for c in b.as_mut_slice() {
-            if *c == 0x0451 {
-                *c = 0x0435;
+            if *c == 'ё' {
+                *c = 'е';
             }
         }
         b.into_text()
     }
 
-    /// The prelude writes no marker unit: it only folds one letter onto
+    /// The prelude writes no marker character: it only folds one letter onto
     /// another that is already in the alphabet.
     pub(crate) static MARKERS: &[(&str, &str)] = &[];
 }
@@ -474,10 +510,15 @@ impl verbora_core::Stemmer for PorterStemmerRu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::units;
 
     fn s(t: &str) -> String {
         PorterStemmerRu::new().stem(t).into_owned()
+    }
+
+    /// A working buffer, the way this stemmer builds one: one position per
+    /// Unicode scalar value.
+    fn scalars(s: &str) -> Vec<char> {
+        s.chars().collect()
     }
 
     #[test]
@@ -502,12 +543,12 @@ mod tests {
 
     #[test]
     fn doubled_n_collapses_left_to_right() {
-        assert_eq!(collapse_double(&units("нннн"), 0x043D), units("нн"));
+        assert_eq!(collapse_double(&scalars("нннн"), 'н'), scalars("нн"));
         // The word itself is vowel-free, so the split fails and it is returned
         // untouched — the collapse never runs.
         assert_eq!(s("нннн"), "нннн");
-        assert_eq!(collapse_double(&units("ннн"), 0x043D), units("нн"));
-        assert_eq!(collapse_double(&units("н"), 0x043D), units("н"));
+        assert_eq!(collapse_double(&scalars("ннн"), 'н'), scalars("нн"));
+        assert_eq!(collapse_double(&scalars("н"), 'н'), scalars("н"));
     }
 
     /// The cross-cutting battery every stemmer in this crate answers: empty,
@@ -551,10 +592,10 @@ mod tests {
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
-        use crate::units::{text, units};
+        use crate::units::text;
 
         /// `/([ая])(ла|на|…)$/`: the index just after the kept `[ая]`.
-        fn alt_suffix_after(w: &[u16], keep: &[u16], alts: &[&str]) -> Option<usize> {
+        fn alt_suffix_after(w: &[char], keep: &[char], alts: &[&str]) -> Option<usize> {
             let mut best: Option<usize> = None;
             for a in alts {
                 let n = slen(a);
@@ -568,57 +609,57 @@ mod tests {
             best
         }
 
-        fn perfective_gerund(w: &[u16]) -> Option<Vec<u16>> {
+        fn perfective_gerund(w: &[char]) -> Option<Vec<char>> {
             if let Some(at) = av_shi(w, SHI) {
                 return Some(w[..at].to_vec());
             }
             alt_suffix(w, GERUND2).map(|at| w[..at].to_vec())
         }
 
-        fn adjective(w: &[u16]) -> Option<Vec<u16>> {
+        fn adjective(w: &[char]) -> Option<Vec<char>> {
             alt_suffix(w, ADJECTIVE).map(|at| w[..at].to_vec())
         }
 
-        fn participle(w: &[u16]) -> Option<Vec<u16>> {
-            if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], PART1) {
+        fn participle(w: &[char]) -> Option<Vec<char>> {
+            if let Some(at) = alt_suffix_after(w, &['а', 'я'], PART1) {
                 return Some(w[..at].to_vec());
             }
             alt_suffix(w, PART2).map(|at| w[..at].to_vec())
         }
 
-        fn adjectival(w: &[u16]) -> Option<Vec<u16>> {
+        fn adjectival(w: &[char]) -> Option<Vec<char>> {
             let result = adjective(w)?;
             Some(or_falsy(participle(&result), &result))
         }
 
-        fn reflexive(w: &[u16]) -> Option<Vec<u16>> {
+        fn reflexive(w: &[char]) -> Option<Vec<char>> {
             alt_suffix(w, REFLEXIVE).map(|at| w[..at].to_vec())
         }
 
-        fn verb(w: &[u16]) -> Option<Vec<u16>> {
-            if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], VERB1) {
+        fn verb(w: &[char]) -> Option<Vec<char>> {
+            if let Some(at) = alt_suffix_after(w, &['а', 'я'], VERB1) {
                 return Some(w[..at].to_vec());
             }
             alt_suffix(w, VERB2).map(|at| w[..at].to_vec())
         }
 
-        fn noun(w: &[u16]) -> Option<Vec<u16>> {
+        fn noun(w: &[char]) -> Option<Vec<char>> {
             alt_suffix(w, NOUN).map(|at| w[..at].to_vec())
         }
 
-        fn superlative(w: &[u16]) -> Option<Vec<u16>> {
+        fn superlative(w: &[char]) -> Option<Vec<char>> {
             alt_suffix(w, SUPERLATIVE).map(|at| w[..at].to_vec())
         }
 
-        fn derivational(w: &[u16]) -> Option<Vec<u16>> {
+        fn derivational(w: &[char]) -> Option<Vec<char>> {
             alt_suffix(w, DERIVATIONAL).map(|at| w[..at].to_vec())
         }
 
         pub(super) fn stem(token: &str) -> String {
-            let mut t = units(&token.to_lowercase());
+            let mut t: Vec<char> = token.to_lowercase().chars().collect();
             for c in &mut t {
-                if *c == 0x0451 {
-                    *c = 0x0435;
+                if *c == 'ё' {
+                    *c = 'е';
                 }
             }
 
@@ -640,7 +681,7 @@ mod tests {
                         .unwrap_or(reflexed)
                 }
             };
-            strip_final(&mut result, 0x0438); // /и$/
+            strip_final(&mut result, 'и'); // /и$/
 
             let derived = if r2_tail
                 .is_some_and(|tail| !tail.is_empty() && alt_suffix(tail, DERIVATIONAL).is_some())
@@ -651,8 +692,8 @@ mod tests {
             };
 
             let mut out = or_falsy(superlative(&derived), &derived);
-            out = collapse_double(&out, 0x043D); // /(н)н/g
-            strip_final(&mut out, 0x044C); // /ь$/
+            out = collapse_double(&out, 'н'); // /(н)н/g
+            strip_final(&mut out, 'ь'); // /ь$/
 
             let mut full = head.to_vec();
             full.extend_from_slice(&out);
@@ -784,5 +825,260 @@ mod tests {
             let w = random_word(&mut rng);
             check(&w);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The text unit
+    // -----------------------------------------------------------------------
+
+    /// A character outside the Basic Multilingual Plane, and a character
+    /// inside it that is its exact equal for every question this module asks.
+    ///
+    /// `U+1D7CE` (MATHEMATICAL BOLD DIGIT ZERO) and `U+4E2D` are both outside
+    /// [`is_vowel`], outside [`is_line_terminator`], neither `ё` nor `е` nor
+    /// `н` nor `ь` nor `и`, absent from every rule table (the highest code
+    /// point in any of them is `U+044F`), fixed points of `str::to_lowercase`,
+    /// and rejected by [`is_russian_letter`]. Under the crate's unit each is
+    /// exactly **one** position of the working buffer.
+    const ASTRAL: char = '\u{1D7CE}';
+    /// See [`ASTRAL`].
+    const BMP_TWIN: char = '\u{4E2D}';
+
+    /// `word` with `c` inserted before its `i`th character.
+    fn insert_at(word: &str, i: usize, c: char) -> String {
+        let cs: Vec<char> = word.chars().collect();
+        let mut out: String = cs[..i].iter().collect();
+        out.push(c);
+        out.extend(&cs[i..]);
+        out
+    }
+
+    /// An astral character is one position, so replacing it with an inert
+    /// Basic Multilingual Plane character cannot change a stem.
+    ///
+    /// # Russian is the one language here the unit provably cannot move
+    ///
+    /// Unlike Ukrainian's `derivational`, every comparison this module makes
+    /// against a constant compares **two positions in the same buffer** —
+    /// `end - n >= rv + 2` is `end - n - 2 >= rv`, `end > rv` and `full > r2s`
+    /// are the same shape — and there is no absolute length gate anywhere in
+    /// the algorithm. Re-indexing the buffer moves both sides of each of those
+    /// by the same amount. This test therefore passed before the conversion as
+    /// well as after, and it is here as the *certification* of that argument
+    /// rather than as its red-to-green gate: the gate for this group is
+    /// `crate::uk`'s, where the same change does move answers.
+    #[test]
+    fn an_astral_character_cannot_move_a_russian_answer() {
+        let twin = BMP_TWIN.to_string();
+        let astral = ASTRAL.to_string();
+        let corpus = astral_corpus();
+        for word in &corpus {
+            let bmp = word.replace(ASTRAL, &twin);
+            assert_eq!(
+                s(word),
+                s(&bmp).replace(BMP_TWIN, &astral),
+                "stem({word:?}) does not agree with its BMP twin {bmp:?}"
+            );
+        }
+        assert_eq!(corpus.len(), placements());
+    }
+
+    /// One character in, one character out: no stem may contain a character
+    /// the caller did not supply.
+    ///
+    /// A `char` working buffer cannot hold half a character, so no cut this
+    /// module makes — a table match, the `[ая]в(ши|шись)` lookbehind, the `нн`
+    /// compaction, or a region bound — can produce one.
+    #[test]
+    fn no_stem_invents_a_replacement_character() {
+        let corpus = astral_corpus();
+        for word in &corpus {
+            let out = s(word);
+            assert!(
+                !out.contains('\u{FFFD}'),
+                "stem({word:?}) returned {out:?}, which the caller never supplied"
+            );
+        }
+        assert_eq!(corpus.len(), placements());
+    }
+
+    /// The size of [`astral_corpus`], derived from its own seeds rather than
+    /// recorded: a seed of `n` characters has `n + 1` insertion points.
+    fn placements() -> usize {
+        astral_seeds().iter().map(|s| s.chars().count() + 1).sum()
+    }
+
+    /// What the enumerations walk: **every** Russian stop word, **every** rule
+    /// table entry, the bench corpus, and a seeded corpus of Russian shapes.
+    ///
+    /// The composition is arithmetic, not a sample of convenience: 137 shipped
+    /// stop words, the 129 entries of the eleven rule tables (2, 6, 2, 26, 5,
+    /// 3, 17, 28, 36, 2 and 2), the 12 bench words, and 40,000 seeded words.
+    /// The seeds stay on the Basic Multilingual Plane so that the one astral
+    /// character inserted below is the only one in play.
+    fn astral_seeds() -> Vec<String> {
+        const ALPHA: &[char] = &[
+            'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'к', 'л', 'м', 'н', 'о', 'п', 'р', 'с',
+            'т', 'у', 'ч', 'ш', 'щ', 'ы', 'ь', 'э', 'ю', 'я', 'ё',
+        ];
+        const SUFFIXES: &[&str] = &[
+            "авшись",
+            "явши",
+            "ывшись",
+            "ившись",
+            "ив",
+            "ыв",
+            "ими",
+            "ыми",
+            "его",
+            "ому",
+            "ая",
+            "яя",
+            "ся",
+            "сь",
+            "ла",
+            "на",
+            "ете",
+            "ешь",
+            "нно",
+            "ила",
+            "ейте",
+            "уйте",
+            "ишь",
+            "ует",
+            "иями",
+            "ями",
+            "ией",
+            "иях",
+            "ью",
+            "ья",
+            "ость",
+            "ост",
+            "ейше",
+            "ейш",
+            "нн",
+            "н",
+            "и",
+            "ь",
+        ];
+
+        let mut seeds: Vec<String> = Language::Ru
+            .defaults()
+            .iter()
+            .map(|w| (*w).to_owned())
+            .collect();
+        for (_, table) in audit::TABLES {
+            seeds.extend(table.iter().map(|e| (*e).to_owned()));
+        }
+        seeds.extend(crate::test_support::bench_words("ru"));
+        let mut rng = Rng(0x0BAD_C0DE_1234_5678);
+        for _ in 0..40_000 {
+            let mut w = String::new();
+            for _ in 0..1 + rng.below(7) {
+                w.push(ALPHA[rng.below(ALPHA.len())]);
+            }
+            if rng.below(10) < 8 {
+                w.push_str(SUFFIXES[rng.below(SUFFIXES.len())]);
+            }
+            // The paths the module documents: an uppercase word, a line
+            // terminator that disables the algorithm outright, and digits.
+            match rng.below(24) {
+                0 => w = w.to_uppercase(),
+                1 => w.push('\n'),
+                2 => w.insert(0, '\u{2028}'),
+                3 => w.push_str("123"),
+                _ => {}
+            }
+            seeds.push(w);
+        }
+        assert_eq!(seeds.len(), 137 + 129 + 12 + 40_000);
+        seeds
+    }
+
+    /// [`astral_seeds`] with [`ASTRAL`] inserted at every position of every
+    /// seed. Nothing here is sampled.
+    fn astral_corpus() -> Vec<String> {
+        let mut out = Vec::new();
+        for seed in &astral_seeds() {
+            for i in 0..=seed.chars().count() {
+                out.push(insert_at(seed, i, ASTRAL));
+            }
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------
+    // The tables, walked through the documented pipeline
+    // -----------------------------------------------------------------------
+
+    /// Every shipped stop word that *is* one token still reaches
+    /// [`TokenizeAndStem::is_stop_word`] spelled the way the list spells it.
+    ///
+    /// This is the failure this migration has produced eight times: a stage
+    /// transforms the text before a later stage looks it up in a table spelled
+    /// the old way. Russian's pipeline is `prepare` (the identity here), then
+    /// UAX #29 word segmentation, then a lookup on the **raw** token
+    /// (`FILTER_ON = Casing::Raw`) — the `ё` fold and the lowercase both
+    /// happen after the list has already been consulted, so no transform can
+    /// get in front of it.
+    ///
+    /// # Four entries that cannot survive
+    ///
+    /// `может быть`, `все еще`, `с кем` and `хотел бы` are *phrases*. A space
+    /// is a word boundary under UAX #29 with no tailoring available to change
+    /// it, so the tokenizer hands `is_stop_word` two tokens and neither is on
+    /// the list. Those four are unreachable through
+    /// [`TokenizeAndStem::tokenize_and_stem`] and always were — a property of
+    /// the shipped list, not of the text unit. They are pinned here as
+    /// *exactly* the space-bearing entries, so a fifth one appearing is a test
+    /// failure rather than a silent loss.
+    #[test]
+    fn every_single_token_stop_word_survives_the_pipeline() {
+        let st = PorterStemmerRu::new();
+        let words = Language::Ru.defaults();
+        assert_eq!(words.len(), 137);
+        let unfiltered: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| !st.tokenize_and_stem(w, false).is_empty())
+            .collect();
+        let phrases: Vec<&str> = words.iter().copied().filter(|w| w.contains(' ')).collect();
+        assert_eq!(unfiltered, phrases);
+        assert_eq!(phrases.len(), 4);
+    }
+
+    /// Every rule table entry measures the same as text and as buffer, and a
+    /// cut by its own length lands where the entry starts.
+    ///
+    /// The tables are `&'static str` and are never re-encoded, so the unit
+    /// they are *measured* in is the only thing the migration could have
+    /// moved. All 129 entries are Basic Multilingual Plane text, which is
+    /// asserted here rather than assumed: that premise is what lets a buffer
+    /// length have a table entry's length subtracted from it at all.
+    #[test]
+    fn every_rule_table_entry_measures_the_same_as_the_buffer() {
+        let mut entries = 0usize;
+        for (name, table) in audit::TABLES {
+            for entry in *table {
+                entries += 1;
+                assert!(
+                    entry.chars().all(|c| (c as u32) < 0x1_0000),
+                    "{name} carries the astral entry {entry:?}"
+                );
+                let probe: Vec<char> = format!("во{entry}").chars().collect();
+                let n = slen(entry);
+                assert_eq!(n, entry.chars().count(), "{name} {entry:?}");
+                assert!(
+                    ends_with(&probe, entry),
+                    "{name} {entry:?} is not found at the end of its own probe"
+                );
+                assert_eq!(
+                    crate::units::text(&probe[..probe.len() - n]),
+                    "во",
+                    "{name} {entry:?} cuts in the wrong place"
+                );
+            }
+        }
+        assert_eq!(entries, 129);
     }
 }

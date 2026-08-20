@@ -220,6 +220,209 @@ fn probe_and_table_agree_for_every_key_of_every_vocabulary_and_stemmer() {
     check("StemmerJa", verbora_stemmers::StemmerJa::new());
 }
 
+/// One installable stemmer: its name, and a call that stems one word with it.
+///
+/// The types are erased behind a closure because [`Stemmer`] is generic over
+/// `Self` at every call site and the tests below want to *walk* the shipped set
+/// rather than name each member.
+type Installable = (&'static str, Box<dyn Fn(&str) -> String>);
+
+/// Every stemmer that can be installed, paired with a label.
+///
+/// The same closure of the shipped set as
+/// `probe_and_table_agree_for_every_key_of_every_vocabulary_and_stemmer` — the
+/// `bridge!` macro's types plus [`NoStemmer`] — reached through one `&dyn`
+/// callable so a test can walk them without repeating the list a third time.
+fn installable_stemmers() -> Vec<Installable> {
+    macro_rules! entry {
+        ($name:literal, $ctor:expr) => {{
+            let stemmer = $ctor;
+            (
+                $name,
+                Box::new(move |word: &str| stemmer.stem(word).into_owned())
+                    as Box<dyn Fn(&str) -> String>,
+            )
+        }};
+    }
+    vec![
+        entry!("NoStemmer", NoStemmer),
+        entry!("CarryStemmerFr", verbora_stemmers::CarryStemmerFr::new()),
+        entry!(
+            "LancasterStemmer",
+            verbora_stemmers::LancasterStemmer::new()
+        ),
+        entry!("PorterStemmer", verbora_stemmers::PorterStemmer::new()),
+        entry!("PorterStemmerDe", verbora_stemmers::PorterStemmerDe::new()),
+        entry!("PorterStemmerEs", verbora_stemmers::PorterStemmerEs::new()),
+        entry!("PorterStemmerFa", verbora_stemmers::PorterStemmerFa::new()),
+        entry!("PorterStemmerFr", verbora_stemmers::PorterStemmerFr::new()),
+        entry!("PorterStemmerIt", verbora_stemmers::PorterStemmerIt::new()),
+        entry!("PorterStemmerNl", verbora_stemmers::PorterStemmerNl::new()),
+        entry!("PorterStemmerNo", verbora_stemmers::PorterStemmerNo::new()),
+        entry!("PorterStemmerPt", verbora_stemmers::PorterStemmerPt::new()),
+        entry!("PorterStemmerRu", verbora_stemmers::PorterStemmerRu::new()),
+        entry!("PorterStemmerSv", verbora_stemmers::PorterStemmerSv::new()),
+        entry!("PorterStemmerUk", verbora_stemmers::PorterStemmerUk::new()),
+        entry!("StemmerJa", verbora_stemmers::StemmerJa::new()),
+    ]
+}
+
+/// The keys that carry a character outside the basic multilingual plane, and
+/// what every installable stemmer does to them.
+///
+/// # Why this is separate from the enumeration above
+///
+/// `probe_and_table_agree_for_every_key_of_every_vocabulary_and_stemmer` walks
+/// every key already, and it would stay green if every astral key in the
+/// shipped tables were mangled beyond recognition — because it derives the
+/// stored key and the probe through *the same* stemmer, so both sides move
+/// together and the set equality still holds. That symmetry is the crate's
+/// central guarantee and it is worth having, but it means the enumeration is
+/// structurally blind to a stemmer that starts rewriting astral text.
+///
+/// `verbora-stemmers` has just moved its text unit from the UTF-16 code unit to
+/// the Unicode scalar value, which changes stems for exactly that input, so the
+/// population needs to be visible rather than merely balanced. This test states
+/// how many such keys there are, where they live, and that every stemmer leaves
+/// every one of them alone.
+///
+/// # Why leaving them alone is the derived answer, not a recorded one
+///
+/// Every shipped astral key is **one character long** — asserted below — and
+/// every character class in every stemmer in the workspace is a set of BMP
+/// scalars: the vowel sets are `[aeiouyæåø]` and their Cyrillic and Romance
+/// equivalents, and the highest code point in any rule table is `U+0457`. A
+/// lone emoji is therefore in no vowel class, matches no suffix and satisfies
+/// no minimum-length gate under either unit — one character and two code units
+/// are both below every gate the crate has. So no rule can fire, and the
+/// stemmers must return these keys unchanged.
+#[test]
+fn every_astral_key_is_left_alone_by_every_installable_stemmer() {
+    fn is_astral(s: &str) -> bool {
+        s.chars().any(|c| (c as u32) >= 0x1_0000)
+    }
+
+    let mut entries = 0usize;
+    let mut astral_entries = 0usize;
+    let mut per_table: Vec<(String, usize)> = Vec::new();
+    let mut distinct: HashSet<String> = HashSet::new();
+
+    for (kind, language) in supported_pairs() {
+        let Some(voca) = Vocabulary::shared(kind, language) else {
+            continue;
+        };
+        let mut here = 0usize;
+        for key in voca.keys() {
+            entries += 1;
+            if is_astral(key) {
+                here += 1;
+                astral_entries += 1;
+                distinct.insert(key.to_owned());
+                assert_eq!(
+                    key.chars().count(),
+                    1,
+                    "{kind:?}/{language}: {key:?} mixes an astral character with \
+                     other text, which the reasoning above does not cover"
+                );
+            }
+        }
+        if here > 0 {
+            per_table.push((format!("{kind:?}/{language}"), here));
+        }
+    }
+
+    // The population, so it cannot silently shrink to nothing and leave the
+    // enumeration passing over an empty set.
+    assert_eq!(entries, 75_803);
+    assert_eq!(astral_entries, 1_086);
+    assert_eq!(distinct.len(), 543);
+    per_table.sort();
+    assert_eq!(
+        per_table,
+        [("Afinn/es".to_owned(), 543), ("Afinn/pt".to_owned(), 543)],
+        "the astral keys are the emoji rows of the Spanish and Portuguese AFINN \
+         tables and nothing else"
+    );
+
+    // …and every stemmer returns every one of them unchanged, and in
+    // particular returns text the caller supplied: a stem carrying U+FFFD would
+    // mean a cut landed between the halves of a character, which is the defect
+    // the scalar unit removes.
+    let keys: Vec<String> = {
+        let mut v: Vec<String> = distinct.into_iter().collect();
+        v.sort();
+        v
+    };
+    let stemmers = installable_stemmers();
+    assert_eq!(
+        stemmers.len(),
+        16,
+        "every installable stemmer is enumerated"
+    );
+    let mut checked = 0usize;
+    for (label, stem) in &stemmers {
+        for key in &keys {
+            // The pipeline lowercases before it stems; no astral key has a case
+            // mapping, but the pipeline is what is under test, not the key.
+            let lower = key.to_lowercase();
+            let stemmed = stem(&lower);
+            assert_eq!(&stemmed, &lower, "{label} rewrote {key:?}");
+            assert!(
+                !stemmed.contains('\u{FFFD}'),
+                "{label} emitted U+FFFD for {key:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 16 * 543);
+}
+
+/// No stemmer ever hands the analyzer a character the lexicon never contained.
+///
+/// The broad form of the U+FFFD check above, over **every** key of **every**
+/// table rather than the astral ones — 75,803 keys against the three stemmers
+/// whose region arithmetic could cut between the halves of a character, which
+/// is 227,409 stems.
+///
+/// This is the property that was false before `verbora-stemmers` moved to the
+/// scalar unit: Swedish, Norwegian and Ukrainian cut at positions derived from
+/// a region scan rather than from a table entry, so a cut could land mid-character
+/// and the lossy decode turned the orphaned half into U+FFFD — text the caller
+/// never supplied. A `char` buffer has no such state to be in, and this
+/// enumerates that over the shipped lexicons.
+#[test]
+fn no_stemmer_replaces_a_lexicon_character_with_the_replacement_character() {
+    let stemmers: Vec<Installable> = installable_stemmers()
+        .into_iter()
+        .filter(|(name, _)| {
+            matches!(
+                *name,
+                "PorterStemmerSv" | "PorterStemmerNo" | "PorterStemmerUk"
+            )
+        })
+        .collect();
+    assert_eq!(stemmers.len(), 3, "the three region-cutting stemmers");
+
+    let mut stems = 0usize;
+    for (kind, language) in supported_pairs() {
+        let Some(voca) = Vocabulary::shared(kind, language) else {
+            continue;
+        };
+        for key in voca.keys() {
+            let lower = key.to_lowercase();
+            for (label, stem) in &stemmers {
+                let stemmed = stem(&lower);
+                assert!(
+                    !stemmed.contains('\u{FFFD}') || lower.contains('\u{FFFD}'),
+                    "{label} turned {key:?} into {stemmed:?}"
+                );
+                stems += 1;
+            }
+        }
+    }
+    assert_eq!(stems, 3 * 75_803);
+}
+
 /// The four keys the old two-path derivation got wrong, named so a regression
 /// is legible rather than a count.
 ///

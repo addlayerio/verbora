@@ -116,4 +116,4 @@ pub use deletion_index::{
 };
 pub use fuzzy_index::{FuzzyIndex, FuzzyIndexBuilder, Neighbors};
 pub use neighbor::Neighbor;
-pub use spellcheck::{Correction, Spellcheck};
+pub use spellcheck::{CorpusTooLarge, Correction, MAX_DISTINCT_WORDS, Spellcheck};

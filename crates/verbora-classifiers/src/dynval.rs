@@ -743,10 +743,29 @@ fn parse_string(input: &str, bytes: &[u8], pos: &mut usize) -> Result<String, Pa
                 }
             }
             Some(_) => {
+                // Two separate invariants meet on the next line, and only one
+                // of them is what the `expect` guards.
+                //
+                // `.next()` is `Some` because this arm was entered from
+                // `Some(_) = bytes.get(*pos)`, so `*pos < input.len()` and the
+                // remaining slice is non-empty. That is the `expect`.
+                //
+                // The `input[*pos..]` slice itself panics if `*pos` is not a
+                // character boundary, and *that* is the invariant with no type
+                // behind it: every advance in this parser keeps `*pos` on a
+                // boundary, because it is either `*pos += 1` past a byte
+                // matched by ASCII value (an ASCII byte never occurs inside a
+                // multi-byte UTF-8 sequence, so the next index starts a
+                // character), or `*pos += c.len_utf8()` for a character just
+                // decoded here, or `*pos = end` in `parse_hex4` — which sets it
+                // only after `input.get(*pos..end)` returned `Some`, and `get`
+                // validates both ends. Replacing that `get` with direct
+                // indexing would make this line panickable on input as
+                // ordinary as `"éé"`.
                 let c = input[*pos..]
                     .chars()
                     .next()
-                    .expect("pos is a char boundary");
+                    .expect("this arm is entered only when *pos < input.len()");
                 out.push(c);
                 *pos += c.len_utf8();
             }

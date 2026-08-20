@@ -352,6 +352,10 @@ fn key_table(nodes: &[FrozenNode], labels: &[char]) -> (Vec<String>, Vec<(u32, u
         restore_len: 0,
     });
 
+    // `stack.last_mut()` is `Some` on entry to the body, and between it and
+    // the `pop()` below only `node`/`next` are copied out and `nodes` is
+    // borrowed — a different collection — so nothing can empty the stack
+    // underneath the `expect`.
     while let Some(top) = stack.last_mut() {
         let node = top.node;
         let next = top.next;

@@ -78,9 +78,20 @@ fn truthy(v: f64) -> bool {
 impl BayesEngine {
     /// An engine with a custom smoothing constant.
     ///
-    /// Reproduces `if (smoothing && isFinite(smoothing))`: the value is used
-    /// only when it is **truthy and finite**, so `0`, `-0`, `NaN` and both
-    /// infinities all fall back to `1.0`, while `-1` is accepted.
+    /// The value is used only when it is **non-zero and finite**, so `0`, `-0`,
+    /// `NaN` and both infinities all fall back to `1.0`.
+    ///
+    /// # A negative constant is accepted, and produces `NaN` scores
+    ///
+    /// `-1` and every other negative finite value is taken as given. This is a
+    /// deliberate boundary, not an oversight — but it is the boundary past
+    /// which scores stop being numbers. An observation bit unseen for a class
+    /// falls back to the smoothing constant, so the class score evaluates
+    /// `log(negative / total)`, which is `NaN` as IEEE 754 requires, and the
+    /// `NaN` then propagates through [`BayesEngine::probability_of_class`] into
+    /// the ranking, where it can win. See this crate's "`NaN` is computable,
+    /// not merely restorable" section for the full chain and what to do about
+    /// it. Validate here if your caller needs scores to be numbers.
     pub fn with_smoothing(smoothing: f64) -> Self {
         Self {
             smoothing: if smoothing != 0.0 && smoothing.is_finite() {
@@ -124,6 +135,12 @@ impl BayesEngine {
     /// panic, on the reasoning that `get_classifications` only ever passes
     /// labels it has just enumerated — true of that caller, and irrelevant to
     /// this one, which is `pub` and takes the label as an ordinary argument.
+    ///
+    /// `Some(NaN)` is a possible answer, not a corrupt one: a negative
+    /// smoothing constant or a negative stored count makes the ratio below zero
+    /// and `log` reports `NaN` for it. See
+    /// [`BayesEngine::with_smoothing`] and this crate's "`NaN` is computable,
+    /// not merely restorable" section.
     #[must_use]
     pub fn probability_of_class(&self, observation: &[u8], label: &str) -> Option<f64> {
         self.probability_of_class_at(&set_indices_descending(observation), label)
@@ -395,6 +412,68 @@ mod tests {
         let before = c.engine().total_examples();
         c.train().unwrap();
         assert_eq!(c.engine().total_examples(), before);
+    }
+
+    /// A negative smoothing constant produces `NaN` scores, and a `NaN` score
+    /// can be returned as the winner.
+    ///
+    /// This is the crate's documented behaviour (see the crate-level "`NaN` is
+    /// computable, not merely restorable" section), pinned here because it is
+    /// surprising and because nothing else in the suite reaches it. The chain
+    /// is entirely ordinary: `with_smoothing(-1.0)` is accepted by design, an
+    /// observation bit unseen for a class falls back to the smoothing constant,
+    /// and `log` of a negative ratio is `NaN` as IEEE 754 requires. The `NaN`
+    /// then survives the ranking, because the comparator treats an unorderable
+    /// difference as a tie and the sort is stable — so the class that happens
+    /// to be enumerated first wins with a score that is not a number.
+    ///
+    /// If this test ever fails, the crate has stopped propagating `NaN`, which
+    /// is a *documentation* change as much as a behavioural one: the crate-level
+    /// section named above, and `Classifier::classify`'s own `NaN` paragraph,
+    /// both have to change with it.
+    #[test]
+    fn negative_smoothing_computes_a_nan_score_that_can_win() {
+        let mut engine = BayesEngine::with_smoothing(-1.0);
+        engine.add_example(&[1, 0], "a");
+        engine.add_example(&[0, 1], "b");
+
+        // Bit 1 was never seen for class "a", so its count falls back to the
+        // smoothing constant -1, and `log(-1 / total)` is NaN.
+        let score = engine
+            .probability_of_class(&[1, 1], "a")
+            .expect("class \"a\" is trained, so it has a score");
+        assert!(score.is_nan(), "expected a NaN score, got {score}");
+
+        // And the ranking keeps it: `classifications` returns it, and a NaN
+        // score is not filtered, demoted or rejected.
+        let scores = engine.classifications(&[1, 1]).expect("both classes score");
+        assert_eq!(scores.len(), 2);
+        assert!(
+            scores.iter().all(|c| c.value.is_nan()),
+            "both classes reach the same NaN, via their own unseen bit"
+        );
+
+        // The whole-classifier path reaches it too, from public API alone.
+        let mut c = BayesClassifier::with_smoothing(-1.0);
+        c.add_document("alpha beta", "first");
+        c.add_document("gamma delta", "second");
+        c.train().unwrap();
+        let ranked = c.get_classifications("alpha gamma").unwrap();
+        assert!(
+            ranked.iter().any(|s| s.value.is_nan()),
+            "a document mixing both vocabularies scores NaN somewhere: {ranked:?}"
+        );
+        // `classify` still answers; it does not panic and does not error.
+        let winner = c.classify("alpha gamma").unwrap();
+        let winning_score = ranked
+            .iter()
+            .find(|s| s.label == winner)
+            .expect("the winner is one of the ranked classes")
+            .value;
+        assert!(
+            winning_score.is_nan(),
+            "the winning score is the NaN this test exists to document: {winning_score}"
+        );
     }
 
     #[test]

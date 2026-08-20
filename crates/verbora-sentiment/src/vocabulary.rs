@@ -666,6 +666,12 @@ impl Build {
                 slot
             }
             None => {
+                // The bound is the shipped tables, and only the `expect` and
+                // `data/mod.rs`'s header record it: the largest single table is
+                // 24,839 entries and all fourteen together are 75,803, while
+                // `Vocabulary::stemmed` adds at most one entry per base entry —
+                // so a caller-supplied stemmer cannot grow this past twice the
+                // base, let alone past `u32::MAX`.
                 let slot = u32::try_from(self.voca.entries.len()).expect("vocabulary fits in u32");
                 self.voca.entries.push(Entry { key, raw, value });
                 slot
@@ -711,6 +717,18 @@ pub(crate) fn source_index(kind: VocabularyKind, language: Language) -> Option<u
 /// pairs, decoded and indexed on first use of that one language.
 static CACHE: [OnceLock<Vocabulary>; data::SOURCE_COUNT] =
     [const { OnceLock::new() }; data::SOURCE_COUNT];
+
+/// `SOURCE_COUNT` and `SOURCES` are two independently maintained numbers, and
+/// [`load`] indexes the first with a position drawn from the second — so a
+/// `SOURCES` that grew past `SOURCE_COUNT` would panic at run time on the new
+/// row, in a `[OnceLock; SOURCE_COUNT]` lookup that no test enumerating
+/// languages could reach for a row that does not fit. Asserting the agreement
+/// here turns that drift into a compile error at the moment the table is
+/// regenerated, which is the only moment anyone can act on it.
+const _: () = assert!(
+    data::SOURCE_COUNT == data::SOURCES.len(),
+    "data::SOURCE_COUNT must equal data::SOURCES.len(): the lazy cache is an array of that width"
+);
 
 /// Decodes one blob: `key \0 polarity \0`, entries in source order.
 pub(crate) fn load(index: usize) -> &'static Vocabulary {

@@ -604,6 +604,18 @@ impl<E: Engine> Classifier<E> {
 
     /// `classify(observation)`: the label of the best-scoring class.
     ///
+    /// # A winning score may be `NaN`
+    ///
+    /// "Best-scoring" is the first entry of [`Classifier::get_classifications`],
+    /// and that ranking treats an unorderable difference as a tie rather than
+    /// panicking. A class scoring `NaN` therefore keeps its enumeration
+    /// position and can be returned here — `Ok(label)`, with a score that is
+    /// not a number. `NaN` is reachable from ordinary calls, not only from a
+    /// corrupt saved model; see this crate's "`NaN` is computable, not merely
+    /// restorable" section for every path into it. Use
+    /// [`Classifier::get_classifications`] and test the top score with
+    /// `f64::is_nan` when that distinction matters.
+    ///
     /// # Errors
     ///
     /// [`ClassifierError::NotTrained`] when there are no classes to score, and
@@ -928,8 +940,17 @@ impl<E: Engine> Classifier<E> {
 /// back in the engine's own enumeration order rather than in some order the sort
 /// happened to produce. And the comparator must treat a `NaN` difference as
 /// "equal" rather than panicking: `partial_cmp().unwrap()` would abort a whole
-/// ranking over one unorderable score, which a caller-restored model can
-/// contain.
+/// ranking over one unorderable score, which both a caller-restored model and a
+/// negative smoothing constant can produce.
+///
+/// What this buys is *panic freedom, not `NaN` freedom*. Treating `NaN` as a
+/// tie leaves a `NaN`-scoring class exactly where enumeration put it, so it can
+/// come back first and be returned by [`Classifier::classify`] as the winner.
+/// That is documented behaviour — see the crate-level "`NaN` is computable, not
+/// merely restorable" section — and is pinned by
+/// `negative_smoothing_computes_a_nan_score_that_can_win`. Demoting `NaN` here
+/// instead would silently reorder a ranking a caller may already depend on, and
+/// would hide the malformed input rather than report it.
 pub(crate) fn sort_descending(scores: &mut [Classification]) {
     scores.sort_by(|x, y| {
         let d = y.value - x.value;

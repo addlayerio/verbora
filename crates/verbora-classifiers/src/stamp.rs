@@ -21,7 +21,16 @@ use crate::stemmer::Stemmer;
 /// of the tokenizer as well as the tokenizer itself. `3` added the `stemmer`
 /// member, so it covers the rules that turn a token into a feature key; see the
 /// [`ArtifactStamp`].
-pub const SCHEMA: u32 = 3;
+///
+/// `4` is the first bump for a change in *behaviour* rather than in the stamp's
+/// own shape. `verbora-stemmers` moved its text unit from the UTF-16 code unit
+/// to the Unicode scalar value, which moves every region bound, length gate and
+/// cut position in every Snowball port, and so re-keys any document carrying a
+/// character outside the basic multilingual plane. Nothing in a schema-3 stamp
+/// records which unit produced its features — see [`STEMMER_PROBES`] for why
+/// the fingerprint could not — so schema-3 models are refused rather than
+/// silently rekeyed.
+pub const SCHEMA: u32 = 4;
 
 /// The JSON member the stamp is written to and read from.
 pub const STAMP_PROPERTY: &str = "_verbora";
@@ -72,14 +81,47 @@ pub fn lowercase_fingerprint() -> u64 {
 
 /// The documents [`stemmer_fingerprint`] hands every stemmer.
 ///
-/// Chosen so that the sixteen stemmers `verbora-stemmers` publishes disagree
-/// about them — Latin with and without diacritics, Cyrillic, Greek, Japanese,
-/// Persian, and English words carrying every family of Porter suffix — plus
-/// two shapes that are about the *tokenizer* rather than the rules: a
-/// hyphenated compound and a decimal number. Coverage is not asserted from this
-/// list; `every_bridged_stemmer_has_its_own_fingerprint` enumerates the shipped
-/// stemmers and proves the sixteen fingerprints are pairwise distinct.
-pub const STEMMER_PROBES: [&str; 12] = [
+/// Chosen so that the stemmers `verbora-stemmers` publishes disagree about them
+/// — Latin with and without diacritics, Cyrillic, Greek, Japanese, Persian, and
+/// English words carrying every family of Porter suffix — plus two shapes that
+/// are about the *tokenizer* rather than the rules: a hyphenated compound and a
+/// decimal number. Coverage is not asserted from this list;
+/// `every_bridged_stemmer_has_its_own_fingerprint` enumerates the fifteen that
+/// implement `TokenizeAndStem`, and so can key a classifier, and proves their
+/// fifteen fingerprints are pairwise distinct.
+///
+/// # Why the last probe leaves the basic multilingual plane
+///
+/// The first twelve are the whole corpus this list used to be, and every one of
+/// them stays on the BMP. That made the fingerprint **blind to the unit a
+/// stemmer measures text in**: counting Unicode scalar values and counting
+/// UTF-16 code units are the same function on the basic multilingual plane, so
+/// two builds that disagree about the unit produce byte-identical token streams
+/// for all twelve and absorb to the same number. When `verbora-stemmers` moved
+/// from the code unit to the scalar value, nothing in the stamp moved with it,
+/// and only the hand-bumped [`SCHEMA`] refused the models it had re-keyed.
+///
+/// The thirteenth probe fixes that at the source, so the next such change is
+/// caught by measurement rather than by remembering. Its characters are chosen
+/// for two properties a probe needs before it can see the unit at all:
+///
+/// * They are **`Alphabetic`**, so UAX #29 keeps them inside word tokens and
+///   they reach a stemming rule. `U+1F600` would not do: it is
+///   `Word_Break=Other`, so `"😀"` yields no token and no stemmer ever sees it.
+/// * They **straddle a length gate**. `𝕳` (`U+1D573`) is one character and two
+///   code units, so `"𝕳s"` is two characters and three code units — on opposite
+///   sides of English Porter's documented three-character minimum.
+///
+/// The Deseret and Adlam runs add the third thing that can move: both have case
+/// mappings that live outside the BMP (`𐐀` → `𐐨`, `𞤀` → `𞤢`), so the probe also
+/// covers a fold applied beyond the basic multilingual plane in front of the
+/// tokenizer.
+///
+/// `the_stemmer_fingerprint_separates_the_two_length_units` pins the property
+/// rather than the probe: it builds two stemmers that differ only in which unit
+/// their length gate counts, checks by enumeration that they agree on all
+/// twelve BMP probes, and requires the fingerprint to tell them apart.
+pub const STEMMER_PROBES: [&str; 13] = [
     "the running dogs jumped over relational happiness quickly",
     "conditional formalize electricity sensitivity hopefulness adjustable",
     "les chiens chantaient doucement pendant la nuit entière",
@@ -92,6 +134,7 @@ pub const STEMMER_PROBES: [&str; 12] = [
     "барвисті українські міста зустрічають гостей щоранку",
     "日本語のテキストを解析します",
     "unit-tests 3.14 İD ΟΔΌΣ naïve",
+    "𝕳s 𝕳𝖊𝖑𝖑𝖔 fli𝕳es 𐐀𐐁𐐂𐐃s 𞤀𞤁𞤂𞤃",
 ];
 
 /// A fingerprint of what `stemmer` does to [`STEMMER_PROBES`].
@@ -114,7 +157,7 @@ pub const STEMMER_PROBES: [&str; 12] = [
 ///
 /// # Cost
 ///
-/// Twelve short documents, stemmed once. It is paid by saving and loading,
+/// Thirteen short documents, stemmed once. It is paid by saving and loading,
 /// never by training or classification, and is not cached: it is a function of
 /// its argument, and the argument is the caller's.
 #[must_use]
@@ -314,10 +357,39 @@ fn parse_fingerprint(s: &str) -> Option<u64> {
 ///
 /// The fingerprint is over the stemmer's *behaviour*, not its type name, so it
 /// separates a caller's own [`Stemmer`](crate::Stemmer) implementations too.
-/// `stamp::tests::every_bridged_stemmer_has_its_own_fingerprint` enumerates all
-/// sixteen stemmers `verbora-stemmers` publishes and asserts the sixteen
-/// fingerprints are pairwise distinct, so the claim is proved over the shipped
-/// set rather than asserted for stemmers in general.
+/// `stamp::tests::every_bridged_stemmer_has_its_own_fingerprint` enumerates the
+/// fifteen stemmers `verbora-stemmers` publishes that implement
+/// `TokenizeAndStem` — the whole set that can key a classifier — and asserts
+/// their fifteen fingerprints are pairwise distinct, so the claim is proved
+/// over the shipped set rather than asserted for stemmers in general.
+///
+/// ## Why a fingerprint needs a probe that leaves the basic multilingual plane
+///
+/// A fingerprint of behaviour only covers behaviour its corpus can reach, and
+/// this one nearly missed a change that re-keyed models.
+///
+/// `verbora-stemmers` moved its text unit from the UTF-16 code unit to the
+/// Unicode scalar value. Every region bound, length gate and cut position in
+/// every Snowball port is stated in that unit, so the same document yields
+/// different stems whenever it carries a character outside the basic
+/// multilingual plane — and 97,491 astral scalars are `Alphabetic`, so such
+/// documents are ordinary text rather than a curiosity. `"fli𝕳es"` keys as
+/// `fli𝕳e` under the scalar unit and keyed as `fli𝕳` under the code unit.
+///
+/// Three of the four facts are blind to it by construction: `unicode` describes
+/// `unicode-segmentation`, `lowercase` describes `str::to_lowercase`, and the
+/// [`SCHEMA`] counter only moves when somebody moves it. The fourth was blind
+/// by accident — [`STEMMER_PROBES`] was twelve strings that never left the BMP,
+/// where counting characters and counting code units are the same function, so
+/// both builds absorbed identical bytes. The corpus now carries an astral
+/// probe, which makes the fingerprint measure the unit instead of assuming it;
+/// see [`STEMMER_PROBES`] for what that probe has to contain and why.
+///
+/// The lesson generalises past this one change: a fingerprint over a corpus is
+/// only as strong as the corpus is varied, and the varieties worth carrying are
+/// the ones a *plausible* change would move. `tests/stemmer_stamp.rs` pins both
+/// halves — that a schema-3 model is refused, and that the fingerprint alone
+/// would have refused it too.
 ///
 /// # What the stamp deliberately does not cover
 ///
@@ -881,6 +953,169 @@ mod tests {
         assert_eq!(
             stemmer_fingerprint(&Shim(false)),
             stemmer_fingerprint(&*crate::default_stemmer())
+        );
+    }
+
+    // --- The text unit the stemmer measures in ------------------------------
+
+    /// [`stemmer_fingerprint`]'s definition, transcribed from its doc comment
+    /// rather than called, over a probe list supplied as an argument.
+    ///
+    /// The FNV-1a constants, the per-token [`FIELD_SEPARATOR`] and the
+    /// per-probe [`PROBE_SEPARATOR`] are all written out again here for the
+    /// reason [`oracle_fingerprint`] writes out the lowercase walk: an
+    /// implementation that drifts from the documented definition disagrees with
+    /// this rather than redefining what it is checked against.
+    ///
+    /// The probe list is a parameter rather than [`STEMMER_PROBES`] because
+    /// `tests/stemmer_stamp.rs` needs the fingerprint an *older* list produced,
+    /// and because a corpus is a thing the definition is evaluated over rather
+    /// than part of the definition.
+    fn oracle_stemmer_fingerprint(stemmer: &(impl Stemmer + ?Sized), probes: &[&str]) -> u64 {
+        fn feed(hash: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *hash ^= u64::from(*byte);
+                *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for probe in probes {
+            for token in stemmer.tokenize_and_stem(probe, true) {
+                feed(&mut hash, token.as_bytes());
+                feed(&mut hash, &[0xFF]);
+            }
+            feed(&mut hash, &[0xFE]);
+        }
+        hash
+    }
+
+    #[test]
+    fn the_stemmer_fingerprint_is_the_documented_walk_of_the_probe_corpus() {
+        let stemmer = crate::default_stemmer();
+        assert_eq!(
+            stemmer_fingerprint(&*stemmer),
+            oracle_stemmer_fingerprint(&*stemmer, &STEMMER_PROBES)
+        );
+    }
+
+    /// A stemmer whose one rule is a minimum-length gate, measured two ways.
+    ///
+    /// This is the exact shape of the change that moved `verbora-stemmers` from
+    /// the UTF-16 code unit to the Unicode scalar value. English Porter returns
+    /// a token untouched when it is shorter than three *characters*; the same
+    /// gate used to count UTF-16 code units. The two counts agree for every
+    /// string that stays on the basic multilingual plane and disagree for a
+    /// token carrying an astral character — so two such builds derive identical
+    /// feature keys from BMP text and different ones from anything else, which
+    /// is exactly the difference a compatibility stamp has to be able to see.
+    ///
+    /// Which rule fires above the gate is deliberately arbitrary. The claim
+    /// under test is that the *gate* decides, and that the unit decides the
+    /// gate.
+    struct MinLengthGate {
+        /// `true` counts characters; `false` counts UTF-16 code units.
+        in_characters: bool,
+    }
+
+    impl Stemmer for MinLengthGate {
+        fn tokenize_and_stem(&self, text: &str, _keep_stops: bool) -> Vec<String> {
+            use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
+
+            let lowered = text.to_lowercase();
+            WordTokenizer
+                .tokens(&lowered)
+                .map(|token| {
+                    let length = if self.in_characters {
+                        token.chars().count()
+                    } else {
+                        token.encode_utf16().count()
+                    };
+                    let mut out = token.to_owned();
+                    if length >= 3 {
+                        out.pop();
+                    }
+                    out
+                })
+                .collect()
+        }
+    }
+
+    /// The probe corpus reaches past the basic multilingual plane, and the
+    /// astral characters in it survive tokenization into whole feature keys.
+    ///
+    /// Both halves are load-bearing and neither is sampled. A corpus that never
+    /// leaves the BMP cannot fingerprint the text unit at all, because counting
+    /// characters and counting UTF-16 code units are the same function there.
+    /// And an astral character the tokenizer discards — `U+1F600` is
+    /// `Word_Break=Other`, so `"😀"` yields no token — never reaches a stemming
+    /// rule and so cannot move a stem either. The probes therefore use astral
+    /// characters that are `Alphabetic`: mathematical fraktur, Deseret and
+    /// Adlam.
+    #[test]
+    fn the_probe_corpus_reaches_past_the_basic_multilingual_plane() {
+        let astral = |s: &str| s.chars().filter(|c| (*c as u32) >= 0x1_0000).count();
+
+        let in_corpus: usize = STEMMER_PROBES.iter().copied().map(astral).sum();
+        assert!(
+            in_corpus > 0,
+            "no probe carries an astral character, so no stemmer's fingerprint \
+             can separate a build that measures text in characters from one \
+             that measures it in UTF-16 code units"
+        );
+
+        let stemmer = crate::default_stemmer();
+        let survived: usize = STEMMER_PROBES
+            .iter()
+            .flat_map(|probe| stemmer.tokenize_and_stem(probe, true))
+            .map(|token| astral(&token))
+            .sum();
+        assert!(
+            survived > 0,
+            "every astral character in the corpus is discarded by the \
+             tokenizer, so none of them reaches a stemming rule"
+        );
+    }
+
+    /// Two stemmers that differ *only* in the unit they measure length in are
+    /// separated by the fingerprint.
+    ///
+    /// The first half establishes the premise by enumeration — over every probe
+    /// that stays on the basic multilingual plane the two are the same
+    /// function, so nothing but the unit distinguishes them. The second half is
+    /// what failed before the corpus reached the astral planes: the two
+    /// absorbed byte-for-byte identical token streams, shared a fingerprint,
+    /// and a model keyed under one loaded silently under the other.
+    #[test]
+    fn the_stemmer_fingerprint_separates_the_two_length_units() {
+        let characters = MinLengthGate {
+            in_characters: true,
+        };
+        let code_units = MinLengthGate {
+            in_characters: false,
+        };
+
+        let mut bmp = 0usize;
+        for probe in STEMMER_PROBES {
+            if probe.chars().all(|c| (c as u32) < 0x1_0000) {
+                bmp += 1;
+                assert_eq!(
+                    characters.tokenize_and_stem(probe, true),
+                    code_units.tokenize_and_stem(probe, true),
+                    "{probe:?}"
+                );
+            }
+        }
+        assert_eq!(
+            bmp, 12,
+            "the twelve probes that predate the scalar migration are all on the \
+             basic multilingual plane"
+        );
+
+        assert_ne!(
+            stemmer_fingerprint(&characters),
+            stemmer_fingerprint(&code_units),
+            "the fingerprint cannot see which unit the stemmer measures text in, \
+             so a model keyed under one is accepted by the other"
         );
     }
 

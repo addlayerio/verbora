@@ -215,7 +215,20 @@ fn swar_diffs(a: &[u8], b: &[u8]) -> u64 {
         // ≤255 words per block, so no per-byte counter can overflow.
         let end = (i + 2040).min(words_end);
         let mut acc = 0u64;
+        // Both `unwrap`s below are `chunks_exact`'s own contract, not an
+        // assumption about the block arithmetic: it yields *only*
+        // exactly-8-byte slices and routes any short tail to `remainder()`,
+        // which this loop never calls. `TryInto<[u8; 8]>` has no other failure
+        // mode, so neither conversion can fail even if `end - i` were not a
+        // multiple of 8. The `b[i..end]` slicing is the line's real
+        // precondition, and it holds because `swar_diffs`' only caller is
+        // inside an `s1.len() == s2.len()` branch — asserted here by the
+        // `debug_assert_eq!` above, which a second caller must keep true.
         for (ca, cb) in a[i..end].chunks_exact(8).zip(b[i..end].chunks_exact(8)) {
+            // `chunks_exact(8)` yields slices of exactly 8 bytes and drops any
+            // shorter remainder, so both conversions to `[u8; 8]` are
+            // infallible by construction. Change the chunk width and these
+            // become fallible together.
             let x = u64::from_le_bytes(ca.try_into().unwrap())
                 ^ u64::from_le_bytes(cb.try_into().unwrap());
             acc += ((((x & !HI).wrapping_add(!HI)) | x) & HI) >> 7;

@@ -277,7 +277,22 @@ impl NameTypeData {
         language_file_suffix: &'static str,
     ) -> std::sync::Arc<CompiledTable> {
         let key = (pass, language_file_suffix);
-        if let Some(t) = self.tables.read().unwrap().get(&key) {
+        // Poison is recovered, not propagated. `BeiderMorse`'s own type
+        // documentation promises "Total: no input panics", and propagating
+        // poison would break that promise for *every later call in the
+        // process* the moment one caller panicked anywhere near this lock —
+        // the exact defect `verbora_stemmers::stopwords` already found and
+        // removed (see its `a_poisoned_lock_does_not_take_the_language_down_
+        // with_it`). Recovery is sound here because the data behind the lock
+        // is a pure cache of compiled tables: a panic cannot leave it half
+        // written, since the only mutation is the single `insert` below, and
+        // the rule compilation that *can* panic runs outside both guards.
+        if let Some(t) = self
+            .tables
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+        {
             return std::sync::Arc::clone(t);
         }
         let filename = format!(
@@ -316,7 +331,7 @@ impl NameTypeData {
         });
         self.tables
             .write()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key, std::sync::Arc::clone(&compiled));
         compiled
     }

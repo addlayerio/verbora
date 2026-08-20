@@ -46,6 +46,16 @@ impl TermId {
     pub(crate) fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// The id as the `u32` it is stored as.
+    ///
+    /// Exists so callers that need the narrow form do not have to widen to
+    /// `usize` and narrow back through a fallible conversion that could never
+    /// fail — the round trip is lossless by type width alone, on every target.
+    #[inline]
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
 }
 
 /// One slot of the short-term table: the token's own bytes are the key.
@@ -147,11 +157,17 @@ impl Interner {
     /// mode; it is checked rather than wrapped because a wrapped id would alias
     /// two different terms silently.
     fn next_id(&self) -> TermId {
-        let id = u32::try_from(self.names.len()).expect("more than u32::MAX distinct terms");
-        // `id + 1` must also fit: the tables store ids offset by one so `0` can
-        // mark an empty slot.
-        assert!(id < u32::MAX, "more than u32::MAX distinct terms");
-        TermId(id)
+        // The assertion, not a narrowing, is what enforces the limit: the
+        // tables store ids offset by one so `0` can mark an empty slot, so
+        // `u32::MAX` itself is unavailable and the bound is one tighter than
+        // `u32::try_from` would give. `names` grows by one per successful call,
+        // so this fires before the vector could reach `u32::MAX + 1` — which is
+        // why the `try_from` that used to precede it was unreachable.
+        assert!(
+            self.names.len() < u32::MAX as usize,
+            "more than u32::MAX distinct terms"
+        );
+        TermId(self.names.len() as u32)
     }
 
     /// Returns the id for `term`, allocating one if it is new.
@@ -319,6 +335,13 @@ impl Interner {
     /// crate holds an id read out of a structure this same `Interner` owns, so
     /// the precondition is structural; [`Self::name`] is the checked form.
     pub(crate) fn name_of(&self, id: TermId) -> &str {
+        // `TermId` is `pub(crate)` and never escapes the crate, and every call
+        // site reads its ids out of `self.documents[..].entries()` — all
+        // interned by this very interner. `names` is append-only (removing a
+        // document decrements document frequencies and never touches the
+        // interner), so an id, once issued, stays resolvable for the corpus's
+        // whole life. Two corpora cannot be crossed either: no public method
+        // accepts a `Document`.
         self.name(id).expect("id issued by this interner")
     }
 }

@@ -18,6 +18,17 @@
 //!   letters still count as vowels. `stem("étude")` is `"étud"`; `stem("ÉTUDE")`
 //!   is `"ÉTUDE"`.
 //!
+//! # The unit
+//!
+//! Lengths and suffix boundaries here are **Unicode scalar values**, the unit
+//! [`crate::units`] states for the whole crate. Carry was already the closest
+//! of the sixteen stemmers to that reading — it slices at `char_indices`
+//! offsets and counts transitions per `chars()` — so converting it was a
+//! matter of saying so and of replacing the one remaining UTF-16 scan, the
+//! gate. Both of the constructs that touched code units are shown below to
+//! answer identically under either reading, so this file's stems did not
+//! change: it is the reasoning that moved onto firm ground, not the behaviour.
+//!
 //! # Divergence: `Object.prototype`
 //!
 //! The reference looks suffixes up with `transformations[suffix]` on a plain
@@ -56,20 +67,46 @@ pub struct CarryStemmerFr;
 ///
 /// Reads the module-level `defaultConf.vowels`, never the instance's `conf`;
 /// that latent bug is unobservable because only one instance is ever built.
+///
+/// The scan is per character, which is the unit this crate measures in. It was
+/// already the answer under the code-unit reading too: Carry's vowel set tops
+/// out at `œ` (`U+0153`), so an astral character is not a vowel, and neither is
+/// either half of the surrogate pair it used to decompose into — and a run of
+/// non-vowels contributes one transition however long it is.
 fn word_size(word: &str) -> usize {
     let mut prev_vowel = false;
     let mut groups = 0;
     for c in word.chars() {
-        // A non-BMP character is two code units in the reference, both surrogates
-        // and both non-vowels; a run of non-vowels contributes one transition
-        // however long it is, so counting characters gives the same answer.
-        let vowel = (c as u32) < 0x1_0000 && is_carry_vowel(c as u16);
+        let vowel = is_vowel(c);
         if !vowel && prev_vowel {
             groups += 1;
         }
         prev_vowel = vowel;
     }
     groups
+}
+
+/// Carry's vowel class, over a whole character.
+///
+/// [`is_carry_vowel`] is stated over BMP code points; nothing in the set
+/// reaches `U+0154`, so anything above the Basic Multilingual Plane is a
+/// consonant for Carry's purposes.
+#[inline]
+fn is_vowel(c: char) -> bool {
+    (c as u32) < 0x1_0000 && is_carry_vowel(c as u16)
+}
+
+/// Whether `c` is one of the letters [`gate_fr`] accepts.
+///
+/// The gate is stated over BMP code points and nothing in it reaches `U+00FD`,
+/// so scanning characters and scanning UTF-16 code units accept exactly the
+/// same tokens: a BMP character *is* its own code unit, and an astral
+/// character is neither in the set itself nor are the two surrogates it used
+/// to be scanned as. The scan is per character because that is the crate's
+/// unit, not because the answer moved.
+#[inline]
+fn is_french_letter(c: char) -> bool {
+    (c as u32) < 0x1_0000 && gate_fr(c as u16)
 }
 
 /// A sorted `(suffix, replacement)` table lookup.
@@ -82,7 +119,8 @@ fn lookup(table: &[(&str, &'static str)], suffix: &str) -> Option<&'static str> 
 
 /// `tranform(word, stepConf)` — one of the three passes.
 fn transform(word: &str, step: &[&[(&str, &'static str)]]) -> Option<String> {
-    // Character offsets, so a suffix boundary never splits a code point.
+    // Character offsets, so a suffix boundary is a scalar-value boundary and
+    // never splits a character.
     let offsets: Vec<usize> = word.char_indices().map(|(i, _)| i).collect();
     let n = offsets.len();
     // `for (let suffixLength = word.length - 1; suffixLength > 0; …)`
@@ -139,7 +177,7 @@ impl TokenizeAndStem for CarryStemmerFr {
     }
 
     fn gate(token: &str) -> bool {
-        token.encode_utf16().any(gate_fr)
+        token.chars().any(is_french_letter)
     }
 
     fn stem_token(&self, token: &str) -> String {
@@ -226,5 +264,87 @@ mod tests {
         assert_eq!(s("😀"), "😀");
         assert_eq!(s("123"), "123");
         assert_eq!(s("a-b"), "a-b");
+    }
+
+    /// Every stem is a whole-character rewrite of the input: no cut can land
+    /// inside a character, so no output can carry a replacement character the
+    /// caller never supplied.
+    #[test]
+    fn stems_are_made_of_whole_characters() {
+        for word in [
+            "acteur",
+            "action",
+            "😀acteur",
+            "acteur😀",
+            "act😀eur",
+            "𝟎action",
+            "action𝟎",
+            "chevaux😀",
+            "😀",
+            "😀😀",
+            "a😀",
+            "😀a",
+            "naïve😀",
+            "œufs😀",
+        ] {
+            let out = s(word);
+            assert!(!out.contains('\u{FFFD}'), "stem({word:?}) = {out:?}");
+            // Carry only ever replaces a trailing suffix, so the stem's own
+            // characters all come from the input's character sequence.
+            assert!(
+                out.chars().count() <= word.chars().count() + 3,
+                "stem({word:?}) = {out:?}"
+            );
+        }
+    }
+
+    /// The two constructs that used to be stated in UTF-16 code units answer
+    /// identically over characters, for every scalar value there is.
+    ///
+    /// This is the whole justification for converting this file without
+    /// changing a stem: `is_carry_vowel` tops out at `U+0153` and `gate_fr` at
+    /// `U+00FC`, so neither an astral character nor either half of the
+    /// surrogate pair it encodes to is ever admitted.
+    #[test]
+    fn the_character_scans_agree_with_the_code_unit_scans() {
+        let mut buf = [0u16; 2];
+        for cp in 0..=0x10_FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let units = c.encode_utf16(&mut buf);
+            assert_eq!(
+                is_vowel(c),
+                units.iter().any(|u| is_carry_vowel(*u)),
+                "U+{cp:04X} vowel"
+            );
+            assert_eq!(
+                is_french_letter(c),
+                units.iter().any(|u| gate_fr(*u)),
+                "U+{cp:04X} gate"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gate_admits_french_letters_and_nothing_astral() {
+        assert!(CarryStemmerFr::gate("étude"));
+        assert!(CarryStemmerFr::gate("abc"));
+        assert!(!CarryStemmerFr::gate("😀"));
+        assert!(!CarryStemmerFr::gate("日本語"));
+        assert!(!CarryStemmerFr::gate("---"));
+        assert!(CarryStemmerFr::gate("😀a"));
+    }
+
+    /// A word size counts vowel-to-consonant transitions over characters, so
+    /// an astral character contributes exactly one consonant, not two.
+    #[test]
+    fn word_size_counts_an_astral_character_once() {
+        // `a` is a vowel, `😀` a consonant: one transition either way, but the
+        // sequence `a😀a😀` has two under a per-character reading.
+        assert_eq!(word_size("a😀"), 1);
+        assert_eq!(word_size("a😀a😀"), 2);
+        assert_eq!(word_size("😀😀"), 0);
+        assert_eq!(word_size("a𝟎b"), 1, "one run of consonants, one transition");
     }
 }

@@ -71,6 +71,14 @@ const LG7: f64 = 1.479_819_860_511_658_6e-1;
 /// A negative argument yields `NaN`, `log(0.0)` is `-inf`, and `log(inf)` is
 /// `inf`, as IEEE 754 requires. The `NaN` payload is unspecified and is not
 /// part of the contract.
+///
+/// This is **not** a fallible operation dressed as an infallible one: `NaN` is
+/// the correct value of the real logarithm at a negative argument, and a
+/// `Result` here would report the caller's negative *input* as this function's
+/// failure. The `NaN` does travel, though — into Bayes and maximum-entropy
+/// scores, and out through a ranking, without being filtered. The crate-level
+/// "`NaN` is computable, not merely restorable" section maps every path and
+/// names the boundaries where a caller can stop it.
 #[allow(clippy::many_single_char_names)]
 pub fn log(mut x: f64) -> f64 {
     let mut hx = high(x) as i32;

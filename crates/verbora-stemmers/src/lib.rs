@@ -31,22 +31,23 @@
 //!
 //! # The text unit
 //!
-//! Eleven of the sixteen index by **UTF-16 code unit** rather than by Unicode
-//! scalar value, because their region arithmetic compares positions against
-//! literal constants (`if rv > 3`, `if r1 < 3 { r1 = 3 }`, the Italian and
-//! Portuguese `length < 3` gates) and those constants were chosen against a
-//! code-unit count. For the Basic Multilingual Plane the two units coincide
-//! exactly, so the choice is observable only for astral-plane characters —
-//! emoji, mathematical alphanumerics — which no rule table in this crate is
-//! written over. `PorterStemmer::stem("😀s")` treats its input as three units
-//! long and stems it; a scalar-counting implementation would see two and
-//! return it unchanged.
+//! **One Unicode scalar value is one unit**, in every stemmer here and in
+//! every other Verbora crate. Region boundaries (R1, R2, RV), the short-word
+//! gates and each rule's removal `size` are all counts of scalar values.
 //!
-//! This is inherited rather than chosen, and it is the one item of this
-//! crate's own migration that is still open: settling it means restating every
-//! region constant in scalars and re-deriving eleven algorithms against the
-//! result. Lancaster, Carry, Japanese and Indonesian are provably unaffected
-//! and already run on `&str`.
+//! The algorithms themselves choose this. Snowball and Porter are published
+//! over *letters* — "the region after the first non-vowel following a vowel",
+//! a measure over consonant/vowel sequences, `length < 3` — and not one of
+//! those definitions names a unit of storage. Every letter class they test is
+//! a set of scalar values and every table entry is a sequence of them, so the
+//! scalar reading is the faithful one.
+//!
+//! Below `U+10000` the readings coincide exactly, which the crate proves
+//! rather than assumes: `among`'s tables are built in both and swept across
+//! the whole Basic Multilingual Plane asserting identical answers. Astral
+//! characters are where they part. `PorterStemmer::stem("😀s")` returns
+//! `"😀s"` unchanged, because `"😀s"` is two scalar values and the
+//! three-letter gate declines to run.
 //!
 //! # State that outlives a call
 //!

@@ -21,6 +21,32 @@ use crate::soundex::SoundEx;
 /// beyond `len` is never read by a trait method, so its value does not
 /// matter (it is left zeroed by [`InlineCode::new`] for `Debug`'s benefit,
 /// not for correctness).
+///
+/// # `N` is capped at 255, at compile time
+///
+/// The occupied length is stored in one byte, so `N` may not exceed
+/// [`u8::MAX`]. That is not a convention a caller has to remember: both
+/// constructors evaluate a `const` assertion over `N`, so `InlineCode<256>`
+/// and wider fail to **compile** rather than misbehaving at run time.
+///
+/// ```compile_fail
+/// use verbora_phonetics::InlineCode;
+/// // `N` = 256 does not fit the one-byte length field, so this is rejected
+/// // by the compiler, not by a panic at run time.
+/// let _ = InlineCode::<256>::new("abc");
+/// ```
+///
+/// ```compile_fail
+/// use verbora_phonetics::InlineCode;
+/// let _ = InlineCode::<300>::prefix_of("abc");
+/// ```
+///
+/// The cap is the reason [`InlineCode::as_str`] cannot fail: without it, a
+/// length of `N` above 255 wrapped when narrowed to the field's `u8`, and
+/// the truncated length could land inside a multi-byte character — which
+/// made a public, safe, documented-as-total API panic. `InlineCode<255>` is
+/// the widest legal instantiation and is exercised by
+/// `the_widest_legal_inline_code_stores_a_full_capacity_code`.
 #[derive(Clone, Copy)]
 pub struct InlineCode<const N: usize> {
     len: u8,
@@ -30,6 +56,18 @@ pub struct InlineCode<const N: usize> {
 impl<const N: usize> InlineCode<N> {
     /// The largest code this type can hold, in bytes.
     pub const CAPACITY: usize = N;
+
+    /// The proof, discharged at compile time, that `len` can hold every
+    /// length this type can store.
+    ///
+    /// Evaluated by both constructors — and only by them, since they are the
+    /// only ways to obtain a value — so an out-of-range `N` is a compile
+    /// error at the point of construction. Rust cannot express
+    /// `where N <= 255` as a bound yet, so this is where that bound lives.
+    const N_FITS_THE_LENGTH_FIELD: () = assert!(
+        N <= u8::MAX as usize,
+        "InlineCode<N> stores its length in a u8: N may not exceed 255"
+    );
 
     /// Stores `s` inline, or returns `None` if it does not fit.
     ///
@@ -41,9 +79,12 @@ impl<const N: usize> InlineCode<N> {
     /// | Over-long input | `None` — you decide | the longest prefix that fits |
     /// | Trade-off | you handle the `None` | two distinct codes sharing a prefix become one key, so the bucket over-generates |
     /// | Recommendation | **the default.** Prefer it wherever the encoder's key length is fixed by its publication. | for [`Metaphone`], whose key length grows with the word |
+    ///
+    /// `N` above 255 is a compile error — see the type's own documentation.
     #[inline]
     #[must_use]
     pub fn new(s: &str) -> Option<Self> {
+        () = Self::N_FITS_THE_LENGTH_FIELD;
         let b = s.as_bytes();
         if b.len() > N {
             return None;
@@ -51,8 +92,11 @@ impl<const N: usize> InlineCode<N> {
         let mut bytes = [0u8; N];
         bytes[..b.len()].copy_from_slice(b);
         Some(Self {
-            // `b.len() <= N <= u8::MAX` holds for every instantiation in this
-            // crate; the widest is 128.
+            // `b.len() <= N <= u8::MAX`: the first from the check above, the
+            // second from `N_FITS_THE_LENGTH_FIELD`, which this function
+            // evaluates. The narrowing is therefore lossless for every `N`
+            // that compiles, not merely for the widths this crate happens to
+            // instantiate.
             len: b.len() as u8,
             bytes,
         })
@@ -61,12 +105,18 @@ impl<const N: usize> InlineCode<N> {
     /// Stores the longest prefix of `s` that fits, cut at a character
     /// boundary.
     ///
-    /// Total: every `&str` produces a value. Where `s` already fits this is
-    /// exactly [`new`](Self::new)'s result, so the truncation is observable
-    /// only for a code longer than `N` bytes.
+    /// Total: every `&str` produces a value, and no `&str` panics. Where `s`
+    /// already fits this is exactly [`new`](Self::new)'s result, so the
+    /// truncation is observable only for a code longer than `N` bytes.
+    ///
+    /// `N` above 255 is a compile error — see the type's own documentation.
+    /// Totality depends on that cap: a wrapped length could cut a multi-byte
+    /// character in half, which is what [`as_str`](Self::as_str) would then
+    /// have to reject.
     #[inline]
     #[must_use]
     pub fn prefix_of(s: &str) -> Self {
+        () = Self::N_FITS_THE_LENGTH_FIELD;
         let mut end = s.len().min(N);
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
@@ -75,6 +125,8 @@ impl<const N: usize> InlineCode<N> {
         let mut bytes = [0u8; N];
         bytes[..end].copy_from_slice(b);
         Self {
+            // `end <= N <= u8::MAX`, the second half by
+            // `N_FITS_THE_LENGTH_FIELD`, evaluated above.
             len: end as u8,
             bytes,
         }
@@ -103,11 +155,17 @@ impl<const N: usize> InlineCode<N> {
     }
 
     /// The code as a string slice.
+    ///
+    /// Total: no value of this type can fail here.
     #[inline]
     #[must_use]
     pub fn as_str(&self) -> &str {
-        // SAFETY-free: `bytes[..len]` was copied verbatim from a `&str` in
-        // `new`, so it is valid UTF-8 by construction — no unsafe needed.
+        // SAFETY-free: `bytes[..len]` was copied verbatim from a `&str` — in
+        // `new` whole, in `prefix_of` cut at a character boundary — and `len`
+        // is the exact number of bytes copied, because `N_FITS_THE_LENGTH_FIELD`
+        // rules out an `N` for which the narrowing to `u8` could wrap. Both
+        // halves are needed: a wrapped `len` would name a shorter prefix that
+        // may end mid-character, which is the one way this could fail.
         std::str::from_utf8(self.as_bytes()).expect("InlineCode always copies from a valid &str")
     }
 }
@@ -958,6 +1016,46 @@ mod tests {
         // the second in half.
         assert_eq!(InlineCode::<4>::prefix_of("日本").as_str(), "日");
         assert_eq!(InlineCode::<2>::prefix_of("日").as_str(), "");
+    }
+
+    /// The widest legal instantiation, at its exact capacity, over the input
+    /// shape that used to break the length field.
+    ///
+    /// `InlineCode` stores its length in a `u8`, and before that bound was
+    /// enforced, `InlineCode<260>::new` on a 260-byte string wrapped `len` to
+    /// `4` and `as_str()` panicked with `Utf8Error { valid_up_to: 3 }` — the
+    /// wrapped length cut a three-byte character in half. `N > 255` is now a
+    /// compile error (pinned by the `compile_fail` doctests on [`InlineCode`]),
+    /// so what remains testable at run time is the boundary just below it: at
+    /// `N = 255` a full-capacity code must round-trip byte for byte, including
+    /// when its last character is multi-byte, and a 256-byte code must be
+    /// rejected by `new` and cut at a character boundary by `prefix_of` rather
+    /// than wrapping.
+    #[test]
+    fn the_widest_legal_inline_code_stores_a_full_capacity_code() {
+        // 84 x 3 bytes + 3 x 1 byte = 255, ending on a multi-byte character.
+        let exact = format!("{}{}", "a".repeat(3), "日".repeat(84));
+        assert_eq!(exact.len(), 255);
+        let code = InlineCode::<255>::new(&exact).expect("255 bytes fits N = 255");
+        assert_eq!(code.as_str(), exact);
+        assert_eq!(code.as_str().len(), 255);
+        assert_eq!(InlineCode::<255>::prefix_of(&exact).as_str(), exact);
+
+        // One byte over: `new` refuses, `prefix_of` cuts at a boundary. Neither
+        // wraps, and `as_str` stays total.
+        let over = format!("{exact}b");
+        assert_eq!(over.len(), 256);
+        assert_eq!(InlineCode::<255>::new(&over), None);
+        assert_eq!(InlineCode::<255>::prefix_of(&over).as_str(), exact);
+
+        // The cut landing inside a character is the case that produced the
+        // panic; here it must simply shorten to the last boundary.
+        let astral = "😀".repeat(64); // 256 bytes
+        assert_eq!(astral.len(), 256);
+        assert_eq!(InlineCode::<255>::new(&astral), None);
+        let cut = InlineCode::<255>::prefix_of(&astral);
+        assert_eq!(cut.as_str(), "😀".repeat(63));
+        assert_eq!(cut.as_str().len(), 252);
     }
 
     #[test]

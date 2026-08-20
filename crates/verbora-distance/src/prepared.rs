@@ -299,8 +299,16 @@ impl PreparedPattern {
         }
 
         match &self.peq {
-            // The early return above is the only path an empty pattern takes.
-            Peq::Empty => unreachable!("an empty pattern delegates before reaching here"),
+            // Dead, and deliberately written as the delegation it would perform
+            // rather than as `unreachable!`. The early return above is the only
+            // path an empty pattern takes — `peq` is read twice from the same
+            // `&self` with no interior mutability in between — but this crate's
+            // contract is that *no function panics, on any input, under any
+            // cost set* (`docs/design/distance-contract.md`), and an
+            // `unreachable!` is a `panic!` expansion that any grep-level audit
+            // of that claim has to re-litigate. This arm costs nothing and
+            // makes the claim checkable.
+            Peq::Empty => self.per_call(target, metric),
             Peq::ByteWord(table) => {
                 // An ASCII pattern's byte table cannot see a target's
                 // non-ASCII scalars, and comparing raw UTF-8 bytes would

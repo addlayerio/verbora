@@ -43,14 +43,23 @@
 //! again at the end. Half the suffix table is spelled in the detoured form
 //! (`"aço~es"`, `"ara~o"`) for that reason.
 //!
-//! # Why the buffer is `Vec<u16>`
+//! # The text unit
 //!
 //! Region marking here compares positions against the literal constants 1, 2
-//! and 3 and against the word's length, all of which are stated in UTF-16 code
-//! units, so this stemmer runs on its own `Vec<u16>` rather than on a scalar
-//! buffer. A `Vec<char>` would count one per Unicode scalar value and move
-//! every region boundary in a word containing an astral scalar. See the crate
-//! root on the text unit.
+//! and 3 and against the word's length, and all of those are counts of
+//! **Unicode scalar values** — R1, R2, RV, the `rv > 3` guard, the literal
+//! `rv = 3`, and every cut. See [`crate::units`] for why that is the faithful
+//! reading of a Snowball algorithm rather than a preference: the specification
+//! is written over *letters*, and the UTF-16 indices this port used to carry
+//! were an artefact of the host language it was transcribed through, not of the
+//! algorithm. `stem("😀eado")` is `"😀ead"`: five letters, so RV starts at 3 and
+//! leaves two of them, which the three-letter step-2 entry `-ado` does not fit.
+//!
+//! The nasal detour below makes the point concrete in the other direction. It
+//! rewrites one character into two *deliberately*, so that a nasal vowel counts
+//! as vowel-plus-consonant during region marking — a length change the
+//! algorithm asks for. Encoding-driven length changes are exactly what it does
+//! not ask for, and there are now none.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -81,25 +90,22 @@ pub struct PorterStemmerPt;
 /// here and could never match; `the_nasal_detour_leaves_no_nasal_behind` pins
 /// the reason rather than the removal.
 #[inline]
-fn is_vowel(c: u16) -> bool {
+fn is_vowel(c: char) -> bool {
     matches!(
         c,
-        0x61 | 0x65 | 0x69 | 0x6F | 0x75          // a e i o u
-        | 0xE1 | 0xE9 | 0xED | 0xF3 | 0xFA        // á é í ó ú
-        | 0xE2 | 0xEA | 0xF4                      // â ê ô
-        | 0xE0 // à
+        'a' | 'e' | 'i' | 'o' | 'u' | 'á' | 'é' | 'í' | 'ó' | 'ú' | 'â' | 'ê' | 'ô' | 'à'
     )
 }
 
 /// `hasVowelAtIndex`. Out of range is the reference's `undefined`, which is not
 /// in the vowel string, so it is false.
 #[inline]
-fn vowel_at(w: &[u16], i: usize) -> bool {
+fn vowel_at(w: &[char], i: usize) -> bool {
     w.get(i).copied().is_some_and(is_vowel)
 }
 
 /// `markRegionN`: the first position after a non-vowel that follows a vowel.
-fn mark_region_n(w: &[u16], start: usize) -> usize {
+fn mark_region_n(w: &[char], start: usize) -> usize {
     let length = w.len();
     let mut index = start;
     let mut region = length;
@@ -113,7 +119,7 @@ fn mark_region_n(w: &[u16], start: usize) -> usize {
 }
 
 /// `markRegionV`.
-fn mark_region_v(w: &[u16]) -> usize {
+fn mark_region_v(w: &[char]) -> usize {
     let mut rv = w.len();
     if rv > 3 {
         if !vowel_at(w, 1) {
@@ -135,7 +141,7 @@ fn mark_region_v(w: &[u16]) -> usize {
 /// rebuild there removes four allocations per word without changing a byte
 /// of output (a zero-occurrence rebuild is the identity).
 #[cfg(test)]
-fn replace_all(w: &mut Vec<u16>, find: &[u16], replacement: &[u16]) {
+fn replace_all(w: &mut Vec<char>, find: &[char], replacement: &[char]) {
     let first = match w.windows(find.len()).position(|win| win == find) {
         Some(i) => i,
         None => return,
@@ -161,7 +167,12 @@ fn replace_all(w: &mut Vec<u16>, find: &[u16], replacement: &[u16]) {
 /// Returns whether a suffix matched and was replaced; every shipped table
 /// pairs a non-empty suffix with a distinct replacement, so "matched" and
 /// "the word changed" coincide at every call site.
-fn replace_in_region(buf: &mut Buf, table: &AmongTable, replacement: &str, region: usize) -> bool {
+fn replace_in_region(
+    buf: &mut Buf<char>,
+    table: &AmongTable<char>,
+    replacement: &str,
+    region: usize,
+) -> bool {
     let len = buf.len();
     let n = table.longest(buf.as_slice(), len, region.min(len));
     if n > 0 {
@@ -187,31 +198,31 @@ fn replace_in_region(buf: &mut Buf, table: &AmongTable, replacement: &str, regio
 /// other. Counting first and then copying backwards means the buffer is only
 /// touched when there is something to move, and no unit is overwritten
 /// before it has been read.
-fn expand_nasals(buf: &mut Buf) {
+fn expand_nasals(buf: &mut Buf<char>) {
     let extra = buf
         .as_slice()
         .iter()
-        .filter(|&&c| c == 0x00E3 || c == 0x00F5)
+        .filter(|&&c| c == 'ã' || c == 'õ')
         .count();
     if extra == 0 {
         return;
     }
     let old_len = buf.len();
     for _ in 0..extra {
-        buf.push(0);
+        buf.push('\0');
     }
     let w = buf.as_mut_slice();
     let mut write = old_len + extra;
     for read in (0..old_len).rev() {
         let base = match w[read] {
-            0x00E3 => Some(0x0061),
-            0x00F5 => Some(0x006F),
+            'ã' => Some('a'),
+            'õ' => Some('o'),
             _ => None,
         };
         if let Some(base) = base {
             write -= 2;
             w[write] = base;
-            w[write + 1] = 0x7E; // '~'
+            w[write + 1] = '~';
         } else {
             write -= 1;
             w[write] = w[read];
@@ -228,8 +239,8 @@ fn expand_nasals(buf: &mut Buf) {
 /// `split(find).join(replace)` calls would. A word with no `~` at all — every
 /// word that had no nasal, and that is nearly all of them — skips the pass
 /// entirely.
-fn collapse_nasals(buf: &mut Buf) {
-    if !buf.as_slice().contains(&0x7E) {
+fn collapse_nasals(buf: &mut Buf<char>) {
+    if !buf.as_slice().contains(&'~') {
         return;
     }
     let len = buf.len();
@@ -237,10 +248,10 @@ fn collapse_nasals(buf: &mut Buf) {
     let mut write = 0usize;
     let mut read = 0usize;
     while read < len {
-        let nasal = if read + 1 < len && w[read + 1] == 0x7E {
+        let nasal = if read + 1 < len && w[read + 1] == '~' {
             match w[read] {
-                0x0061 => Some(0x00E3),
-                0x006F => Some(0x00F5),
+                'a' => Some('ã'),
+                'o' => Some('õ'),
                 _ => None,
             }
         } else {
@@ -359,15 +370,15 @@ const RULE_IRA: usize = 8;
 /// The sorted search tables, built once from the ordered rule tables below.
 struct PtTables {
     /// The nine step-1 tables merged into one search; see [`Step1Rule`].
-    step1: UnionTable,
-    verb: AmongTable,
-    residual: AmongTable,
+    step1: UnionTable<char>,
+    verb: AmongTable<char>,
+    residual: AmongTable<char>,
     /// Step 5's `ue|ué|uê` group (after a `g`).
-    ue: AmongTable,
+    ue: AmongTable<char>,
     /// Step 5's `ie|ié|iê` group (after a `c`).
-    ie: AmongTable,
+    ie: AmongTable<char>,
     /// Step 5's unconditional `e|é|ê`.
-    e: AmongTable,
+    e: AmongTable<char>,
 }
 
 static TABLES: LazyLock<PtTables> = LazyLock::new(|| PtTables {
@@ -396,7 +407,7 @@ impl PorterStemmerPt {
     #[must_use]
     pub fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let mut w = Buf::fill_lowercase(word);
+        let mut w: Buf<char> = Buf::fill_lowercase(word);
 
         // --- Prelude: nasal vowels become vowel + '~' ----------------------
         expand_nasals(&mut w);
@@ -468,10 +479,10 @@ impl PorterStemmerPt {
             replace_in_region(&mut w, &tb.e, "", rv);
         }
         // `['ç'] -> 'c'` in region `all` (0), so this one is unconditional.
-        if w.as_slice().last() == Some(&0x00E7) {
+        if w.as_slice().last() == Some(&'ç') {
             let keep = w.len() - 1;
             w.truncate(keep);
-            w.push(0x63);
+            w.push('c');
         }
 
         // --- Postlude ------------------------------------------------------
@@ -571,7 +582,7 @@ pub(crate) mod audit {
     /// The prelude `stem` runs before any table is consulted, in isolation:
     /// lowercase, then the nasal detour.
     pub(crate) fn prelude(token: &str) -> String {
-        let mut w = Buf::fill_lowercase(token);
+        let mut w: Buf<char> = Buf::fill_lowercase(token);
         super::expand_nasals(&mut w);
         w.into_text()
     }
@@ -629,7 +640,7 @@ mod tests {
                 format!("{c}{c}"),
                 format!("c{c}rac{c}o"),
             ] {
-                let mut w = Buf::fill_lowercase(&probe);
+                let mut w: Buf<char> = Buf::fill_lowercase(&probe);
                 expand_nasals(&mut w);
                 let out = w.into_text();
                 assert!(
@@ -711,6 +722,140 @@ mod tests {
         assert_eq!(s("çç"), "çc");
     }
 
+    /// The text unit is the **Unicode scalar value**, and Portuguese's region
+    /// arithmetic makes the choice observable.
+    ///
+    /// Derived from the algorithm rather than recorded from it. `"😀eado"` is
+    /// five letters — `😀 e a d o` — and the nasal detour leaves all of them
+    /// alone, there being no `ã` or `õ`. `hasVowelAtIndex(1)` is `e`, a vowel,
+    /// so `markRegionV` skips its first arm; index 0 is not a vowel, so it
+    /// skips the second and takes the literal **`rv = 3`**. RV therefore leaves
+    /// `5 - 3 = 2` letters, which the three-letter step-2 verb ending `-ado`
+    /// does not fit; step 2 declines, step 1 has nothing, and the residual step
+    /// cuts the one-letter `-o`: `"😀ead"`.
+    ///
+    /// `"ñeado"` is the control, and it is a control rather than a decoration:
+    /// `ñ` is outside the vowel set exactly as `😀` is, so the two words have
+    /// the same letter classes in the same positions and the algorithm cannot
+    /// tell them apart. Anything that makes their stems differ is the encoding
+    /// leaking through.
+    #[test]
+    fn one_astral_character_is_one_letter() {
+        assert_eq!(s("😀eado"), "😀ead");
+        assert_eq!(s("ñeado"), "ñead");
+    }
+
+    /// A character that is inert for this algorithm and inside the Basic
+    /// Multilingual Plane: not in the vowel set, not spelled in any rule table,
+    /// its own lower case, and neither produced nor consumed by the nasal
+    /// detour.
+    const INERT_TWIN: char = 'ж';
+
+    /// Every entry of the Portuguese stop-word list and of every Portuguese
+    /// rule table, walked through `stem` with one astral character inserted at
+    /// **every** position, against the same word carrying an inert
+    /// Basic-Multilingual-Plane character instead.
+    ///
+    /// # What the twin proves, and why it needs no second implementation
+    ///
+    /// [`INERT_TWIN`] is inert for this algorithm in exactly the way an astral
+    /// character is: neither is a vowel, neither is spelled in any rule table,
+    /// neither is rewritten by the lower-casing or by the nasal detour. So the
+    /// only thing that can possibly distinguish the two words is **how long
+    /// each of them is** — one character each under the contract, one and two
+    /// under the code-unit reading this port used to carry. One build run over
+    /// both therefore measures the unit directly, and a divergence here is a
+    /// position that is still being counted in code units.
+    ///
+    /// The detour is the reason to state that carefully. This stemmer *does*
+    /// rewrite one character into two — `ã` becomes `a~` — and it does so
+    /// deliberately, so that a nasal vowel counts as vowel-plus-consonant while
+    /// regions are marked. That length change is the algorithm asking for it.
+    /// The one this test forbids is the encoding asking for it.
+    ///
+    /// # Why every entry and every position, rather than a sample
+    ///
+    /// This is the shape of defect that has already cost this crate 116 Swedish
+    /// stop words and two dead rules: a stage transforms text before a later
+    /// stage measures or looks it up, and the entries that die are exactly the
+    /// ones a spot check does not name. So the walk is over every entry of
+    /// every table and of the stop-word list, behind every alphabetic entry of
+    /// that same list — the probe construction [`crate::data::table_audit`]
+    /// uses — and the astral character goes in at every position of each,
+    /// including the two ends. The counts are pinned by equality so that a walk
+    /// which quietly stops enumerating cannot report a clean sweep of nothing.
+    ///
+    /// # Red, then green
+    ///
+    /// Against the code-unit reading this port used to carry, this walk reports
+    /// **588 of 302 423** probes measuring an astral character as more than one
+    /// letter. It reports **0** here. Every one of the 588 has the same shape:
+    /// a word that opens with a non-vowel and whose second letter is a vowel,
+    /// so that `markRegionV` takes its third arm and is the literal `rv = 3`.
+    /// That 3 is an absolute position rather than a relative one, so the extra
+    /// code unit lengthened the region past it, and a suffix that does not fit
+    /// the region by one letter fitted it by one code unit.
+    /// [`one_astral_character_is_one_letter`] states one such word
+    /// with its arithmetic written out; this walk is what shows the shape is the
+    /// only one, and that nothing else in the shipped data moved.
+    #[test]
+    fn every_shipped_entry_measures_the_same_under_either_unit() {
+        let stemmer = PorterStemmerPt::new();
+        let stops = Language::Pt.defaults();
+        let fillers: Vec<&str> = std::iter::once("")
+            .chain(
+                stops
+                    .iter()
+                    .copied()
+                    .filter(|w| !w.is_empty() && w.chars().all(char::is_alphabetic)),
+            )
+            .collect();
+        let mut entries: Vec<&str> = audit::TABLES
+            .iter()
+            .flat_map(|(_, table)| table.iter().copied())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            206,
+            "the Portuguese rule-table entry count moved"
+        );
+        entries.extend(stops.iter().copied());
+        assert_eq!(entries.len(), 323, "the Portuguese entry count moved");
+        assert_eq!(fillers.len(), 107, "the Portuguese filler count moved");
+
+        let twin = INERT_TWIN.to_string();
+        let mut probes = 0usize;
+        let mut diverging: Vec<String> = Vec::new();
+        for entry in &entries {
+            for filler in &fillers {
+                let word: Vec<char> = format!("{filler}{entry}").chars().collect();
+                for pos in 0..=word.len() {
+                    let mut astral: String = word[..pos].iter().collect();
+                    astral.push('\u{1F600}');
+                    astral.extend(&word[pos..]);
+                    let bmp = astral.replace('\u{1F600}', &twin);
+                    probes += 1;
+                    let from_astral = stemmer.stem(&astral).replace('\u{1F600}', &twin);
+                    let from_bmp = stemmer.stem(&bmp).into_owned();
+                    if from_astral != from_bmp {
+                        diverging.push(format!("{astral:?}: {from_astral:?} vs {from_bmp:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            diverging.is_empty(),
+            "{} of {probes} probes measure an astral character as more than one \
+             letter: {:#?}",
+            diverging.len(),
+            &diverging[..diverging.len().min(10)]
+        );
+        assert_eq!(
+            probes, 302_423,
+            "the number of probes this walk builds moved"
+        );
+    }
+
     /// Portuguese is a **first-match** language; routing its tables through
     /// the longest-match search is only sound while every nested pair is
     /// ordered longest-first. See the module docs.
@@ -744,10 +889,10 @@ mod tests {
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
-        use crate::units::{ends_with, replace_suffix, slen, text, units};
+        use crate::units::{ends_with, replace_suffix, slen, text};
 
         struct PtToken {
-            w: Vec<u16>,
+            w: Vec<char>,
             r1: usize,
             r2: usize,
             rv: usize,
@@ -802,10 +947,10 @@ mod tests {
         }
 
         pub(super) fn stem(word: &str) -> String {
-            let mut w = units(&word.to_lowercase());
+            let mut w: Vec<char> = word.to_lowercase().chars().collect();
 
-            replace_all(&mut w, &[0x00E3], &[0x0061, 0x007E]);
-            replace_all(&mut w, &[0x00F5], &[0x006F, 0x007E]);
+            replace_all(&mut w, &['ã'], &['a', '~']);
+            replace_all(&mut w, &['õ'], &['o', '~']);
 
             let mut t = PtToken {
                 w,
@@ -843,8 +988,8 @@ mod tests {
             t.replace_suffix_in_region(&["ç"], "c", 0);
 
             let mut w = t.w;
-            replace_all(&mut w, &[0x0061, 0x007E], &[0x00E3]);
-            replace_all(&mut w, &[0x006F, 0x007E], &[0x00F5]);
+            replace_all(&mut w, &['a', '~'], &['ã']);
+            replace_all(&mut w, &['o', '~'], &['õ']);
             text(&w)
         }
     }

@@ -1,5 +1,6 @@
 //! [`Spellcheck`]: corrections for a misspelled word, drawn from a corpus.
 
+use std::fmt;
 use std::hash::Hasher;
 use std::sync::OnceLock;
 
@@ -15,6 +16,47 @@ use crate::deletions::{distinct_deletions, to_scalars};
 /// the corpus it indexes. Beyond this the query falls back to a scan; see
 /// [`Spellcheck::corrections`]'s "Cost" section.
 const NEAR_DISTANCE: u32 = 2;
+
+/// The largest number of **distinct** words one [`Spellcheck`] can hold.
+///
+/// Every entry is addressed by a `u32` — in the word index, in the deletion
+/// buckets, and in the candidate lists — because a 32-bit id halves the size of
+/// those structures against a `usize` one. That choice buys memory at the price
+/// of a ceiling, and this constant is the ceiling, named rather than implied.
+///
+/// Repeats do not count: a corpus of a trillion occurrences of ten words holds
+/// ten distinct words. Reaching the limit therefore needs 4.29 billion *distinct*
+/// strings resident at once, which measures at roughly 156 bytes each — about
+/// 620 GiB before any of them is corrected. [`Spellcheck::try_new`] reports it
+/// rather than panicking, on the principle `verbora_util`'s graph builder states
+/// for the identical situation: a capacity a caller controls belongs in a
+/// `Result`, not in a panic.
+pub const MAX_DISTINCT_WORDS: u32 = u32::MAX;
+
+/// Returned by [`Spellcheck::try_new`] when a corpus holds more distinct words
+/// than one [`Spellcheck`] can address.
+///
+/// Not a soft limit: entry ids are `u32`, so the 4,294,967,296th distinct word
+/// has no id to be given. Split the corpus, or deduplicate it further, if you
+/// somehow have one this large — see [`MAX_DISTINCT_WORDS`] for what that costs
+/// in memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CorpusTooLarge {
+    /// The largest number of distinct words that would have been accepted.
+    pub limit: u32,
+}
+
+impl fmt::Display for CorpusTooLarge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "corpus holds more than {} distinct words, which is all a Spellcheck can address",
+            self.limit
+        )
+    }
+}
+
+impl std::error::Error for CorpusTooLarge {}
 
 /// One suggested correction.
 ///
@@ -152,7 +194,58 @@ impl Spellcheck {
     /// assert_eq!(sc.frequency("the"), Some(2));
     /// assert_eq!(sc.frequency("dog"), None);
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// On a corpus of more than [`MAX_DISTINCT_WORDS`] **distinct** words —
+    /// roughly 620 GiB of them, so not on any corpus that fits in a normal
+    /// machine. Use [`Spellcheck::try_new`] to receive that as a
+    /// [`CorpusTooLarge`] instead; this constructor exists because handling an
+    /// error no realistic corpus can produce is noise at most call sites.
+    #[must_use]
     pub fn new<I, S>(wordlist: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::build(wordlist, MAX_DISTINCT_WORDS).unwrap_or_else(|e| panic!("Spellcheck::new: {e}"))
+    }
+
+    /// Builds a spellchecker from a corpus, reporting the one way it can fail.
+    ///
+    /// Identical to [`Spellcheck::new`] in every other respect.
+    ///
+    /// # Errors
+    ///
+    /// [`CorpusTooLarge`] when the corpus holds more than
+    /// [`MAX_DISTINCT_WORDS`] distinct words. Repeats are free: they raise a
+    /// frequency and consume no id, so only the number of *distinct* words is
+    /// bounded.
+    ///
+    /// ```
+    /// use verbora_spellcheck::Spellcheck;
+    ///
+    /// let sc = Spellcheck::try_new(["the", "cat", "the"]).expect("a small corpus");
+    /// assert_eq!(sc.frequency("the"), Some(2));
+    /// ```
+    pub fn try_new<I, S>(wordlist: I) -> Result<Self, CorpusTooLarge>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::build(wordlist, MAX_DISTINCT_WORDS)
+    }
+
+    /// The shared body of [`Spellcheck::new`] and [`Spellcheck::try_new`],
+    /// with the ceiling as a parameter so the boundary is testable at a small
+    /// value rather than only at 4.29 billion distinct words — which needs
+    /// hundreds of gigabytes of RAM and so cannot be reached in a test suite.
+    ///
+    /// The id counter is a `u32` and is compared against `limit` *before* it is
+    /// handed out, so an id that does not fit is not merely rejected: it is
+    /// never formed. That is why there is no fallible narrowing anywhere on
+    /// this path.
+    fn build<I, S>(wordlist: I, limit: u32) -> Result<Self, CorpusTooLarge>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -160,25 +253,29 @@ impl Spellcheck {
         let mut words: Vec<Box<str>> = Vec::new();
         let mut frequencies: Vec<u32> = Vec::new();
         let mut index: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        let mut next_id: u32 = 0;
 
         for word in wordlist {
             let word = word.as_ref();
             if let Some(&i) = index.get(word) {
                 frequencies[i as usize] = frequencies[i as usize].saturating_add(1);
             } else {
-                let i = u32::try_from(words.len()).expect("word list exceeds u32 entries");
-                index.insert(word.into(), i);
+                if next_id == limit {
+                    return Err(CorpusTooLarge { limit });
+                }
+                index.insert(word.into(), next_id);
                 words.push(word.into());
                 frequencies.push(1);
+                next_id += 1;
             }
         }
 
-        Self {
+        Ok(Self {
             words,
             frequencies,
             index,
             near: OnceLock::new(),
-        }
+        })
     }
 
     /// The number of distinct words in the corpus.
@@ -445,6 +542,8 @@ impl Spellcheck {
             if word.chars().count().abs_diff(query_len) > max_distance as usize {
                 continue;
             }
+            // Lossless: `build` refuses to create a word past
+            // `MAX_DISTINCT_WORDS`, so every index into `words` fits a `u32`.
             emit(i as u32, &mut f);
         }
     }
@@ -458,6 +557,8 @@ impl Spellcheck {
     fn build_near_index(&self) -> FxHashMap<u64, Vec<u32>> {
         let mut near: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
         for (i, word) in self.words.iter().enumerate() {
+            // Lossless for the same reason as the scan in `for_each_candidate`:
+            // `build` caps `words.len()` at `MAX_DISTINCT_WORDS`.
             let i = i as u32;
             let units = to_scalars(word);
             for variant in distinct_deletions(&units, NEAR_DISTANCE) {
@@ -491,6 +592,69 @@ mod tests {
 
     fn words(sc: &Spellcheck, query: &str, k: u32) -> Vec<String> {
         sc.correction_words(query, k)
+    }
+
+    /// The address ceiling, exercised at the boundary.
+    ///
+    /// The real ceiling is [`MAX_DISTINCT_WORDS`] — 4.29 billion distinct
+    /// words, about 620 GiB — so it cannot be reached by a test on any
+    /// machine this suite runs on. That is exactly why [`Spellcheck::build`]
+    /// takes the limit as a parameter: the *logic* at the boundary is the
+    /// thing worth pinning, and it is identical at 2 and at `u32::MAX`.
+    ///
+    /// Three properties, each of which a rewrite could plausibly break:
+    /// the last word that fits is accepted, the first that does not is an
+    /// error rather than a panic or a silent omission, and a repeat never
+    /// consumes an id (so a corpus of a billion occurrences of two words is
+    /// still a two-word corpus).
+    #[test]
+    fn a_corpus_past_the_address_ceiling_is_an_error_not_a_panic() {
+        let full = Spellcheck::build(["a", "b", "a"], 2).expect("two distinct words fit a limit 2");
+        assert_eq!(full.len(), 2);
+        assert_eq!(full.frequency("a"), Some(2));
+
+        assert_eq!(
+            Spellcheck::build(["a", "b", "c"], 2).unwrap_err(),
+            CorpusTooLarge { limit: 2 }
+        );
+        // The word that overflows may arrive at any point, including last.
+        assert_eq!(
+            Spellcheck::build(["a", "a", "b", "b", "a", "c"], 2).unwrap_err(),
+            CorpusTooLarge { limit: 2 }
+        );
+
+        // Repeats are free: 6 occurrences, 2 distinct words, still fits.
+        let repeated = Spellcheck::build(["a", "a", "a", "b", "b", "b"], 2)
+            .expect("repeats do not consume ids");
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(repeated.frequency("b"), Some(3));
+
+        // A limit of zero admits nothing but an empty corpus, which is the
+        // degenerate end of the same rule.
+        assert!(Spellcheck::build(std::iter::empty::<&str>(), 0).is_ok());
+        assert_eq!(
+            Spellcheck::build(["a"], 0).unwrap_err(),
+            CorpusTooLarge { limit: 0 }
+        );
+
+        // And the ceiling the public constructors actually use.
+        assert_eq!(MAX_DISTINCT_WORDS, u32::MAX);
+        assert_eq!(
+            CorpusTooLarge { limit: 4 }.to_string(),
+            "corpus holds more than 4 distinct words, which is all a Spellcheck can address"
+        );
+    }
+
+    /// `try_new` and `new` agree on every corpus a machine can hold.
+    #[test]
+    fn try_new_matches_new_below_the_ceiling() {
+        let corpus = ["the", "the", "cat", "sat", "cat"];
+        let a = Spellcheck::new(corpus);
+        let b = Spellcheck::try_new(corpus).expect("a five-word corpus fits");
+        assert_eq!(a.len(), b.len());
+        for (w, f) in a.frequencies() {
+            assert_eq!(b.frequency(w), Some(f));
+        }
     }
 
     /// The definition: every corpus word within `k`, and nothing else.

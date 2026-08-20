@@ -67,6 +67,10 @@ pub(crate) fn hash_bytes(b: &[u8]) -> u64 {
     let mut h: u64 = b.len() as u64;
     let mut it = b.chunks_exact(8);
     for c in it.by_ref() {
+        // Infallible by `chunks_exact`'s own contract: it yields *only*
+        // exactly-8-byte slices, and any short tail is excluded from the
+        // iterator and reachable solely through `remainder()` below. The
+        // conversion has no other failure mode.
         let v = u64::from_le_bytes(c.try_into().expect("chunks_exact yields 8 bytes"));
         h = (h.rotate_left(5) ^ v).wrapping_mul(K);
     }
@@ -238,6 +242,11 @@ impl HashIndex {
             while slots[i] != 0 {
                 i = (i + 1) & mask;
             }
+            // Lossless, and checked in exactly one place rather than two:
+            // `k` indexes `self.hashes`, whose length is `self.len`, and
+            // `insert_folded` refuses to grow past `u32::MAX` keys before a
+            // hash is ever pushed. Re-checking here would suggest the bound
+            // lives in two places; it does not.
             slots[i] = (k + 1) as u32;
         }
         self.slots = slots;

@@ -162,6 +162,15 @@ impl<'g, V> Topological<'g, V> {
     /// `order` when the ids are what you need.
     pub fn labels(&self) -> impl ExactSizeIterator<Item = &'g V> {
         let graph = self.graph;
+        // The invariant a future edit must preserve: `order` holds only ids
+        // below `graph.vertex_count()`. `new` seeds it from
+        // `(0..graph.vertex_count()).map(VertexId::from_index)` and afterwards
+        // pushes only `edge.to()` for edges of that same graph; `graph` is an
+        // immutable borrow with no interior mutability, so its vertex count
+        // cannot move underneath it; the fields are private and `new` is the
+        // only constructor, so a `Topological` holding a foreign id is
+        // unconstructible — and `VertexId::from_index` is `pub(crate)`, so a
+        // caller cannot mint one to smuggle in either.
         self.order
             .iter()
             .map(move |id| graph.label(*id).expect("id minted by this graph"))

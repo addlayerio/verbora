@@ -174,7 +174,16 @@ impl Distribution {
         Ok(())
     }
 
-    /// `calculateAPosteriori(x)`: a genuine conditional probability in `[0, 1]`.
+    /// `calculateAPosteriori(x)`: a genuine conditional probability in `[0, 1]`
+    /// — for a distribution whose alphas are positive.
+    ///
+    /// An alpha of zero drives numerator and denominator to zero together, and
+    /// the division returns `Ok(NaN)`: an unorderable value, reported rather
+    /// than an error, with no `log` involved. A negative alpha reaches `NaN` the
+    /// other way, through `log`. Both are documented in this crate's "`NaN` is
+    /// computable, not merely restorable" section; neither is filtered here,
+    /// because a `NaN` a caller can see is better than a substituted number
+    /// they cannot.
     ///
     /// # Errors
     ///

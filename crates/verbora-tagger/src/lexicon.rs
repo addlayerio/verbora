@@ -385,6 +385,19 @@ impl<'a> Iterator for Entries<'a> {
         // A two-way merge of two ascending sequences. One step per call: an
         // overlay entry that shadows a base key advances both cursors at once,
         // so the shadowed base entry is skipped rather than emitted twice.
+        //
+        // Three `expect`s below rest on one invariant, which is worth stating
+        // once because reordering this function is what would break it:
+        // `base_len` is `base.map_or(0, StaticLexicon::len)` fixed at
+        // construction, and `Entries` borrows the `Lexicon` immutably for its
+        // whole lifetime, so `base_len > 0` implies `base.is_some()` and stays
+        // implying it. Every read of `base` here is therefore guarded by
+        // `base_at < base_len`, directly or through `base_key` being `Some`,
+        // and the same guard is what keeps `key(base_at)`/`tags(base_at)` in
+        // bounds. The last `expect` is different in kind: it is `Peekable`'s
+        // own contract, that a `peek()` returning `Some` is followed by a
+        // `next()` returning `Some` — nothing between the two touches
+        // `self.overlay`.
         let base_key = (self.base_at < self.base_len).then(|| {
             self.lexicon
                 .base

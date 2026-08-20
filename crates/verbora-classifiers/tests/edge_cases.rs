@@ -8,8 +8,14 @@
 //! * an empty document is dropped in silence, and so is one made entirely of
 //!   stop words;
 //! * a bare `"7"` is a stop word, so a document of digits can vanish;
-//! * an astral-plane token is an ordinary feature key, because feature keys are
-//!   compared for equality and never indexed;
+//! * an astral-plane token is an ordinary feature key, because a classifier
+//!   compares feature keys for equality and never indexes into one — note that
+//!   this is a claim about the *classifier*, and the documents below are given
+//!   as token slices, which `Observation::Tokens` hands over without stemming.
+//!   On the `Observation::Text` path a token is very much indexed, by the
+//!   stemmer in front of the classifier, which measures text in Unicode scalar
+//!   values; that boundary is what `ArtifactStamp` fingerprints and what
+//!   `tests/stemmer_stamp.rs` covers;
 //! * a maxent context key is `safe-stable-stringify` output, so non-ASCII is
 //!   emitted raw and object keys are sorted by UTF-16 code unit.
 
