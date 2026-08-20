@@ -4,19 +4,18 @@
 //! and only observable through the same two calls (`text_to_features` and
 //! `get_classifications`):
 //!
-//! * **`text_to_features` is token-driven.** It used to build the enumeration
+//! * **`text_to_features` is token-driven.** It used to build the feature
 //!   order, collect the observation's tokens into a hash set and ask "is this
 //!   feature present?" once per *feature*; it now asks
 //!   [`OrderedMap::slot_of`](verbora_classifiers::OrderedMap::slot_of) once
 //!   per *token*. The 0/1 vector must be identical bit for bit, including for
-//!   tokens outside the vocabulary, repeated tokens, integer-like tokens
-//!   (which hoist the whole layout) and an empty vocabulary.
-//! * **The enumeration order is memoized.** `OrderedMap` computes the
-//!   reference's own-property order once per entry set instead of once per
-//!   call. A memo that outlived a mutation would hand a *stable* feature
-//!   layout to a model whose whole documented quirk is that its layout is not
-//!   stable, so the oracle here recomputes the order from insertion order on
-//!   every probe and compares.
+//!   tokens outside the vocabulary, repeated tokens, integer-like tokens and
+//!   an empty vocabulary.
+//! * **The slot layout is the vocabulary's insertion order.** A feature's slot
+//!   is fixed when the token first enters the vocabulary and only
+//!   `remove_document` can move it, so the oracle here rebuilds the order
+//!   independently — by walking the map's own entries — and requires
+//!   `slot_of` to agree with it on every probe.
 //! * **Stems are memoized per classifier.** `add_document` and `classify` now
 //!   route through `Stemmer::tokenize_and_stem_cached`. A classifier built on
 //!   a stemmer that does *not* implement that method re-stems every token,
@@ -55,8 +54,8 @@ impl Lcg {
     }
 }
 
-/// The same pool `tests/train_parity.rs` uses: integer-like strings
-/// (enumeration hoisting), stop words (dropped documents), unicode,
+/// The same pool `tests/train_parity.rs` uses: integer-like strings (the keys
+/// a reordering map would move), stop words (dropped documents), unicode,
 /// punctuation-bearing words, and stems that exercise every Porter step.
 const WORD_POOL: &[&str] = &[
     "running",
@@ -158,37 +157,18 @@ fn uncached_stemmer() -> Arc<dyn Stemmer + Send + Sync> {
     Arc::new(Uncached(StemmerOf(PorterStemmer::new())))
 }
 
-/// Whether `key` is an array index — the rule `crate::ordmap` documents,
-/// restated here so the oracle does not borrow the implementation it checks.
-fn is_index(key: &str) -> bool {
-    !key.is_empty()
-        && key.len() <= 10
-        && key.bytes().all(|b| b.is_ascii_digit())
-        && (key.len() == 1 || !key.starts_with('0'))
-        && key.parse::<u32>().is_ok_and(|n| n != u32::MAX)
-}
-
-/// The reference's own-property enumeration order, recomputed from scratch:
-/// integer-index keys in ascending numeric order, then the rest in insertion
-/// order.
+/// The slot order, recomputed from the map's own entries rather than read out
+/// of `keys()`, so the oracle does not borrow the answer it is checking.
+///
+/// Verbora's rule is that a key's slot is where it was inserted and nothing but
+/// a removal moves it — no key is reordered on the way out, whatever it is
+/// spelled like.
 fn oracle_order<V>(map: &OrderedMap<V>) -> Vec<String> {
-    let mut indices: Vec<(u32, String)> = Vec::new();
-    let mut rest: Vec<String> = Vec::new();
-    for (k, _) in map.iter_insertion() {
-        if is_index(k) {
-            indices.push((k.parse().expect("checked"), k.to_owned()));
-        } else {
-            rest.push(k.to_owned());
-        }
-    }
-    indices.sort_by_key(|(n, _)| *n);
-    let mut out: Vec<String> = indices.into_iter().map(|(_, k)| k).collect();
-    out.extend(rest);
-    out
+    map.iter().map(|(k, _)| k.to_owned()).collect()
 }
 
 /// The pre-change `text_to_features` tail: one membership test per *feature*,
-/// over a freshly computed enumeration order.
+/// over an independently rebuilt slot order.
 fn oracle_features(features: &OrderedMap<f64>, tokens: &[String]) -> Vec<u8> {
     let present: Vec<&str> = tokens.iter().map(String::as_str).collect();
     oracle_order(features)
@@ -266,9 +246,9 @@ fn token_driven_features_match_the_per_feature_probe() {
                 oracle_features(c.features(), &stemmed),
                 "stored document tokens"
             );
-            // And the two directions of the enumeration must agree.
+            // And the two directions of the layout must agree.
             let order = oracle_order(c.features());
-            assert_eq!(c.feature_order(), order, "enumeration order");
+            assert_eq!(c.feature_order(), order, "slot order");
             for (slot, key) in order.iter().enumerate() {
                 assert_eq!(c.features().slot_of(key), Some(slot), "slot of {key}");
             }
@@ -306,7 +286,7 @@ fn sparse_bayes_scoring_matches_the_dense_walk() {
                     _ => u8::from(rng.below(2) == 1),
                 })
                 .collect();
-            for label in c.engine().class_features().enumeration_order() {
+            for label in c.engine().class_features().keys() {
                 assert_eq!(
                     c.engine()
                         .probability_of_class(&observation, label)
@@ -322,8 +302,7 @@ fn sparse_bayes_scoring_matches_the_dense_walk() {
             let mut want: Vec<(String, u64)> = c
                 .engine()
                 .class_features()
-                .enumeration_order()
-                .into_iter()
+                .keys()
                 .map(|l| {
                     (
                         l.to_owned(),
@@ -482,34 +461,44 @@ fn a_warm_memo_still_sees_stop_word_list_mutations() {
     );
 }
 
-/// The enumeration memo must be dropped by every mutation that can reorder
-/// the keys — which is what makes an integer-like token still able to
-/// invalidate a trained model.
+/// An integer-like token appends: it widens the vector by one slot at the end
+/// and leaves every earlier slot — and therefore every trained weight — alone.
+///
+/// `remove_document` is the one operation that does move slots, so it is
+/// exercised here too: deleting the trailing token narrows the vector back
+/// without disturbing what preceded it, while deleting an *earlier* one shifts
+/// everything after it down.
 #[test]
-fn an_integer_like_token_still_reshuffles_a_warm_layout() {
+fn an_integer_like_token_appends_without_disturbing_the_layout() {
     let mut c = BayesClassifier::new();
     let alpha = vec!["alpha".to_owned()];
     let beta = vec!["beta".to_owned()];
     c.add_document(&alpha, "A");
     c.add_document(&beta, "B");
     c.train().expect("bayes train cannot fail");
-    // Warm the memo through the prediction path.
     assert_eq!(c.text_to_features(&alpha), vec![1, 0]);
     assert_eq!(c.feature_order(), vec!["alpha", "beta"]);
 
     c.add_document(&vec!["99".to_owned()], "C");
-    assert_eq!(c.feature_order(), vec!["99", "alpha", "beta"]);
-    assert_eq!(c.text_to_features(&alpha), vec![0, 1, 0]);
-    assert_eq!(c.features().slot_of("99"), Some(0));
+    assert_eq!(c.feature_order(), vec!["alpha", "beta", "99"]);
+    assert_eq!(c.text_to_features(&alpha), vec![1, 0, 0]);
+    assert_eq!(c.features().slot_of("alpha"), Some(0));
+    assert_eq!(c.features().slot_of("99"), Some(2));
 
     c.remove_document(&vec!["99".to_owned()], "C");
     assert_eq!(c.feature_order(), vec!["alpha", "beta"]);
     assert_eq!(c.text_to_features(&alpha), vec![1, 0]);
     assert_eq!(c.features().slot_of("99"), None);
+    assert_eq!(c.features().slot_of("alpha"), Some(0));
+
+    // Removing an earlier feature is what genuinely moves slots.
+    c.remove_document(&alpha, "A");
+    assert_eq!(c.feature_order(), vec!["beta"]);
+    assert_eq!(c.features().slot_of("beta"), Some(0));
 }
 
-/// Overwriting an existing key keeps its position, so the memo survives — and
-/// the counts still move.
+/// Re-adding a token already in the vocabulary writes through to its count and
+/// leaves its slot alone.
 #[test]
 fn repeated_tokens_update_counts_without_moving_slots() {
     let mut c = BayesClassifier::new();

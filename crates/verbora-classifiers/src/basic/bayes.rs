@@ -24,7 +24,6 @@ use crate::transcendental;
 /// feature of both classes and the two scores tie.
 pub type BayesClassifier = Classifier<BayesEngine>;
 
-/// The naive-Bayes engine: per-class feature counts plus Laplace smoothing.
 /// The naive-Bayes engine: per-class feature counts plus additive smoothing.
 ///
 /// Small enough to read in one sitting, and every line of it matters:
@@ -35,10 +34,9 @@ pub type BayesClassifier = Classifier<BayesEngine>;
 /// * `probabilityOfClass` accumulates its log-sum from the **highest** set
 ///   feature index **down** to zero. Summing the other way changes the last bits
 ///   of the result, and the results are then sorted, so a near-tie can flip.
-/// * Class labels are enumerated by [`OrderedMap`](crate::OrderedMap), which
-///   puts integer-like keys first in ascending numeric order — which is *not*
-///   the order they were added in, and is what `get_classifications` returns
-///   ties in.
+/// * Class labels are enumerated by [`OrderedMap`](crate::OrderedMap), in the
+///   order they were first trained — the same order `get_classifications`
+///   returns ties in.
 ///
 #[derive(Debug, Clone)]
 pub struct BayesEngine {
@@ -236,12 +234,11 @@ impl Engine for BayesEngine {
         let set_desc = set_indices_descending(observation);
         let mut labels: Vec<Classification> = self
             .class_features
-            .enumeration_order()
-            .into_iter()
+            .keys()
             .filter_map(|label| {
-                // Every label here was just enumerated out of `class_features`,
-                // so the lookup cannot miss; `filter_map` states that rather
-                // than asserting it.
+                // Every label here came straight out of `class_features`, so
+                // the lookup cannot miss; `filter_map` states that rather than
+                // asserting it.
                 Some(Classification {
                     label: label.to_owned(),
                     value: self.probability_of_class_at(&set_desc, label)?,
@@ -258,8 +255,7 @@ impl Engine for BayesEngine {
                 "classFeatures".to_owned(),
                 DynValue::Obj(
                     self.class_features
-                        .ordered_entries()
-                        .into_iter()
+                        .iter()
                         .map(|(label, counts)| {
                             (
                                 label.to_owned(),
@@ -278,8 +274,7 @@ impl Engine for BayesEngine {
                 "classTotals".to_owned(),
                 DynValue::Obj(
                     self.class_totals
-                        .ordered_entries()
-                        .into_iter()
+                        .iter()
                         .map(|(label, total)| (label.to_owned(), DynValue::Num(*total)))
                         .collect(),
                 ),
@@ -385,10 +380,10 @@ mod tests {
     ///
     /// `"unit-tests"` is two words under UAX #29 (U+002D is
     /// `Word_Break=Other`), so `test` is trained into *both* classes with the
-    /// same count and the same class total. Ties resolve by enumeration order,
-    /// which puts `software` first.
+    /// same count and the same class total. Ties resolve by the order the
+    /// classes were first trained, which puts `software` first.
     #[test]
-    fn a_shared_feature_ties_and_resolves_by_enumeration_order() {
+    fn a_shared_feature_ties_and_resolves_by_first_appearance_order() {
         let c = trained();
         let scores = c.get_classifications("did the tests pass?").unwrap();
         assert_eq!(

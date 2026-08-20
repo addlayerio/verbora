@@ -250,13 +250,11 @@ impl From<StampError> for LoadError {
 ///
 /// The shell shared by Bayes and logistic regression.
 ///
-/// Everything here is stateful and order-dependent, and three of the behaviours
-/// look like bugs a port would want to fix. They are not optional:
+/// Everything here is stateful and order-dependent. The feature vector's layout
+/// is the vocabulary's insertion order ([`OrderedMap`](crate::OrderedMap)), so a
+/// token added to a trained classifier takes the next free slot and leaves every
+/// learned index alone. Two behaviours remain surprising, and are deliberate:
 ///
-/// * **The feature vector's layout is a reference object's enumeration order.**
-///   `textToFeatures` walks `for (const feature in this.features)`, so adding a
-///   token that *looks like an integer* hoists it to slot 0 and shifts every
-///   previously learned index. See [`OrderedMap`](crate::OrderedMap).
 /// * **`removeDocument` deletes feature entries rather than decrementing them**,
 ///   removes the *last* of several matching documents, and leaves `lastAdded`
 ///   untouched — so a subsequent `train()` silently skips documents and only
@@ -360,9 +358,9 @@ impl<E: Engine> Classifier<E> {
         &self.features
     }
 
-    /// The feature names in the order `textToFeatures` emits them.
+    /// The feature names in slot order — the order `text_to_features` emits.
     pub fn feature_order(&self) -> Vec<&str> {
-        self.features.enumeration_order()
+        self.features.keys().collect()
     }
 
     /// How many documents have already been handed to the engine.
@@ -421,12 +419,10 @@ impl<E: Engine> Classifier<E> {
             // `(this.features[token] || 0) + 1`: a truthiness test, so a count
             // that somehow reached 0 would restart at 1 rather than at 1 + 1.
             //
-            // A token already in the vocabulary is updated in place: assigning
-            // to an existing key keeps its position, so this is the same
-            // `insert` minus the key clone and the second hash lookup — and,
-            // because the key set does not change, minus the enumeration
-            // memo's invalidation, which matters on corpora where almost every
-            // token is a repeat.
+            // A token already in the vocabulary is updated in place: writing
+            // through an existing key keeps its slot, so this is the same
+            // `insert` minus the key clone and the second hash lookup, which
+            // matters on corpora where almost every token is a repeat.
             if let Some(count) = self.features.get_mut(token) {
                 *count = if *count != 0.0 && !count.is_nan() {
                     *count + 1.0
@@ -468,10 +464,10 @@ impl<E: Engine> Classifier<E> {
 
     /// `textToFeatures(observation)`: a 0/1 vector, one slot per known feature.
     ///
-    /// The slot order is [`OrderedMap::enumeration_order`] as it stands *now* —
-    /// which is exactly why adding an integer-like token invalidates a trained
-    /// model, and why the memo behind that order is thrown away by every
-    /// mutation that could reshuffle it.
+    /// The slot order is the vocabulary's insertion order, so a model trained
+    /// against an earlier, narrower vocabulary reads the same slots here that it
+    /// was fitted on — the vector merely grows a tail of features the fit has
+    /// not seen, which [`ClassifierError::StaleModel`] reports.
     ///
     /// An `Observation::Tokens` input is already an owned `&[String]` the
     /// caller holds; going through the crate-internal `resolve` step that
@@ -502,15 +498,15 @@ impl<E: Engine> Classifier<E> {
         }
     }
 
-    /// The shared tail of [`Self::text_to_features`]: a 0/1 vector over
-    /// [`OrderedMap::enumeration_order`], one slot per known feature.
+    /// The shared tail of [`Self::text_to_features`]: a 0/1 vector over the
+    /// vocabulary in slot order, one slot per known feature.
     ///
     /// Driven by the *tokens*, not by the features. "Slot `s` is 1 iff some
-    /// token equals the feature enumerated at `s`" reads equally well from
-    /// either end, but a probe holds a dozen tokens where a trained
-    /// vocabulary holds hundreds, so asking [`OrderedMap::slot_of`] once per
-    /// token replaces one hash probe per *feature* — and drops the
-    /// `enumeration_order` vector the per-feature form had to materialise.
+    /// token equals the feature at `s`" reads equally well from either end, but
+    /// a probe holds a dozen tokens where a trained vocabulary holds hundreds,
+    /// so asking [`OrderedMap::slot_of`] once per token replaces one hash probe
+    /// per *feature* — and drops the key vector the per-feature form had to
+    /// materialise.
     /// A token outside the vocabulary has no slot and contributes nothing,
     /// exactly as it failed the per-feature membership test; a token repeated
     /// in the document sets the same slot twice, which is still 1.
@@ -544,14 +540,11 @@ impl<E: Engine> Classifier<E> {
         }
         let total = self.docs.len();
         if self.last_added < total {
-            // Calling `text_to_features` per document would recompute the
-            // enumeration order — an O(vocabulary) allocation and sort — for
-            // every document in the loop. But nothing inside the loop touches
-            // `features` (only `addDocument`/`removeDocument` do), so the order,
-            // and with it the whole token→slot layout, is loop-invariant: the
-            // memo behind `slot_of` is filled by the first token and answers
-            // every later one. Marking each document's tokens into a reused
-            // buffer produces byte-identical observations: a slot is 1 exactly
+            // Nothing inside the loop touches `features` (only
+            // `addDocument`/`removeDocument` do), so the token→slot layout is
+            // loop-invariant and the observation buffer can be reused rather
+            // than reallocated per document. Marking each document's tokens
+            // into it produces byte-identical observations: a slot is 1 exactly
             // when the document contains that feature, which is the same
             // membership test `text_to_features` runs per slot.
             let mut observation = vec![0u8; self.features.len()];
@@ -608,7 +601,7 @@ impl<E: Engine> Classifier<E> {
     ///
     /// "Best-scoring" is the first entry of [`Classifier::get_classifications`],
     /// and that ranking treats an unorderable difference as a tie rather than
-    /// panicking. A class scoring `NaN` therefore keeps its enumeration
+    /// panicking. A class scoring `NaN` therefore keeps its first-appearance
     /// position and can be returned here — `Ok(label)`, with a score that is
     /// not a number. `NaN` is reachable from ordinary calls, not only from a
     /// corrupt saved model; see this crate's "`NaN` is computable, not merely
@@ -776,8 +769,7 @@ impl<E: Engine> Classifier<E> {
                 "features".to_owned(),
                 DynValue::Obj(
                     self.features
-                        .ordered_entries()
-                        .into_iter()
+                        .iter()
                         .map(|(k, v)| (k.to_owned(), DynValue::Num(*v)))
                         .collect(),
                 ),
@@ -937,14 +929,14 @@ impl<E: Engine> Classifier<E> {
 /// Sorts scores descending by value.
 ///
 /// Two details are load-bearing. The sort must be **stable**, so exact ties come
-/// back in the engine's own enumeration order rather than in some order the sort
-/// happened to produce. And the comparator must treat a `NaN` difference as
+/// back in the order the engine first saw those classes rather than in some
+/// order the sort happened to produce. And the comparator must treat a `NaN` difference as
 /// "equal" rather than panicking: `partial_cmp().unwrap()` would abort a whole
 /// ranking over one unorderable score, which both a caller-restored model and a
 /// negative smoothing constant can produce.
 ///
 /// What this buys is *panic freedom, not `NaN` freedom*. Treating `NaN` as a
-/// tie leaves a `NaN`-scoring class exactly where enumeration put it, so it can
+/// tie leaves a `NaN`-scoring class exactly where first appearance put it, so it can
 /// come back first and be returned by [`Classifier::classify`] as the winner.
 /// That is documented behaviour — see the crate-level "`NaN` is computable, not
 /// merely restorable" section — and is pinned by
@@ -1013,15 +1005,142 @@ mod tests {
         assert_eq!(c.feature_order(), vec!["gamma"]);
     }
 
+    /// An integer-like token is a token: it takes the next slot, like any
+    /// other, rather than being hoisted to the front of the vector.
     #[test]
-    fn integer_like_tokens_are_hoisted() {
+    fn integer_like_tokens_take_their_insertion_slot() {
         let mut c = BayesClassifier::new();
         c.add_document(
             &vec!["zebra".to_owned(), "42".to_owned(), "appl".to_owned()],
             "A",
         );
-        assert_eq!(c.feature_order(), vec!["42", "zebra", "appl"]);
-        assert_eq!(c.text_to_features(&vec!["42".to_owned()]), vec![1, 0, 0]);
+        assert_eq!(c.feature_order(), vec!["zebra", "42", "appl"]);
+        assert_eq!(c.text_to_features(&vec!["42".to_owned()]), vec![0, 1, 0]);
+    }
+
+    /// The corruption this crate used to ship, pinned shut.
+    ///
+    /// Train, add a document carrying an integer-like token, retrain: under the
+    /// old hoisting rule `"99"` landed at slot 0 and pushed every learned
+    /// feature one place along, so the fitted weights addressed the wrong
+    /// features and a query that had classified correctly stopped doing so.
+    /// Three things are asserted, because only the third is the user-visible
+    /// harm: the learned slots do not move, the new token lands at the end, and
+    /// the model still answers what it was trained to answer.
+    #[test]
+    fn an_integer_like_token_added_between_trainings_keeps_every_learned_slot() {
+        let mut c = BayesClassifier::new();
+        c.add_document(&vec!["zebra".to_owned(), "appl".to_owned()], "A");
+        c.add_document(&vec!["quux".to_owned(), "wombat".to_owned()], "B");
+        c.train().expect("bayes train cannot fail");
+
+        let before: Vec<(String, usize)> = c
+            .feature_order()
+            .into_iter()
+            .map(|k| (k.to_owned(), c.features().slot_of(k).expect("present")))
+            .collect();
+        assert_eq!(c.classify(&vec!["zebra".to_owned()]).unwrap(), "A");
+        assert_eq!(c.classify(&vec!["quux".to_owned()]).unwrap(), "B");
+
+        c.add_document(&vec!["99".to_owned(), "zebra".to_owned()], "A");
+        c.retrain().expect("bayes train cannot fail");
+
+        for (key, slot) in &before {
+            assert_eq!(
+                c.features().slot_of(key),
+                Some(*slot),
+                "{key} moved when \"99\" was added"
+            );
+        }
+        assert_eq!(
+            c.feature_order(),
+            vec!["zebra", "appl", "quux", "wombat", "99"],
+            "the new token appends"
+        );
+        assert_eq!(c.classify(&vec!["zebra".to_owned()]).unwrap(), "A");
+        assert_eq!(c.classify(&vec!["quux".to_owned()]).unwrap(), "B");
+    }
+
+    /// A model saved before the slot order was corrected still loads, and still
+    /// means what it meant — which is why [`crate::stamp::SCHEMA`] was *not*
+    /// bumped for that change.
+    ///
+    /// The bytes below were produced by the build immediately before it, from
+    /// three documents whose tokens were inserted in the order
+    /// `zebra, 42, appl, 7, quux`. That build laid the vector out in its
+    /// enumeration order — integer-like keys hoisted, so
+    /// `7, 42, zebra, appl, quux` — and serialised `features` in exactly that
+    /// order. This build replays the serialised order as insertion order, which
+    /// reproduces the same slots, so the restored engine's indices still
+    /// address the features they were fitted on.
+    #[test]
+    fn a_model_saved_before_the_slot_order_changed_restores_to_the_same_slots() {
+        const LEGACY: &str = concat!(
+            r#"{"_verbora":{"schema":4,"unicode":"17.0.0","#,
+            r#""lowercase":"63e0f1a00f3be510","stemmer":"95e8a9a16e95e535"},"#,
+            r#""_events":{},"_eventsCount":0,"#,
+            r#""classifier":{"classFeatures":{"A":{"1":2,"2":3,"3":2,"4":2},"#,
+            r#""B":{"0":2,"3":2}},"classTotals":{"A":3,"B":2},"#,
+            r#""totalExamples":4,"smoothing":1},"#,
+            r#""docs":[{"label":"A","text":["zebra","42","appl"]},"#,
+            r#"{"label":"B","text":["7","appl"]},"#,
+            r#"{"label":"A","text":["zebra","quux"]}],"#,
+            r#""features":{"7":1,"42":1,"zebra":2,"appl":2,"quux":1},"#,
+            r#""stemmer":{},"lastAdded":3,"Threads":null}"#,
+        );
+        let c = BayesClassifier::restore(LEGACY).expect("a schema-4 model still loads");
+        assert_eq!(
+            c.feature_order(),
+            vec!["7", "42", "zebra", "appl", "quux"],
+            "the saved order is the slot order, and it is replayed verbatim"
+        );
+        // The scores the saving build recorded for the same probe.
+        let scores = c
+            .get_classifications(&vec!["zebra".to_owned(), "42".to_owned()])
+            .expect("trained");
+        assert_eq!(scores[0].label, "A");
+        assert_eq!(scores[0].value, 0.5);
+        assert_eq!(scores[1].label, "B");
+        assert_eq!(scores[1].value, 0.125);
+        assert_eq!(c.classify(&vec!["7".to_owned()]).unwrap(), "B");
+        // And re-saving it does not disturb the layout either.
+        assert_eq!(c.to_json(), LEGACY);
+    }
+
+    /// A feature keeps its slot across a save and a restore, integer-like
+    /// tokens and labels included.
+    ///
+    /// The slot layout travels in the *key order* of the saved `features`
+    /// object and nowhere else, so this is the guard on the JSON writer: a
+    /// writer that sorted or hoisted keys — as `JSON.stringify` does — would
+    /// hand the restored engine a layout its weights were never fitted on, and
+    /// the scores would move without any number in the file changing.
+    #[test]
+    fn a_saved_model_restores_to_the_slots_it_was_trained_on() {
+        let mut c = BayesClassifier::new();
+        c.add_document(
+            &vec!["zebra".to_owned(), "42".to_owned(), "appl".to_owned()],
+            "2",
+        );
+        c.add_document(&vec!["7".to_owned(), "appl".to_owned()], "1");
+        c.train().expect("bayes train cannot fail");
+        let probe = vec!["zebra".to_owned(), "7".to_owned()];
+        let before = c.get_classifications(&probe).expect("trained");
+        assert_eq!(c.feature_order(), vec!["zebra", "42", "appl", "7"]);
+
+        let revived = BayesClassifier::restore(&c.to_json()).expect("its own output round-trips");
+        assert_eq!(revived.feature_order(), c.feature_order(), "slot order");
+        assert_eq!(
+            revived.get_classifications(&probe).expect("trained"),
+            before,
+            "the restored model scores identically"
+        );
+        // Class order is carried by the same mechanism, and integer-like labels
+        // are where a reordering writer would show it.
+        assert_eq!(
+            revived.engine().class_features().keys().collect::<Vec<_>>(),
+            vec!["2", "1"]
+        );
     }
 
     #[test]

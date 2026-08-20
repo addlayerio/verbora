@@ -1,10 +1,10 @@
-//! Differential parity for the hoisted `train()` path and the sparse logistic
+//! Differential parity for the batched `train()` path and the sparse logistic
 //! fit.
 //!
-//! `train_with` no longer calls `text_to_features` per document — it computes
-//! the enumeration order and a token→slot map once per call — and the logistic
-//! engine no longer materialises a dense `f64` matrix or evaluates the
-//! hypothesis twice per iteration. Neither restructuring may move a single bit
+//! `train_with` no longer calls `text_to_features` per document — it marks each
+//! document's tokens into one reused observation buffer, the token→slot map
+//! being loop-invariant — and the logistic engine no longer materialises a
+//! dense `f64` matrix or evaluates the hypothesis twice per iteration. Neither restructuring may move a single bit
 //! of observable state, so these tests keep the *old* computation alive as an
 //! oracle:
 //!
@@ -15,10 +15,11 @@
 //!   gradient descent, exactly as `fit()` shipped before the sparse rewrite;
 //!
 //! and every comparison is on raw `f64` bits, not on formatted output, over
-//! randomized op-sequences that include integer-like tokens and labels
-//! (enumeration hoisting), `remove_document` (feature deletion), interleaved
-//! incremental `train()` calls, `keep_stops` both ways, and corpora that
-//! tokenise to nothing (the error paths).
+//! randomized op-sequences that include integer-like tokens and labels (the
+//! keys a reordering map would move), `remove_document` (feature deletion,
+//! which is the one thing that *does* move slots), interleaved incremental
+//! `train()` calls, `keep_stops` both ways, and corpora that tokenise to
+//! nothing (the error paths).
 
 use verbora_classifiers::{
     BayesClassifier, BayesEngine, ClassifierError, Engine, LogisticEngine,
@@ -42,9 +43,9 @@ impl Lcg {
     }
 }
 
-/// Tokens chosen to hit the delicate paths: integer-like strings (enumeration
-/// hoisting), stop words (dropped documents), unicode, punctuation-bearing
-/// words, and stems that exercise every Porter step.
+/// Tokens chosen to hit the delicate paths: integer-like strings (the keys a
+/// reordering map would move), stop words (dropped documents), unicode,
+/// punctuation-bearing words, and stems that exercise every Porter step.
 const WORD_POOL: &[&str] = &[
     "running",
     "jumps",
@@ -113,8 +114,8 @@ fn random_text(rng: &mut Lcg, max_words: usize) -> String {
         .join(" ")
 }
 
-/// A label that is sometimes integer-like, to exercise class-key hoisting in
-/// the engines' own `OrderedMap`s.
+/// A label that is sometimes integer-like, so the engines' own `OrderedMap`s
+/// are exercised with the class keys a reordering map would move.
 fn random_label(rng: &mut Lcg) -> String {
     if rng.below(4) == 0 {
         format!("{}", rng.below(50))
@@ -127,22 +128,22 @@ fn random_label(rng: &mut Lcg) -> String {
 fn bayes_engine_state(e: &BayesEngine) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    for (label, counts) in e.class_features().iter_insertion() {
+    for (label, counts) in e.class_features().iter() {
         write!(s, "C{label}:").unwrap();
         for (i, v) in counts {
             write!(s, "{i}={:x},", v.to_bits()).unwrap();
         }
         s.push(';');
     }
-    for (label, total) in e.class_totals().iter_insertion() {
+    for (label, total) in e.class_totals().iter() {
         write!(s, "T{label}={:x};", total.to_bits()).unwrap();
     }
     write!(s, "N{:x}", e.total_examples().to_bits()).unwrap();
     s
 }
 
-/// The pre-hoist training loop: one `text_to_features` call per document, fed
-/// through the public [`Engine`] trait into a shadow engine.
+/// The pre-batching training loop: one `text_to_features` call per document,
+/// fed through the public [`Engine`] trait into a shadow engine.
 fn slow_bayes_train(c: &BayesClassifier, engine: &mut BayesEngine, last_added: &mut usize) {
     for doc in &c.docs()[*last_added..] {
         engine.add_example(&c.text_to_features(&doc.text), &doc.label);
@@ -152,7 +153,7 @@ fn slow_bayes_train(c: &BayesClassifier, engine: &mut BayesEngine, last_added: &
 }
 
 #[test]
-fn hoisted_bayes_train_matches_the_per_document_path() {
+fn batched_bayes_train_matches_the_per_document_path() {
     let mut rng = Lcg(0xDEAD_BEEF_1234_5678);
     for case in 0..500 {
         let mut c = BayesClassifier::new();
@@ -188,7 +189,7 @@ fn hoisted_bayes_train_matches_the_per_document_path() {
                 }
                 8 => {
                     // Deletes the matched tokens' feature slots outright, so a
-                    // later train sees a narrower — and re-hoisted — layout.
+                    // later train sees a narrower — and re-indexed — layout.
                     let t = random_text(&mut rng, 6);
                     let l = random_label(&mut rng);
                     c.remove_document(t.as_str(), &l);
@@ -204,28 +205,44 @@ fn hoisted_bayes_train_matches_the_per_document_path() {
         assert_eq!(
             bayes_engine_state(c.engine()),
             bayes_engine_state(&oracle),
-            "case {case}: hoisted train diverged from the per-document path"
+            "case {case}: batched train diverged from the per-document path"
         );
         assert_eq!(c.last_added(), oracle_last, "case {case}");
     }
 }
 
+/// An integer-like token added between trainings widens the vector at the end
+/// and leaves every learned slot where it was — which is what makes the second,
+/// *incremental* train sound: the counts already in the engine still address
+/// the features they were accumulated for.
 #[test]
-fn integer_like_tokens_added_between_trains_shift_the_slots_identically() {
-    // After the first train, adding "42" hoists it to slot 0 and shifts every
-    // learned index; the second (incremental) train must build the *new*
-    // documents' observations against the new layout — and only those.
+fn integer_like_tokens_added_between_trains_keep_the_learned_slots() {
     let mut c = BayesClassifier::new();
     let mut oracle = BayesEngine::default();
     let mut oracle_last = 0usize;
     c.add_document(&vec!["zebra".to_owned(), "appl".to_owned()], "A");
     slow_bayes_train(&c, &mut oracle, &mut oracle_last);
     c.train().unwrap();
+    let learned: Vec<(String, usize)> = c
+        .feature_order()
+        .into_iter()
+        .map(|k| (k.to_owned(), c.features().slot_of(k).expect("present")))
+        .collect();
+    assert_eq!(
+        learned,
+        vec![("zebra".to_owned(), 0), ("appl".to_owned(), 1)]
+    );
+
     c.add_document(&vec!["42".to_owned(), "zebra".to_owned()], "B");
     slow_bayes_train(&c, &mut oracle, &mut oracle_last);
     c.train().unwrap();
-    assert_eq!(c.feature_order(), vec!["42", "zebra", "appl"]);
+    assert_eq!(c.feature_order(), vec!["zebra", "appl", "42"]);
+    for (key, slot) in &learned {
+        assert_eq!(c.features().slot_of(key), Some(*slot), "{key} moved");
+    }
     assert_eq!(bayes_engine_state(c.engine()), bayes_engine_state(&oracle));
+    // The engine trained before "42" existed still answers what it learned.
+    assert_eq!(c.classify(&vec!["appl".to_owned()]).unwrap(), "A");
 }
 
 #[test]
@@ -351,8 +368,16 @@ mod dense_reference {
         let mut targets = vec![vec![0.0f64; num_classes]; e.example_count()];
         let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(e.example_count());
         let mut d = 0usize;
-        for (c, label) in e.examples().enumeration_order().into_iter().enumerate() {
-            for row in e.examples().get(label).expect("key came from this map") {
+        // Same ordering the production path uses: `theta[i]` is reported under
+        // `classifications()[i]`, so column `i` of `targets` must be that same
+        // class. Deriving the order from `examples()` separately is how the two
+        // came apart before, and is what this parity test is here to catch.
+        for (c, label) in e.classifications().iter().enumerate() {
+            for row in e
+                .examples()
+                .get(label.as_str())
+                .expect("key came from this map")
+            {
                 matrix.push(row.iter().map(|&b| f64::from(b)).collect());
                 targets[d][c] = 1.0;
                 d += 1;
@@ -376,7 +401,7 @@ mod dense_reference {
 fn logistic_examples_state(e: &LogisticEngine) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    for (label, rows) in e.examples().iter_insertion() {
+    for (label, rows) in e.examples().iter() {
         write!(s, "E{label}:{rows:?};").unwrap();
     }
     write!(s, "C{:?};N{}", e.classifications(), e.example_count()).unwrap();
@@ -412,7 +437,7 @@ fn sparse_logistic_fit_matches_the_dense_reference() {
         }
 
         // Oracle engine: the per-document observation path, recorded through
-        // the public trait — this checks the hoisted logistic re-add loop.
+        // the public trait — this checks the batched logistic re-add loop.
         let mut oracle = LogisticEngine::default();
         for doc in c.docs() {
             oracle.add_example(&c.text_to_features(&doc.text), &doc.label);
@@ -425,7 +450,7 @@ fn sparse_logistic_fit_matches_the_dense_reference() {
                 assert_eq!(
                     logistic_examples_state(c.engine()),
                     logistic_examples_state(&oracle),
-                    "case {case}: hoisted re-add diverged from the per-document path"
+                    "case {case}: batched re-add diverged from the per-document path"
                 );
                 assert_eq!(
                     theta_bits(c.engine().theta().expect("trained")),
@@ -442,7 +467,7 @@ fn sparse_logistic_fit_matches_the_dense_reference() {
 #[test]
 fn retraining_after_new_vocabulary_matches_the_dense_reference() {
     // A second train() after the vocabulary grew re-adds *every* document
-    // against the widened, re-hoisted layout — the RESETS_ON_TRAIN path.
+    // against the widened layout — the RESETS_ON_TRAIN path.
     let mut c = LogisticRegressionClassifier::new();
     c.add_document("i am long qqqq", "buy");
     c.add_document("i am short qqqq", "sell");

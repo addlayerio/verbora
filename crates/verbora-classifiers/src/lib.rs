@@ -65,7 +65,7 @@
 //!   changes the iteration count and hence the model.
 //! * **Ties are resolved, not left to chance.** `get_classifications` sorts
 //!   descending with a *stable* sort, so classes scoring exactly equal come
-//!   back in the engine's own enumeration order. A `NaN` difference compares as
+//!   back in the order the engine first saw those classes. A `NaN` difference compares as
 //!   "equal" rather than panicking, so an unorderable score never aborts a
 //!   ranking.
 //!
@@ -88,7 +88,7 @@
 //!
 //! The consequence worth stating plainly: **a `NaN` score can be returned as
 //! the winner.** The comparator treats an unorderable difference as a tie and
-//! the sort is stable, so a class scoring `NaN` keeps its enumeration position
+//! the sort is stable, so a class scoring `NaN` keeps its first-appearance position
 //! and [`Classifier::classify`] returns it — `Ok(label)`, no error, no panic,
 //! and a score that is not a number. Compare `NaN` explicitly (`f64::is_nan`)
 //! if that matters to your caller; the ranking will not do it for you.
@@ -111,16 +111,21 @@
 //! | A token absent from the vocabulary | contributes nothing to the observation vector; in Bayes its per-class count falls back to the smoothing constant |
 //! | An unknown class label handed to [`BayesEngine::probability_of_class`] | `None` — an untrained class has no prior |
 //! | A document added after `train()` | the vocabulary widens and the fit does not, so classifying is [`ClassifierError::StaleModel`] until `train()` runs again |
-//! | Two classes scoring exactly equal | both are returned; `classify` takes the first in enumeration order |
+//! | Two classes scoring exactly equal | both are returned; `classify` takes the first the engine was trained on |
 //!
-//! # Feature layout, and why it is fragile
+//! # Feature layout
 //!
-//! A feature's id is its position in an insertion-ordered map ([`OrderedMap`]),
-//! which enumerates **integer-like keys first, in ascending numeric order**,
-//! and the rest in insertion order. Adding a token that looks like an integer
-//! therefore hoists it to slot 0 and shifts every previously learned index. A
-//! trained weight vector restored against a shifted index is scrambled rather
-//! than merely stale, which is why persistence is stamped.
+//! A feature's id is its slot in an insertion-ordered map ([`OrderedMap`]): the
+//! first token the vocabulary ever saw is slot 0, and a token keeps its slot
+//! for as long as it is in the vocabulary. Adding a token — including one that
+//! looks like an integer — appends it after every feature already known, so a
+//! trained model's indices stay valid and only the new slot is untrained.
+//!
+//! [`Classifier::remove_document`] is the exception, and is destructive by
+//! design: it *deletes* the matched document's tokens from the vocabulary
+//! rather than decrementing them, and closing those gaps shifts every later
+//! slot down. A model fitted before such a call is stale afterwards; `retrain`
+//! is what recovers it.
 //!
 //! # Persistence
 //!
@@ -211,7 +216,7 @@ pub use maxent::{
     Event, Gis, MaxEntClassifier, MaxEntError, MaxEntModel, ModelDefect, RestoreError, Sample,
     StopReason, TrainingReport,
 };
-pub use ordmap::{OrderedMap, is_array_index};
+pub use ordmap::OrderedMap;
 pub use stamp::{
     // `StampMismatch` is exported because `StampError::Incompatible` carries
     // one: a caller matching on that variant has to be able to name its

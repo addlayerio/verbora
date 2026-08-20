@@ -18,7 +18,6 @@ use crate::transcendental;
 /// ```
 pub type LogisticRegressionClassifier = Classifier<LogisticEngine>;
 
-/// The logistic-regression engine: examples per class, and a theta per class.
 /// The logistic-regression engine: one-vs-rest batch gradient descent.
 ///
 /// This is the most numerically delicate code in the crate. `descendGradient`
@@ -76,13 +75,14 @@ pub type LogisticRegressionClassifier = Classifier<LogisticEngine>;
 ///
 #[derive(Debug, Clone, Default)]
 pub struct LogisticEngine {
-    /// Label -> observations. Enumerated in
-    /// [`OrderedMap`](crate::OrderedMap) order when the training matrix is
-    /// assembled, which is *not* the order the labels were first seen in.
+    /// Label -> observations, in the order the labels were first seen
+    /// ([`OrderedMap`](crate::OrderedMap) is insertion-ordered).
     examples: OrderedMap<Vec<Vec<u8>>>,
-    /// Labels in first-appearance order — the order `getClassifications` reads
-    /// them back in. When it disagrees with the enumeration order above, the
-    /// engine mislabels every class; see the module docs of [`OrderedMap`](crate::OrderedMap).
+    /// Labels in first-appearance order — the order `get_classifications` reads
+    /// them back in, and the order [`Self::fit`] assembles the target columns
+    /// in. The two must be the same order or every class is mislabelled, so
+    /// `fit` reads this field rather than re-deriving the order from
+    /// `examples`.
     classifications: Vec<String>,
     example_count: usize,
     /// `None` until `train()`; asking for classifications before then is
@@ -316,9 +316,16 @@ impl Engine for LogisticEngine {
         let mut rows: Vec<&Vec<u8>> = Vec::with_capacity(self.example_count);
 
         let mut d = 0usize;
-        // `for (var classification in this.examples)` — enumeration order, which
-        // is where the label/theta misalignment comes from.
-        for (c, label) in self.examples.enumeration_order().into_iter().enumerate() {
+        // Column `c` of `targets` trains `theta[c]`, and `classifications()`
+        // reports `theta[i]` under `self.classifications[i]`. Those two indices
+        // must therefore be the same order, so this walks `self.classifications`
+        // — the one field that defines it — rather than re-deriving an order
+        // from `examples`. Deriving it separately is how the two came apart
+        // before: with labels "2" then "1", every weight was trained against
+        // the right column and then reported under the wrong label, so a
+        // document of class "2" classified as "1" and vice versa.
+        for (c, label) in self.classifications.clone().into_iter().enumerate() {
+            let label = label.as_str();
             for row in self.examples.get(label).expect("key came from this map") {
                 rows.push(row);
                 targets[d][c] = 1.0;
@@ -388,8 +395,7 @@ impl Engine for LogisticEngine {
                 "examples".to_owned(),
                 DynValue::Obj(
                     self.examples
-                        .ordered_entries()
-                        .into_iter()
+                        .iter()
                         .map(|(label, rows)| {
                             (
                                 label.to_owned(),
@@ -495,6 +501,25 @@ impl Engine for LogisticEngine {
 
 #[cfg(test)]
 mod tests {
+    /// Trained weights must come back under the label they were trained for,
+    /// whatever the labels look like.
+    ///
+    /// Integer-like labels are the case that used to separate the two
+    /// orderings, back when the label map hoisted them ahead of every other
+    /// key: walking it while reporting insertion order paired each column of
+    /// weights with the wrong class, and with labels "2" then "1" the
+    /// classifier returned exactly the opposite of what it was trained on,
+    /// confidently.
+    #[test]
+    fn integer_like_labels_do_not_swap_the_trained_classes() {
+        let mut c = LogisticRegressionClassifier::new();
+        c.add_document("cat dog cat", "2");
+        c.add_document("car truck car", "1");
+        c.train().expect("trains");
+        assert_eq!(c.classify("cat dog cat").expect("classifies"), "2");
+        assert_eq!(c.classify("car truck car").expect("classifies"), "1");
+    }
+
     use super::*;
 
     #[test]
@@ -576,15 +601,25 @@ mod tests {
         assert_eq!(c.engine().example_count(), 2);
     }
 
+    /// The label map and the reported label list must agree on one order —
+    /// including for integer-like labels, which is where they used to diverge.
+    ///
+    /// `fit` reads `classifications` and nothing else, so this cannot come
+    /// apart by construction; the assertion is here so that a future map whose
+    /// order is *not* first-appearance fails loudly rather than silently
+    /// mislabelling. See `integer_like_labels_do_not_swap_the_trained_classes`
+    /// for the end-to-end outcome.
     #[test]
-    fn integer_like_labels_are_mislabelled_exactly_as_in_the_reference() {
-        // `classifications` is ['2','1'] but the theta columns are built in
-        // enumeration order ['1','2'], so the labels are swapped.
+    fn the_label_map_and_the_reported_labels_share_one_order() {
         let mut c = LogisticRegressionClassifier::new();
         c.add_document("i have a computer", "2");
         c.add_document("my laptop is fast", "1");
         c.train().unwrap();
         assert_eq!(c.engine().classifications(), ["2", "1"]);
-        assert_eq!(c.engine().examples().enumeration_order(), vec!["1", "2"]);
+        assert_eq!(
+            c.engine().examples().keys().collect::<Vec<_>>(),
+            c.engine().classifications(),
+            "fit assembles target columns in this order; classifications() reports in it"
+        );
     }
 }

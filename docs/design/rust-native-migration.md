@@ -348,10 +348,9 @@ Changing the unit without fixing the window first would silently regress
 
 ## Remaining migration debt
 
-A real gap, deliberately left rather than started half-way. It blocks no
-release; finishing it means redefining behaviour, not editing it.
+Nothing is presently tracked here — the stemmer, phonetics and classifiers
+rows this table used to carry are all closed now.
 
-The stemmer and phonetics rows this table used to carry are both closed now.
 `verbora-stemmers` no longer indexes by UTF-16 code unit anywhere — every
 stemmer measures in Unicode scalar values (see `units.rs`). `verbora-phonetics`
 was re-verified rather than merely recounted: only **12** references to Apache
@@ -361,9 +360,15 @@ is a legitimate standards citation or a candid note about a diffed oracle used
 only during development — none asserts a value transcribed from a Java test
 class. The violation this row used to flag no longer exists in the crate.
 
-| Crate | Debt |
-|---|---|
-| **`verbora-classifiers`** | `Classifier<E>`'s feature-vector layout still reproduces another implementation's own-property enumeration bug, on purpose: `OrderedMap` hoists any token that is the canonical decimal spelling of an integer in `0..=2^32-2` to the front, in ascending numeric order, ahead of every other token in insertion order. Adding the token `"99"` to a trained classifier can shift every previously learned feature index and silently corrupt the model (`src/ordmap.rs`). Documented rather than redefined, because redefining it is a redesign — and because `MaxEntClassifier`, the crate's other model, carries no such debt: it is a from-scratch implementation of generalised iterative scaling (Darroch & Ratcliff, 1972), not a port of anything. |
+`verbora-classifiers`' `OrderedMap` no longer reproduces another runtime's
+own-property enumeration order. A key takes the next free slot the first time
+it is inserted and keeps it — integer-like or not — so adding a token to a
+trained classifier appends rather than reshuffling: no previously learned
+feature index can be shifted, and therefore silently corrupted, by vocabulary
+growth (`src/ordmap.rs`). The one remaining way a fitted model's slots move is
+`Classifier::remove_document`, which deletes matched tokens outright and
+closes the resulting gap; that is a documented, deliberate behaviour, not
+migration debt.
 
 ## Pending documentation corrections
 

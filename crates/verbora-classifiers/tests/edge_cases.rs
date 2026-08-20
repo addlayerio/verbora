@@ -65,10 +65,15 @@ fn bayes_survives_every_category() {
             "{name} should classify as itself"
         );
     }
-    // The vocabulary holds one slot per distinct token, and `"0"` and `"42"` are
-    // array-index keys, so they enumerate first.
-    let order = classifier.feature_order();
-    assert_eq!(&order[..2], &["0", "42"]);
+    // The vocabulary holds one slot per distinct token, in the order the tokens
+    // were first added — every category's tokens land where they were fed, and
+    // the digit tokens `"0"` and `"42"` take their turn like the rest instead of
+    // being sorted to the front.
+    let expected: Vec<String> = categories()
+        .into_iter()
+        .flat_map(|(_, tokens)| tokens)
+        .collect();
+    assert_eq!(classifier.feature_order(), expected);
 }
 
 #[test]

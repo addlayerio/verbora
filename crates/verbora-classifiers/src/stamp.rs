@@ -30,6 +30,20 @@ use crate::stemmer::Stemmer;
 /// records which unit produced its features — see [`STEMMER_PROBES`] for why
 /// the fingerprint could not — so schema-3 models are refused rather than
 /// silently rekeyed.
+///
+/// # Why correcting the feature slot order did *not* bump this
+///
+/// [`OrderedMap`](crate::OrderedMap) used to enumerate integer-like keys ahead
+/// of every other key, and the feature vector's layout is that enumeration; it
+/// now enumerates in insertion order. That moves slots in memory, which sounds
+/// like exactly the hazard this constant exists for — but it does not move them
+/// in a *saved* model. A model is serialised with its `features` written in slot
+/// order, and restored by inserting those keys in the order they appear, so the
+/// restored slot order is whatever the saving build wrote. A schema-4 model from
+/// before the change replays its own hoisted order as insertion order and lands
+/// on the identical layout; `a_model_saved_before_the_slot_order_changed_restores_to_the_same_slots`
+/// pins that against recorded bytes. The invariant that keeps this true is in
+/// the JSON writer, which must never reorder object keys — see `write_json`.
 pub const SCHEMA: u32 = 4;
 
 /// The JSON member the stamp is written to and read from.

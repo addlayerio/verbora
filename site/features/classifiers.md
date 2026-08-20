@@ -340,20 +340,21 @@ fn main() {
 }
 ```
 
-### Feature-vector key order is not insertion order
+### Feature slots are stable across vocabulary growth
 
-`Classifier::text_to_features` builds a document's 0/1 vector using a two-tier key
-order: keys that are the canonical decimal spelling of an integer in
-`0..=2^32-2` ("array-index" keys) come first in ascending numeric order, and every
-other key follows in insertion order. `OrderedMap<V>` **recomputes** that order on
-every call rather than caching stable indices, because indices shift whenever an
-integer-like token is learned later.
+`Classifier::text_to_features` builds a document's 0/1 vector directly from the
+feature vocabulary's insertion order (`OrderedMap`): the first token the
+vocabulary ever saw takes slot 0, and a token — integer-like or not — keeps its
+slot for as long as it stays in the vocabulary. Adding a new token later,
+including one that looks like an integer, appends it after every slot already
+handed out.
 
-Because `BayesClassifier::train()` is incremental, each document's feature vector
-is built against whatever the current order was when *that* document was trained.
-Add a new integer-like token later and every future `text_to_features` call
-recomputes a shifted layout, while the counts already learned stay keyed under the
-old slot numbers — silently invalidating the model with no error and no warning:
+That is what lets `BayesClassifier::train()` stay incremental. A document
+trained early reads back the same slots it was fitted on even after the
+vocabulary has grown around it — the vector merely grows a tail of new,
+as-yet-untrained slots, which is what `LogisticRegressionClassifier` reports as
+`ClassifierError::StaleModel` once a fitted `theta` is narrower than the current
+observation:
 
 ```rust
 use verbora_classifiers::BayesClassifier;
@@ -365,20 +366,30 @@ fn main() {
     c.train().unwrap();
     assert_eq!(c.classify(&vec!["alpha".to_owned()]).unwrap(), "A");
 
-    // A brand-new document whose only token LOOKS LIKE AN INTEGER.
+    // A new document whose only token looks like an integer.
     c.add_document(&vec!["99".to_owned()], "C");
     c.train().unwrap();
 
-    // "99" is hoisted to slot 0, shifting "alpha" and "beta" one slot right in
-    // every FUTURE text_to_features call — but the counts learned for A and B
-    // are still stored under their OLD slots.
-    assert_eq!(c.feature_order(), vec!["99", "alpha", "beta"]);
-    assert_eq!(c.classify(&vec!["alpha".to_owned()]).unwrap(), "B");
+    // "99" takes the next free slot; "alpha" and "beta" keep theirs, and the
+    // prediction already fitted for "alpha" is unchanged.
+    assert_eq!(c.feature_order(), vec!["alpha", "beta", "99"]);
+    assert_eq!(c.classify(&vec!["alpha".to_owned()]).unwrap(), "A");
 }
 ```
 
-The same hazard applies to **class labels**: `add_document(text, "42")` gives an
-integer-like label, which can misassign logistic regression's theta columns.
+`Classifier::remove_document` is the one operation that moves slots: it deletes
+the matched document's tokens from the vocabulary outright rather than
+decrementing them, and closing the resulting gap shifts every later slot down
+by one. A model fitted before such a call reads the wrong features afterwards,
+and `ClassifierError::StaleModel` is not a safety net here — it only fires for
+`LogisticRegressionClassifier`, and only when the resulting width actually
+differs from what `theta` was fitted on. `retrain()` is what recovers a
+classifier that has had documents removed.
+
+The same insertion-order rule governs class labels: `LogisticEngine::fit`
+assembles its per-class target columns from `classifications`, the identical
+first-appearance order `get_classifications` reports weights back in, so a
+label like `"42"` trains and predicts under the correct class.
 
 ### MaxEnt scores are genuine probabilities
 
@@ -405,8 +416,8 @@ is no unnormalised intermediate value anywhere in the public surface.
   convergence or `Gis::max_iterations` with no "advance one iteration" entry
   point, and it rebuilds its feature index from the whole sample every time it
   runs — nothing from a previous fit is reused.
-- **Labels are always `String`,** set from the moment `add_document` runs.
-  Integer-like labels enumerate out of insertion order, as above.
+- **Labels are always `String`,** set from the moment `add_document` runs, and
+  enumerate in insertion order like every other key.
 - **`add_document` requires an explicit label.** Check before calling if you want
   to skip a document conditionally.
 - **Bayes smoothing is `f64`-only with a truthy-and-finite guard.**
@@ -418,10 +429,12 @@ is no unnormalised intermediate value anywhere in the public surface.
 - **Calling `LogisticRegressionClassifier::train()` repeatedly, expecting
   `BayesClassifier`-style incremental behaviour.** It resets and reruns gradient
   descent over every stored document on every call.
-- **Adding a vocabulary token that looks like an integer,** then being surprised
-  a trained model's feature indices shifted — `classify()` can silently change
-  its answer for input it never saw. See
-  [Feature-vector key order](#feature-vector-key-order-is-not-insertion-order).
+- **Calling `remove_document` and expecting `train()` alone to fix things up.**
+  Removal deletes the matched document's tokens from the vocabulary outright and
+  shifts every later feature slot down by one — a model fitted before the call
+  can silently read the wrong features afterwards, and a coincidental length
+  match will not raise `ClassifierError::StaleModel` to catch it. See
+  [Feature slots are stable across vocabulary growth](#feature-slots-are-stable-across-vocabulary-growth).
 - **Adding events after `train()`/`train_with()` and forgetting to refit.** The
   classifier keeps answering with the previous fit — nothing is invalidated
   automatically — until you call `train()`/`train_with()` again over the grown
@@ -458,7 +471,7 @@ document's feature list contains. See
 |---|---|---|
 | `BayesClassifier::add_document` | amortised O(1) per token | one `OrderedMap` insert per distinct token |
 | `BayesClassifier::train` | O(new docs × features per doc) | incremental — only documents past `last_added` |
-| `Classifier::text_to_features` | O(\|features\| + \|observation\|) | a `HashSet` probe, not a linear scan per feature |
+| `Classifier::text_to_features` | O(\|features\| + \|observation\|) | one `OrderedMap::slot_of` hash lookup per token, not a linear scan per feature |
 | `LogisticRegressionClassifier::train` | O(iterations × classes × m × n) | bounded by `max_it = 500 × m` per class, typically far fewer at convergence |
 | `MaxEntClassifier::train`/`train_with` | O(iterations × Σ over events of that event's active features) | generalised iterative scaling, refit from the uniform model every call |
 | `MaxEntModel::distribution` | O(\|context predicates\| × outcomes each is known with) | a linear scan for dedup, since contexts are small — tens of predicates at most |
@@ -565,7 +578,7 @@ cargo doc -p verbora-classifiers --no-deps --open
 | `Gis`, `StopReason`, `TrainingReport` | `verbora_classifiers::{Gis, StopReason, TrainingReport}` |
 | `MaxEntModel`, `ModelDefect` | `verbora_classifiers::{MaxEntModel, ModelDefect}` |
 | Bit-exact `log`/`exp`/`pow`/`sigmoid` | `verbora_classifiers::{log, exp, pow, sigmoid}` |
-| array-index-first, insertion-order map | `verbora_classifiers::{OrderedMap, is_array_index}` |
+| insertion-order map | `verbora_classifiers::OrderedMap` |
 | JSON-like value, UTF-16-ordered stringify/parse | `verbora_classifiers::{DynValue, ParseError, json_stringify_pretty, number_to_string, utf16_cmp}` |
 | Tokenize-and-stem adapter | `verbora_classifiers::{StemCache, Stemmer, StemmerOf, default_stemmer}` |
 

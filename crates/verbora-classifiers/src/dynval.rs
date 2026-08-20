@@ -14,9 +14,10 @@ use std::fmt;
 ///   Unicode scalar value instead of UTF-16 code unit, print `1e21` as
 ///   `1000000000000000000000` — and two contexts that the reference keeps apart
 ///   collide, or two that it merges stay separate. The trained model changes.
-/// * `save()` calls `JSON.stringify`, and the reference's own spec files read
-///   the bytes back. Key order there is the reference's own-property order, which
-///   is *not* the sorted order `safe-stable-stringify` uses.
+/// * `save()` writes a model as JSON and `restore()` reads it back. Key order
+///   there is the object's **own field order**, left exactly as built — which is
+///   *not* the sorted order `safe-stable-stringify` uses, and is what carries a
+///   classifier's feature slots across the round trip; see [`json_stringify`](DynValue::json_stringify).
 ///
 /// Both need the reference's `Number::toString`, which differs from Rust's `{}` in
 /// exactly the region where the exponent form kicks in:
@@ -70,7 +71,13 @@ impl DynValue {
         }
     }
 
-    /// The value's `JSON.stringify` rendering, preserving own-property order.
+    /// The value as JSON, with every object's fields in the order they were
+    /// built — nothing is sorted or hoisted.
+    ///
+    /// That order is part of the contract, not a formatting detail: a
+    /// classifier's `features` object is written in feature-slot order and read
+    /// back by inserting its fields in the order they appear, so reordering here
+    /// would silently re-key every restored model.
     ///
     /// Returns `None` for a top-level `undefined`, as `JSON.stringify` does.
     pub fn json_stringify(&self) -> Option<String> {
@@ -100,27 +107,6 @@ impl DynValue {
                 .collect::<Vec<_>>()
                 .join(","),
             Self::Obj(_) => "[object Object]".to_owned(),
-        }
-    }
-
-    /// The same value with every object's properties reordered the way
-    /// the reference enumerates them: array-index keys first in ascending numeric
-    /// order, then the rest in insertion order.
-    ///
-    /// Useful when a structure built in source order has to be compared against
-    /// one that has been through this ordering — a Bayes model's per-class
-    /// counts are keyed by feature index, so a map built as `{"10": …, "2": …}`
-    /// enumerates as `{"2": …, "10": …}`.
-    pub fn in_own_property_order(&self) -> Self {
-        match self {
-            Self::Obj(fields) => Self::Obj(
-                own_key_order(fields)
-                    .into_iter()
-                    .map(|(k, v)| (k.clone(), v.in_own_property_order()))
-                    .collect(),
-            ),
-            Self::Arr(items) => Self::Arr(items.iter().map(Self::in_own_property_order).collect()),
-            other => other.clone(),
         }
     }
 
@@ -368,38 +354,21 @@ fn write_stable(out: &mut String, value: &DynValue) -> bool {
 // JSON.stringify
 // --------------------------------------------------------------------------
 
-/// Orders object entries the way the reference enumerates own properties:
-/// array-index keys first in ascending numeric order, then the rest in
-/// insertion order.
+/// Writes `value` in its own field order, with no sorting and no reordering.
 ///
-/// The ordering is visible in every saved file. A Bayes model's per-class
-/// counts are the everyday case: they are keyed by feature index, so a map
-/// accumulated as `{'10':…, '2':…}` serialises as `{"2":…,"10":…}`. Only
-/// canonical non-negative integers below `2^32 − 1` count as indices, so a
-/// predicate spelled `"-2"` sorts with the ordinary keys, not before them.
-fn own_key_order(fields: &[(String, DynValue)]) -> Vec<&(String, DynValue)> {
-    let mut indices: Vec<(u32, &(String, DynValue))> = Vec::new();
-    let mut rest: Vec<&(String, DynValue)> = Vec::new();
-    for field in fields {
-        if crate::ordmap::is_array_index(&field.0) {
-            indices.push((field.0.parse().expect("checked by is_array_index"), field));
-        } else {
-            rest.push(field);
-        }
-    }
-    indices.sort_by_key(|(n, _)| *n);
-    let mut out: Vec<&(String, DynValue)> = indices.into_iter().map(|(_, f)| f).collect();
-    out.extend(rest);
-    out
-}
-
-/// Writes `value` as `JSON.stringify` would: own-property order, no sorting.
+/// The field order is load-bearing, not cosmetic. `Classifier`'s `features`
+/// object is written in slot order and read back by inserting the fields in the
+/// order they appear, so a feature keeps its slot across a save/restore round
+/// trip only because this writer leaves the order alone. A writer that hoisted
+/// integer-like keys — as `JSON.stringify` does, and as this one used to —
+/// would hand a restored model a feature layout its weights were never trained
+/// against.
 fn write_json(out: &mut String, value: &DynValue) -> bool {
     match value {
         DynValue::Obj(fields) => {
             out.push('{');
             let mut first = true;
-            for (k, v) in own_key_order(fields) {
+            for (k, v) in fields {
                 if matches!(v, DynValue::Undefined) {
                     continue;
                 }
@@ -449,8 +418,8 @@ fn write_pretty(out: &mut String, value: &DynValue, indent: usize, depth: usize)
     let pad = |out: &mut String, d: usize| out.extend(std::iter::repeat_n(' ', indent * d));
     match value {
         DynValue::Obj(fields) => {
-            let live: Vec<&(String, DynValue)> = own_key_order(fields)
-                .into_iter()
+            let live: Vec<&(String, DynValue)> = fields
+                .iter()
                 .filter(|(_, v)| !matches!(v, DynValue::Undefined))
                 .collect();
             if live.is_empty() {
