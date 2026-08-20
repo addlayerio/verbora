@@ -254,7 +254,18 @@ body {
    transparent (§4) so the bar, its title block and its content body all let
    this through. VitePress's own divider stops at the sidebar edge; one
    full-width hairline here replaces it. */
-.VPNav {
+/* The glass goes on `.VPNavBar`, never on `.VPNav`.
+
+   `.VPNav` is the wrapper around *both* the bar and `.VPNavScreen`, the
+   mobile menu — and `.VPNavScreen` is `position: fixed` with
+   `top: var(--vp-nav-height); bottom: 0`, expecting the viewport as its
+   containing block. `backdrop-filter` (like `filter` and `transform`)
+   makes an element the containing block for its fixed descendants, so
+   putting it on `.VPNav` resolves those offsets against the 64px bar
+   instead: the menu opens with zero height and nothing appears, while the
+   hamburger still flips to its close state. Scoping the effect to the bar
+   keeps the look and leaves the menu measuring against the viewport. */
+.VPNavBar {
     background: rgb(var(--ox-bg-rgb) / 0.8);
     backdrop-filter: blur(16px) saturate(140%);
     -webkit-backdrop-filter: blur(16px) saturate(140%);
