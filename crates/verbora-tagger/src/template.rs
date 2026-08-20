@@ -179,6 +179,9 @@ impl Template {
         }
         let t = |d: isize| tag_at(words, i, d).cloned();
         let w = |d: isize| word_at(words, i, d);
+        // Where the caller starts writing, so the within-window templates can
+        // deduplicate only what this call added.
+        let first = out.len();
         match self {
             Self::PrevTag => out.extend(t(-1).map(Condition::PrevTag)),
             Self::NextTag => out.extend(t(1).map(Condition::NextTag)),
@@ -326,11 +329,61 @@ impl Template {
                 }
             }
         }
+
+        // A window template asks one question — "is the tag at −1 *or* −2 a
+        // DT?" — so it must contribute one condition, not one per position it
+        // looked at. Emitting a duplicate makes the trainer credit the same
+        // token twice: a rule fixing exactly one site scored 2, clearing the
+        // `min_score` threshold that exists precisely to stop a rule from
+        // memorising a single site, and `TrainingStep::corrections` — "tokens
+        // it changed from wrong to right" — reported two for one token.
+        // `PrevTagWithin3`/`NextTagWithin3` could triple-count.
+        if out.len() - first > 1 {
+            let mut seen = first;
+            while seen < out.len() {
+                if out[first..seen].contains(&out[seen]) {
+                    out.remove(seen);
+                } else {
+                    seen += 1;
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A window template contributes one condition per site, not one per
+    /// position it inspected.
+    ///
+    /// `PREV-1-OR-2-TAG` looks at −1 and −2. When both carry the same tag the
+    /// two lookups produce the *same* `Condition`, and emitting it twice makes
+    /// the trainer credit one corrected token twice. The corpus below has
+    /// exactly one mis-tagged token, so no rule can honestly score 2 — yet
+    /// before this deduplication one did, clearing the `min_score` threshold
+    /// that exists to stop a rule from memorising a single site.
+    #[test]
+    fn a_window_template_credits_a_repeated_tag_once() {
+        let words = [tok("the", "DT"), tok("the", "DT"), tok("dog", "VB")];
+        let mut out = Vec::new();
+        Template::PrevTagWithin2.instantiate(&words, 2, &mut out);
+        assert_eq!(
+            out,
+            vec![Condition::PrevTagWithin2(
+                Tag::new("DT").expect("valid tag")
+            )]
+        );
+    }
+
+    /// Distinct tags in the window still contribute one condition each.
+    #[test]
+    fn a_window_template_keeps_distinct_tags() {
+        let words = [tok("a", "DT"), tok("big", "JJ"), tok("dog", "VB")];
+        let mut out = Vec::new();
+        Template::PrevTagWithin2.instantiate(&words, 2, &mut out);
+        assert_eq!(out.len(), 2);
+    }
+
     use super::*;
 
     fn tok(t: &'static str, g: &'static str) -> TaggedToken<'static> {
