@@ -118,6 +118,8 @@
 //! are not restated here: measurement is pending, and this crate publishes
 //! no number it has not measured against the code as it now stands.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod auto;
 mod detect;
 mod fallback;

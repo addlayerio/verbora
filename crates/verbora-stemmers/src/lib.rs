@@ -85,6 +85,8 @@
 //! to rayon's own per-task scheduling cost that word-level parallelism would
 //! mostly measure the scheduler, while a whole document clears that floor.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod among;
 mod base;
 mod carry;

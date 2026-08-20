@@ -107,6 +107,8 @@
 //! has not been measured; where a trade-off is claimed without a number, the
 //! claim is about allocation behaviour, which is visible in the signatures.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod frozen;
 mod iter;
 mod membership;

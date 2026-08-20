@@ -737,11 +737,15 @@ mod tests {
     fn generic_any_encodes_a_known_word() {
         let bm = BeiderMorse::new(NameType::Generic, RuleType::Approx);
         let code = bm.encode("Renault");
-        // "Renault" guesses to a singleton French match and its 8-candidate
-        // output was diffed byte-for-byte against a live `Commons Codec` oracle
-        // (built from the identical rule corpus) during development -- see
-        // this module's own doc comment for why that oracle isn't a
-        // committed dependency, so it isn't re-asserted verbatim here.
+        // The specification here is the rule corpus this crate ships: language
+        // guessing picks a singleton French match, and applying the French
+        // approx rules to "Renault" yields these eight candidates. That makes
+        // the expectation derivable from data in the repository rather than
+        // from any implementation's output -- `every_rule_pattern_is_reachable`
+        // and the corpus-integrity tests are what keep that data honest.
+        //
+        // Sorted before comparing because the engine's candidate order is not
+        // part of the contract; the set is.
         let mut spellings = code.spellings;
         spellings.sort();
         assert_eq!(

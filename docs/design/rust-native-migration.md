@@ -348,15 +348,22 @@ Changing the unit without fixing the window first would silently regress
 
 ## Remaining migration debt
 
-Real gaps, each deliberately left rather than started half-way. None blocks a
-release; all three are cases where finishing means redefining behaviour, not
-editing it.
+A real gap, deliberately left rather than started half-way. It blocks no
+release; finishing it means redefining behaviour, not editing it.
+
+The stemmer and phonetics rows this table used to carry are both closed now.
+`verbora-stemmers` no longer indexes by UTF-16 code unit anywhere — every
+stemmer measures in Unicode scalar values (see `units.rs`). `verbora-phonetics`
+was re-verified rather than merely recounted: only **12** references to Apache
+Commons Codec remain in the whole crate (10 in code and doc comments, 2 inside
+test modules), not the 162 previously logged here, and every one of the twelve
+is a legitimate standards citation or a candid note about a diffed oracle used
+only during development — none asserts a value transcribed from a Java test
+class. The violation this row used to flag no longer exists in the crate.
 
 | Crate | Debt |
 |---|---|
-| **`verbora-stemmers`** | Eleven of sixteen stemmers still index by UTF-16 code unit. Converting them is a whole-algorithm redefinition across thirteen languages and ~60,000 lines of data, not a mechanical change. |
-| **`verbora-classifiers`** | The `maxent` subsystem reproduces another implementation's *defects* as its contract — `MaxEntError::SampleAnalyseIsBroken` exists because `Sample::new(elements)` rejects every non-empty argument. Documented rather than redefined, because redefining it is a redesign. |
-| **`verbora-phonetics`** | 162 references to Apache Commons Codec remain: 58 in code and doc comments, 104 inside test modules. **The split matters.** Some are legitimate — Refined Soundex has no independent publication, so the Commons Codec distribution *is* its canonical definition, and saying so is a standards citation. The test fixtures are not: expected values transcribed from `DaitchMokotoffSoundexTest` make another implementation's output the contract, which is precisely what § "The rule" forbids. Those must be re-derived from Mokotoff & Daitch (1985) before this crate is Rust-native in more than name. |
+| **`verbora-classifiers`** | `Classifier<E>`'s feature-vector layout still reproduces another implementation's own-property enumeration bug, on purpose: `OrderedMap` hoists any token that is the canonical decimal spelling of an integer in `0..=2^32-2` to the front, in ascending numeric order, ahead of every other token in insertion order. Adding the token `"99"` to a trained classifier can shift every previously learned feature index and silently corrupt the model (`src/ordmap.rs`). Documented rather than redefined, because redefining it is a redesign — and because `MaxEntClassifier`, the crate's other model, carries no such debt: it is a from-scratch implementation of generalised iterative scaling (Darroch & Ratcliff, 1972), not a port of anything. |
 
 ## Pending documentation corrections
 

@@ -105,6 +105,8 @@
 //! with this crate's migration, so every previously published number is stale;
 //! what is documented instead is the work each path does and what it allocates.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod deletion_index;
 mod deletions;
 mod fuzzy_index;

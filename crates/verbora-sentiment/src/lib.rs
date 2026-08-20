@@ -154,6 +154,8 @@
 //! * **`negations` is immutable.** It is a `&'static [&'static str]`, so one
 //!   analyzer cannot alter another's.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod analyzer;
 mod data;
 #[cfg(feature = "parallel")]

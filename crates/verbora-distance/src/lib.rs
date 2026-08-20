@@ -453,6 +453,8 @@
 //! individual function docs for cost trade-offs and when a plain sequential
 //! loop is the better choice (usually: for small batches or short strings).
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod dice;
 mod hamming;
 mod jaro_winkler;

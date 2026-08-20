@@ -278,6 +278,8 @@
 //! [`char_ngrams`] allocate nothing at all, and [`Padded`] pays for the padded
 //! sequence once in [`Padded::new`] rather than per window.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod chars;
 mod engine;
 

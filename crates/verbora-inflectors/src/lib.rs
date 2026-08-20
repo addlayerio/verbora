@@ -162,6 +162,8 @@
 //! * **The lexical lists are not exhaustive** and do not claim to be. A word
 //!   absent from a list takes the regular rule.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod case;
 mod data;
 mod engine;

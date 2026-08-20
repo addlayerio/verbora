@@ -91,6 +91,7 @@
 //!
 //! [UAX #29]: https://www.unicode.org/reports/tr29/
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
 #![forbid(unsafe_code)]
 
 mod condition;

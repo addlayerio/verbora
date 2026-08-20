@@ -147,6 +147,8 @@
 //! without the space and is what the halfwidth U+FF9E already decomposes to.
 //! The derivation is on that function.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod romanize;
 mod scan;
 mod syllabary;

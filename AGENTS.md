@@ -1639,9 +1639,10 @@ Concretely, permanently:
   execution environment.
 - A type is not made `Send`/`Sync` with `unsafe impl` to satisfy Rayon. If a
   type genuinely cannot be shared safely across threads (interior mutability
-  that is load-bearing, not incidental — see `MaxEntClassifier`'s
-  `Rc<RefCell<_>>` state or `PorterStemmerNl`'s sticky `Cell<bool>` flag),
-  it stays sequential-only, documented as to why, rather than forced.
+  that is load-bearing, not incidental — see `PorterStemmerNl`'s sticky
+  `Cell<bool>` flag, which makes it `!Sync` and is why it has no
+  `par_tokenize_and_stem_batch`), it stays sequential-only, documented as to
+  why, rather than forced.
 
 ---
 

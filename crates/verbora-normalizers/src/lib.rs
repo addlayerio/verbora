@@ -130,6 +130,7 @@
 //!
 //! [UAX #15]: https://www.unicode.org/reports/tr15/
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod diacritics;

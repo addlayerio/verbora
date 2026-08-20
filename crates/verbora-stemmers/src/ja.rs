@@ -1,8 +1,7 @@
-//! The Japanese katakana stemmer, ported from
-//! The reference `stemmer_ja`.
+//! The Japanese katakana stemmer.
 //!
 //! The whole algorithm is one rule: drop a trailing U+30FC PROLONGED SOUND MARK
-//! from a katakana-only string of at least four code units. `コーヒー` becomes
+//! from a katakana-only string of at least four scalar values. `コーヒー` becomes
 //! `コーヒ`; `コピー` is too short and is left alone; `ﾀｸｼｰ` is halfwidth katakana,
 //! which the range `゠..ヿ` (U+30A0..U+30FF) excludes, so it is left alone too.
 //! Only one mark is ever removed, never a run.
@@ -66,7 +65,9 @@ impl StemmerJa {
 
     /// Removes one trailing prolonged sound mark from a long katakana token.
     pub fn stem_katakana<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        // The reference tests `token.length >= 4` in UTF-16 code units, then
+        // The length gate counts scalar values, like the rest of this crate;
+        // every katakana scalar is inside the BMP, so the two readings of
+        // "four" coincide for any input this rule can fire on. Then
         // `isKatakana`. Katakana are all BMP, so for any string that passes the
         // second test the two length notions agree; the order of the tests makes
         // the difference unobservable rather than merely unlikely.

@@ -30,7 +30,7 @@ existing sequential primitive:
 | [`verbora-transliterators`](../features/transliterators) | `par_transliterate_ja_batch` | per document |
 | [`verbora-stemmers`](../features/stemmers) | `TokenizeAndStem::par_tokenize_and_stem_batch` | **per document, not per word** — per-word cost is as low as ~26 ns, far below task-dispatch overhead |
 | [`verbora-phonetics`](../features/phonetics) | `par_encode_batch` / `par_encode_double_batch` | **chunked** (`par_chunks`) — same overhead problem at ~42–183 ns/word |
-| [`verbora-classifiers`](../features/classifiers) | `par_classify_batch` on `Classifier<E>` | per document — `MaxEntClassifier` is excluded, its `Rc<RefCell<_>>` state is load-bearing |
+| [`verbora-classifiers`](../features/classifiers) | `par_classify_batch` on `Classifier<E>` | per document — `MaxEntClassifier` is excluded; it is already `Send + Sync`, but no `par_*` API ships here without sequential-vs-parallel benchmark evidence, and there is none yet for this model |
 | [`verbora-tfidf`](../features/tfidf) | `TfIdf::par_add_documents` | per document, split phase — see below |
 | [`verbora-language`](../features/language) | `par_detect_batch` | per text; generic over any `LanguageDetector + Sync` |
 

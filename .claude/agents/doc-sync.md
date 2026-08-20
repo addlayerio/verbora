@@ -142,6 +142,23 @@ every hit per the rules above.
 - `docs/design/` — pre-implementation design and research docs. Internal
   archive; each one already states plainly that it describes a proposal,
   not shipped behavior — keep that framing intact.
+- `crates/*/README.md` — **one per crate, and each one is that crate's
+  landing page on crates.io.** This is the first thing anyone evaluating the
+  crate reads, and if the file is missing crates.io says so in place of the
+  description. Each answers what *this* crate does, not what the workspace
+  does: one paragraph of purpose, the contract in two or three sentences
+  (unit of text, what it guarantees never to do), one minimal example that
+  compiles, and a link to the crate's page on the site for the rest. The
+  root `README.md` is the project's front door and is a different document —
+  never point a crate's readme at it, and never let a crate readme grow into
+  a second copy of the site page.
+
+  **These go stale silently.** A crate readme is not compiled, not linked
+  from the site, and not read by any gate, so a renamed type or a changed
+  return value survives there long after the code moved. Whenever a crate's
+  public API changes — a signature, a removed item, a changed guarantee, a
+  new default — its readme is part of that change, not follow-up work.
+
 - `AGENTS.md`, `README.md`, and module-level doc comments (`//!`, `///`) —
   keep these in sync with what the code actually does, not what it used to
   do. `README.md` and doc comments are read by people evaluating or using

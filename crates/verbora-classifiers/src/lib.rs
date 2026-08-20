@@ -6,7 +6,7 @@
 //! |---|---|---|---|
 //! | [`BayesClassifier`] | per-class feature counts | one pass, incremental | multinomial naive Bayes with additive smoothing — Manning, Raghavan & Schütze, *Introduction to Information Retrieval* (2008) §13.2 |
 //! | [`LogisticRegressionClassifier`] | one-vs-rest weights | batch gradient descent, refitted from scratch each call | Cox (1958), *The regression analysis of binary sequences*; the one-vs-rest reduction is Rifkin & Klautau (2004) |
-//! | [`MaxEntClassifier`] | feature weights `alpha` | generalised iterative scaling | Darroch & Ratcliff (1972), *Generalized iterative scaling for log-linear models* |
+//! | [`MaxEntClassifier`] | a weight per `(predicate, outcome)` feature | generalised iterative scaling, refitted from the uniform model each call | the conditional exponential model of Berger, Della Pietra & Della Pietra (1996), *A Maximum Entropy Approach to Natural Language Processing*, fitted by Darroch & Ratcliff (1972), *Generalized iterative scaling for log-linear models* |
 //!
 //! ```
 //! use verbora_classifiers::BayesClassifier;
@@ -79,8 +79,12 @@
 //! |---|---|
 //! | [`BayesEngine::with_smoothing`] with a negative constant, then any observation bit unseen for a class | the per-class count falls back to the smoothing constant, so the class score takes `log` of a negative ratio |
 //! | [`Classifier::restore`] of a model whose stored count is negative | the same `log`, from a stamp-valid artifact |
-//! | [`Distribution`] with a negative alpha | `log_likelihood`, `entropy` and `kullback_liebler_distance` all return `Ok(NaN)` |
-//! | [`Distribution`] with an alpha of zero | `calculate_a_posteriori` returns `Ok(NaN)` from `0 / 0`, without `log` being involved at all |
+//!
+//! **Maximum entropy is the exception, and deliberately so.** No
+//! [`MaxEntClassifier`] or [`MaxEntModel`] API returns a `NaN`, an infinity, or
+//! a sentinel standing in for one — see that module's own "No `NaN`, no
+//! infinities, no sentinels" section for the four facts that make it
+//! structural. The rows above are about Bayes and logistic regression.
 //!
 //! The consequence worth stating plainly: **a `NaN` score can be returned as
 //! the winner.** The comparator treats an unorderable difference as a tie and
@@ -138,54 +142,55 @@
 //! [`default_stemmer`] and is refused otherwise rather than silently rekeying
 //! the model.
 //!
-//! [`MaxEntClassifier::restore`] deliberately returns an **untrained**
-//! classifier: it reads only the sample's elements and regenerates the features
-//! from them, discarding `alpha`.
+//! [`MaxEntClassifier::restore`] restores the **fit**: a file carrying a model
+//! comes back trained and classifies identically, and one saved before training
+//! comes back untrained. Its predicates are caller-supplied strings rather than
+//! stems of tokenised text, so no tokenizer, case mapping or stemmer of this
+//! crate's stands between a document and a maximum-entropy feature key; the
+//! stamp is still written and checked, because a caller should not have to know
+//! which classifier wrote a file to know whether it is safe to read.
 //!
 //! # Maximum entropy
 //!
-//! Ten of the crate's exported types belong to [`MaxEntClassifier`], and they
-//! are wired together by **shared mutable references**, not by ownership: a
-//! classifier holds the caller's [`FeatureSet`] and [`Sample`], and `train`
-//! mutates both — it appends a correction feature to the feature set and
-//! memoises an observed expectation onto every feature. The Rust types use
-//! `Rc<RefCell<…>>` for exactly that reason.
+//! [`MaxEntClassifier`] models `p(outcome | context)` where a context is a
+//! **set of contextual predicates the caller supplies** — not a document this
+//! crate tokenises. Training events go in through [`Sample`]/[`Event`],
+//! [`Gis`] settings control the fit, and [`TrainingReport`] says what it did.
+//! Everything it returns is a probability: the scores over one context are
+//! non-negative and sum to `1`.
 //!
-//! Four consequences are worth knowing before reading a maximum-entropy score:
+//! It is owned rather than shared: fitting reads the sample and produces a new
+//! [`MaxEntModel`], mutating nothing the caller still holds and memoising
+//! nothing, so both types are `Send + Sync` and a fitted model can be shared
+//! across threads behind an `Arc` with no lock. Refitting always restarts from
+//! the uniform model, so training twice over an unchanged sample is
+//! bit-identical and training after the sample grew fits the sample as it now
+//! stands.
 //!
-//! * **The scores are not probabilities.** `calculate_a_priori` returns the
-//!   unnormalised weight `∏ αⱼ^fⱼ(x)`. They routinely exceed 1 and do not sum
-//!   to 1. Normalising would change every score, the Kullback–Leibler
-//!   trajectory, and therefore the iteration at which training stops.
-//! * **Training always runs at least once**, so `train(0, x)` performs one full
-//!   iteration rather than none.
-//! * **An observed expectation is memoised and never invalidated.** Add an
-//!   eleventh element to a ten-element sample and retrain, and the reported
-//!   expectations are still the ten's.
-//! * **The correction feature cannot be replaced.** It closes over the scaler
-//!   that built it, and `add_feature` rejects a second feature of the same
-//!   name, so retraining after the sample changed evaluates the correction
-//!   against the first run's cached feature sums.
-//!
-//! These four are **inherited behaviour this migration has not yet redefined**.
-//! They are written down so a caller is not surprised, not because they are
-//! defensible; see `docs/design/rust-native-migration.md`.
+//! The maximum-entropy contract — the model, the GIS update, why there is no
+//! stored slack feature, what convergence is measured on, and the summation
+//! orders — is stated in full on the [`MaxEntClassifier`] module's own
+//! documentation.
 //!
 //! # Limits
 //!
 //! * **Labels and class names are `String`.** A label is text.
 //! * **Bayes smoothing is an `f64`**, and [`BayesEngine::with_smoothing`]
 //!   accepts only a non-zero finite one, falling back to `1.0` otherwise.
-//! * **Applying a POS feature to a context without windows returns 0.**
-//!   Generating features from such a context is rejected, with
-//!   [`MaxEntError::PosContextMissingWindows`].
-//! * **[`MECorpus::split_in_train_and_test_with`] takes its randomness as an
-//!   argument**, so a split is reproducible.
+//! * **A maximum-entropy predicate is an opaque string.** It is never trimmed,
+//!   lowercased, tokenised or stemmed, and deriving predicates from text is the
+//!   caller's job. There is no built-in bias feature either: a caller who wants
+//!   the model to learn outcome priors adds a predicate that every context
+//!   carries.
+//! * **[`MaxEntClassifier`] has no parallel batch API.** Every `par_*` API in
+//!   this workspace requires sequential-versus-parallel benchmark evidence, and
+//!   there is none for this model yet.
 //! * **The stop-word list is process-global mutable state** inherited from
 //!   `verbora-stemmers`, so two classifiers built at different moments in one
 //!   process can tokenise the same document differently. No stamp can cover
 //!   that; see [`ArtifactStamp`].
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
 #![doc(html_root_url = "https://docs.rs/verbora-classifiers")]
 
 mod basic;
@@ -203,9 +208,8 @@ pub use basic::{
 };
 pub use dynval::{DynValue, ParseError, json_stringify_pretty, number_to_string, utf16_cmp};
 pub use maxent::{
-    Context, Distribution, Element, Feature, FeatureFn, FeatureSet, GISScaler, GenerateFeatures,
-    MECorpus, MESentence, MaxEntClassifier, MaxEntError, POSElement, RestoreError, SEElement,
-    Sample, ScalerState, TaggedWord,
+    Event, Gis, MaxEntClassifier, MaxEntError, MaxEntModel, ModelDefect, RestoreError, Sample,
+    StopReason, TrainingReport,
 };
 pub use ordmap::{OrderedMap, is_array_index};
 pub use stamp::{

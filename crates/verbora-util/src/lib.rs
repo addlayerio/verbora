@@ -55,6 +55,8 @@
 //! assert_eq!(tree.path_labels_of(&"test"), Some(vec![&"fetch", &"build", &"test"]));
 //! ```
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod abbreviations;
 mod data;
 mod graph;

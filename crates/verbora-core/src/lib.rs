@@ -33,6 +33,8 @@
 //! `Choosing the Right API` table; start there rather than guessing from the
 //! signatures.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod stopwords;
 
 pub use stopwords::{

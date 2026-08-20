@@ -31,9 +31,11 @@ use std::fmt;
 /// shortest-round-trip digits, so the digits themselves come from a correctly
 /// rounded formatter and only the *layout* is reimplemented.
 ///
-/// `serde_json::Value` cannot stand in: it has no `undefined`, cannot hold
-/// `NaN`/`Infinity` (all three occur in maxent contexts and alpha vectors), and
-/// does not distinguish `-0.0`, which `Number::toString` renders as `0`.
+/// `serde_json::Value` cannot stand in: it has no `undefined` (an absent
+/// member of a saved model is exactly that), cannot hold `NaN`/`Infinity` (a
+/// Bayes model fitted with a negative smoothing constant scores one — see the
+/// crate-level "`NaN` is computable" section), and does not distinguish
+/// `-0.0`, which `Number::toString` renders as `0`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DynValue {
     /// `undefined`.
@@ -106,8 +108,9 @@ impl DynValue {
     /// order, then the rest in insertion order.
     ///
     /// Useful when a structure built in source order has to be compared against
-    /// something that went through `Object.keys` — a maxent POS context, for
-    /// instance, is populated `0, -2, -1, 1, 2` but enumerates `0, 1, 2, -2, -1`.
+    /// one that has been through this ordering — a Bayes model's per-class
+    /// counts are keyed by feature index, so a map built as `{"10": …, "2": …}`
+    /// enumerates as `{"2": …, "10": …}`.
     pub fn in_own_property_order(&self) -> Self {
         match self {
             Self::Obj(fields) => Self::Obj(
@@ -369,10 +372,11 @@ fn write_stable(out: &mut String, value: &DynValue) -> bool {
 /// array-index keys first in ascending numeric order, then the rest in
 /// insertion order.
 ///
-/// `JSON.stringify` walks `OwnPropertyKeys`, so this reordering is visible in
-/// every saved file. A maxent POS context is the everyday case: its `tagWindow`
-/// is built as `{'0':…, '-2':…, '-1':…, '1':…, '2':…}` and serialises as
-/// `{"0":…,"1":…,"2":…,"-2":…,"-1":…}`, because `-2` and `-1` are not indices.
+/// The ordering is visible in every saved file. A Bayes model's per-class
+/// counts are the everyday case: they are keyed by feature index, so a map
+/// accumulated as `{'10':…, '2':…}` serialises as `{"2":…,"10":…}`. Only
+/// canonical non-negative integers below `2^32 − 1` count as indices, so a
+/// predicate spelled `"-2"` sorts with the ordinary keys, not before them.
 fn own_key_order(fields: &[(String, DynValue)]) -> Vec<&(String, DynValue)> {
     let mut indices: Vec<(u32, &(String, DynValue))> = Vec::new();
     let mut rest: Vec<&(String, DynValue)> = Vec::new();
@@ -429,8 +433,9 @@ fn write_json(out: &mut String, value: &DynValue) -> bool {
 
 /// Writes `value` as `JSON.stringify(value, null, indent)` would.
 ///
-/// The maxent `save()` uses an indent of 2, and the reference's spec files read
-/// those bytes back, so the pretty form is part of the observable contract.
+/// Every `save()` in this crate writes with an indent of 2, and a saved file is
+/// read back byte for byte by the round-trip tests, so the pretty form is part
+/// of the observable contract.
 pub fn json_stringify_pretty(value: &DynValue, indent: usize) -> Option<String> {
     let mut out = String::new();
     if write_pretty(&mut out, value, indent, 0) {
@@ -531,7 +536,7 @@ impl DynValue {
     pub fn parse(input: &str) -> Result<Self, ParseError> {
         let bytes = input.as_bytes();
         let mut pos = 0usize;
-        let value = parse_value(input, bytes, &mut pos)?;
+        let value = parse_value(input, bytes, &mut pos, 0)?;
         skip_ws(bytes, &mut pos);
         if pos != bytes.len() {
             return Err(ParseError {
@@ -566,7 +571,31 @@ fn expect(
     }
 }
 
-fn parse_value(input: &str, bytes: &[u8], pos: &mut usize) -> Result<DynValue, ParseError> {
+/// The deepest nesting `parse` accepts.
+///
+/// This parser descends one stack frame per `[` or `{`, so without a bound a
+/// caller-supplied document is a stack overflow rather than a parse error —
+/// and a stack overflow aborts the process instead of unwinding, so no caller
+/// can catch it. Model files come from disk, which makes their depth an input
+/// like any other. 128 is far past any real serialized model (the deepest
+/// this crate writes is 4) and far short of the frames a default 8 MiB stack
+/// holds.
+const MAX_DEPTH: usize = 128;
+
+fn parse_value(
+    input: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+    depth: usize,
+) -> Result<DynValue, ParseError> {
+    // `depth` is the count already entered, so this admits exactly
+    // `MAX_DEPTH` levels of nesting rather than one more than the name says.
+    if depth >= MAX_DEPTH {
+        return Err(ParseError {
+            offset: *pos,
+            message: "nesting too deep",
+        });
+    }
     skip_ws(bytes, pos);
     match bytes.get(*pos) {
         Some(b'{') => {
@@ -582,7 +611,7 @@ fn parse_value(input: &str, bytes: &[u8], pos: &mut usize) -> Result<DynValue, P
                 let key = parse_string(input, bytes, pos)?;
                 skip_ws(bytes, pos);
                 expect(bytes, pos, b':', "expected ':'")?;
-                let value = parse_value(input, bytes, pos)?;
+                let value = parse_value(input, bytes, pos, depth + 1)?;
                 fields.push((key, value));
                 skip_ws(bytes, pos);
                 match bytes.get(*pos) {
@@ -609,7 +638,7 @@ fn parse_value(input: &str, bytes: &[u8], pos: &mut usize) -> Result<DynValue, P
                 return Ok(DynValue::Arr(items));
             }
             loop {
-                items.push(parse_value(input, bytes, pos)?);
+                items.push(parse_value(input, bytes, pos, depth + 1)?);
                 skip_ws(bytes, pos);
                 match bytes.get(*pos) {
                     Some(b',') => *pos += 1,
@@ -789,6 +818,29 @@ fn parse_hex4(input: &str, pos: &mut usize) -> Result<u16, ParseError> {
 
 #[cfg(test)]
 mod tests {
+    /// Depth is an input, and an unbounded recursive parser turns it into a
+    /// process abort rather than an error.
+    ///
+    /// Before the bound, `"[".repeat(20_000)` overflowed the stack — and a
+    /// stack overflow is not a panic: it aborts, so no caller can catch it,
+    /// and a model file read from disk is enough to kill the process. The
+    /// assertion is that this is now an ordinary parse error.
+    #[test]
+    fn nesting_deeper_than_the_bound_is_an_error_not_an_abort() {
+        for n in [MAX_DEPTH + 1, 20_000] {
+            let deep = format!("{}{}", "[".repeat(n), "]".repeat(n));
+            let err = DynValue::parse(&deep).expect_err("must refuse");
+            assert_eq!(err.message, "nesting too deep");
+        }
+    }
+
+    /// The bound admits every shape a serialized model actually has.
+    #[test]
+    fn nesting_up_to_the_bound_still_parses() {
+        let ok = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(DynValue::parse(&ok).is_ok());
+    }
+
     use super::*;
 
     fn obj(pairs: &[(&str, DynValue)]) -> DynValue {

@@ -144,6 +144,7 @@
 //!
 //! [UAX #29]: https://www.unicode.org/reports/tr29/
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod analyzer;

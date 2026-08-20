@@ -189,6 +189,8 @@
 //! language but English. A prepositional phrase here is the flat `IN … noun`
 //! span above, not a nested constituent, and attachment is never resolved.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod analysis;
 mod sentence_type;
 mod tag;

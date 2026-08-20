@@ -19,26 +19,23 @@
 //!   prediction is feature extraction — on a 342-feature vocabulary the
 //!   answer is now "very little": the remainder is Porter stemming, which no
 //!   restructuring can remove because the stems *are* the features.
-//! * **How does maximum-entropy training scale?** Generalised iterative scaling
-//!   is `O(iterations x features x contexts x classes)`, and every one of those
-//!   factors grows with the corpus, so it is measured against corpus size.
-//! * **What do the reference-compatibility primitives cost?** `Math.log` and
-//!   `Math.exp` are hand-ported FDLIBM, and `safe-stable-stringify` runs once
-//!   per context key. Both sit in the innermost loops, so a regression there is
-//!   a regression everywhere.
+//! * **How does maximum-entropy training scale?** One generalised-iterative-
+//!   scaling iteration costs `O(events x predicates-per-event x outcomes)`, and
+//!   the iteration count is itself data-dependent, so training is measured
+//!   against sample size at a fixed iteration budget.
+//! * **What do the shared numeric primitives cost?** `log` and `exp` are
+//!   in-tree FDLIBM ports and sit in the innermost loop of every model, and
+//!   `stable_stringify` runs once per persisted value. A regression in either
+//!   is a regression everywhere.
 //!
 //! Inputs are synthesised deterministically rather than read from a corpus file:
 //! the classifiers' cost depends on the *shape* of the data (documents, distinct
 //! tokens, classes) far more than on its content, and generating it here keeps
 //! the size sweep honest.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use verbora_classifiers::{
-    BayesClassifier, Context, DynValue, FeatureSet, LogisticRegressionClassifier, MECorpus,
-    MaxEntClassifier, SEElement, Sample, TaggedWord,
+    BayesClassifier, DynValue, Gis, LogisticRegressionClassifier, MaxEntClassifier, Sample,
 };
 
 /// A deterministic pseudo-random source, so every run measures the same corpus.
@@ -192,71 +189,56 @@ fn serialisation(c: &mut Criterion) {
     group.finish();
 }
 
-/// The ten-element SimpleExample sample the reference's own spec trains on.
-fn simple_example() -> (Rc<RefCell<FeatureSet>>, Rc<RefCell<Sample>>) {
+/// A deterministic maximum-entropy sample: `events` events over `outcomes`
+/// outcomes, each context carrying `width` predicates drawn from a shared pool.
+///
+/// The shape, not the content, is what the cost depends on: how many events,
+/// how many predicates fire per event, and how many outcomes each of them has
+/// to be scored against.
+fn maxent_sample(events: usize, outcomes: usize, width: usize) -> Sample {
+    let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
     let mut sample = Sample::new();
-    let zero = Rc::new(Context::of_str("0"));
-    let one = Rc::new(Context::of_str("1"));
-    for _ in 0..3 {
-        sample.add_element(SEElement::new("x", Rc::clone(&zero)));
+    for _ in 0..events {
+        let outcome = format!("o{}", rng.below(outcomes));
+        let predicates: Vec<String> = (0..width)
+            .map(|slot| format!("f{slot}={}", rng.below(16)))
+            .collect();
+        sample.add(outcome, predicates);
     }
-    for _ in 0..3 {
-        sample.add_element(SEElement::new("y", Rc::clone(&zero)));
-    }
-    sample.add_element(SEElement::new("x", Rc::clone(&one)));
-    for _ in 0..3 {
-        sample.add_element(SEElement::new("y", Rc::clone(&one)));
-    }
-    let mut features = FeatureSet::new();
     sample
-        .generate_features(&mut features)
-        .expect("SEElement generates features");
-    (
-        Rc::new(RefCell::new(features)),
-        Rc::new(RefCell::new(sample)),
-    )
 }
 
-/// `count` four-word tagged sentences, for the POS model.
-fn pos_corpus(count: usize) -> MECorpus {
-    let tags = ["DT", "JJ", "NN", "VB"];
-    let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
-    MECorpus::from_tagged(
-        (0..count)
-            .map(|_| {
-                tags.iter()
-                    .map(|tag| TaggedWord::new(format!("w{}", rng.below(20)), *tag))
-                    .collect()
-            })
-            .collect(),
-    )
+/// The worked four-event example the module documentation derives by hand.
+fn worked_example() -> Sample {
+    let mut sample = Sample::new();
+    sample.add("x", ["a"]);
+    sample.add("x", ["a"]);
+    sample.add("y", ["a"]);
+    sample.add("y", ["b"]);
+    sample
 }
 
 fn maxent_training(c: &mut Criterion) {
     let mut group = c.benchmark_group("maxent/train");
-    group.bench_function("simpleExample", |b| {
+    group.bench_function("workedExample", |b| {
         b.iter(|| {
-            let (features, sample) = simple_example();
-            let mut classifier = MaxEntClassifier::new(features, sample);
-            classifier.train(20, 0.01).expect("SE features are finite");
-            black_box(classifier.scaler().expect("trained").iteration())
+            let mut classifier = MaxEntClassifier::from_sample(worked_example());
+            let report = *classifier
+                .train_with(Gis::new(20, 1e-6).expect("a valid tolerance"))
+                .expect("four events");
+            black_box(report.iterations)
         });
     });
-    for sentences in [1usize, 2, 4] {
-        let corpus = pos_corpus(sentences);
-        group.bench_with_input(BenchmarkId::new("pos", sentences), &corpus, |b, corpus| {
+    // A fixed iteration budget, so the sweep measures the per-iteration cost
+    // rather than how many iterations each sample happens to need.
+    let budget = Gis::new(8, 0.0).expect("a valid tolerance");
+    for events in [16usize, 64, 256] {
+        let sample = maxent_sample(events, 4, 6);
+        group.bench_with_input(BenchmarkId::new("gis", events), &sample, |b, sample| {
             b.iter(|| {
-                let sample = corpus.generate_sample();
-                let mut features = FeatureSet::new();
-                sample
-                    .generate_features(&mut features)
-                    .expect("POS elements generate features");
-                let mut classifier = MaxEntClassifier::new(
-                    Rc::new(RefCell::new(features)),
-                    Rc::new(RefCell::new(sample)),
-                );
-                classifier.train(2, 0.01).expect("POS features are finite");
-                black_box(classifier.scaler().expect("trained").c())
+                let mut classifier = MaxEntClassifier::from_sample(sample.clone());
+                let report = *classifier.train_with(budget).expect("a non-empty sample");
+                black_box(report.log_likelihood)
             });
         });
     }
@@ -264,18 +246,32 @@ fn maxent_training(c: &mut Criterion) {
 }
 
 fn maxent_predict(c: &mut Criterion) {
-    let (features, sample) = simple_example();
-    let mut classifier = MaxEntClassifier::new(features, sample);
-    classifier.train(20, 0.01).expect("SE features are finite");
-    let probe = Rc::new(Context::of_str("0"));
-    let unseen = Rc::new(Context::of_str("unseen"));
+    let mut classifier = MaxEntClassifier::from_sample(maxent_sample(256, 4, 6));
+    classifier
+        .train_with(Gis::new(8, 0.0).expect("a valid tolerance"))
+        .expect("a non-empty sample");
+    let model = classifier.model().expect("just trained").clone();
+    let known: Vec<String> = classifier.sample().events()[0].predicates().to_vec();
+    let unknown: Vec<String> = (0..6).map(|i| format!("f{i}=never")).collect();
 
     let mut group = c.benchmark_group("maxent/predict");
-    group.bench_function("classify/memoised", |b| {
-        b.iter(|| black_box(classifier.classify(black_box(&probe))));
+    group.bench_function("classify/known", |b| {
+        b.iter(|| black_box(classifier.classify(black_box(&known))));
     });
-    group.bench_function("classify/unseen", |b| {
-        b.iter(|| black_box(classifier.classify(black_box(&unseen))));
+    group.bench_function("classify/unknown", |b| {
+        b.iter(|| black_box(classifier.classify(black_box(&unknown))));
+    });
+    // The allocating convenience against the reusable-buffer primitive, which
+    // is the only difference between them.
+    group.bench_function("distribution/allocating", |b| {
+        b.iter(|| black_box(model.distribution(black_box(&known))));
+    });
+    group.bench_function("distribution/reused", |b| {
+        let mut out = Vec::new();
+        b.iter(|| {
+            model.distribution_into(black_box(&known), &mut out);
+            black_box(out.len())
+        });
     });
     group.finish();
 }
@@ -294,27 +290,28 @@ fn reference_primitives(c: &mut Criterion) {
         b.iter(|| black_box(verbora_classifiers::sigmoid(black_box(0.75))));
     });
 
-    // One context key per element per training iteration.
-    let window = |offsets: &[(&str, &str)]| {
-        DynValue::Obj(
-            offsets
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), DynValue::Str((*v).to_owned())))
-                .collect(),
-        )
-    };
-    let data = DynValue::Obj(vec![
+    // One stringify per persisted value.
+    let nested = DynValue::Obj(vec![
         (
-            "wordWindow".to_owned(),
-            window(&[("0", "dog"), ("-2", "the"), ("-1", "big"), ("1", "runs")]),
+            "counts".to_owned(),
+            DynValue::Obj(
+                (0..8)
+                    .map(|i| (format!("k{i}"), DynValue::Num(f64::from(i))))
+                    .collect(),
+            ),
         ),
         (
-            "tagWindow".to_owned(),
-            window(&[("0", "NN"), ("-2", "DT"), ("-1", "JJ"), ("1", "VB")]),
+            "labels".to_owned(),
+            DynValue::Arr(
+                ["the", "big", "dog", "runs"]
+                    .into_iter()
+                    .map(|s| DynValue::Str(s.to_owned()))
+                    .collect(),
+            ),
         ),
     ]);
-    group.bench_function("stable_stringify/posContext", |b| {
-        b.iter(|| black_box(black_box(&data).stable_stringify()));
+    group.bench_function("stable_stringify/nested", |b| {
+        b.iter(|| black_box(black_box(&nested).stable_stringify()));
     });
     group.bench_function("stable_stringify/string", |b| {
         let s = DynValue::Str("café😀".to_owned());

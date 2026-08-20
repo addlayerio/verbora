@@ -477,10 +477,10 @@ pub struct ArtifactStamp {
     /// keys.
     ///
     /// `None` for an artifact whose keys are not stems — a
-    /// [`MaxEntClassifier`](crate::MaxEntClassifier) keys on the context values
-    /// it is handed and never stems anything — and for the schema-1 and
-    /// schema-2 models that predate the member. As with `lowercase`, absence is
-    /// a version difference rather than damage.
+    /// [`MaxEntClassifier`](crate::MaxEntClassifier) keys on the predicates it
+    /// is handed and never tokenises or stems anything — and for the schema-1
+    /// and schema-2 models that predate the member. As with `lowercase`,
+    /// absence is a version difference rather than damage.
     pub stemmer: Option<u64>,
 }
 
@@ -488,9 +488,9 @@ impl ArtifactStamp {
     /// The stamp for an artifact whose keys are **not** stems.
     ///
     /// [`MaxEntClassifier`](crate::MaxEntClassifier) is the only such artifact
-    /// in this crate: its keys are the context values a caller hands it, so
-    /// there is no stemmer to describe and [`Self::stemmer`] is `None`. A
-    /// document classifier uses [`Self::for_stemmer`] instead.
+    /// in this crate: its keys are the predicates a caller hands it, so there
+    /// is no stemmer to describe and [`Self::stemmer`] is `None`. A document
+    /// classifier uses [`Self::for_stemmer`] instead.
     ///
     /// The first call computes [`lowercase_fingerprint`]; every later one in
     /// the same process reads it back from a [`OnceLock`].

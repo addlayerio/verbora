@@ -1065,12 +1065,19 @@ dependency. Every module private; everything re-exported from the root.
    silently mismatches every query. **Add a Unicode-version stamp and refuse
    to load across a change** — this is `verbora-tfidf`'s own migration item,
    but the obligation is created here and the release note must lead with it.
-3. **`verbora-classifiers` is an unlisted transitive consumer.** Its Bayes and
-   MaxEnt feature keys are stems produced by `verbora-stemmers`' scan over
-   `classes::is_word_en`, and trained models are serialized
-   (`basic/classifier.rs:707`, `:729`; `maxent/classifier.rs:202`, `:242`). A
-   boundary change re-partitions features, so a model trained before and
-   loaded after silently mispredicts. Same obligation as (2).
+3. **`verbora-classifiers` is an unlisted transitive consumer — through
+   `Classifier<E>` (Bayes and logistic regression) only.** Its feature keys are
+   stems produced by `verbora-stemmers`' scan over `classes::is_word_en`, and
+   trained documents are serialized with that stemmed text (`Document::text` is
+   "already stemmed if it came from a string"; `basic/classifier.rs:747`
+   `to_value`, `:892` `from_value`). A boundary change re-partitions those
+   features, so a model trained before and loaded after silently mispredicts.
+   **`MaxEntClassifier` is not exposed to this.** Its predicates are opaque
+   caller-supplied strings — `maxent/mod.rs`'s module documentation states
+   directly that no tokenizer, case fold or stemmer of this crate's stands
+   between a document and a maximum-entropy feature key — so a UAX #29
+   boundary change re-partitions nothing a maximum-entropy model reads. Same
+   obligation as (2), scoped to `Classifier<E>` only.
 4. **`verbora-phonetics` changes results wherever hyphens, slashes or
    apostrophes appear**, once the compile error is fixed. Its stop-word filter
    is deliberately case-sensitive on raw tokens, and its only coverage of the

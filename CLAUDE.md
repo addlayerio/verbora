@@ -33,6 +33,23 @@ under `docs/` or `site/` directly, stop and delegate to `doc-sync` instead
 unless the edit is a trivial one-line fix already in the same diff as a
 larger docs task already delegated.
 
+## A crate's public API and its README change together
+
+Every crate under `crates/` has a `README.md`, and it is that crate's landing
+page on crates.io — the first thing anyone evaluating it reads. Unlike the
+site, it is compiled by nothing, linked from nothing and checked by no gate,
+so a renamed type or a changed return value can survive there indefinitely.
+
+Treat it as part of the API change, not as follow-up: when a crate's public
+surface moves — a signature, a removed item, a changed guarantee, a new
+default — its README moves in the same piece of work. Delegate the writing to
+`doc-sync` along with the rest of the documentation brief; the point is that
+it gets listed, not that you write it yourself.
+
+The root `README.md` is a different document with a different audience. A
+crate README answers "what does *this* crate do"; the root answers "what is
+Verbora". Never point one at the other.
+
 ## Never run benchmarks on your own initiative — ask, then batch
 
 **Do not run `cargo bench`, `benchmarks/competitive/**` scripts, or any

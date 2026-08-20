@@ -265,7 +265,11 @@ mod tests {
 
     #[test]
     fn enumeration_hoists_integer_keys() {
-        // Recorded from the reference engine: addDocument('zebra 42 apple 7') yields this order.
+        // Derived from the enumeration rule this type documents, not recorded:
+        // integer-index keys first in ascending numeric order, then the rest in
+        // insertion order. Of the four keys inserted, "42" and "7" are integer
+        // indices and sort 7 < 42; "zebra" and "appl" are not, and keep the
+        // order they were inserted in.
         let mut m: OrderedMap<u32> = OrderedMap::new();
         m.insert("zebra", 1);
         m.insert("42", 1);

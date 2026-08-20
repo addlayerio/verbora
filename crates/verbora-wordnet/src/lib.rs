@@ -229,6 +229,8 @@
 //! concurrently — nothing is cached per query, nothing is locked, and results
 //! never depend on what was looked up before.
 
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+
 mod data_file;
 mod error;
 mod index_file;

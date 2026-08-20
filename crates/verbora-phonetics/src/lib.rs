@@ -16,7 +16,7 @@
 //! | Type | Publication | Key shape |
 //! |---|---|---|
 //! | [`SoundEx`] | Russell 1918; NARA, *The Soundex Indexing System* | letter + 3 digits |
-//! | [`RefinedSoundex`] | Refined Soundex, as distributed with Apache Commons Codec | letter + digits, unbounded |
+//! | [`RefinedSoundex`] | no publication; the reference distribution is its definition (see below) | letter + digits, unbounded |
 //! | [`Metaphone`] | Philips 1990, *Computer Language* 7(12) | letters, unbounded |
 //! | [`DoubleMetaphone`] | Philips 2000, *C/C++ Users Journal* 18(6) | one or two keys, ≤ 4 |
 //! | [`DaitchMokotoff`] | Daitch–Mokotoff Soundex (Gary Mokotoff and Randy Daitch, 1985) | 6 digits, branching |
@@ -26,6 +26,16 @@
 //! | [`Phonex`] | Lait and Randell 1996 | letter + digits |
 //! | [`MatchRatingApproach`] | Moore et al. 1977, *Western Union* | letters, plus a match decision |
 //! | [`BeiderMorse`] | Beider and Morse phonetic matching | a candidate list |
+//!
+//! Every row above cites a paper except one. **Refined Soundex has no
+//! publication to cite** — no paper, no standards document, no author's
+//! specification: the algorithm exists only as the letter-to-digit mapping
+//! that ships in the Apache Commons Codec distribution, which is therefore
+//! its reference definition rather than a second implementation of one.
+//! Citing a distribution is a standards citation when the distribution *is*
+//! the standard; [`RefinedSoundex`]'s own documentation says so, and states
+//! the mapping in full so that a reader never has to go and read code to
+//! learn what the encoder does.
 //!
 //! # Choosing the right API
 //!
@@ -49,9 +59,16 @@
 //!
 //! Every encoder here reads **one Unicode scalar at a time**. What it does
 //! with a scalar depends on the algorithm's own alphabet, and each type's
-//! documentation states it exactly — but no encoder in this crate indexes text
-//! by byte or by UTF-16 code unit, so no input can be split in the middle of a
+//! documentation states it exactly. No input can be split in the middle of a
 //! character and no output can contain a character the input did not imply.
+//!
+//! One exception, stated because it is observable: [`DaitchMokotoff`] advances
+//! past a matched rule pattern by the pattern's **byte** length. For the
+//! coding chart's ASCII patterns that is the same as its character length, but
+//! the four two-byte keys `ą`, `ę`, `ţ` and `ț` therefore consume one
+//! character more than they matched. That behaviour is recorded and pinned
+//! rather than corrected — see [`DaitchMokotoff`]'s own documentation for why
+//! and for exactly which inputs it changes.
 //!
 //! The three Latin-alphabet encoders ([`SoundEx`], [`Metaphone`],
 //! [`DoubleMetaphone`]) read only `A`–`Z` after simple ASCII case folding and
@@ -63,10 +80,19 @@
 //!
 //! # No encoder here fails
 //!
-//! Every `process` is total: no `Result`, no panic, on any `&str`. An input
-//! with no letter the algorithm recognises yields an empty key, which is the
-//! absence of a key rather than a value standing in for one — no input with a
-//! recognised letter can produce it.
+//! Every `process` is total: no `Result`, no panic, on any `&str`. An empty
+//! key means the algorithm found nothing to encode — it is the absence of a
+//! key, not a value standing in for one, so two empty keys are not a match.
+//!
+//! An empty key does **not** imply the input had no recognised letter. Several
+//! algorithms encode a letter only in a context they define, so a word made
+//! only of letters they treat as silent or as carriers encodes to nothing:
+//! `Metaphone` on `"y"` or `"w"`, `Cologne` on `"h"`, and
+//! `MatchRatingApproach` on any single vowel, since rule 2 removes vowels
+//! after the first letter and rule 1 has nothing to keep. Test for emptiness
+//! before treating a key as an index entry.
+
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
 
 mod beider_morse;
 mod caverphone;
