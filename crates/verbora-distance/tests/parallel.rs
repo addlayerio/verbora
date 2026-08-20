@@ -11,26 +11,25 @@
 //! Inputs reuse the edge cases each metric's own unit-test suite already knows
 //! to exercise (`src/levenshtein.rs`, `src/jaro_winkler.rs`, `src/dice.rs`,
 //! `src/hamming.rs`) rather than inventing new ones: empty strings, the
-//! restricted-vs-unrestricted Damerau divergence, astral-plane and BMP
-//! Unicode, the single-character Jaro window quirk, bigram-set collapsing,
-//! and UTF-16-length mismatches for Hamming.
+//! Damerau-vs-OSA divergence, astral-plane and BMP Unicode, the
+//! single-unit Jaro window clamp, bigram-set collapsing, and scalar-count
+//! mismatches for Hamming.
 
 #![cfg(feature = "parallel")]
 
 use verbora_distance::{
-    hamming, jaro_winkler,
-    jaro_winkler::Options as JwOptions,
-    levenshtein::{Options as LevOptions, damerau_levenshtein, levenshtein},
+    DamerauCosts, damerau_levenshtein, hamming, jaro_winkler, levenshtein, osa,
     par_damerau_levenshtein_batch, par_dice_coefficient_batch, par_hamming_batch,
-    par_jaro_winkler_batch, par_levenshtein_batch,
+    par_jaro_winkler_batch, par_levenshtein_batch, par_osa_batch,
 };
 
 /// ASCII pairs already exercised by this crate's own unit-test suites:
 /// `levenshtein::tests::{classic_distances, transposition_only_counts_for_damerau,
-/// restricted_and_unrestricted_damerau_differ, asymmetric_costs_are_respected,
-/// two_row_and_full_matrix_agree}`, `jaro_winkler::tests::classic_reference_values`,
-/// `dice::tests::{bigrams_are_a_set_so_repeats_collapse,
-/// sanitize_folds_case_and_collapses_space, partial_overlap_is_between_zero_and_one}`,
+/// damerau_and_osa_are_different_functions, asymmetric_costs_are_respected,
+/// every_fast_path_agrees_with_the_full_matrix}`,
+/// `jaro_winkler::tests::published_worked_examples`,
+/// `dice::tests::{identity_is_not_injective, operands_are_not_rewritten,
+/// partial_overlap_is_between_zero_and_one}`,
 /// `hamming::tests::counts_differing_positions`.
 const PATHOLOGICAL: &[(&str, &str)] = &[
     ("kitten", "sitting"),
@@ -40,7 +39,7 @@ const PATHOLOGICAL: &[(&str, &str)] = &[
     ("", "abc"),
     ("same", "same"),
     ("ab", "ba"),  // transposition: 2 under Levenshtein, 1 under Damerau
-    ("ca", "abc"), // restricted vs. unrestricted Damerau diverge (2 vs 3)
+    ("ca", "abc"), // Damerau vs. OSA diverge (2 vs 3)
     ("abc", "ab"), // one deletion
     ("ab", "abc"), // one insertion
     ("flaw", "lawn"),
@@ -49,7 +48,7 @@ const PATHOLOGICAL: &[(&str, &str)] = &[
     ("MARTHA", "MARHTA"),
     ("DIXON", "DICKSONX"),
     ("DWAYNE", "DUANE"),
-    ("a", "b"),     // single-char Jaro match window is empty (floor(1/2)-1 = -1)
+    ("a", "b"),     // single-unit Jaro: the window clamps to 0, the units differ
     ("aaaa", "aa"), // dice: repeated bigrams collapse to a set
     ("Hello  World", "hello world"),
     ("  padded  ", "padded"),
@@ -60,17 +59,18 @@ const PATHOLOGICAL: &[(&str, &str)] = &[
 ];
 
 /// Unicode pairs already exercised by this crate's own unit-test suites:
-/// `levenshtein::tests::{utf16_semantics_match_the_reference,
-/// bmp_non_ascii_is_one_unit_per_char}`, `dice::tests::astral_characters_use_code_unit_pairs`,
-/// `hamming::tests::{length_is_measured_in_utf16_units, bmp_non_ascii_compares_per_character}`.
+/// `levenshtein::tests::{scalar_semantics_count_astral_characters_once,
+/// bmp_non_ascii_is_one_unit_per_char}`, `dice::tests::astral_characters_use_scalar_pairs`,
+/// `hamming::tests::{length_is_measured_in_scalars, bmp_non_ascii_compares_per_character}`.
 const UNICODE: &[(&str, &str)] = &[
-    ("a😀b", "ab"), // UTF-16 length 4 vs 2 for Levenshtein
+    ("a😀b", "ab"), // 3 scalars vs 2: one deletion for Levenshtein
     ("😀", ""),
     ("😀", "😀"),
     ("café", "cafe"),
     ("Москва", "Москва"),
-    ("a😀b", "abcd"), // both 4 UTF-16 units: comparable for Hamming
-    ("a😀b", "ab"),   // 4 vs 2 units: incomparable for Hamming
+    ("a😀b", "abc"),  // 3 scalars each: comparable for Hamming
+    ("a😀b", "abcd"), // 3 vs 4 scalars: incomparable for Hamming
+    ("😀", "𝕳"),      // one scalar each, both astral
 ];
 
 fn all_pairs() -> Vec<(&'static str, &'static str)> {
@@ -82,11 +82,13 @@ fn many_pairs() -> Vec<(&'static str, &'static str)> {
     all_pairs().into_iter().cycle().take(4096).collect()
 }
 
-/// `a == b`, treating two `NaN`s as equal (as `dice_coefficient("", "")`
-/// produces, since `0.0 / 0.0` is `NaN` and genuinely reproduced rather than
-/// smoothed away — see `src/dice.rs`).
+/// Bitwise equality. Every `f64` this crate returns is finite
+/// (`docs/design/distance-contract.md` §1), so there is no `NaN` case to
+/// excuse and parity is exact: the parallel and sequential paths call the
+/// same pure function on the same operands and must agree bit for bit, not
+/// merely within a tolerance.
 fn f64_eq(a: f64, b: f64) -> bool {
-    a == b || (a.is_nan() && b.is_nan())
+    a.to_bits() == b.to_bits()
 }
 
 fn assert_f64_parity(pairs: &[(&str, &str)], seq: impl Fn(&str, &str) -> f64, got: &[f64]) {
@@ -107,7 +109,27 @@ fn assert_f64_parity(pairs: &[(&str, &str)], seq: impl Fn(&str, &str) -> f64, go
     }
 }
 
-fn assert_i64_parity(pairs: &[(&str, &str)], seq: impl Fn(&str, &str) -> i64, got: &[i64]) {
+/// Hamming reports `Option<usize>`: `None` is the ordinary answer for a
+/// scalar-count mismatch, so parity has to compare the `Option`s themselves
+/// rather than unwrapping them.
+fn assert_option_parity(
+    pairs: &[(&str, &str)],
+    seq: impl Fn(&str, &str) -> Option<usize>,
+    got: &[Option<usize>],
+) {
+    assert_eq!(
+        got.len(),
+        pairs.len(),
+        "batch of {} pairs produced {} results",
+        pairs.len(),
+        got.len()
+    );
+    for (i, (a, b)) in pairs.iter().enumerate() {
+        assert_eq!(got[i], seq(a, b), "pair {i} ({a:?}, {b:?}) diverged");
+    }
+}
+
+fn assert_usize_parity(pairs: &[(&str, &str)], seq: impl Fn(&str, &str) -> usize, got: &[usize]) {
     assert_eq!(
         got.len(),
         pairs.len(),
@@ -126,75 +148,117 @@ fn assert_i64_parity(pairs: &[(&str, &str)], seq: impl Fn(&str, &str) -> i64, go
 
 #[test]
 fn levenshtein_batch_empty_input_produces_empty_output() {
-    let opts = LevOptions::default();
-    let got = par_levenshtein_batch(&[], &opts);
+    let got = par_levenshtein_batch(&[]);
     assert!(got.is_empty());
 }
 
 #[test]
 fn levenshtein_batch_a_single_item_matches_the_sequential_call() {
-    let opts = LevOptions::default();
     let pairs = &all_pairs()[..1];
-    let got = par_levenshtein_batch(pairs, &opts);
-    assert_f64_parity(pairs, |a, b| levenshtein(a, b, &opts), &got);
+    let got = par_levenshtein_batch(pairs);
+    assert_usize_parity(pairs, levenshtein, &got);
 }
 
 #[test]
 fn levenshtein_batch_matches_sequential_on_pathological_and_unicode_pairs() {
-    let opts = LevOptions::default();
     let pairs = all_pairs();
-    let got = par_levenshtein_batch(&pairs, &opts);
-    assert_f64_parity(&pairs, |a, b| levenshtein(a, b, &opts), &got);
+    let got = par_levenshtein_batch(&pairs);
+    assert_usize_parity(&pairs, levenshtein, &got);
 }
 
 #[test]
 fn levenshtein_batch_many_items_preserve_order_and_match_the_sequential_loop() {
-    let opts = LevOptions::default();
     let pairs = many_pairs();
-    let got = par_levenshtein_batch(&pairs, &opts);
-    assert_f64_parity(&pairs, |a, b| levenshtein(a, b, &opts), &got);
+    let got = par_levenshtein_batch(&pairs);
+    assert_usize_parity(&pairs, levenshtein, &got);
 }
 
 // ---------------------------------------------------------------------------
-// damerau_levenshtein (both restricted and unrestricted, since the sequential
-// suite's own `restricted_and_unrestricted_damerau_differ` shows they diverge)
+// damerau_levenshtein
 // ---------------------------------------------------------------------------
 
 #[test]
 fn damerau_batch_empty_input_produces_empty_output() {
-    let opts = LevOptions::default();
-    let got = par_damerau_levenshtein_batch(&[], &opts);
+    let got = par_damerau_levenshtein_batch(&[]);
     assert!(got.is_empty());
 }
 
 #[test]
 fn damerau_batch_a_single_item_matches_the_sequential_call() {
-    let opts = LevOptions::default();
     let pairs = &all_pairs()[..1];
-    let got = par_damerau_levenshtein_batch(pairs, &opts);
-    assert_f64_parity(pairs, |a, b| damerau_levenshtein(a, b, &opts), &got);
+    let got = par_damerau_levenshtein_batch(pairs);
+    assert_usize_parity(pairs, damerau_levenshtein, &got);
 }
 
 #[test]
-fn damerau_batch_matches_sequential_unrestricted() {
-    let opts = LevOptions {
-        restricted: false,
-        ..LevOptions::default()
-    };
+fn damerau_batch_many_items_preserve_order_and_match_the_sequential_loop() {
     let pairs = many_pairs();
-    let got = par_damerau_levenshtein_batch(&pairs, &opts);
-    assert_f64_parity(&pairs, |a, b| damerau_levenshtein(a, b, &opts), &got);
+    let got = par_damerau_levenshtein_batch(&pairs);
+    assert_usize_parity(&pairs, damerau_levenshtein, &got);
 }
 
 #[test]
-fn damerau_batch_matches_sequential_restricted() {
-    let opts = LevOptions {
-        restricted: true,
-        ..LevOptions::default()
-    };
+fn damerau_batch_never_panics_because_there_is_no_cost_set_to_reject() {
+    // This replaces `damerau_batch_rejects_inadmissible_costs_before_fanning_out`,
+    // whose whole subject — a cost set below Lowrance & Wagner's threshold
+    // reaching a metric — is now unconstructable: `DamerauCosts::new`
+    // returns `Err` instead, and the batch takes no cost argument at all.
+    assert!(DamerauCosts::new(1.0, 1.0, 1.0, 0.5).is_err());
+    assert!(par_damerau_levenshtein_batch(&[]).is_empty());
+    assert_eq!(par_damerau_levenshtein_batch(&[("ab", "ba")]), vec![1]);
+}
+
+#[test]
+fn there_is_no_weighted_batch_variant() {
+    // Deliberate: the weighted path is strictly heavier per pair, so the
+    // crossover at which parallelism wins is *earlier* than the unit form's
+    // and this file's guidance is conservative for it. A caller with
+    // weighted costs writes the one-line `par_iter().map(...)` themselves —
+    // which is what this test does, standing in for the API that is not
+    // shipped.
+    use rayon::prelude::*;
+    use verbora_distance::{LevenshteinCosts, levenshtein_weighted};
+    let costs = LevenshteinCosts::new(1.0, 3.0, 1.0).expect("admissible");
+    let pairs = all_pairs();
+    let got: Vec<f64> = pairs
+        .par_iter()
+        .map(|(a, b)| levenshtein_weighted(a, b, &costs))
+        .collect();
+    assert_f64_parity(&pairs, |a, b| levenshtein_weighted(a, b, &costs), &got);
+}
+
+// ---------------------------------------------------------------------------
+// osa
+// ---------------------------------------------------------------------------
+
+#[test]
+fn osa_batch_empty_input_produces_empty_output() {
+    let got = par_osa_batch(&[]);
+    assert!(got.is_empty());
+}
+
+#[test]
+fn osa_batch_a_single_item_matches_the_sequential_call() {
+    let pairs = &all_pairs()[..1];
+    let got = par_osa_batch(pairs);
+    assert_usize_parity(pairs, osa, &got);
+}
+
+#[test]
+fn osa_batch_many_items_preserve_order_and_match_the_sequential_loop() {
     let pairs = many_pairs();
-    let got = par_damerau_levenshtein_batch(&pairs, &opts);
-    assert_f64_parity(&pairs, |a, b| damerau_levenshtein(a, b, &opts), &got);
+    let got = par_osa_batch(&pairs);
+    assert_usize_parity(&pairs, osa, &got);
+}
+
+#[test]
+fn damerau_and_osa_batches_genuinely_differ() {
+    // The two fan-outs must not be aliases of one another: at least one
+    // pinned pair has to come back with different answers, or the split into
+    // two entry points is decorative.
+    let pairs = [("ca", "abc")];
+    assert_eq!(par_damerau_levenshtein_batch(&pairs), vec![2]);
+    assert_eq!(par_osa_batch(&pairs), vec![3]);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,46 +267,53 @@ fn damerau_batch_matches_sequential_restricted() {
 
 #[test]
 fn jaro_winkler_batch_empty_input_produces_empty_output() {
-    let opts = JwOptions::default();
-    let got = par_jaro_winkler_batch(&[], &opts);
+    let got = par_jaro_winkler_batch(&[]);
     assert!(got.is_empty());
 }
 
 #[test]
 fn jaro_winkler_batch_a_single_item_matches_the_sequential_call() {
-    let opts = JwOptions::default();
     let pairs = &all_pairs()[..1];
-    let got = par_jaro_winkler_batch(pairs, &opts);
-    assert_f64_parity(pairs, |a, b| jaro_winkler(a, b, &opts), &got);
+    let got = par_jaro_winkler_batch(pairs);
+    assert_f64_parity(pairs, jaro_winkler, &got);
 }
 
 #[test]
 fn jaro_winkler_batch_matches_sequential_on_pathological_and_unicode_pairs() {
-    let opts = JwOptions::default();
     let pairs = all_pairs();
-    let got = par_jaro_winkler_batch(&pairs, &opts);
-    assert_f64_parity(&pairs, |a, b| jaro_winkler(a, b, &opts), &got);
+    let got = par_jaro_winkler_batch(&pairs);
+    assert_f64_parity(&pairs, jaro_winkler, &got);
 }
 
 #[test]
 fn jaro_winkler_batch_many_items_preserve_order_and_match_the_sequential_loop() {
-    let opts = JwOptions::default();
     let pairs = many_pairs();
-    let got = par_jaro_winkler_batch(&pairs, &opts);
-    assert_f64_parity(&pairs, |a, b| jaro_winkler(a, b, &opts), &got);
+    let got = par_jaro_winkler_batch(&pairs);
+    assert_f64_parity(&pairs, jaro_winkler, &got);
 }
 
 #[test]
-fn jaro_winkler_batch_respects_ignore_case() {
-    // Exercises the single-character prefix-boost quirk `jaro_winkler::tests::
-    // single_char_ignore_case_exposes_the_prefix_quirk` asserts by value.
-    let opts = JwOptions {
-        ignore_case: true,
-        dj: None,
-    };
+fn jaro_winkler_batch_is_case_sensitive_like_the_sequential_call() {
+    // No metric in this crate rewrites its inputs, so the batch cannot
+    // either: `("A", "a")` scores 0.0 per element, and the folded pair scores
+    // 1.0, exactly as `jaro_winkler::tests::
+    // case_is_significant_and_folding_is_the_callers` asserts by value.
     let pairs = [("A", "a"), ("X", "x"), ("AB", "ab"), ("MARTHA", "martha")];
-    let got = par_jaro_winkler_batch(&pairs, &opts);
-    assert_f64_parity(&pairs, |a, b| jaro_winkler(a, b, &opts), &got);
+    let got = par_jaro_winkler_batch(&pairs);
+    assert_f64_parity(&pairs, jaro_winkler, &got);
+    assert_eq!(got[0], 0.0);
+
+    let folded: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(a, b)| (a.to_lowercase(), b.to_lowercase()))
+        .collect();
+    let folded_refs: Vec<(&str, &str)> = folded
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let got = par_jaro_winkler_batch(&folded_refs);
+    assert_f64_parity(&folded_refs, jaro_winkler, &got);
+    assert!(got.iter().all(|&v| v == 1.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -263,13 +334,15 @@ fn dice_batch_a_single_item_matches_the_sequential_call() {
 }
 
 #[test]
-fn dice_batch_matches_sequential_on_pathological_and_unicode_pairs_including_nan() {
-    // `all_pairs()` includes ("", ""), whose sequential result is NaN
-    // (`dice::tests::empty_pair_is_nan`) — `f64_eq` treats NaN == NaN as
-    // parity here, since that is genuinely what both sides produce.
+fn dice_batch_matches_sequential_on_pathological_and_unicode_pairs() {
+    // `all_pairs()` includes ("", ""), which used to make this the one batch
+    // that produced a `NaN`. It is now `1.0` — two empty strings are
+    // identical, not disjoint (`dice::tests::degenerate_pairs_are_total`) —
+    // so every element here is finite and parity is bit-exact.
     let pairs = all_pairs();
     let got = par_dice_coefficient_batch(&pairs);
     assert_f64_parity(&pairs, verbora_distance::dice_coefficient, &got);
+    assert!(got.iter().all(|v| v.is_finite()));
 }
 
 #[test]
@@ -279,43 +352,69 @@ fn dice_batch_many_items_preserve_order_and_match_the_sequential_loop() {
     assert_f64_parity(&pairs, verbora_distance::dice_coefficient, &got);
 }
 
+#[test]
+fn dice_batch_is_case_sensitive_like_the_sequential_call() {
+    // No metric in this crate rewrites its inputs, so the batch cannot
+    // either: each of these pairs has disjoint bigram sets and scores 0.0,
+    // and the folded pair scores 1.0, exactly as
+    // `dice::tests::operands_are_not_rewritten` asserts by value.
+    let pairs = [("AB", "ab"), ("ABC", "abc"), ("MARTHA", "martha")];
+    let got = par_dice_coefficient_batch(&pairs);
+    assert_f64_parity(&pairs, verbora_distance::dice_coefficient, &got);
+    assert!(got.iter().all(|&v| v == 0.0));
+
+    let folded: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(a, b)| (a.to_lowercase(), b.to_lowercase()))
+        .collect();
+    let folded_refs: Vec<(&str, &str)> = folded
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let got = par_dice_coefficient_batch(&folded_refs);
+    assert_f64_parity(&folded_refs, verbora_distance::dice_coefficient, &got);
+    assert!(got.iter().all(|&v| v == 1.0));
+}
+
 // ---------------------------------------------------------------------------
 // hamming
 // ---------------------------------------------------------------------------
 
 #[test]
 fn hamming_batch_empty_input_produces_empty_output() {
-    let got = par_hamming_batch(&[], false);
+    let got = par_hamming_batch(&[]);
     assert!(got.is_empty());
 }
 
 #[test]
 fn hamming_batch_a_single_item_matches_the_sequential_call() {
     let pairs = &all_pairs()[..1];
-    let got = par_hamming_batch(pairs, false);
-    assert_i64_parity(pairs, |a, b| hamming(a, b, false), &got);
+    let got = par_hamming_batch(pairs);
+    assert_option_parity(pairs, hamming, &got);
 }
 
 #[test]
 fn hamming_batch_matches_sequential_on_pathological_and_unicode_pairs_including_mismatches() {
-    // `all_pairs()` includes UTF-16-length mismatches (`hamming::tests::
-    // length_is_measured_in_utf16_units`), which report as `INCOMPARABLE` on
-    // both sides.
+    // `all_pairs()` includes scalar-count mismatches (`hamming::tests::
+    // length_is_measured_in_scalars`), which report as `None` on both sides.
     let pairs = all_pairs();
-    let got = par_hamming_batch(&pairs, false);
-    assert_i64_parity(&pairs, |a, b| hamming(a, b, false), &got);
+    let got = par_hamming_batch(&pairs);
+    assert_option_parity(&pairs, hamming, &got);
 }
 
 #[test]
 fn hamming_batch_many_items_preserve_order_and_match_the_sequential_loop() {
     let pairs = many_pairs();
-    let got = par_hamming_batch(&pairs, false);
-    assert_i64_parity(&pairs, |a, b| hamming(a, b, false), &got);
+    let got = par_hamming_batch(&pairs);
+    assert_option_parity(&pairs, hamming, &got);
 }
 
 #[test]
-fn hamming_batch_respects_ignore_case() {
+fn hamming_batch_reports_case_sensitively() {
+    // No metric folds case, so a batch cannot either: the parallel fan-out is
+    // the sequential function and nothing more.
     let pairs = [("ABC", "abc"), ("karolin", "KATHRIN")];
-    let got = par_hamming_batch(&pairs, true);
-    assert_i64_parity(&pairs, |a, b| hamming(a, b, true), &got);
+    let got = par_hamming_batch(&pairs);
+    assert_eq!(got, vec![Some(3), Some(7)]);
+    assert_option_parity(&pairs, hamming, &got);
 }

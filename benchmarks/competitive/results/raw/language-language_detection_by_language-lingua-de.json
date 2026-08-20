@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 238776.78714495708,
-      "upper_bound": 264590.87079593143
+      "lower_bound": 207624.624307825,
+      "upper_bound": 208237.74939966394
     },
-    "point_estimate": 250541.00467221366,
-    "standard_error": 6610.315758526489
+    "point_estimate": 207903.86990185516,
+    "standard_error": 157.136335105892
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 233027.88214285712,
-      "upper_bound": 235620.98593706486
+      "lower_bound": 207455.69627192983,
+      "upper_bound": 207966.04910714284
     },
-    "point_estimate": 234505.24181547618,
-    "standard_error": 900.3892161285547
+    "point_estimate": 207573.5052083333,
+    "standard_error": 129.13837301343847
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 977.8547412293693,
-      "upper_bound": 5225.539446964962
+      "lower_bound": 167.37524119516308,
+      "upper_bound": 883.6180015001446
     },
-    "point_estimate": 2802.974608362237,
-    "standard_error": 1235.7037896027587
+    "point_estimate": 443.5661869168228,
+    "standard_error": 186.91882549226065
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 235741.9087398284,
-      "upper_bound": 248549.51067574054
+      "lower_bound": 207618.25623354322,
+      "upper_bound": 208277.66382332306
     },
-    "point_estimate": 240595.10086122234,
-    "standard_error": 3287.4330276795686
+    "point_estimate": 207937.69452670545,
+    "standard_error": 169.0322801083665
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 18605.59447612889,
-      "upper_bound": 47853.8537349425
+      "lower_bound": 474.49116216877627,
+      "upper_bound": 1232.4922229855094
     },
-    "point_estimate": 36892.7505068358,
-    "standard_error": 7609.570912410642
+    "point_estimate": 872.6888199179633,
+    "standard_error": 214.8073276255089
   }
 }

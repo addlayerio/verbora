@@ -15,10 +15,10 @@
 //! * **Query: `FuzzyIndex::neighbors` vs. a brute-force linear scan** —
 //!   the same "which of these words are within `k` edits of this query?"
 //!   question, answered by walking the tree (with triangle-inequality
-//!   pruning) versus computing real Levenshtein distance against every
+//!   pruning) versus computing the crate's metric against every
 //!   dictionary word. This is the number that justifies the tree's own
 //!   existence: if it isn't faster than the scan at realistic sizes, there
-//!   is no reason to prefer it over `verbora_distance::levenshtein` in a
+//!   is no reason to prefer it over `verbora_distance::damerau_levenshtein` in a
 //!   plain loop.
 //!
 //! Inputs come from `benches/data/words.json`, the same shared word list
@@ -26,7 +26,7 @@
 //! crate's own benchmarks.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use verbora_distance::levenshtein;
+use verbora_distance::damerau_levenshtein;
 use verbora_spellcheck::{FuzzyIndex, FuzzyIndexBuilder};
 
 /// Corpus sizes, in words — matches `benches/spellcheck.rs`'s own range.
@@ -132,8 +132,7 @@ fn bench_query_vs_brute_force(c: &mut Criterion) {
                         n += corpus
                             .iter()
                             .filter(|w| {
-                                (levenshtein(black_box(q), w, &Default::default()).round() as u32)
-                                    <= MAX_DISTANCE
+                                damerau_levenshtein(black_box(q), w) <= MAX_DISTANCE as usize
                             })
                             .count();
                     }

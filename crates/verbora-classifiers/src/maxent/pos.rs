@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 
-use verbora_core::whitespace::is_whitespace;
+use crate::whitespace::is_whitespace;
 
 use crate::dynval::DynValue;
 use crate::maxent::MaxEntError;

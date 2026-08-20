@@ -30,8 +30,6 @@
 
 use std::borrow::Cow;
 
-use verbora_tokenizers::classes;
-
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::lancaster_rules;
 use crate::units::slen;
@@ -150,7 +148,7 @@ impl LancasterStemmer {
     /// Appends a stop word to the **process-global English list**, shared with
     /// [`crate::PorterStemmer`].
     pub fn add_stop_word(&self, word: impl Into<String>) {
-        verbora_core::stopwords::add_global_stopword(word);
+        verbora_core::add_global_stopword(word);
     }
 
     /// Appends several stop words to the process-global English list.
@@ -159,12 +157,12 @@ impl LancasterStemmer {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        verbora_core::stopwords::add_global_stopwords(words);
+        verbora_core::add_global_stopwords(words);
     }
 
     /// Removes the first occurrence of `word` from the process-global list.
     pub fn remove_stop_word(&self, word: &str) {
-        verbora_core::stopwords::remove_global_stopword(word);
+        verbora_core::remove_global_stopword(word);
     }
 
     /// Removes the first occurrence of each of `words`.
@@ -172,7 +170,7 @@ impl LancasterStemmer {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        verbora_core::stopwords::remove_global_stopwords(words);
+        verbora_core::remove_global_stopwords(words);
     }
 }
 
@@ -180,16 +178,12 @@ impl TokenizeAndStem for LancasterStemmer {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Raw;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_en(c)
-    }
-
     fn prepare(t: &str) -> Cow<'_, str> {
         Cow::Owned(t.to_lowercase())
     }
 
     fn is_stop_word(word: &str) -> bool {
-        verbora_core::stopwords::is_default_stopword(word)
+        verbora_core::is_global_stopword(word)
     }
 
     fn stem_token(&self, token: &str) -> String {

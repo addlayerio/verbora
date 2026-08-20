@@ -49,12 +49,10 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use verbora_tokenizers::classes;
-
-use crate::among::AmongTable;
+use crate::among::{AmongTable, Buf, UnionTable, longest_at_most};
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_fr;
-use crate::stopwords::{self, Language};
+use crate::stopwords::Language;
 use crate::units::{at, ends_with, longest_suffix, text, text_lowercase, u, units};
 
 /// The French Snowball stemmer.
@@ -64,7 +62,7 @@ use crate::units::{at, ends_with, longest_suffix, text, text_lowercase, u, units
 /// let s = PorterStemmerFr::new();
 /// assert_eq!(s.stem("volerait"), "vol");
 /// assert_eq!(s.stem("publicité"), "publiqu");
-/// assert_eq!(s.stem(""), "undefined"); // yes, really — see the module docs
+/// assert_eq!(s.stem(""), "");
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerFr;
@@ -100,34 +98,58 @@ fn vowel_at(w: &[u16], i: usize) -> bool {
 }
 
 /// Removes `n` code units from the end and appends `tail`.
-fn cut(w: &mut Vec<u16>, n: usize, tail: &str) {
-    w.truncate(w.len().saturating_sub(n));
-    w.extend(tail.encode_utf16());
+fn cut(buf: &mut Buf, n: usize, tail: &str) {
+    buf.truncate(buf.len().saturating_sub(n));
+    buf.push_str(tail);
+}
+
+/// `prelude` applied to a buffer that already holds the lowercased token.
+///
+/// # Why the one-unit lag is needed
+///
+/// Every test in `prelude` reads the **original** token, never the partly
+/// rewritten result, so an already-marked neighbour still counts as a vowel.
+/// Rewriting in place would destroy `t[i - 1]` before `t[i]` is decided, so
+/// the original left neighbour is carried in `prev`; the right neighbour is
+/// still untouched at that point and can be read from the buffer directly.
+/// The transform is one unit in, one unit out, which is what makes an
+/// in-place form possible at all and removes the `prelude` output `Vec`.
+fn prelude_in_place(buf: &mut Buf) {
+    if buf.len() == 0 {
+        // The empty token has nothing to mark. See `PorterStemmerFr::prelude`
+        // for what used to happen here instead.
+        return;
+    }
+    let w = buf.as_mut_slice();
+    let n = w.len();
+    let mut prev = 0u16;
+    for i in 0..n {
+        let c = w[i];
+        let next_vowel = i + 1 < n && is_vowel(w[i + 1]);
+        let prev_vowel = i > 0 && is_vowel(prev);
+        w[i] = if i == 0 {
+            if c == u('y') && next_vowel { u('Y') } else { c }
+        } else if (c == u('u') || c == u('i')) && prev_vowel && next_vowel {
+            c - 32 // ASCII uppercase
+        } else if c == u('y') && (prev_vowel || next_vowel) {
+            u('Y')
+        } else if c == u('u') && prev == u('q') {
+            u('U')
+        } else {
+            c
+        };
+        prev = c;
+    }
 }
 
 /// The sorted search tables, built once from the rule tables below.
 struct FrTables {
-    ance: AmongTable,
-    icatrice: AmongTable,
-    atrice: AmongTable,
-    logie: AmongTable,
-    usion: AmongTable,
-    ence: AmongTable,
-    issement: AmongTable,
-    ativement: AmongTable,
-    ivement: AmongTable,
-    eusement: AmongTable,
-    ablement: AmongTable,
-    ierement: AmongTable,
-    ement: AmongTable,
-    icite: AmongTable,
-    abilite: AmongTable,
-    ite: AmongTable,
-    icatif: AmongTable,
+    /// Every step-1 rule table merged into one search; the `T_*` constants
+    /// name each table's slot in the mask array.
+    step1: UnionTable,
+    /// Also a step-1 table, kept standalone because one rule searches it
+    /// again after a cut, when the merged mask no longer describes the word.
     atif: AmongTable,
-    if_ive: AmongTable,
-    euse: AmongTable,
-    ment: AmongTable,
     step2a: AmongTable,
     step2b_e: AmongTable,
     step2b_a: AmongTable,
@@ -135,33 +157,44 @@ struct FrTables {
     undouble: AmongTable,
 }
 
+/// The step-1 rule tables, in chain order. Their positions are the `T_*`
+/// constants and the ids [`UnionTable::length_masks`] writes.
+static STEP1_TABLE_LIST: &[&[&str]] = &[
+    STEP1_ANCE, ICATRICE, ATRICE, LOGIE, USION, ENCE, ISSEMENT, ATIVEMENT, IVEMENT, EUSEMENT,
+    ABLEMENT, IEREMENT, EMENT, ICITE, ABILITE, ITE, ICATIF, ATIF, IF_IVE, EUSE, MENT,
+];
+/// The number of step-1 tables, and so the size of the mask array.
+const STEP1_TABLES: usize = 21;
+const T_ANCE: usize = 0;
+const T_ICATRICE: usize = 1;
+const T_ATRICE: usize = 2;
+const T_LOGIE: usize = 3;
+const T_USION: usize = 4;
+const T_ENCE: usize = 5;
+const T_ISSEMENT: usize = 6;
+const T_ATIVEMENT: usize = 7;
+const T_IVEMENT: usize = 8;
+const T_EUSEMENT: usize = 9;
+const T_ABLEMENT: usize = 10;
+const T_IEREMENT: usize = 11;
+const T_EMENT: usize = 12;
+const T_ICITE: usize = 13;
+const T_ABILITE: usize = 14;
+const T_ITE: usize = 15;
+const T_ICATIF: usize = 16;
+const T_ATIF: usize = 17;
+const T_IF_IVE: usize = 18;
+const T_EUSE: usize = 19;
+const T_MENT: usize = 20;
+
 static TABLES: LazyLock<FrTables> = LazyLock::new(|| FrTables {
-    ance: AmongTable::build(STEP1_ANCE),
-    icatrice: AmongTable::build(ICATRICE),
-    atrice: AmongTable::build(ATRICE),
-    logie: AmongTable::build(&["logie", "logies"]),
-    usion: AmongTable::build(&["usion", "ution", "usions", "utions"]),
-    ence: AmongTable::build(&["ence", "ences"]),
-    issement: AmongTable::build(&["issement", "issements"]),
-    ativement: AmongTable::build(&["ativement", "ativements"]),
-    ivement: AmongTable::build(&["ivement", "ivements"]),
-    eusement: AmongTable::build(&["eusement", "eusements"]),
-    ablement: AmongTable::build(&["ablement", "ablements", "iqUement", "iqUements"]),
-    ierement: AmongTable::build(&["ièrement", "ièrements", "Ièrement", "Ièrements"]),
-    ement: AmongTable::build(&["ement", "ements"]),
-    icite: AmongTable::build(&["icité", "icités"]),
-    abilite: AmongTable::build(&["abilité", "abilités"]),
-    ite: AmongTable::build(&["ité", "ités"]),
-    icatif: AmongTable::build(ICATIF),
+    step1: UnionTable::build(STEP1_TABLE_LIST),
     atif: AmongTable::build(ATIF),
-    if_ive: AmongTable::build(&["if", "ive", "ifs", "ives"]),
-    euse: AmongTable::build(&["euse", "euses"]),
-    ment: AmongTable::build(&["ment", "ments"]),
     step2a: AmongTable::build(STEP2A),
     step2b_e: AmongTable::build(STEP2B_E),
     step2b_a: AmongTable::build(STEP2B_A),
-    ier: AmongTable::build(&["ier", "ière", "Ier", "Ière"]),
-    undouble: AmongTable::build(&["enn", "onn", "ett", "ell", "eill"]),
+    ier: AmongTable::build(IER),
+    undouble: AmongTable::build(UNDOUBLE),
 });
 
 impl PorterStemmerFr {
@@ -171,15 +204,34 @@ impl PorterStemmerFr {
         Self
     }
 
-    /// `PorterStemmerFr.prelude`, exported by the reference for tests.
+    /// The prelude: lower case, then mark the semivowels.
+    ///
+    /// `u` and `i` between two vowels become `U` and `I`, `y` next to a vowel
+    /// becomes `Y`, and the `u` of `qu` becomes `U`. The marked forms are
+    /// outside the vowel class, which is how the following region scan stops
+    /// counting them as vowels — and why several rule tables are spelled with
+    /// them (`iqUe`, `aIent`, `Ièrement`).
+    ///
+    /// Exposed because the marking is observable in the stem: `stem("voyiez")`
+    /// is `"voi"`, and the `Y` is where that comes from.
+    ///
+    /// # Empty input
+    ///
+    /// `prelude("")` is `""`, and `stem("")` is `""`. Both used to be the
+    /// nine-character string `"undefined"`: the marking loop was written to
+    /// handle index 0 outside the loop and appended `token[0]` unconditionally,
+    /// which for an empty token appended the *name* of the absent value. The
+    /// literal then flowed through region marking and every step and came back
+    /// out as the stem. It is not a word, not a stem of anything, and had no
+    /// basis in the algorithm; every other stemmer in this crate returns `""`
+    /// for `""` and this one now does too.
     pub fn prelude(token: &str) -> String {
         text(&Self::prelude_units(&units(&token.to_lowercase())))
     }
 
     fn prelude_units(t: &[u16]) -> Vec<u16> {
         if t.is_empty() {
-            // `result += token[0]` with `token[0] === undefined`.
-            return units("undefined");
+            return Vec::new();
         }
         let mut out = Vec::with_capacity(t.len());
         out.push(if t[0] == u('y') && vowel_at(t, 1) {
@@ -204,7 +256,14 @@ impl PorterStemmerFr {
         out
     }
 
-    /// `PorterStemmerFr.regions`, exported by the reference for tests.
+    /// The R1, R2 and RV offsets `token` is divided into, in UTF-16 code
+    /// units.
+    ///
+    /// R1 is the region after the first non-vowel following a vowel, R2 the
+    /// same taken inside R1, and RV the French-specific region every verb rule
+    /// is checked against. Exposed because which region a suffix falls in is
+    /// the whole reason a rule fires or does not, and a caller debugging an
+    /// unexpected stem needs to see them.
     pub fn regions(token: &str) -> Regions {
         Self::regions_units(&units(token))
     }
@@ -255,7 +314,8 @@ impl PorterStemmerFr {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[expect(
         clippy::too_many_lines,
@@ -263,12 +323,19 @@ impl PorterStemmerFr {
     )]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let mut t = Self::prelude_units(&units(&token.to_lowercase()));
-        if t.len() == 1 {
-            return Cow::Owned(text(&t));
+        // Lowercase, prelude and working copy all land in one stack buffer:
+        // the straightforward port allocated three `Vec`/`String`s before the
+        // first rule ran, plus a fourth for the step-1 snapshot below.
+        let mut buf = Buf::fill_lowercase(token);
+        prelude_in_place(&mut buf);
+        if buf.len() == 1 {
+            return Cow::Owned(buf.into_text());
         }
-        let regs = Self::regions_units(&t);
-        let before_step1 = t.clone();
+        let regs = Self::regions_units(buf.as_slice());
+        // A `Buf` clone is a stack copy, so the reference's "has step 1
+        // changed the word?" comparison stays a content comparison rather
+        // than becoming a fragile change-flag.
+        let before_step1 = buf.clone();
         let mut do_step2a = false;
 
         // --- Step 1 --------------------------------------------------------
@@ -280,175 +347,187 @@ impl PorterStemmerFr {
         // from the un-cut `t` are the reference's fresh snapshots at every
         // read below; the two rules that cut twice recompute their limits in
         // between, where the reference refreshed its snapshots.
-        let len = t.len();
+        let len = buf.len();
         let lb1 = regs.r1.min(len);
         let lb2 = regs.r2.min(len);
         let lbv = regs.rv.min(len);
+        // One union search answers every step-1 table at once: the walk of
+        // its substring links records, per rule table, the lengths of that
+        // table's entries that are suffixes of the word, and each rule then
+        // reads its own region-restricted longest match out of that mask.
+        // The chain below is otherwise the reference's else-if ladder,
+        // unchanged and in order.
+        let mut lm = [0u32; STEP1_TABLES];
+        tb.step1.length_masks(buf.as_slice(), len, &mut lm);
+        let (av1, av2, avv) = (len - lb1, len - lb2, len - lbv);
         'step1: {
-            let m = tb.ance.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ANCE], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            let m = tb.icatrice.longest(&t, len, 0);
+            let m = longest_at_most(lm[T_ICATRICE], len);
             if m > 0 {
-                if tb.icatrice.longest(&t, len, lb2) > 0 {
-                    cut(&mut t, m, "");
+                if longest_at_most(lm[T_ICATRICE], av2) > 0 {
+                    cut(&mut buf, m, "");
                 } else {
-                    cut(&mut t, m, "iqU");
+                    cut(&mut buf, m, "iqU");
                 }
                 break 'step1;
             }
-            let m = tb.atrice.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ATRICE], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            let m = tb.logie.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_LOGIE], av2);
             if m > 0 {
-                cut(&mut t, m, "log");
+                cut(&mut buf, m, "log");
                 break 'step1;
             }
-            let m = tb.usion.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_USION], av2);
             if m > 0 {
-                cut(&mut t, m, "u");
+                cut(&mut buf, m, "u");
                 break 'step1;
             }
-            let m = tb.ence.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ENCE], av2);
             if m > 0 {
-                cut(&mut t, m, "ent");
+                cut(&mut buf, m, "ent");
                 break 'step1;
             }
-            let m = tb.issement.longest(&t, len, lb1);
+            let m = longest_at_most(lm[T_ISSEMENT], av1);
             if m > 0 {
                 // The rule consumes the chain even when the vowel test
                 // declines the cut — a plain `if` inside the branch.
-                if !(len > m && is_vowel(t[len - m - 1])) {
-                    cut(&mut t, m, "");
+                if !(len > m && is_vowel(buf.as_slice()[len - m - 1])) {
+                    cut(&mut buf, m, "");
                 }
                 break 'step1;
             }
-            let m = tb.ativement.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ATIVEMENT], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            let m = tb.ivement.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_IVEMENT], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            if tb.eusement.longest(&t, len, 0) > 0 {
-                let m = tb.eusement.longest(&t, len, lb2);
+            if longest_at_most(lm[T_EUSEMENT], len) > 0 {
+                let m = longest_at_most(lm[T_EUSEMENT], av2);
                 if m > 0 {
-                    cut(&mut t, m, "");
+                    cut(&mut buf, m, "");
                 } else {
-                    let m = tb.eusement.longest(&t, len, lb1);
+                    let m = longest_at_most(lm[T_EUSEMENT], av1);
                     if m > 0 {
-                        cut(&mut t, m, "eux");
+                        cut(&mut buf, m, "eux");
                     } else {
-                        let m = tb.ement.longest(&t, len, lbv);
+                        let m = longest_at_most(lm[T_EMENT], avv);
                         if m > 0 {
-                            cut(&mut t, m, "");
+                            cut(&mut buf, m, "");
                         }
                     }
                 }
                 break 'step1;
             }
-            let m = tb.ablement.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ABLEMENT], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            let m = tb.ierement.longest(&t, len, lbv);
+            let m = longest_at_most(lm[T_IEREMENT], avv);
             if m > 0 {
-                cut(&mut t, m, "i");
+                cut(&mut buf, m, "i");
                 break 'step1;
             }
-            let m = tb.ement.longest(&t, len, lbv);
+            let m = longest_at_most(lm[T_EMENT], avv);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            let m = tb.icite.longest(&t, len, 0);
+            let m = longest_at_most(lm[T_ICITE], len);
             if m > 0 {
-                if tb.icite.longest(&t, len, lb2) > 0 {
-                    cut(&mut t, m, "");
+                if longest_at_most(lm[T_ICITE], av2) > 0 {
+                    cut(&mut buf, m, "");
                 } else {
-                    cut(&mut t, m, "iqU");
+                    cut(&mut buf, m, "iqU");
                 }
                 break 'step1;
             }
-            let m = tb.abilite.longest(&t, len, 0);
+            let m = longest_at_most(lm[T_ABILITE], len);
             if m > 0 {
-                if tb.abilite.longest(&t, len, lb2) > 0 {
-                    cut(&mut t, m, "");
+                if longest_at_most(lm[T_ABILITE], av2) > 0 {
+                    cut(&mut buf, m, "");
                 } else {
-                    cut(&mut t, m, "abl");
+                    cut(&mut buf, m, "abl");
                 }
                 break 'step1;
             }
-            let m = tb.ite.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ITE], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            if tb.icatif.longest(&t, len, 0) > 0 {
+            if longest_at_most(lm[T_ICATIF], len) > 0 {
                 // Two consecutive `if`s, not an if/else — both can fire.
-                let m = tb.icatif.longest(&t, len, lb2);
+                let m = longest_at_most(lm[T_ICATIF], av2);
                 if m > 0 {
-                    cut(&mut t, m, "");
+                    cut(&mut buf, m, "");
                 }
-                let len2 = t.len();
-                let m = tb.atif.longest(&t, len2, regs.r2.min(len2));
+                // This one reads the *cut* buffer, so it is a real search
+                // rather than a mask lookup — the mask describes the word as
+                // it was before the branch.
+                let len2 = buf.len();
+                let m = tb.atif.longest(buf.as_slice(), len2, regs.r2.min(len2));
                 if m > 0 {
-                    cut(&mut t, m + 2, "iqU");
+                    cut(&mut buf, m + 2, "iqU");
                 }
                 break 'step1;
             }
-            let m = tb.atif.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ATIF], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            let m = tb.if_ive.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_IF_IVE], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            if ends_with(&t, "eaux") {
-                cut(&mut t, 4, "eau");
+            if ends_with(buf.as_slice(), "eaux") {
+                cut(&mut buf, 4, "eau");
                 break 'step1;
             }
-            if ends_with(&t, "aux") && len - lb1 >= 3 {
-                cut(&mut t, 3, "al");
+            if ends_with(buf.as_slice(), "aux") && av1 >= 3 {
+                cut(&mut buf, 3, "al");
                 break 'step1;
             }
-            let m = tb.euse.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_EUSE], av2);
             if m > 0 {
-                cut(&mut t, m, "");
+                cut(&mut buf, m, "");
                 break 'step1;
             }
-            let m = tb.euse.longest(&t, len, lb1);
+            let m = longest_at_most(lm[T_EUSE], av1);
             if m > 0 {
-                cut(&mut t, m, "eux");
+                cut(&mut buf, m, "eux");
                 break 'step1;
             }
-            if ends_with(&t, "amment") && len - lbv >= 6 {
-                cut(&mut t, 6, "ant");
+            if ends_with(buf.as_slice(), "amment") && avv >= 6 {
+                cut(&mut buf, 6, "ant");
                 do_step2a = true;
                 break 'step1;
             }
-            if ends_with(&t, "emment") && len - lbv >= 6 {
-                cut(&mut t, 6, "ent");
+            if ends_with(buf.as_slice(), "emment") && avv >= 6 {
+                cut(&mut buf, 6, "ent");
                 do_step2a = true;
                 break 'step1;
             }
-            let m = tb.ment.longest(&t, len, lbv);
+            let m = longest_at_most(lm[T_MENT], avv);
             if m > 0 {
                 // A vowel must precede, and that vowel must be inside RV.
-                if len > m && is_vowel(t[len - m - 1]) && len - lbv > m {
-                    cut(&mut t, m, "");
+                if len > m && is_vowel(buf.as_slice()[len - m - 1]) && avv > m {
+                    cut(&mut buf, m, "");
                     do_step2a = true;
                 }
                 break 'step1;
@@ -458,15 +537,15 @@ impl PorterStemmerFr {
         // --- Step 2a -------------------------------------------------------
         let mut step2a_done = false;
         let mut step2a_changed = false;
-        if before_step1 == t || do_step2a {
+        if before_step1.as_slice() == buf.as_slice() || do_step2a {
             step2a_done = true;
-            let len = t.len();
+            let len = buf.len();
             let lbv = regs.rv.min(len);
-            let m = tb.step2a.longest(&t, len, lbv);
+            let m = tb.step2a.longest(buf.as_slice(), len, lbv);
             if m > 0 && len > m {
-                let b = t[len - m - 1];
-                if !is_vowel(b) && len - lbv > m {
-                    cut(&mut t, m, "");
+                let prev = buf.as_slice()[len - m - 1];
+                if !is_vowel(prev) && len - lbv > m {
+                    cut(&mut buf, m, "");
                     step2a_changed = true;
                 }
             }
@@ -474,42 +553,45 @@ impl PorterStemmerFr {
 
         // --- Step 2b -------------------------------------------------------
         if step2a_done && !step2a_changed {
-            let len = t.len();
+            let len = buf.len();
             let lbv = regs.rv.min(len);
-            let m = tb.step2b_e.longest(&t, len, lbv);
+            let m = tb.step2b_e.longest(buf.as_slice(), len, lbv);
             if m > 0 {
-                cut(&mut t, m, "");
-            } else if ends_with(&t, "ions") && len - lbv >= 4 && len - regs.r2.min(len) >= 4 {
-                cut(&mut t, 4, "");
+                cut(&mut buf, m, "");
+            } else if ends_with(buf.as_slice(), "ions")
+                && len - lbv >= 4
+                && len - regs.r2.min(len) >= 4
+            {
+                cut(&mut buf, 4, "");
             } else {
-                let m = tb.step2b_a.longest(&t, len, lbv);
+                let m = tb.step2b_a.longest(buf.as_slice(), len, lbv);
                 if m > 0 {
                     // The `e` test below reads the PRE-deletion RV,
                     // deliberately — capture its length before the cut.
                     let rv_len_before = len - lbv;
-                    cut(&mut t, m, "");
-                    if t.last() == Some(&u('e')) && rv_len_before > m {
-                        t.truncate(t.len() - 1);
+                    cut(&mut buf, m, "");
+                    if buf.as_slice().last() == Some(&u('e')) && rv_len_before > m {
+                        buf.truncate(buf.len() - 1);
                     }
                 }
             }
         }
 
-        if t != before_step1 {
+        if buf.as_slice() != before_step1.as_slice() {
             // --- Step 3 ----------------------------------------------------
-            if t.last() == Some(&u('Y')) {
-                let n = t.len();
-                t[n - 1] = u('i');
+            if buf.as_slice().last() == Some(&u('Y')) {
+                let n = buf.len();
+                buf.as_mut_slice()[n - 1] = u('i');
             }
-            if t.last() == Some(&u('ç')) {
-                let n = t.len();
-                t[n - 1] = u('c');
+            if buf.as_slice().last() == Some(&u('ç')) {
+                let n = buf.len();
+                buf.as_mut_slice()[n - 1] = u('c');
             }
         } else {
             // --- Step 4: residual ------------------------------------------
-            let last = t.last().copied();
-            let second_last = if t.len() >= 2 {
-                Some(t[t.len() - 2])
+            let last = buf.as_slice().last().copied();
+            let second_last = if buf.len() >= 2 {
+                Some(buf.as_slice()[buf.len() - 2])
             } else {
                 None
             };
@@ -518,67 +600,75 @@ impl PorterStemmerFr {
                     matches!(c, x if x == u('a') || x == u('i') || x == u('o') || x == u('u') || x == u('è') || x == u('s'))
                 })
             {
-                t.truncate(t.len() - 1);
+                buf.truncate(buf.len() - 1);
             }
             {
-                let len = t.len();
-                if ends_with(&t, "ion") && len - regs.r2.min(len) >= 3 {
-                    let before = if len >= 4 { Some(t[len - 4]) } else { None };
+                let len = buf.len();
+                if ends_with(buf.as_slice(), "ion") && len - regs.r2.min(len) >= 3 {
+                    let before = if len >= 4 {
+                        Some(buf.as_slice()[len - 4])
+                    } else {
+                        None
+                    };
                     if before.is_some_and(|c| c == u('s') || c == u('t')) {
-                        cut(&mut t, 3, "");
+                        cut(&mut buf, 3, "");
                     }
                 }
             }
             {
-                let len = t.len();
+                let len = buf.len();
                 let lbv = regs.rv.min(len);
-                let m = tb.ier.longest(&t, len, lbv);
+                let m = tb.ier.longest(buf.as_slice(), len, lbv);
                 if m > 0 {
-                    cut(&mut t, m, "i");
+                    cut(&mut buf, m, "i");
                 }
             }
             // `endsinArr(rvtxt, 'e')`: a STRING, iterated as its characters.
             {
-                let len = t.len();
+                let len = buf.len();
                 let lbv = regs.rv.min(len);
-                if len > lbv && t[len - 1] == u('e') {
-                    t.truncate(len - 1);
+                if len > lbv && buf.as_slice()[len - 1] == u('e') {
+                    buf.truncate(len - 1);
                 }
             }
             {
-                let len = t.len();
+                let len = buf.len();
                 let lbv = regs.rv.min(len);
-                if len > lbv && t[len - 1] == u('ë') {
+                if len > lbv && buf.as_slice()[len - 1] == u('ë') {
                     // `token.slice(token.length - 3, -1)`: a start argument
                     // below zero is treated as an offset from the end, not
                     // clamped, so for a token shorter than three units this
                     // can never be "gu".
-                    if len >= 3 && t[len - 3] == u('g') && t[len - 2] == u('u') {
-                        t.truncate(len - 1);
+                    if len >= 3
+                        && buf.as_slice()[len - 3] == u('g')
+                        && buf.as_slice()[len - 2] == u('u')
+                    {
+                        buf.truncate(len - 1);
                     }
                 }
             }
         }
 
         // --- Step 5: undouble ----------------------------------------------
-        if tb.undouble.longest(&t, t.len(), 0) > 0 {
-            t.truncate(t.len() - 1);
+        if tb.undouble.longest(buf.as_slice(), buf.len(), 0) > 0 {
+            buf.truncate(buf.len() - 1);
         }
 
         // --- Step 6: un-accent the final é/è -------------------------------
-        let mut i = t.len().saturating_sub(1);
+        let w = buf.as_mut_slice();
+        let mut i = w.len().saturating_sub(1);
         while i > 0 {
-            if !is_vowel(t[i]) {
+            if !is_vowel(w[i]) {
                 i -= 1;
-            } else if i != t.len() - 1 && (t[i] == u('é') || t[i] == u('è')) {
-                t[i] = u('e');
+            } else if i != w.len() - 1 && (w[i] == u('é') || w[i] == u('è')) {
+                w[i] = u('e');
                 break;
             } else {
                 break;
             }
         }
 
-        Cow::Owned(text_lowercase(&mut t))
+        Cow::Owned(text_lowercase(buf.as_mut_slice()))
     }
 }
 
@@ -594,8 +684,28 @@ static ICATRICE: &[&str] = &[
     "ications",
 ];
 static ATRICE: &[&str] = &["atrice", "ateur", "ation", "atrices", "ateurs", "ations"];
+static LOGIE: &[&str] = &["logie", "logies"];
+static USION: &[&str] = &["usion", "ution", "usions", "utions"];
+static ENCE: &[&str] = &["ence", "ences"];
+static ISSEMENT: &[&str] = &["issement", "issements"];
+static ATIVEMENT: &[&str] = &["ativement", "ativements"];
+static IVEMENT: &[&str] = &["ivement", "ivements"];
+static EUSEMENT: &[&str] = &["eusement", "eusements"];
+static ABLEMENT: &[&str] = &["ablement", "ablements", "iqUement", "iqUements"];
+static IEREMENT: &[&str] = &["ièrement", "ièrements", "Ièrement", "Ièrements"];
+static EMENT: &[&str] = &["ement", "ements"];
+static ICITE: &[&str] = &["icité", "icités"];
+static ABILITE: &[&str] = &["abilité", "abilités"];
+static ITE: &[&str] = &["ité", "ités"];
+static IF_IVE: &[&str] = &["if", "ive", "ifs", "ives"];
+static EUSE: &[&str] = &["euse", "euses"];
+static MENT: &[&str] = &["ment", "ments"];
 static ICATIF: &[&str] = &["icatif", "icative", "icatifs", "icatives"];
 static ATIF: &[&str] = &["atif", "ative", "atifs", "atives"];
+/// Step 3's `ier` group, in both the plain and the `I`-marked spelling.
+static IER: &[&str] = &["ier", "i\u{e8}re", "Ier", "I\u{e8}re"];
+/// Step 4's undoubling group.
+static UNDOUBLE: &[&str] = &["enn", "onn", "ett", "ell", "eill"];
 static STEP2A: &[&str] = &[
     "îmes", "ît", "îtes", "i", "ie", "Ie", "ies", "ir", "ira", "irai", "iraIent", "irais", "irait",
     "iras", "irent", "irez", "iriez", "irions", "irons", "iront", "is", "issaIent", "issais",
@@ -616,12 +726,8 @@ impl TokenizeAndStem for PorterStemmerFr {
     const FILTER_ON: Casing = Casing::Lower;
     const STEM_ON: Casing = Casing::Lower;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_fr(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Fr, word)
+        Language::Fr.contains(word)
     }
 
     fn gate(token: &str) -> bool {
@@ -631,6 +737,48 @@ impl TokenizeAndStem for PorterStemmerFr {
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("STEP1_ANCE", super::STEP1_ANCE),
+        ("ICATRICE", super::ICATRICE),
+        ("ATRICE", super::ATRICE),
+        ("LOGIE", super::LOGIE),
+        ("USION", super::USION),
+        ("ENCE", super::ENCE),
+        ("ISSEMENT", super::ISSEMENT),
+        ("ATIVEMENT", super::ATIVEMENT),
+        ("IVEMENT", super::IVEMENT),
+        ("EUSEMENT", super::EUSEMENT),
+        ("ABLEMENT", super::ABLEMENT),
+        ("IEREMENT", super::IEREMENT),
+        ("EMENT", super::EMENT),
+        ("ICITE", super::ICITE),
+        ("ABILITE", super::ABILITE),
+        ("ITE", super::ITE),
+        ("ICATIF", super::ICATIF),
+        ("ATIF", super::ATIF),
+        ("IF_IVE", super::IF_IVE),
+        ("EUSE", super::EUSE),
+        ("MENT", super::MENT),
+        ("STEP2A", super::STEP2A),
+        ("STEP2B_E", super::STEP2B_E),
+        ("STEP2B_A", super::STEP2B_A),
+        ("IER", super::IER),
+        ("UNDOUBLE", super::UNDOUBLE),
+    ];
+
+    /// The prelude `stem` runs before any table is consulted, in isolation.
+    pub(crate) fn prelude(token: &str) -> String {
+        super::PorterStemmerFr::prelude(token)
+    }
+
+    /// The units the prelude writes, paired with what it writes them for.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[("I", "i"), ("U", "u"), ("Y", "y")];
 }
 
 impl verbora_core::Stemmer for PorterStemmerFr {
@@ -670,10 +818,22 @@ mod tests {
         }
     }
 
+    /// The empty token stems to the empty token.
+    ///
+    /// This asserted `"undefined"` for as long as the crate has existed — a
+    /// nine-character string fabricated by the prelude out of an absent value
+    /// and then stemmed as if it were a French word. See
+    /// [`PorterStemmerFr::prelude`].
     #[test]
-    fn empty_input_stems_to_the_word_undefined() {
-        assert_eq!(s(""), "undefined");
-        assert_eq!(PorterStemmerFr::prelude(""), "undefined");
+    fn empty_input_stems_to_the_empty_string() {
+        assert_eq!(s(""), "");
+        assert_eq!(PorterStemmerFr::prelude(""), "");
+        assert_eq!(PorterStemmerFr::new().stem(""), "");
+        // And the pipeline agrees: no token, no stem.
+        assert_eq!(
+            PorterStemmerFr::new().tokenize_and_stem("", true),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -745,6 +905,12 @@ mod tests {
     mod oracle {
         use super::super::*;
         use crate::units::{longest_suffix, slen};
+
+        /// The pre-`Buf` `cut`, over the owned `Vec` the oracle still uses.
+        fn cut(w: &mut Vec<u16>, n: usize, tail: &str) {
+            w.truncate(w.len().saturating_sub(n));
+            w.extend(tail.encode_utf16());
+        }
 
         fn from(w: &[u16], at: usize) -> &[u16] {
             &w[at.min(w.len())..]

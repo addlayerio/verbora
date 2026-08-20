@@ -1,29 +1,30 @@
 //! A hash membership index over the stored (already-folded) words, so that
 //! `contains` costs one hash + one probe chain instead of one dependent arena
-//! hop per UTF-16 code unit.
+//! hop per Unicode scalar.
 //!
 //! # Why this exists
 //!
-//! `contains` on the arena is depth-bound: ~8.5 dependent cache misses over a
-//! multi-megabyte arena for a natural-language word, and no layout change
-//! recovers that (an SoA/CSR child layout and an ASCII byte path were both
-//! measured at zero gain — the cost is the dependent misses, not decoding).
+//! `contains` on the arena is depth-bound: one dependent cache miss per scalar
+//! over a multi-megabyte arena, and no layout change recovers that (an SoA/CSR
+//! child layout and an ASCII byte path were both measured at zero gain — the
+//! cost is the dependent misses, not decoding).
 //! A flat membership set answers the same question in one hash of the query
 //! bytes plus a short linear probe, roughly halving `contains` latency on the
 //! benchmark corpus. The trade is paid at build time: maintaining the index
 //! adds ~a third to a bulk load, a cost disclosed on
-//! [`Trie::add_string`](crate::Trie::add_string).
+//! [`Trie::insert`](crate::Trie::insert).
 //!
 //! # Why it is exact
 //!
-//! `Trie::contains(s)` walks the UTF-16 units of the *folded* query and asks
+//! `Trie::contains(s)` walks the Unicode scalars of the *folded* query and asks
 //! whether the landing node is a word. That is precisely "is `fold(s)` one of
-//! the folded strings that were stored": `encode_utf16` is injective on
-//! well-formed strings, so unit-sequence equality and byte equality coincide,
-//! and every stored word entered the trie already folded. Storing the folded
-//! bytes in a set therefore answers `contains` identically — differentially
-//! verified against the walk in this crate's tests, including folding,
-//! surrogate pairs, duplicates, and the empty string.
+//! the folded strings that were stored": UTF-8 encoding is a bijection between
+//! scalar sequences and well-formed byte sequences, so scalar-sequence
+//! equality and byte equality coincide, and every stored word entered the trie
+//! already folded. Storing the folded bytes in a set therefore answers
+//! `contains` identically — differentially verified against the walk in this
+//! crate's tests, including folding, astral scalars, duplicates, and the empty
+//! string.
 //!
 //! # Design
 //!
@@ -33,6 +34,27 @@
 //! which is what lets the blob be append-only and the table insert-only. The
 //! hash is an FxHash-style multiply-and-rotate over 8-byte SWAR chunks; no
 //! external hasher crate is pulled in for one internal set.
+//!
+//! # The first-byte gate
+//!
+//! Answering from a hash gave up the one thing the arena walk did well: it
+//! rejected a query whose *first* code unit labels no root edge after a
+//! single, always-cached child scan, without reading the rest of the query
+//! at all. The hash cannot do that — it must digest every byte before it
+//! knows where to look, and the slot it then reads is a random offset into a
+//! table that outgrows L2 on any real word list, so the cheapest possible
+//! miss cost the same as the most expensive one.
+//!
+//! [`HashIndex::first_byte`] buys that early exit back for 32 bytes: a
+//! 256-bit map of the first byte of every stored key, embedded by value so
+//! it shares a cache line with the fields around it and is warm for free.
+//! Membership in the map is a *necessary* condition — every stored key's own
+//! first byte is set — so clearing it is a sound rejection and setting it
+//! only ever falls through to the unchanged probe. The gate is exact for the
+//! same reason the table is: it is a predicate on the already-folded query
+//! bytes, the same bytes the table stores, so no folding, surrogate or
+//! empty-key case can slip past it (the empty key has no first byte and is
+//! tracked by its own flag).
 
 /// Hashes `b` by folding 8-byte little-endian chunks into a multiplicative
 /// accumulator, seeded with the length so prefixes of one another ("ab",
@@ -64,6 +86,16 @@ pub(crate) fn hash_bytes(b: &[u8]) -> u64 {
 /// re-slots without re-reading (and re-hashing) the blob.
 #[derive(Clone, Default)]
 pub(crate) struct HashIndex {
+    /// Which bytes occur as the *first* byte of some stored key, bit `b & 63`
+    /// of word `b >> 6`. See the module doc comment's "first-byte gate": a
+    /// clear bit rejects the query before it is hashed or a slot is touched.
+    /// First field so it lands at the start of the enclosing `Trie` rather
+    /// than behind the `Vec`s.
+    first_byte: [u64; 4],
+    /// Whether the empty key is stored. It has no first byte, so
+    /// [`HashIndex::first_byte`] cannot represent it and the gate needs this
+    /// one bit to stay a *necessary* condition rather than a wrong one.
+    has_empty: bool,
     /// `slots.len() - 1`; `slots.len()` is always a power of two (or zero
     /// before the first insert — the empty state allocates nothing, so a
     /// fresh [`Trie`](crate::Trie) stays two allocations, not three).
@@ -72,8 +104,9 @@ pub(crate) struct HashIndex {
     hashes: Vec<u64>,
     blob: Vec<u8>,
     /// `len + 1` entries once non-empty: `offs[0] == 0`, then one end offset
-    /// per key.
-    offs: Vec<u32>,
+    /// per key. `usize`, not `u32`: a narrower offset would make a blob larger
+    /// than 4 GiB a panic, and a dictionary that large is a legitimate input.
+    offs: Vec<usize>,
     len: usize,
 }
 
@@ -104,14 +137,44 @@ impl HashIndex {
     /// Bytes of key `k`.
     #[inline]
     fn key_bytes(&self, k: usize) -> &[u8] {
-        &self.blob[self.offs[k] as usize..self.offs[k + 1] as usize]
+        &self.blob[self.offs[k]..self.offs[k + 1]]
+    }
+
+    /// Whether some stored key starts with the byte `b0`.
+    #[inline]
+    fn first_byte_seen(&self, b0: u8) -> bool {
+        self.first_byte[usize::from(b0 >> 6)] & (1u64 << (b0 & 63)) != 0
+    }
+
+    /// Records `b`'s first byte (or its emptiness) in the gate.
+    #[inline]
+    fn note_first_byte(&mut self, b: &[u8]) {
+        match b.first() {
+            Some(&b0) => self.first_byte[usize::from(b0 >> 6)] |= 1u64 << (b0 & 63),
+            None => self.has_empty = true,
+        }
     }
 
     /// Whether `b` — which must already be folded — is a stored key.
     #[inline]
     pub(crate) fn contains_folded(&self, b: &[u8]) -> bool {
-        if self.len == 0 {
-            return false;
+        // The first-byte gate, before the hash: a byte no stored key starts
+        // with settles the question out of one 32-byte map that never leaves
+        // cache, which is the arena walk's root-level early exit restored.
+        // An empty index has every bit clear and `has_empty` unset, so this
+        // also subsumes the `len == 0` case the probe below would otherwise
+        // have to guard (`slots` is empty then, and indexing it would panic).
+        match b.first() {
+            Some(&b0) => {
+                if !self.first_byte_seen(b0) {
+                    return false;
+                }
+            }
+            None => {
+                if !self.has_empty {
+                    return false;
+                }
+            }
         }
         let h = hash_bytes(b);
         let mut i = (h as usize) & self.mask;
@@ -128,8 +191,7 @@ impl HashIndex {
     }
 
     /// Inserts `b` — which must already be folded — returning `true` when it
-    /// was **already** present, matching
-    /// [`Trie::add_string`](crate::Trie::add_string)'s convention.
+    /// was **already** present.
     pub(crate) fn insert_folded(&mut self, b: &[u8]) -> bool {
         if self.slots.is_empty() {
             self.reserve(1, b.len());
@@ -147,10 +209,15 @@ impl HashIndex {
             i = (i + 1) & self.mask;
         }
         let k = self.len;
+        // Only on a genuine insert: the gate must admit every stored key, and
+        // a duplicate returned above without reaching here has already been
+        // recorded.
+        self.note_first_byte(b);
         self.blob.extend_from_slice(b);
-        self.offs
-            .push(u32::try_from(self.blob.len()).expect("membership blob exceeds 4 GiB"));
+        self.offs.push(self.blob.len());
         self.hashes.push(h);
+        // The one remaining capacity bound, documented on `Trie` itself: more
+        // than `u32::MAX` distinct keys needs tens of gigabytes of live text.
         self.slots[i] = u32::try_from(k + 1).expect("membership index exceeds 2^32 keys");
         self.len += 1;
         // Growing at load ½ keeps probe chains short; the check runs after
@@ -203,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_reports_prior_presence_like_add_string() {
+    fn insert_reports_prior_presence() {
         let mut idx = HashIndex::new();
         assert!(!idx.insert_folded(b"test"));
         assert!(idx.insert_folded(b"test"));

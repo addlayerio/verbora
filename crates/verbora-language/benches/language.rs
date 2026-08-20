@@ -36,6 +36,11 @@
 //! * F. [`bench_par_batch`] — sequential vs. [`par_detect_batch`] at a few
 //!   batch sizes, mirroring `verbora-sentiment/benches/sentiment.rs`'s own
 //!   `par_batch` group. Behind `language-detection` **and** `parallel`.
+//! * G. [`bench_fast_language_detection`] — `HashedLinearDetector::detect`
+//!   at four input lengths. Behind `fast-language-detection`.
+//! * H. [`bench_fallback_composition`] — the `FallbackDetector` pairing of
+//!   the two detectors, against both of its halves. Behind
+//!   `fast-language-detection` **and** `language-detection`.
 //!
 //! # Memory (section 30) and lazy initialization (section 31)
 //!
@@ -139,8 +144,8 @@ use criterion::{
     BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main,
 };
 
-#[cfg(feature = "language-detection")]
-use verbora_language::AutoPhoneticStrategy;
+#[cfg(all(feature = "fast-language-detection", feature = "language-detection"))]
+use verbora_language::FallbackDetector;
 #[cfg(feature = "fast-language-detection")]
 use verbora_language::HashedLinearDetector;
 #[cfg(all(
@@ -150,6 +155,8 @@ use verbora_language::HashedLinearDetector;
 use verbora_language::LanguageDetector;
 #[cfg(all(feature = "language-detection", feature = "parallel"))]
 use verbora_language::par_detect_batch;
+#[cfg(feature = "language-detection")]
+use verbora_language::{AutoPhoneticStrategy, Confidence};
 use verbora_language::{Language, detect_script, recommend};
 #[cfg(feature = "language-detection")]
 use verbora_language::{LanguageDetector, WhatlangDetector};
@@ -360,7 +367,10 @@ fn bench_language_detection(c: &mut Criterion) {
 #[cfg(feature = "language-detection")]
 fn bench_auto_end_to_end(c: &mut Criterion) {
     let long_doc = long_document();
-    let auto = AutoPhoneticStrategy::new(WhatlangDetector::new(), 0.5);
+    let auto = AutoPhoneticStrategy::new(
+        WhatlangDetector::new(),
+        Confidence::new(0.5).expect("0.5 is in range"),
+    );
 
     let mut g = c.benchmark_group("auto_end_to_end");
     configure(&mut g);
@@ -418,6 +428,56 @@ fn bench_fast_language_detection(c: &mut Criterion) {
         g.throughput(Throughput::Bytes(text.len() as u64));
         g.bench_with_input(BenchmarkId::from_parameter(label), &text, |b, &text| {
             b.iter(|| detector.detect(black_box(text)));
+        });
+    }
+
+    g.finish();
+}
+
+// ---------------------------------------------------------------------------
+// H. Fallback composition — behind `fast-language-detection` AND
+// `language-detection`.
+// ---------------------------------------------------------------------------
+
+/// H. `FallbackDetector<HashedLinearDetector, WhatlangDetector>` against
+/// both of its own halves, at the same four tiers as G.
+///
+/// This group exists to make one cost model visible rather than asserted:
+/// the composition pays the fast detector's cost when the fast detector
+/// commits, and *both* detectors' cost when it abstains. So its curve
+/// should sit on top of `fast` from `short_text` upward and on top of
+/// `whatlang` at the `word` tier — which is the whole trade, since the
+/// composition is what recovers the abstentions the fast detector's
+/// accuracy loses on short input (see `src/fallback.rs`'s measured table).
+/// Running all three in one group means those three numbers come from one
+/// machine state, not three.
+///
+/// Only compiled with `--features fast-language-detection,language-detection`.
+#[cfg(all(feature = "fast-language-detection", feature = "language-detection"))]
+fn bench_fallback_composition(c: &mut Criterion) {
+    let long_doc = long_document();
+    let fast = HashedLinearDetector::new();
+    let whatlang = WhatlangDetector::new();
+    let composed = FallbackDetector::new(HashedLinearDetector::new(), WhatlangDetector::new());
+
+    let mut g = c.benchmark_group("fallback_composition");
+    configure(&mut g);
+
+    for (label, text) in [
+        ("word", WORD),
+        ("short_text", SHORT_TEXT),
+        ("paragraph", PARAGRAPH),
+        ("long_document", long_doc.as_str()),
+    ] {
+        g.throughput(Throughput::Bytes(text.len() as u64));
+        g.bench_with_input(BenchmarkId::new("fast", label), &text, |b, &text| {
+            b.iter(|| fast.detect(black_box(text)));
+        });
+        g.bench_with_input(BenchmarkId::new("whatlang", label), &text, |b, &text| {
+            b.iter(|| whatlang.detect(black_box(text)));
+        });
+        g.bench_with_input(BenchmarkId::new("fallback", label), &text, |b, &text| {
+            b.iter(|| composed.detect(black_box(text)));
         });
     }
 
@@ -511,8 +571,19 @@ criterion_group!(
 // it gets its own group rather than doubling that matrix to eight cfg
 // combinations; when the feature is off, a no-op function stands in
 // (criterion_main! only needs a callable per group).
-#[cfg(feature = "fast-language-detection")]
+#[cfg(all(
+    feature = "fast-language-detection",
+    not(feature = "language-detection")
+))]
 criterion_group!(fast_benches, bench_fast_language_detection);
+// H needs both detectors, so it joins G's group only when both features
+// are on — the composition literally cannot be constructed otherwise.
+#[cfg(all(feature = "fast-language-detection", feature = "language-detection"))]
+criterion_group!(
+    fast_benches,
+    bench_fast_language_detection,
+    bench_fallback_composition
+);
 #[cfg(not(feature = "fast-language-detection"))]
 fn fast_benches() {}
 

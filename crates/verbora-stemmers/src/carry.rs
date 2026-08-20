@@ -34,13 +34,11 @@
 
 use std::borrow::Cow;
 
-use verbora_tokenizers::classes;
-
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::carry_tables::STEPS;
 use crate::data::charsets::is_carry_vowel;
 use crate::data::gates::gate_fr;
-use crate::stopwords::{self, Language};
+use crate::stopwords::Language;
 
 /// The Carry French stemmer.
 ///
@@ -115,7 +113,8 @@ impl CarryStemmerFr {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
         let mut current: Option<String> = None;
@@ -135,12 +134,8 @@ impl TokenizeAndStem for CarryStemmerFr {
     const FILTER_ON: Casing = Casing::Lower;
     const STEM_ON: Casing = Casing::Lower;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_fr(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Fr, word)
+        Language::Fr.contains(word)
     }
 
     fn gate(token: &str) -> bool {

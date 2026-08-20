@@ -51,12 +51,14 @@ For a `Vec<String>` each `clear()` frees every string it held — reuse then sav
 the *vector's* allocation but not the per-string ones. Which of those you have
 depends on the tokenizer:
 
-| Tokenizer's token type | `clear()` frees | Reuse saves |
-|---|---|---|
-| `&'a str` — the thirteen character-class tokenizers, `WordTokenizer` | nothing (just pointers) | the whole allocation cost |
-| `Cow<'a, str>` — `AggressiveTokenizerNo`, `…Sv`, `…Hi` | only the tokens that were rewritten | the vector, plus the borrowed tokens |
-| `Utf16Token<'a>` — `WordPunctTokenizer`, `TreebankWordTokenizer`, `TokenizerJa`, `CaseTokenizer`, `OrthographyTokenizer` | only the owned variants | the vector, plus the borrowed tokens |
-| `String` — `SentenceTokenizer` | every element | the vector only |
+| Buffer element type | Which call fills it | `clear()` frees | Reuse saves |
+|---|---|---|---|
+| `&'a str` | `tokenize_borrowed_into` | nothing (just pointers) | the whole allocation cost |
+| `String` | `Tokenizer::tokenize_into` | every element | the vector only |
+
+Every tokenizer in `verbora-tokenizers` can fill either, because every token is a
+substring of the input. Take the borrowed buffer unless the tokens must outlive
+the document.
 
 ## The two conventions
 
@@ -67,8 +69,8 @@ this is the single easiest mistake to make with these APIs.
 
 | Method | Convention |
 |---|---|
-| `Tokenize::tokenize_into` | **appends** — you call `clear()` |
-| `verbora_core::Tokenizer::tokenize_into` | **appends** |
+| `BorrowingTokenizer::tokenize_borrowed_into` | **appends** — you call `clear()` |
+| `Tokenizer::tokenize_into` | **appends** |
 | `NounInflector::pluralize_into` / `singularize_into` | **appends** |
 | `verbora_inflectors::CaseMode::apply_into` | **appends** |
 | `verbora_core::Stemmer::stem_into` | **clears first** |
@@ -79,17 +81,16 @@ clears. Each method states its convention in its own rustdoc.
 
 ## Accumulating on purpose
 
-Because `tokenize_into` appends, gathering a whole corpus into one buffer needs
-no special API:
+Because `tokenize_borrowed_into` appends, gathering a whole corpus into one
+buffer needs no special API:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let t = AggressiveTokenizer::new();
-let mut all = Vec::new();
+let mut all: Vec<&str> = Vec::new();
 
 for document in ["one two", "three four"] {
-    t.tokenize_into(document, &mut all);      // no clear
+    WordTokenizer.tokenize_borrowed_into(document, &mut all);      // no clear
 }
 
 assert_eq!(all, ["one", "two", "three", "four"]);
@@ -105,23 +106,21 @@ stay alive.
 estimate the size:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-let t = AggressiveTokenizer::new();
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 // English averages ~5 characters plus a separator per token; over-estimating
 // slightly is much cheaper than three doublings.
 let text = "the quick brown fox jumps over the lazy dog";
-let mut buf = Vec::with_capacity(text.len() / 5);
+let mut buf: Vec<&str> = Vec::with_capacity(text.len() / 5);
 
-t.tokenize_into(text, &mut buf);
+WordTokenizer.tokenize_borrowed_into(text, &mut buf);
 assert_eq!(buf.len(), 9);
 ```
 
-Verbora's own iterators help here. `WordRuns::size_hint` reports an upper bound
-derived from the input length — one token needs at least one byte, plus a
-separator between any two — so `collect()` on a tokenizer's iterator can
-pre-size in one shot rather than doubling repeatedly.
+Estimate from the input, not from the token count you do not have yet: one
+token needs at least one byte plus a separator between any two, so
+`text.len() / average_token_length` is a workable upper bound and
+over-estimating slightly is far cheaper than three doublings.
 
 `Trie::reserve(additional)` does the equivalent for a bulk load, growing the node
 arena once instead of as the words go in.
@@ -136,8 +135,9 @@ every `clear()`, reuse saves the vector and nothing else. Prefer a tokenizer tha
 yields `&str` if you have the choice.
 
 **When the work dwarfs the allocation.** A `levenshtein/ascii/1024` call takes
-29.08 µs, and a weighted call evaluates the full scalar recurrence on top of
-that. Container reuse is not the dominant question at that scale — see the
+29.08 µs † — pending re-measurement, but tens of microseconds either way — and a
+weighted call evaluates the full scalar recurrence on top of that. Container
+reuse is not the dominant question at that scale; see the
 [shape suite](../benchmarks/distance.md#current-levenshtein-shape-suite) for how
 much the input shape matters instead.
 
@@ -165,12 +165,15 @@ parallelism together.
 ## There is no scratch-buffer API for distance
 
 `verbora-distance` has no `levenshtein_with_scratch`. Weighted plain Levenshtein
-allocates one `Vec<f64>` row, restricted Damerau three, and the full-matrix
-search modes a cost vector plus a parent vector; unit-cost paths use bit-vectors
-and allocate no row at all. Those `O(m)` and `O(nm)` allocations cannot be
-hoisted out of a loop today.
+allocates one `Vec<f64>` row, weighted `osa` three, weighted
+`damerau_levenshtein` a full cost plus parent matrix, and the search modes a
+cost vector plus a parent vector; unit-cost `levenshtein` and `osa` use
+bit-vectors and allocate no row at all, while unit-cost `damerau_levenshtein`
+allocates at most one `Vec<i64>` holding its three rolling rows (and nothing at
+all for short operands). Those `O(m)` and `O(nm)` allocations cannot be hoisted
+out of a loop today.
 
-Jaro–Winkler *is* allocation-free for inputs up to 128 code units: its two
+Jaro–Winkler *is* allocation-free for inputs up to 128 units: its two
 match-flag arrays live on the stack below that threshold, and only above it does
 it allocate two `Vec<bool>`. Words are short by nature, so the stack path is the
 common one.

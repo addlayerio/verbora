@@ -12,18 +12,18 @@ the API, and what it means for the code you write.
 
 | Technique | Where it shows up in the API | Page |
 |---|---|---|
-| Borrowing | Fourteen tokenizers yield `&str` slices of your input | [Zero-copy](zero-copy.md) |
-| `Cow` | Four of six normalizers; all 17 `ja::converters`; `Stemmer::stem`; three tokenizers | [Zero-copy](zero-copy.md) |
-| Lazy iterators | `tokens()`, `ngrams_iter()`, `iter_keys_with_prefix()` | [Iterator vs `_into`](iterator-vs-into.md) |
-| Caller-owned buffers | `tokenize_into()`, `pluralize_into()`, `stem_into()` | [Buffer reuse](buffer-reuse.md) |
+| Borrowing | Every tokenizer yields `&str` slices of your input; every n-gram window borrows your slice | [Zero-copy](zero-copy.md) |
+| `Cow` | All five normalizers, guaranteed borrowed when nothing changed; `Stemmer::stem` | [Zero-copy](zero-copy.md) |
+| Lazy iterators | `tokens()`, `ngrams()`, `char_ngrams()`, `iter_keys_with_prefix()` | [Iterator vs `_into`](iterator-vs-into.md) |
+| Caller-owned buffers | `tokenize_borrowed_into()`, `pluralize_into()`, `stem_into()` | [Buffer reuse](buffer-reuse.md) |
 | Choosing the smallest working set | Levenshtein's bit-vector / row / matrix modes | [Cache locality](cache-locality.md) |
 | Struct-of-arrays | The Levenshtein search matrix | [Cache locality](cache-locality.md) |
 | Flat arenas | `Trie`'s `Vec<Node>` addressed by `u32` | [Cache locality](cache-locality.md) |
 | Inline small collections | `SmallVec` children per trie node | [Cache locality](cache-locality.md) |
 | Stack buffers for small inputs | Jaro–Winkler's match flags | [Allocation](allocation.md) |
-| Cheaper hash keys | Dice hashes `(u16, u16)` instead of a `String` per bigram | [Allocation](allocation.md) |
-| Exact fast paths | ASCII `&[u8]` vs `Vec<u16>` promotion in distance and phonetics | [Zero-copy](zero-copy.md) |
-| Monomorphised predicates | `CharClass` as a zero-sized type, so each tokenizer's scan inlines | [Cache locality](cache-locality.md) |
+| Cheaper hash keys | Dice hashes `(char, char)` instead of a `String` per bigram | [Allocation](allocation.md) |
+| Exact fast paths | ASCII `&[u8]` vs promotion to a decoded `Vec<char>`, in distance | [Zero-copy](zero-copy.md) |
+| Monomorphised iterators | `tokens()` returns `impl Iterator`, not a boxed trait object, so each boundary scan inlines | [Cache locality](cache-locality.md) |
 
 ## Read these in order
 
@@ -46,7 +46,7 @@ the API, and what it means for the code you write.
 
 <a class="card" href="zero-copy">
 <span class="card-title">4. Zero-copy and Cow →</span>
-<span class="card-desc">Borrowed tokens, <code>Cow</code>-returning normalizers, and the ASCII fast paths that keep UTF-16 exactness free.</span>
+<span class="card-desc">Borrowed tokens, <code>Cow</code>-returning normalizers, and the ASCII fast paths that keep exact Unicode indexing free.</span>
 </a>
 
 <a class="card" href="allocation">
@@ -61,7 +61,7 @@ the API, and what it means for the code you write.
 
 <a class="card" href="parallelism">
 <span class="card-title">7. Parallelism →</span>
-<span class="card-desc">The thirteen opt-in <code>par_*</code> APIs, and how to parallelise everything else yourself.</span>
+<span class="card-desc">The fourteen opt-in <code>par_*</code> APIs, and how to parallelise everything else yourself.</span>
 </a>
 
 <a class="card" href="cache-locality">

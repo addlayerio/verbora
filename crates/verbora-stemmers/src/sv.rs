@@ -39,13 +39,10 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use verbora_normalizers::normalize_sv;
-use verbora_tokenizers::classes;
-
-use crate::among::AmongTable;
+use crate::among::{AmongTable, Buf, UnionTable};
 use crate::base::{Casing, TokenizeAndStem};
-use crate::stopwords::{self, Language};
-use crate::units::{text, units};
+use crate::stopwords::Language;
+use crate::units::borrowed_prefix;
 
 /// The Swedish stemmer.
 ///
@@ -56,6 +53,38 @@ use crate::units::{text, units};
 /// assert_eq!(s.stem("jaktbössa"), "jaktböss");
 /// assert_eq!(s.stem("BJÖRKS"), "björk");
 /// ```
+///
+/// # `å`, `ä` and `ö` are letters, so nothing is folded
+///
+/// [`TokenizeAndStem::prepare`] is the identity for Swedish: text reaches the
+/// tokenizer, the stop-word list and [`Self::stem`] spelled exactly as it was
+/// written. No diacritic fold, no case fold, no rewrite of any kind. Three
+/// independent reasons, and each on its own is decisive:
+///
+/// 1. **They are distinct letters, not accents.** Swedish has twenty-nine
+///    letters; `å`, `ä` and `ö` are the last three and collate *after* `z`,
+///    not next to `a` and `o`. Folding them merges words that are not the
+///    same word: `för` ("for") becomes `for` (past tense of *fara*, "to
+///    travel"), and `hår` ("hair") becomes `har` ("has").
+/// 2. **Every rule below is stated over the un-folded alphabet.** The vowel
+///    class is `[aeiouyäåö]`, R1's character class is `[a-zåäö]`, and step 3's
+///    non-removable check is `(lös|full)t`. Fold first and `löst` can never
+///    match — the rule is written for a spelling the stemmer would no longer
+///    receive.
+/// 3. **It emptied a third of the stop-word list.** 116 of the 428 Swedish
+///    stop words are spelled with `å`, `ä` or `ö` and fold to strings that are
+///    not themselves on the list, so a document-level fold silently deleted
+///    them: `på`, `för`, `från`, `över`, `här`, `där`, `när` and 109 more
+///    stopped being stop words while `is_stop_word` still answered `true` for
+///    them.
+///
+/// Foreign accents in loanwords (`é`, `ç`, `ü`) are not folded either. Nothing
+/// in the algorithm or the list distinguishes them, so folding only those
+/// would be a new rule of Verbora's own invention with no algorithmic
+/// consequence — and the alphabet argument does not reach them either way.
+/// A caller who wants an accent-insensitive index should fold with
+/// `verbora_normalizers::remove_diacritics` *around* this stemmer, where the
+/// choice is theirs and visible.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerSv;
 
@@ -84,56 +113,157 @@ struct RegionIx {
     rest_len: usize,
 }
 
-fn region_ix(t: &[u16]) -> RegionIx {
-    let (mut r1s, mut r1e) = (0usize, 0usize);
-    if let Some(index) = (0..t.len().saturating_sub(2))
-        .find(|&i| is_vowel(t[i]) && !is_vowel(t[i + 1]) && is_r1_char(t[i + 2]))
-    {
-        r1s = index + 2;
-        r1e = (index + 2..t.len())
-            .find(|&i| !is_r1_char(t[i]))
-            .unwrap_or(t.len());
+/// `getRegions`, freshly scanned. `stem` goes through [`RegionScan`]
+/// instead; this remains as the definition the cached form is checked
+/// against.
+#[cfg(test)]
+fn region_ix_uncached(t: &[u16]) -> RegionIx {
+    RegionScan::of(t).at_len(t.len())
+}
+
+/// A scan of `getRegions`' match, kept so the later steps can re-derive R1
+/// after a truncation instead of rescanning the word.
+///
+/// # Why this is exact
+///
+/// The reference calls `getRegions(token)` afresh in every step, and the
+/// steps below only ever *truncate* — except the paste arm of [`rebuild`],
+/// which `stem` marks and rescans after. For a truncation the question is
+/// what a rescan of a prefix would return. The match position is the first
+/// `i` with `vowel(t[i]) && !vowel(t[i+1]) && r1char(t[i+2])`; truncating to
+/// `len'` changes none of those three units for any `i` with `i + 2 < len'`,
+/// and removes exactly the positions with `i + 2 >= len'` from
+/// consideration. So the same `i` is still the first match when
+/// `i + 2 < len'`, and there is no match at all otherwise. The captured
+/// run's end is the first non-R1 character at or after `i + 2`, or the
+/// length; over a prefix that is the same index when it lies inside the
+/// prefix and the prefix's own length when it does not — which is
+/// `min(end, len')` in both cases, including the `index == 0` branch whose
+/// end is the length by construction.
+#[derive(Clone, Copy)]
+struct RegionScan {
+    index: Option<usize>,
+    start: usize,
+    end: usize,
+}
+
+impl RegionScan {
+    fn of(t: &[u16]) -> RegionScan {
+        let Some(index) = (0..t.len().saturating_sub(2))
+            .find(|&i| is_vowel(t[i]) && !is_vowel(t[i + 1]) && is_r1_char(t[i + 2]))
+        else {
+            return RegionScan {
+                index: None,
+                start: 0,
+                end: 0,
+            };
+        };
         if index == 0 {
             // The unexplained special case: `r1 = str.slice(3)`.
-            r1s = 3;
-            r1e = t.len();
+            return RegionScan {
+                index: Some(0),
+                start: 3,
+                end: t.len(),
+            };
+        }
+        let end = (index + 2..t.len())
+            .find(|&i| !is_r1_char(t[i]))
+            .unwrap_or(t.len());
+        RegionScan {
+            index: Some(index),
+            start: index + 2,
+            end,
         }
     }
-    RegionIx {
-        rest_len: t.len() - (r1e - r1s),
-        r1s,
-        r1e,
+
+    /// What `getRegions` would return for the same word truncated to `len`.
+    #[inline]
+    fn at_len(self, len: usize) -> RegionIx {
+        let (r1s, r1e) = match self.index {
+            Some(index) if index + 2 < len => (self.start, self.end.min(len)),
+            _ => (0, 0),
+        };
+        RegionIx {
+            rest_len: len - (r1e - r1s),
+            r1s,
+            r1e,
+        }
     }
 }
 
 /// The sorted search tables, built once from the alternations below.
+///
+/// # Why step 2 is not among them
+///
+/// Its seven alternatives are all two units long, so the whole `find_among`
+/// apparatus reduces to reading the last two units and switching on them —
+/// see [`ends_consonant_pair`]. Step 3's two alternations *are* tables, but
+/// merged into one: they interrogate the same region of the same word, so a
+/// single search plus a link walk answers both (see
+/// [`crate::among::UnionTable`]).
 struct SvTables {
     step1a: AmongTable,
-    /// `(dd|gd|nn|dt|gt|kt|tt)` — step 2's alternation.
-    step2: AmongTable,
-    /// `(lös|full)t` — checked before the removable step-3 suffixes.
-    lost_fullt: AmongTable,
-    /// `(lig|ig|els)` — step 3's removable suffixes.
-    lig_ig_els: AmongTable,
+    /// 0 = [`LOST_FULLT`] (`(lös|full)t`, checked first), 1 = [`LIG_IG_ELS`]
+    /// (step 3's removable suffixes).
+    step3: UnionTable,
 }
 
 static TABLES: LazyLock<SvTables> = LazyLock::new(|| SvTables {
     step1a: AmongTable::build(STEP1A),
-    step2: AmongTable::build(&["dd", "gd", "nn", "dt", "gt", "kt", "tt"]),
-    lost_fullt: AmongTable::build(&["löst", "fullt"]),
-    lig_ig_els: AmongTable::build(&["lig", "ig", "els"]),
+    step3: UnionTable::build(&[LOST_FULLT, LIG_IG_ELS]),
 });
+
+/// `(lös|full)t` — step 3's non-removable check.
+static LOST_FULLT: &[&str] = &["löst", "fullt"];
+/// `(lig|ig|els)` — step 3's removable suffixes.
+static LIG_IG_ELS: &[&str] = &["lig", "ig", "els"];
+/// `(dd|gd|nn|dt|gt|kt|tt)` — step 2's alternation, kept as the table the
+/// hand-written [`ends_consonant_pair`] is checked against (and as the
+/// oracle's input); `stem` itself never searches it.
+#[cfg(test)]
+static STEP2: &[&str] = &["dd", "gd", "nn", "dt", "gt", "kt", "tt"];
+
+/// Whether `w[lb..cursor]` ends in one of `dd`, `gd`, `nn`, `dt`, `gt`,
+/// `kt`, `tt` — step 2's alternation.
+///
+/// Every alternative is exactly two units, so this is the same answer a
+/// table search would give, reached by reading the two units directly. The
+/// arms are grouped by the *final* unit because that is the one the region
+/// guarantees is present once the length check passes.
+#[inline]
+fn ends_consonant_pair(w: &[u16], cursor: usize, lb: usize) -> bool {
+    if cursor < lb + 2 {
+        return false;
+    }
+    let (first, last) = (w[cursor - 2], w[cursor - 1]);
+    match last {
+        0x64 => matches!(first, 0x64 | 0x67),               // dd, gd
+        0x6E => first == 0x6E,                              // nn
+        0x74 => matches!(first, 0x64 | 0x67 | 0x6B | 0x74), // dt, gt, kt, tt
+        _ => false,
+    }
+}
 
 /// `regions.rest + r1.slice(0, idx)`: a plain truncation when `rest` ends
 /// exactly where R1 starts, the literal two-slice paste otherwise.
-fn rebuild(t: &mut Vec<u16>, r: &RegionIx, idx: usize) {
+///
+/// The paste arm's result is never longer than the buffer already is
+/// (`rest_len + idx <= len` by construction), so it moves R1's kept prefix
+/// down over the same buffer instead of building a second one. The two
+/// ranges can overlap in either direction — `rest` and R1 need not be
+/// adjacent — which is exactly what `copy_within`'s memmove semantics
+/// handle.
+/// Returns whether the paste arm ran — the caller's cached region scan is
+/// only invalidated by that arm, the other being a plain truncation.
+fn rebuild(buf: &mut Buf, r: &RegionIx, idx: usize) -> bool {
     if r.rest_len == r.r1s {
-        t.truncate(r.r1s + idx);
-    } else {
-        let mut out = t[..r.rest_len.min(t.len())].to_vec();
-        out.extend_from_slice(&t[r.r1s..r.r1s + idx]);
-        *t = out;
+        buf.truncate(r.r1s + idx);
+        return false;
     }
+    let keep = r.rest_len.min(buf.len());
+    buf.as_mut_slice().copy_within(r.r1s..r.r1s + idx, keep);
+    buf.truncate(keep + idx);
+    true
 }
 
 /// The step-1a alternation, in source order.
@@ -154,21 +284,26 @@ impl PorterStemmerSv {
     /// Stems one token: lowercase, then step 1, step 2, step 3.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let lower = token.to_lowercase();
-        let mut t = units(&lower);
+        let (mut buf, ascii_lower) = Buf::fill_lowercase_tracked(token);
+        let mut rewrote = false;
+        let t = buf.as_slice();
+        // One scan of `getRegions`' match serves all three steps; see
+        // `RegionScan` for why re-deriving it after a truncation is exact.
+        let mut scan = RegionScan::of(t);
 
         // --- Step 1: 1a and 1b share ONE regions call; the shorter result
         // wins and a tie goes to 1b (strict `<`, see the module docs).
-        let r = region_ix(&t);
+        let r = scan.at_len(t.len());
         let len = t.len();
         let mut idx_a: Option<usize> = None;
         if r.r1e > r.r1s {
-            let n = tb.step1a.longest(&t, r.r1e, r.r1s);
+            let n = tb.step1a.longest(t, r.r1e, r.r1s);
             if n > 0 {
                 idx_a = Some((r.r1e - r.r1s) - n);
             }
@@ -204,40 +339,69 @@ impl PorterStemmerSv {
         }
         if len_a < len_b {
             let idx = idx_a.unwrap_or(0);
-            rebuild(&mut t, &r, idx);
+            if rebuild(&mut buf, &r, idx) {
+                // The paste arm moves units rather than only dropping them,
+                // so the cached scan no longer describes the word — and the
+                // result is no longer a prefix of the input.
+                scan = RegionScan::of(buf.as_slice());
+                rewrote = true;
+            }
         } else {
-            t.truncate(len_b);
+            buf.truncate(len_b);
         }
 
         // --- Step 2: drop a final unit when R1 ends in a listed pair -------
-        let r = region_ix(&t);
-        if r.r1e > r.r1s && tb.step2.longest(&t, r.r1e, r.r1s) > 0 {
-            let keep = t.len().saturating_sub(1);
-            t.truncate(keep);
+        let r = scan.at_len(buf.len());
+        if r.r1e > r.r1s && ends_consonant_pair(buf.as_slice(), r.r1e, r.r1s) {
+            let keep = buf.len().saturating_sub(1);
+            buf.truncate(keep);
         }
 
         // --- Step 3 --------------------------------------------------------
-        let r = region_ix(&t);
+        let r = scan.at_len(buf.len());
         if r.r1e > r.r1s {
-            // `/(lös|full)t$/` — the trailing `t` is outside the group.
-            if tb.lost_fullt.longest(&t, r.r1e, r.r1s) > 0 {
-                let keep = t.len().saturating_sub(1);
-                t.truncate(keep);
-            } else {
-                let n = tb.lig_ig_els.longest(&t, r.r1e, r.r1s);
-                if n > 0 {
-                    let idx = (r.r1e - r.r1s) - n;
-                    rebuild(&mut t, &r, idx);
+            // One search over R1 answers both alternations; the link walk
+            // visits matches longest-first, so the first hit per table id is
+            // that table's own longest match.
+            let mut best_lost = 0usize;
+            let mut best_lig = 0usize;
+            let mut i = tb.step3.find_longest_index(buf.as_slice(), r.r1e, r.r1s);
+            while i >= 0 {
+                let (n, link, tid) = tb.step3.entry(i);
+                if tid == 0 {
+                    if best_lost == 0 {
+                        best_lost = n;
+                    }
+                } else if best_lig == 0 {
+                    best_lig = n;
                 }
+                i = link;
+            }
+            // `/(lös|full)t$/` — the trailing `t` is outside the group, and
+            // this branch wins outright when it fires.
+            if best_lost > 0 {
+                let keep = buf.len().saturating_sub(1);
+                buf.truncate(keep);
+            } else if best_lig > 0 {
+                let idx = (r.r1e - r.r1s) - best_lig;
+                // Last step: nothing reads the scan after this, but the
+                // paste arm still rules out borrowing the input.
+                rewrote |= rebuild(&mut buf, &r, idx);
             }
         }
 
-        Cow::Owned(text(&t))
+        // Every step here either truncates or — in `rebuild`'s paste arm —
+        // moves units down; only the former leaves a prefix of the input.
+        // See `crate::units::borrowed_prefix`.
+        if let Some(prefix) = borrowed_prefix(token, buf.len(), ascii_lower, rewrote) {
+            return Cow::Borrowed(prefix);
+        }
+        Cow::Owned(buf.into_text())
     }
 
     /// Appends a stop word to the **process-global Swedish list**.
     pub fn add_stop_word(&self, word: impl Into<String>) {
-        stopwords::add(Language::Sv, word);
+        Language::Sv.add(word);
     }
 
     /// Appends several stop words to the process-global Swedish list.
@@ -246,7 +410,7 @@ impl PorterStemmerSv {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        stopwords::add_all(Language::Sv, words);
+        Language::Sv.add_all(words);
     }
 }
 
@@ -254,23 +418,39 @@ impl TokenizeAndStem for PorterStemmerSv {
     const FILTER_ON: Casing = Casing::Lower;
     const STEM_ON: Casing = Casing::Raw;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_sv(c)
-    }
-
-    /// `AggressiveTokenizerSv` folds `à á è é` — and only their first occurrence
-    /// each — before splitting.
-    fn prepare(text: &str) -> Cow<'_, str> {
-        normalize_sv(text)
-    }
+    // `prepare` is deliberately *not* overridden: the trait's identity default
+    // is the specified behaviour. See `PorterStemmerSv`'s own documentation,
+    // "`å`, `ä` and `ö` are letters, so nothing is folded", for the reasoning
+    // and for the 116 stop words a fold here used to delete.
 
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Sv, word)
+        Language::Sv.contains(word)
     }
 
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("STEP1A", super::STEP1A),
+        ("STEP2", super::STEP2),
+        ("LOST_FULLT", super::LOST_FULLT),
+        ("LIG_IG_ELS", super::LIG_IG_ELS),
+    ];
+
+    /// The prelude `stem` runs before any table is consulted: lowercasing,
+    /// and nothing else. `å`, `ä` and `ö` are letters and are not folded.
+    pub(crate) fn prelude(token: &str) -> String {
+        token.to_lowercase()
+    }
+
+    /// The prelude writes no marker unit.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[];
 }
 
 impl verbora_core::Stemmer for PorterStemmerSv {
@@ -282,9 +462,151 @@ impl verbora_core::Stemmer for PorterStemmerSv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::units;
 
     fn s(t: &str) -> String {
         PorterStemmerSv::new().stem(t).into_owned()
+    }
+
+    /// **Every** entry of the Swedish stop-word list must still be recognised
+    /// through the documented pipeline, not a spot check of a few.
+    ///
+    /// A whole-document diacritic fold in `prepare` rewrote `för` to `for`
+    /// before `is_stop_word` ever saw it, so 116 of the 428 entries — every
+    /// one spelled with `å`, `ä` or `ö` whose folded form is not itself on the
+    /// list — silently stopped being stop words. A handful of ASCII spot
+    /// checks passes that unchanged, which is why this enumerates the list.
+    #[test]
+    fn every_stop_word_is_filtered_by_the_pipeline() {
+        let st = PorterStemmerSv::new();
+        let defaults = Language::Sv.defaults();
+        let mut unreachable = Vec::new();
+        for word in defaults {
+            // The entry must be one word to the tokenizer, or no `prepare`
+            // could ever present it to `is_stop_word` in the first place.
+            assert_eq!(
+                st.tokenize_and_stem(word, true).len(),
+                1,
+                "{word:?} is not a single token"
+            );
+            if !st.tokenize_and_stem(word, false).is_empty() {
+                unreachable.push(*word);
+            }
+        }
+        assert!(
+            unreachable.is_empty(),
+            "{} of {} Swedish stop words are unreachable through the pipeline: {unreachable:?}",
+            unreachable.len(),
+            defaults.len()
+        );
+    }
+
+    /// `prepare` rewrites nothing and borrows everything.
+    ///
+    /// This is the decision recorded on [`PorterStemmerSv`]: `å`, `ä` and `ö`
+    /// are letters of the Swedish alphabet, so a diacritic fold here merges
+    /// distinct words, makes the stemmer's own `(lös|full)t` rule unmatchable,
+    /// and deletes 116 stop words. Foreign accents are left alone for the same
+    /// reason the fold is: nothing downstream distinguishes them.
+    #[test]
+    fn prepare_is_the_identity_and_never_allocates() {
+        for text in [
+            "förälder",
+            "Åsa",
+            "âçêîñóôûš",
+            "ààà ééé",
+            "stiftelsen",
+            "körsbärsträdgårdarna",
+            "",
+        ] {
+            assert!(
+                matches!(PorterStemmerSv::prepare(text), Cow::Borrowed(t) if t == text),
+                "prepare rewrote {text:?}"
+            );
+        }
+    }
+
+    /// The three-letter argument, at the level a caller sees it: folding would
+    /// collapse pairs that Swedish spells differently because they *are*
+    /// different words.
+    #[test]
+    fn folding_would_merge_distinct_words() {
+        let st = PorterStemmerSv::new();
+        // `för` ("for") vs `for` (past tense of `fara`); `hår` vs `har`.
+        assert_ne!(
+            st.tokenize_and_stem("för", true),
+            st.tokenize_and_stem("for", true)
+        );
+        assert_ne!(
+            st.tokenize_and_stem("hår", true),
+            st.tokenize_and_stem("har", true)
+        );
+        // Step 3's `(lös|full)t` check is spelled with `ö`, so it is only
+        // reachable at all because nothing folded the token first.
+        assert_eq!(s("löst"), "löst");
+    }
+
+    /// The hand-written step-2 matcher must answer exactly what a search of
+    /// [`STEP2`] would, for every region and every pair of code units in the
+    /// Latin-1 range the alternation lives in — otherwise the table it
+    /// replaced would still be the specification and this would be a
+    /// divergence rather than an optimisation.
+    #[test]
+    fn the_consonant_pair_matcher_agrees_with_its_table() {
+        let table = AmongTable::build(STEP2);
+        for a in 0..=0xFFu16 {
+            for b in 0..=0xFFu16 {
+                let w = [0x78, a, b];
+                for lb in 0..=3usize {
+                    for cursor in lb..=3usize {
+                        assert_eq!(
+                            ends_consonant_pair(&w, cursor, lb),
+                            table.longest(&w, cursor, lb) > 0,
+                            "units {a:#06X},{b:#06X} region {lb}..{cursor}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `RegionScan::at_len` must agree with a fresh `getRegions` of the
+    /// truncated word at every truncation point, which is what lets `stem`
+    /// scan once.
+    #[test]
+    fn a_cached_scan_matches_a_rescan_of_every_prefix() {
+        let mut rng = Rng(0xB7E1_5162_8AED_2A6B);
+        for _ in 0..20_000 {
+            let word = random_word(&mut rng).to_lowercase();
+            let t = units(&word);
+            let scan = RegionScan::of(&t);
+            for len in 0..=t.len() {
+                let got = scan.at_len(len);
+                let want = region_ix_uncached(&t[..len]);
+                assert_eq!(
+                    (got.r1s, got.r1e, got.rest_len),
+                    (want.r1s, want.r1e, want.rest_len),
+                    "{word:?} truncated to {len}"
+                );
+            }
+        }
+    }
+
+    /// The Swedish counterpart of Norwegian's borrow path: an already-lower
+    /// ASCII word that was only truncated comes back as a slice of the
+    /// input. Swedish reaches it less often because `å ä ö` are not ASCII.
+    #[test]
+    fn an_unrewritten_ascii_word_is_returned_borrowed() {
+        let st = PorterStemmerSv::new();
+        assert!(matches!(st.stem("klockorna"), Cow::Borrowed("klock")));
+        assert!(matches!(st.stem("stiftelsen"), Cow::Borrowed("stift")));
+        assert!(matches!(st.stem("xyz"), Cow::Borrowed("xyz")));
+        // Uppercase folds, so the buffer is no longer the input's bytes.
+        assert!(matches!(st.stem("BJORKS"), Cow::Owned(_)));
+        // Non-ASCII keeps the owned path.
+        assert!(matches!(st.stem("björks"), Cow::Owned(_)));
+        assert_eq!(st.stem("björks"), "björk");
+        assert_eq!(st.stem("BJÖRKS"), "björk");
     }
 
     #[test]
@@ -309,10 +631,14 @@ mod tests {
         }
     }
 
-    /// The cross-cutting battery from `docs/PARITY.md`: empty, one character,
-    /// uppercase, accented Latin, Greek, Cyrillic, CJK, an astral pair,
-    /// punctuation, digits, a line terminator, and a very long word. Every
-    /// expectation below was read off the reference with `node`.
+    /// The cross-cutting battery every stemmer in this crate answers: empty,
+    /// one character, uppercase, accented Latin, Greek, Cyrillic, CJK, an
+    /// astral pair, punctuation, digits, a line terminator, and a very long
+    /// word.
+    ///
+    /// The expectations are the *identity* in every row but the case fold,
+    /// which is the whole point: none of these is a word of this language, so
+    /// a stemmer that changes one is reaching outside its own alphabet.
     #[test]
     fn cross_script_battery() {
         for (input, want) in [
@@ -342,6 +668,7 @@ mod tests {
     mod oracle {
         use super::super::*;
         use crate::units::{ends_with, slen};
+        use crate::units::{text, units};
 
         struct Regions<'t> {
             r1: &'t [u16],
@@ -432,9 +759,7 @@ mod tests {
 
         fn step2(t: &[u16]) -> Vec<u16> {
             let r = regions(t);
-            if !r.r1.is_empty()
-                && listed_suffix(r.r1, &["dd", "gd", "nn", "dt", "gt", "kt", "tt"]).is_some()
-            {
+            if !r.r1.is_empty() && listed_suffix(r.r1, STEP2).is_some() {
                 return t[..t.len().saturating_sub(1)].to_vec();
             }
             t.to_vec()
@@ -445,10 +770,10 @@ mod tests {
             if r.r1.is_empty() {
                 return t.to_vec();
             }
-            if listed_suffix(r.r1, &["löst", "fullt"]).is_some() {
+            if listed_suffix(r.r1, LOST_FULLT).is_some() {
                 return t[..t.len().saturating_sub(1)].to_vec();
             }
-            match listed_suffix(r.r1, &["lig", "ig", "els"]) {
+            match listed_suffix(r.r1, LIG_IG_ELS) {
                 Some(idx) => {
                     let mut out = t[..r.rest_len.min(t.len())].to_vec();
                     out.extend_from_slice(&r.r1[..idx]);

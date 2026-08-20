@@ -6,7 +6,12 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 VERBORA_COMMIT=$(git -C ../.. rev-parse HEAD)
-VERBORA_VERSION=$(grep -m1 '^version' ../../Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
+# The root manifest is a *virtual* workspace: it has no top-level `version`,
+# so the original `grep -m1 '^version' ../../Cargo.toml` matched nothing and,
+# under `set -o pipefail`, took the whole script — and with it the machine
+# metadata no published number may go without — down with exit 1. Read the
+# version from a real member crate instead, which is where it actually lives.
+VERBORA_VERSION=$(grep -m1 '^version' ../../crates/verbora-distance/Cargo.toml | sed -E 's/.*"(.+)".*/\1/')
 RUSTC_VERSION=$(rustc --version)
 CPU_MODEL=$(grep -m1 'model name' /proc/cpuinfo | sed -E 's/model name\s*:\s*//')
 CPU_CORES=$(nproc)

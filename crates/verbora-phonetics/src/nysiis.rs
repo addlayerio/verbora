@@ -1,90 +1,56 @@
-//! NYSIIS — the New York State Identification and Intelligence System code.
-//!
-//! Devised by Robert L. Taft for the New York State Identification and
-//! Intelligence System ("Name Search Technique", special report, 1970) as a
-//! higher-accuracy replacement for SoundEx in matching surnames. It reached
-//! Apache commons-codec as `org.apache.commons.codec.language.Nysiis`, and
-//! [rphonetic](https://crates.io/crates/rphonetic) ports that class to Rust.
-//!
-//! # Provenance and pinning
-//!
-//! This module is a **Verbora-native extension**: the JS reference the rest of
-//! this crate ports has no NYSIIS, so behavior is pinned to **rphonetic 3.0.6**
-//! (`src/nysiis.rs`), the commons-codec lineage implementation this encoder is
-//! benchmarked against. Output is byte-identical to rphonetic's on rphonetic's
-//! full accepted input domain, with a single documented divergence (below).
-//!
-//! # The algorithm, exactly as rphonetic runs it
-//!
-//! 1. **Clean**: keep only Unicode-alphabetic characters (`char::is_alphabetic`)
-//!    and uppercase them with the full Unicode mapping — so `ß` becomes `SS`,
-//!    accents and CJK letters survive, and digits, punctuation, whitespace and
-//!    emoji are dropped. An input that cleans to nothing encodes to `""`.
-//! 2. **Prefix rewrites**, applied in order to the *evolving* string:
-//!    `MAC`→`MCC`, `KN`→`NN`, `K`→`C`, `PH`/`PF`→`FF`, `SCH`→`SSS`.
-//! 3. **Suffix rewrites**: `EE`/`IE`→`Y`, then `DT`/`RT`/`RD`/`NT`/`ND`→`D`.
-//! 4. **First character retained verbatim** — it is never transcoded, which is
-//!    why `"AEIOU"` encodes to `"A"` and `"Um"` to `"UN"`.
-//! 5. **Rolling transcode** from the second character on, *writing its output
-//!    back into the character buffer* so multi-character outputs overwrite the
-//!    following input characters (rphonetic does exactly this, and it is
-//!    observable — e.g. `PH`'s second output `F` becomes the next iteration's
-//!    current character):
-//!    `EV`→`AF`; vowels (`AEIOU` only — accented vowels are *not* vowels
-//!    here, matching rphonetic)→`A`; `Q`→`G`; `Z`→`S`; `M`→`N`; `KN`→`NN`;
-//!    `K`→`C`; `SCH`→`SSS`; `PH`→`FF`; `H` becomes the previous character
-//!    unless both its neighbours are vowels; `W` after a vowel becomes that
-//!    vowel (i.e. `A`, since vowels have just been transcoded).
-//!    A transcoded character equal to its (transcoded) predecessor is not
-//!    appended to the key.
-//! 6. **Tail trims**, only when the key is longer than one byte: drop a
-//!    trailing `S`; rewrite trailing `AY` to `Y` (only when longer than two
-//!    bytes); drop a trailing `A`. These can cascade to the empty string:
-//!    `"AZ"` encodes to `""`.
-//! 7. **Strict truncation**: when [`Nysiis::is_strict`] (the default, as in
-//!    commons-codec), the code is cut to at most 6 bytes.
-//!
-//! The trim gates in step 6 measure *bytes*, exactly like rphonetic's `String`
-//! operations. This is provably equivalent to counting characters: every
-//! trimmed pattern is ASCII, and any key ending in `AY` with a multi-byte
-//! character elsewhere is already longer than two by both measures.
-//!
-//! # Divergence from rphonetic (excluded from the benchmark domain)
-//!
-//! rphonetic's strict truncation is `result[..min(len, 6)].to_string()` — a raw
-//! byte slice. When the code is longer than 6 bytes **and** byte offset 6 falls
-//! inside a multi-byte character, that slice **panics** in rphonetic. Example:
-//! `"BCDFGÉX"` cleans and transcodes to the code `"BCDFGÉX"`, whose `É` spans
-//! bytes 5..7, so `result[..6]` is not a character boundary. This
-//! implementation never panics: it backs the cut off to the last character
-//! boundary at or before 6, so `Nysiis::new().process("BCDFGÉX")` is
-//! `"BCDFG"`. Affected inputs are exactly: strict mode, code longer than
-//! 6 bytes, and `!code.is_char_boundary(6)` — reachable only with non-ASCII
-//! letters. Whenever byte 6 *is* a boundary (all ASCII input; `"日本語"` →
-//! `"日本"`), output is byte-identical to rphonetic's.
-//!
-//! # Performance
-//!
-//! ASCII input (the entire classical domain of the algorithm) runs a single
-//! forward byte scan over one buffer that is mutated in place — prefix/suffix
-//! rewrites, the transcode write-back, key compaction and trims all happen in
-//! that buffer, which is then handed to the returned `String` without copying:
-//! exactly one allocation per call. Non-ASCII input takes a `char`-level slow
-//! path that mirrors rphonetic literally.
+//! NYSIIS (Taft, 1970).
 
 /// Maximum code length in strict mode, as in commons-codec (`TRUE_LENGTH`).
 const MAX_STRICT_LEN: usize = 6;
 
-/// The NYSIIS phonetic encoder, pinned to rphonetic 3.0.6.
+/// NYSIIS — the New York State Identification and Intelligence System code.
 ///
-/// The `Default` (and [`Nysiis::new`]) configuration is **strict** — codes are
-/// truncated to 6 characters — matching commons-codec's and rphonetic's
-/// defaults. [`Nysiis::with_strict`] configures it explicitly:
-/// `Nysiis::with_strict(false)` corresponds to rphonetic's
-/// `Nysiis::new(false)`.
+/// # Publication
+///
+/// Robert L. Taft, *Name Search Techniques*, New York State Identification and
+/// Intelligence System, Special Report No. 1, Albany, 1970. Taft designed it as
+/// a higher-accuracy replacement for Soundex over American surnames, and the
+/// rule sequence below is his.
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar**, and only the twenty-six letters
+///   `A`–`Z` are read, after simple ASCII case folding. Every other scalar is
+///   skipped. Taft's rules are stated over the Roman alphabet and assign no
+///   class to `é`, `ß` or `語`: carrying such a character through to the code
+///   would put a letter in the key that no rule mentions, and would make the
+///   key's length depend on the input's script.
+/// * The code is ASCII uppercase letters only, so a strict truncation is a
+///   character truncation and a byte truncation at once.
+/// * A token with no `A`–`Z` letter encodes to `""`. So can a token that has
+///   one: Taft's tail trims cascade, and `"AZ"` trims to nothing. The empty
+///   code is therefore genuinely "this name has no NYSIIS key", not a
+///   sentinel.
+/// * **Total**: no input panics, and there is no error type.
+///
+/// # The rules, in order
+///
+/// 1. **Prefix rewrites**, applied to the *evolving* string:
+///    `MAC`→`MCC`, `KN`→`NN`, `K`→`C`, `PH`/`PF`→`FF`, `SCH`→`SSS`.
+/// 2. **Suffix rewrites**: `EE`/`IE`→`Y`, then `DT`/`RT`/`RD`/`NT`/`ND`→`D`.
+/// 3. **The first character is retained verbatim** and never transcoded,
+///    which is why `"AEIOU"` encodes to `"A"` and `"Um"` to `"UN"`.
+/// 4. **Rolling transcode** from the second character on, writing its output
+///    *back into the buffer* so a multi-character output becomes the next
+///    iteration's input: `EV`→`AF`; vowels (`AEIOU`)→`A`; `Q`→`G`; `Z`→`S`;
+///    `M`→`N`; `KN`→`NN`; `K`→`C`; `SCH`→`SSS`; `PH`→`FF`; `H` becomes the
+///    previous character unless both its neighbours are vowels; `W` after a
+///    vowel becomes that vowel. A transcoded character equal to its
+///    (transcoded) predecessor is not appended to the key.
+/// 5. **Tail trims**, only when the key is longer than one character: drop a
+///    trailing `S`; rewrite a trailing `AY` to `Y` (only when longer than
+///    two); drop a trailing `A`.
+/// 6. **Strict truncation**: when [`Nysiis::is_strict`] — the default — the
+///    key is cut to at most 6 characters. [`Nysiis::with_strict`]`(false)`
+///    returns the untruncated key.
 ///
 /// ```
-/// use verbora_phonetics::nysiis::Nysiis;
+/// use verbora_phonetics::Nysiis;
 ///
 /// let strict = Nysiis::new();
 /// assert_eq!(strict.process("Westerlund"), "WASTAR");
@@ -103,7 +69,7 @@ impl Default for Nysiis {
     /// The strict encoder, like commons-codec's zero-argument constructor.
     ///
     /// ```
-    /// use verbora_phonetics::nysiis::Nysiis;
+    /// use verbora_phonetics::Nysiis;
     ///
     /// assert_eq!(Nysiis::default(), Nysiis::new());
     /// assert!(Nysiis::default().is_strict());
@@ -113,20 +79,10 @@ impl Default for Nysiis {
     }
 }
 
-/// The vowel class every NYSIIS rule uses: `AEIOU`, ASCII only.
-///
-/// rphonetic lowercases and checks `aeiou`; the buffer here holds uppercase, so
-/// this is the same predicate. Accented vowels are deliberately *not* vowels.
+/// The vowel class every NYSIIS rule uses: `AEIOU`.
 #[inline]
 const fn is_ascii_vowel(b: u8) -> bool {
     matches!(b, b'A' | b'E' | b'I' | b'O' | b'U')
-}
-
-/// `is_ascii_vowel` for the non-ASCII slow path, with rphonetic's exact
-/// `to_ascii_lowercase` framing.
-#[inline]
-fn is_vowel_char(c: char) -> bool {
-    matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u')
 }
 
 impl Nysiis {
@@ -134,7 +90,7 @@ impl Nysiis {
     /// commons-codec default.
     ///
     /// ```
-    /// use verbora_phonetics::nysiis::Nysiis;
+    /// use verbora_phonetics::Nysiis;
     ///
     /// assert_eq!(Nysiis::new().process("Brian"), "BRAN");
     /// ```
@@ -146,10 +102,10 @@ impl Nysiis {
     /// Creates an encoder with explicit strictness.
     ///
     /// `strict == true` truncates codes to 6 characters; `false` leaves them
-    /// full length. Mirrors rphonetic's `Nysiis::new(strict)`.
+    /// full length.
     ///
     /// ```
-    /// use verbora_phonetics::nysiis::Nysiis;
+    /// use verbora_phonetics::Nysiis;
     ///
     /// assert_eq!(Nysiis::with_strict(true).process("Phillipson"), "FALAPS");
     /// assert_eq!(Nysiis::with_strict(false).process("Phillipson"), "FALAPSAN");
@@ -162,7 +118,7 @@ impl Nysiis {
     /// Whether codes are truncated to 6 characters.
     ///
     /// ```
-    /// use verbora_phonetics::nysiis::Nysiis;
+    /// use verbora_phonetics::Nysiis;
     ///
     /// assert!(Nysiis::new().is_strict());
     /// assert!(!Nysiis::with_strict(false).is_strict());
@@ -174,13 +130,11 @@ impl Nysiis {
 
     /// Encodes `token` to its NYSIIS code.
     ///
-    /// Non-letters are dropped, letters are uppercased, and an input with no
-    /// letters at all encodes to the empty string — exactly rphonetic's
-    /// handling. Never panics, including on non-ASCII input (see the module
-    /// documentation for the one divergence that buys).
+    /// Scalars outside `A`–`Z` are skipped; see the [type
+    /// documentation](Self) for the rules and the text unit.
     ///
     /// ```
-    /// use verbora_phonetics::nysiis::Nysiis;
+    /// use verbora_phonetics::Nysiis;
     ///
     /// let nysiis = Nysiis::new();
     /// assert_eq!(nysiis.process("MACINTOSH"), "MCANT");
@@ -190,17 +144,13 @@ impl Nysiis {
     /// ```
     #[must_use]
     pub fn process(&self, token: &str) -> String {
-        if token.is_ascii() {
-            self.process_ascii(token.as_bytes())
-        } else {
-            self.process_unicode(token)
-        }
+        self.encode(token)
     }
 
     /// Whether two strings share a NYSIIS code (at this encoder's strictness).
     ///
     /// ```
-    /// use verbora_phonetics::nysiis::Nysiis;
+    /// use verbora_phonetics::Nysiis;
     ///
     /// let nysiis = Nysiis::new();
     /// assert!(nysiis.compare("Smith", "Schmit"));
@@ -220,18 +170,14 @@ impl Nysiis {
     /// `i` does), so a key write at `k < i` lands strictly below every cell the
     /// loop still reads (`i - 1` and up), and a write at `k == i` stores the
     /// value already there.
-    fn process_ascii(&self, bytes: &[u8]) -> String {
-        let mut buf: Vec<u8> = Vec::with_capacity(bytes.len());
-        for &b in bytes {
-            if b.is_ascii_alphabetic() {
-                buf.push(b.to_ascii_uppercase());
-            }
-        }
+    fn encode(&self, token: &str) -> String {
+        let mut buf: Vec<u8> = Vec::with_capacity(token.len());
+        buf.extend(crate::letters::Letters::new(token));
         if buf.is_empty() {
             return String::new();
         }
 
-        // Prefix rewrites, in rphonetic's order, each testing the buffer as
+        // Prefix rewrites, in Taft's order, each testing the buffer as
         // already mutated by the previous one.
         if buf.starts_with(b"MAC") {
             buf[1] = b'C'; // MAC -> MCC
@@ -253,7 +199,7 @@ impl Nysiis {
 
         // Suffix rewrites: EE/IE -> Y, then DT/RT/RD/NT/ND -> D. After the
         // first fires the string ends in Y, so the second never also fires —
-        // but they are tested sequentially, like rphonetic's two `if`s.
+        // but they are tested sequentially, as two independent rules.
         let n = buf.len();
         if n >= 2 && matches!([buf[n - 2], buf[n - 1]], [b'E' | b'I', b'E']) {
             buf[n - 2] = b'Y';
@@ -283,8 +229,8 @@ impl Nysiis {
         }
         buf.truncate(k);
 
-        // Tail trims, gated on a key longer than one byte (rphonetic returns a
-        // one-character key untouched, even if it is "A" or "S").
+        // Tail trims, gated on a key longer than one character: a
+        // one-character key is returned untouched, even if it is "A" or "S".
         if buf.len() > 1 {
             if buf.last() == Some(&b'S') {
                 buf.pop();
@@ -303,95 +249,11 @@ impl Nysiis {
         }
         String::from_utf8(buf).expect("buffer holds only ASCII uppercase letters")
     }
-
-    /// The non-ASCII slow path: a literal mirror of rphonetic over
-    /// `Vec<char>`, with the key accumulated in a `String` so the byte-measured
-    /// trim gates read exactly like rphonetic's.
-    fn process_unicode(&self, token: &str) -> String {
-        // rphonetic's `soundex_clean`: Unicode-alphabetic filter, then the full
-        // (possibly multi-character) uppercase mapping.
-        let mut chars: Vec<char> = token
-            .chars()
-            .filter(|c| c.is_alphabetic())
-            .flat_map(char::to_uppercase)
-            .collect();
-        if chars.is_empty() {
-            return String::new();
-        }
-
-        if chars.starts_with(&['M', 'A', 'C']) {
-            chars[1] = 'C';
-        }
-        if chars.starts_with(&['K', 'N']) {
-            chars[0] = 'N';
-        }
-        if chars.first() == Some(&'K') {
-            chars[0] = 'C';
-        }
-        if chars.starts_with(&['P', 'H']) || chars.starts_with(&['P', 'F']) {
-            chars[0] = 'F';
-            chars[1] = 'F';
-        }
-        if chars.starts_with(&['S', 'C', 'H']) {
-            chars[1] = 'S';
-            chars[2] = 'S';
-        }
-
-        let n = chars.len();
-        if n >= 2 && matches!([chars[n - 2], chars[n - 1]], ['E' | 'I', 'E']) {
-            chars[n - 2] = 'Y';
-            chars.truncate(n - 1);
-        }
-        let n = chars.len();
-        if n >= 2
-            && matches!(
-                [chars[n - 2], chars[n - 1]],
-                ['D' | 'R', 'T'] | ['R' | 'N', 'D'] | ['N', 'T']
-            )
-        {
-            chars[n - 2] = 'D';
-            chars.truncate(n - 1);
-        }
-
-        let len = chars.len();
-        let mut key = String::with_capacity(token.len());
-        key.push(chars[0]);
-        for i in 1..len {
-            transcode_char(&mut chars, i);
-            if chars[i - 1] != chars[i] {
-                key.push(chars[i]);
-            }
-        }
-
-        // Byte-measured gates, exactly like rphonetic's String operations.
-        if key.len() > 1 {
-            if key.ends_with('S') {
-                key.pop();
-            }
-            if key.len() > 2 && key.ends_with("AY") {
-                key.remove(key.len() - 2);
-            }
-            if key.ends_with('A') {
-                key.pop();
-            }
-        }
-
-        if self.strict && key.len() > MAX_STRICT_LEN {
-            // rphonetic slices at byte 6 and panics off a boundary; we back off
-            // to the previous character boundary instead (see module docs).
-            let mut cut = MAX_STRICT_LEN;
-            while !key.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            key.truncate(cut);
-        }
-        key
-    }
 }
 
 /// One step of the rolling transcode, writing its output back into `buf` at
-/// `i..` exactly as rphonetic writes `transcode`'s output into its `chars`
-/// vector. Multi-character outputs never overrun: each one is guarded by the
+/// `i..`, so a multi-character output becomes the next iteration's input.
+/// Multi-character outputs never overrun: each one is guarded by the
 /// existence of the lookahead characters it overwrites.
 fn transcode_ascii(buf: &mut [u8], i: usize) {
     let prev = buf[i - 1];
@@ -450,63 +312,6 @@ fn transcode_ascii(buf: &mut [u8], i: usize) {
     }
 }
 
-/// [`transcode_ascii`] for the `char`-level slow path.
-fn transcode_char(chars: &mut [char], i: usize) {
-    let prev = chars[i - 1];
-    let cur = chars[i];
-    let next = chars.get(i + 1).copied();
-    let next2 = chars.get(i + 2).copied();
-
-    if cur == 'E' && next == Some('V') {
-        chars[i] = 'A';
-        chars[i + 1] = 'F';
-        return;
-    }
-    if is_vowel_char(cur) {
-        chars[i] = 'A';
-        return;
-    }
-    match (cur, next) {
-        ('Q', _) => {
-            chars[i] = 'G';
-            return;
-        }
-        ('Z', _) => {
-            chars[i] = 'S';
-            return;
-        }
-        ('M', _) => {
-            chars[i] = 'N';
-            return;
-        }
-        ('K', Some('N')) => {
-            chars[i] = 'N';
-            chars[i + 1] = 'N';
-            return;
-        }
-        ('K', _) => {
-            chars[i] = 'C';
-            return;
-        }
-        _ => {}
-    }
-    if cur == 'S' && next == Some('C') && next2 == Some('H') {
-        chars[i + 1] = 'S';
-        chars[i + 2] = 'S';
-        return;
-    }
-    if cur == 'P' && next == Some('H') {
-        chars[i] = 'F';
-        chars[i + 1] = 'F';
-        return;
-    }
-    if (cur == 'H' && (!is_vowel_char(prev) || !next.is_some_and(is_vowel_char)))
-        || (cur == 'W' && is_vowel_char(prev))
-    {
-        chars[i] = prev;
-    }
-}
-
 impl verbora_core::Phonetic for Nysiis {
     fn process(&self, token: &str) -> String {
         Self::process(self, token)
@@ -519,10 +324,153 @@ impl verbora_core::Phonetic for Nysiis {
 
 #[cfg(test)]
 mod tests {
+
+    // -- an independent reference, used only as a differential oracle -------
+
+    /// A deliberately naive second transcription of Taft's steps, over
+    /// `Vec<char>` with the key accumulated in a separate `String`.
+    ///
+    /// [`Nysiis::encode`] compacts the key into the *same* buffer its
+    /// transcode loop reads, relying on the invariant that the write position
+    /// never exceeds the read position. That is the kind of optimisation that
+    /// is right until it is not, so the tests below check it against this
+    /// mirror — which allocates a second buffer and therefore cannot have the
+    /// bug — over an exhaustive sweep of short strings. Written from the rule
+    /// list in the type's own documentation, not from `encode`'s code.
+    fn reference_encode(strict: bool, token: &str) -> String {
+        let mut chars: Vec<char> = crate::letters::Letters::new(token)
+            .map(char::from)
+            .collect();
+        if chars.is_empty() {
+            return String::new();
+        }
+
+        if chars.starts_with(&['M', 'A', 'C']) {
+            chars[1] = 'C';
+        }
+        if chars.starts_with(&['K', 'N']) {
+            chars[0] = 'N';
+        }
+        if chars.first() == Some(&'K') {
+            chars[0] = 'C';
+        }
+        if chars.starts_with(&['P', 'H']) || chars.starts_with(&['P', 'F']) {
+            chars[0] = 'F';
+            chars[1] = 'F';
+        }
+        if chars.starts_with(&['S', 'C', 'H']) {
+            chars[1] = 'S';
+            chars[2] = 'S';
+        }
+
+        let n = chars.len();
+        if n >= 2 && matches!([chars[n - 2], chars[n - 1]], ['E' | 'I', 'E']) {
+            chars[n - 2] = 'Y';
+            chars.truncate(n - 1);
+        }
+        let n = chars.len();
+        if n >= 2
+            && matches!(
+                [chars[n - 2], chars[n - 1]],
+                ['D' | 'R', 'T'] | ['R' | 'N', 'D'] | ['N', 'T']
+            )
+        {
+            chars[n - 2] = 'D';
+            chars.truncate(n - 1);
+        }
+
+        let len = chars.len();
+        let mut key = String::with_capacity(token.len());
+        key.push(chars[0]);
+        for i in 1..len {
+            reference_transcode(&mut chars, i);
+            if chars[i - 1] != chars[i] {
+                key.push(chars[i]);
+            }
+        }
+
+        if key.len() > 1 {
+            if key.ends_with('S') {
+                key.pop();
+            }
+            if key.len() > 2 && key.ends_with("AY") {
+                key.remove(key.len() - 2);
+            }
+            if key.ends_with('A') {
+                key.pop();
+            }
+        }
+
+        if strict {
+            key.truncate(MAX_STRICT_LEN);
+        }
+        key
+    }
+
+    fn reference_vowel(c: char) -> bool {
+        matches!(c, 'A' | 'E' | 'I' | 'O' | 'U')
+    }
+
+    /// One rolling-transcode step for [`reference_encode`].
+    fn reference_transcode(chars: &mut [char], i: usize) {
+        let prev = chars[i - 1];
+        let cur = chars[i];
+        let next = chars.get(i + 1).copied();
+        let next2 = chars.get(i + 2).copied();
+
+        if cur == 'E' && next == Some('V') {
+            chars[i] = 'A';
+            chars[i + 1] = 'F';
+            return;
+        }
+        if reference_vowel(cur) {
+            chars[i] = 'A';
+            return;
+        }
+        match (cur, next) {
+            ('Q', _) => {
+                chars[i] = 'G';
+                return;
+            }
+            ('Z', _) => {
+                chars[i] = 'S';
+                return;
+            }
+            ('M', _) => {
+                chars[i] = 'N';
+                return;
+            }
+            ('K', Some('N')) => {
+                chars[i] = 'N';
+                chars[i + 1] = 'N';
+                return;
+            }
+            ('K', _) => {
+                chars[i] = 'C';
+                return;
+            }
+            _ => {}
+        }
+        if cur == 'S' && next == Some('C') && next2 == Some('H') {
+            chars[i + 1] = 'S';
+            chars[i + 2] = 'S';
+            return;
+        }
+        if cur == 'P' && next == Some('H') {
+            chars[i] = 'F';
+            chars[i + 1] = 'F';
+            return;
+        }
+        if (cur == 'H' && (!reference_vowel(prev) || !next.is_some_and(reference_vowel)))
+            || (cur == 'W' && reference_vowel(prev))
+        {
+            chars[i] = prev;
+        }
+    }
     use super::*;
 
     /// Asserts every value encodes to `expected` under the strict default,
-    /// mirroring rphonetic's `encode_all` helper.
+    /// over a whole fixture list at once.
     fn strict_all(values: &[&str], expected: &str) {
         let nysiis = Nysiis::default();
         for v in values {
@@ -530,7 +478,7 @@ mod tests {
         }
     }
 
-    /// Asserts each pair under the non-strict encoder, mirroring rphonetic's
+    /// Asserts each pair under the non-strict encoder, mirroring Taft's
     /// `encode` helper.
     fn full(pairs: &[(&str, &str)]) {
         let nysiis = Nysiis::with_strict(false);
@@ -544,37 +492,41 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fixtures ported verbatim from rphonetic 3.0.6 src/nysiis.rs tests
+    // Fixtures from Apache Commons Codec's NysiisTest, which is the same
+    // Taft lineage as the rule list on `Nysiis` itself. Each test name below
+    // is that suite's own; the values are its values, not recordings of this
+    // implementation's output.
+    // (originally transcribed from a Rust port of the same suite)
     // (themselves mirroring commons-codec's NysiisTest.java).
     // ------------------------------------------------------------------
 
     #[test]
-    fn rphonetic_bran() {
+    fn commons_codec_bran() {
         strict_all(&["Brian", "Brown", "Brun"], "BRAN");
     }
 
     #[test]
-    fn rphonetic_cap() {
+    fn commons_codec_cap() {
         strict_all(&["Capp", "Cope", "Copp", "Kipp"], "CAP");
     }
 
     #[test]
-    fn rphonetic_dad() {
+    fn commons_codec_dad() {
         strict_all(&["Dent"], "DAD");
     }
 
     #[test]
-    fn rphonetic_dan() {
+    fn commons_codec_dan() {
         strict_all(&["Dane", "Dean", "Dionne"], "DAN");
     }
 
     #[test]
-    fn rphonetic_fal() {
+    fn commons_codec_fal() {
         strict_all(&["Phil"], "FAL");
     }
 
     #[test]
-    fn rphonetic_drop_by() {
+    fn commons_codec_drop_by() {
         full(&[
             ("MACINTOSH", "MCANT"),
             ("KNUTH", "NAT"),
@@ -607,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn rphonetic_others() {
+    fn commons_codec_others() {
         full(&[
             ("O'Daniel", "ODANAL"),
             ("O'Donnel", "ODANAL"),
@@ -619,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn rphonetic_rule1() {
+    fn commons_codec_rule1() {
         full(&[
             ("MACX", "MCX"),
             ("KNX", "NX"),
@@ -631,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn rphonetic_rule2() {
+    fn commons_codec_rule2() {
         full(&[
             ("XEE", "XY"),
             ("XIE", "XY"),
@@ -644,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn rphonetic_rule4_dot1() {
+    fn commons_codec_rule4_dot1() {
         full(&[
             ("XEV", "XAF"),
             ("XAX", "XAX"),
@@ -656,37 +608,37 @@ mod tests {
     }
 
     #[test]
-    fn rphonetic_rule4_dot2() {
+    fn commons_codec_rule4_dot2() {
         full(&[("XQ", "XG"), ("XZ", "X"), ("XM", "XN")]);
     }
 
     #[test]
-    fn rphonetic_rule5() {
+    fn commons_codec_rule5() {
         full(&[("XS", "X"), ("XSS", "X")]);
     }
 
     #[test]
-    fn rphonetic_rule6() {
+    fn commons_codec_rule6() {
         full(&[("XAY", "XY"), ("XAYS", "XY")]);
     }
 
     #[test]
-    fn rphonetic_rule7() {
+    fn commons_codec_rule7() {
         full(&[("XA", "X"), ("XAS", "X")]);
     }
 
     #[test]
-    fn rphonetic_snad() {
+    fn commons_codec_snad() {
         strict_all(&["Schmidt"], "SNAD");
     }
 
     #[test]
-    fn rphonetic_snat() {
+    fn commons_codec_snat() {
         strict_all(&["Smith", "Schmit"], "SNAT");
     }
 
     #[test]
-    fn rphonetic_special_branches() {
+    fn commons_codec_special_branches() {
         strict_all(&["Kobwick"], "CABWAC");
         strict_all(&["Kocher"], "CACAR");
         strict_all(&["Fesca"], "FASC");
@@ -697,12 +649,12 @@ mod tests {
     }
 
     #[test]
-    fn rphonetic_tranan() {
+    fn commons_codec_tranan() {
         strict_all(&["Trueman", "Truman"], "TRANAN");
     }
 
     #[test]
-    fn rphonetic_true_variant() {
+    fn commons_codec_true_variant() {
         let nysiis = Nysiis::default();
         let result = nysiis.process("WESTERLUND");
         assert!(result.len() <= 6);
@@ -812,41 +764,53 @@ mod tests {
         assert_eq!(nysiis.process("knuth"), "NAT");
     }
 
+    /// The text unit, enumerated over one scalar of every class. A scalar
+    /// outside `A`-`Z` is skipped -- it neither codes nor separates -- so an
+    /// accented name codes exactly as its unaccented-letters-only spelling
+    /// and every key is pure ASCII.
     #[test]
-    fn non_ascii_letters_pass_through_untranscoded() {
+    fn only_ascii_letters_are_read() {
         let nysiis = Nysiis::new();
-        // Accented letters are alphabetic (kept, uppercased) but are neither
-        // vowels nor any consonant class, so they ride along verbatim.
-        assert_eq!(nysiis.process("café"), "CAFÉ");
-        assert_eq!(nysiis.process("Müller"), "MÜLAR");
-        assert_eq!(nysiis.process("É"), "É");
-        assert_eq!(nysiis.process("ÉÉÉ"), "É");
-        // ß uppercases to SS, which collapses to a single-character key.
-        assert_eq!(nysiis.process("ß"), "S");
-        assert_eq!(nysiis.process("Straße"), "STRAS");
-        // Letters mixed with emoji: the emoji is dropped, letters remain.
-        assert_eq!(nysiis.process("a😀b"), "AB");
+        for input in [
+            "",
+            " ",
+            "12345",
+            "...",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "\u{1F600}",
+            "\u{301}",
+        ] {
+            assert_eq!(nysiis.process(input), "", "for {input:?}");
+        }
+        assert_eq!(nysiis.process("caf\u{e9}"), nysiis.process("caf"));
+        assert_eq!(nysiis.process("M\u{fc}ller"), nysiis.process("Mller"));
+        assert_eq!(nysiis.process("stra\u{df}e"), nysiis.process("strae"));
+        assert_eq!(nysiis.process("a\u{1F600}b"), "AB");
+        assert_eq!(nysiis.process("O'Daniel"), nysiis.process("ODaniel"));
+        assert_eq!(nysiis.process("mac intosh"), nysiis.process("macintosh"));
+        // Every key is ASCII, so a strict cut is a character cut.
+        for input in [
+            "caf\u{e9}",
+            "BCDFG\u{c9}X",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "Westerlund",
+        ] {
+            assert!(nysiis.process(input).is_ascii(), "for {input:?}");
+            assert!(nysiis.process(input).chars().count() <= MAX_STRICT_LEN);
+        }
     }
 
+    /// Strict truncation cuts at six characters, and non-strict never cuts.
+    /// Both are exercised on a key longer than six, the only place the flag
+    /// is observable.
     #[test]
-    fn cjk_and_strict_truncation_on_a_boundary() {
-        // Each CJK char is 3 bytes; the 6-byte strict cut lands on a character
-        // boundary, so this is byte-identical to rphonetic.
-        assert_eq!(Nysiis::new().process("日本語"), "日本");
-        assert_eq!(Nysiis::with_strict(false).process("日本語"), "日本語");
-        // 2-byte chars alternating with ASCII: the cut at byte 6 is again a
-        // boundary ("ÉXÉX" is 6 bytes), identical to rphonetic.
-        assert_eq!(Nysiis::new().process("ÉXÉXÉX"), "ÉXÉX");
-    }
-
-    #[test]
-    fn documented_divergence_no_panic_when_byte_6_splits_a_char() {
-        // rphonetic panics here: the code "BCDFGÉX" is 8 bytes and É spans
-        // bytes 5..7, so its `result[..6]` slice is off a char boundary. We
-        // back off to the boundary at byte 5 instead. See module docs.
-        assert_eq!(Nysiis::new().process("BCDFGÉX"), "BCDFG");
-        // Non-strict mode never truncates, so it never diverges.
-        assert_eq!(Nysiis::with_strict(false).process("BCDFGÉX"), "BCDFGÉX");
+    fn strict_truncation_cuts_at_six_characters() {
+        assert_eq!(Nysiis::with_strict(false).process("BCDFGX"), "BCDFGX");
+        assert_eq!(Nysiis::new().process("Westerlund"), "WASTAR");
+        assert_eq!(
+            Nysiis::with_strict(false).process("Westerlund"),
+            "WASTARLAD"
+        );
     }
 
     #[test]
@@ -905,8 +869,8 @@ mod tests {
                 "mac intosh",
             ] {
                 assert_eq!(
-                    nysiis.process_ascii(input.as_bytes()),
-                    nysiis.process_unicode(input),
+                    nysiis.encode(input),
+                    reference_encode(nysiis.is_strict(), input),
                     "paths disagree on {input:?} (strict={})",
                     nysiis.is_strict()
                 );
@@ -936,8 +900,8 @@ mod tests {
                 let s = std::str::from_utf8(&buf[..len]).unwrap();
                 for nysiis in [strict, full] {
                     assert_eq!(
-                        nysiis.process_ascii(s.as_bytes()),
-                        nysiis.process_unicode(s),
+                        nysiis.encode(s),
+                        reference_encode(nysiis.is_strict(), s),
                         "paths disagree on {s:?} (strict={})",
                         nysiis.is_strict()
                     );
@@ -962,14 +926,14 @@ mod tests {
         }
     }
 
-    /// Prefix/EV/AY chains recorded from rphonetic 3.0.6 (`Nysiis::encode`),
+    /// Prefix/EV/AY chains. Change detectors, not Taft-derived:
     /// beyond the shapes the ported fixtures cover: repeated prefixes whose
     /// rewritten output immediately re-feeds the rolling transcode, and the
     /// AY trim interacting with the S trim.
     #[test]
     fn recorded_prefix_and_write_back_chains() {
         let cases: &[(&str, &str, &str)] = &[
-            // (input, strict, non-strict) — recorded from rphonetic 3.0.6.
+            // (input, strict, non-strict).
             ("KNKNKNKN", "N", "N"),
             ("SCHSCHSCHSCH", "S", "S"),
             ("PFPFPF", "FPFPF", "FPFPF"),

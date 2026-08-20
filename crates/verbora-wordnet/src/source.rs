@@ -1,41 +1,4 @@
 //! Byte access to a dictionary file, and the four strategies for providing it.
-//!
-//! # What the reference does
-//!
-//! The reference reads **one byte per `fs.read` call**. `findPrevEOL` walks
-//! backwards a byte at a time to the start of the enclosing line, allocating a
-//! fresh 1 KiB `Buffer` on *every* step; `appendLineChar` then walks forwards a
-//! byte at a time to the newline. Measured syscall counts for a single
-//! operation: 1098 reads for `find('entity')` on `index.noun`, 1024 for
-//! `find('node')`, 190 for `get(1740)` on `data.noun`. A `lookup('run')` opens
-//! and closes 61 file descriptors and issues tens of thousands of one-byte
-//! reads.
-//!
-//! None of that is observable in the results — only in the time. What *is*
-//! observable is the sequence of byte positions the bisection probes, because
-//! that sequence is what makes the search incomplete (see [`crate::index_file`]).
-//! Every backend here reproduces the probe positions exactly and differs only in
-//! how it fetches the bytes at them.
-//!
-//! # The strategies
-//!
-//! | [`Storage`] | Startup | Per query | Resident memory |
-//! |---|---|---|---|
-//! | [`Storage::Pread`] | none | a handful of positioned reads | none |
-//! | [`Storage::LazyResident`] | none | in-memory after first touch | grows to the files used |
-//! | [`Storage::Resident`] | reads the file | in-memory scan | the whole file |
-//! | [`Storage::Indexed`] | reads the file + one `memchr` pass | in-memory, `partition_point` for line starts | the file plus 4 bytes per line |
-//!
-//! Measured numbers are in the crate docs and in `benches/wordnet.rs`.
-//!
-//! # Why there is no memory-mapped backend
-//!
-//! `mmap` cannot be reached from safe Rust without a dependency (`memmap2`),
-//! and this workspace denies `unsafe_code` and admits no dependency outside the
-//! curated `[workspace.dependencies]` list. [`Storage::LazyResident`] covers the
-//! practical case `mmap` is wanted for — near-zero startup with in-memory query
-//! cost once a file is touched — at the cost of paying for a whole file the
-//! first time any part of it is read.
 
 use std::fs::File;
 use std::io::Read;
@@ -44,51 +7,60 @@ use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
 
+/// The largest dictionary file [`Storage::Indexed`] can build a line table for.
+///
+/// Line starts are stored as `u32`, so a file must fit in 4 GiB. WordNet 3.1's
+/// largest file, `data.noun`, is about 16 MB — four thousand times smaller —
+/// but the limit is checked rather than assumed, because truncating an offset
+/// would silently return the wrong line.
+pub(crate) const MAX_INDEXED_FILE_LEN: u64 = u32::MAX as u64;
+
 /// How a dictionary file's bytes are obtained.
 ///
-/// All four reproduce identical results; they trade startup cost against
-/// per-query cost and resident memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// All four answer every query identically; they trade startup cost against
+/// per-query cost and resident memory. See the crate-level
+/// "Choosing the right API" section for which to pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Storage {
     /// Positioned reads against an open descriptor. Nothing is preloaded.
     ///
-    /// Closest in spirit to the reference, minus the one-byte-at-a-time
-    /// pathology: a backwards scan reads 512-byte blocks and a forwards scan
-    /// reads 4 KiB blocks, so a lookup costs a handful of syscalls rather than
-    /// a thousand. Choose this for a short-lived process that performs one or
-    /// two lookups.
+    /// A backwards line scan reads 512-byte blocks and a forwards line read
+    /// reads 4 KiB blocks, so one lookup costs a handful of syscalls. Choose
+    /// this for a short-lived process that performs one or two lookups, or when
+    /// resident memory matters more than latency.
     Pread,
 
-    /// The whole file, loaded on first use and cached for the process lifetime.
+    /// The whole file, read on first use and cached for the process lifetime.
     ///
     /// Startup is free and steady-state cost equals [`Storage::Resident`]; the
     /// first query against a file pays for reading it. This is the closest safe
-    /// analogue of a memory map.
+    /// analogue of a memory map — see the crate docs for why there is no `mmap`
+    /// backend.
     LazyResident,
 
-    /// The whole file, loaded eagerly when the dictionary is opened.
+    /// The whole file, read eagerly when the dictionary is opened.
     #[default]
     Resident,
 
-    /// [`Storage::Resident`] plus a prebuilt table of line-start offsets.
+    /// [`Storage::Resident`] plus a table of line-start offsets.
     ///
-    /// `findPrevEOL` becomes a `partition_point` over `u32`s instead of a
-    /// backwards byte scan. The table costs four bytes per line — about 470 KiB
-    /// for `index.noun`'s 118k lines — and can be persisted with
-    /// [`crate::prebuilt`] so that reopening skips the scan.
+    /// Locating the line enclosing a byte position becomes a `partition_point`
+    /// over `u32`s instead of a backwards byte scan. The table costs four bytes
+    /// per line and can be persisted with [`PrebuiltIndex`](crate::PrebuiltIndex)
+    /// so that reopening skips the scan.
     Indexed,
 }
 
 /// A dictionary file, with whichever backing [`Storage`] was requested.
 ///
-/// Read-only after construction and `Send + Sync`, so a single [`crate::WordNet`]
-/// can serve queries from many threads concurrently.
+/// Read-only after construction and `Send + Sync`, so a single
+/// [`WordNet`](crate::WordNet) can serve queries from many threads at once.
 #[derive(Debug)]
-pub struct Source {
+pub(crate) struct Source {
     path: PathBuf,
-    /// Recorded once at open. The reference calls `fs.statSync` on *every*
-    /// `find`, so a file that changed size mid-session would change the search
-    /// path; that is documented as divergence **W5**.
+    /// Recorded once, when the file is opened. Every later answer is computed
+    /// against this length, so a file that changes size mid-session does not
+    /// change a search that is already in flight.
     len: u64,
     kind: Kind,
 }
@@ -99,10 +71,20 @@ enum Kind {
     Lazy(OnceLock<Box<[u8]>>),
     Memory {
         bytes: Box<[u8]>,
-        /// Byte offset of the start of each line: `0`, then one past every
+        /// Byte offset of the start of every line: `0`, then one past every
         /// `\n`. Present only for [`Storage::Indexed`].
         line_starts: Option<Box<[u32]>>,
     },
+}
+
+/// One line of a dictionary file, as handed to [`Source::with_line`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Line<'a> {
+    /// The line's bytes, without its `\n` terminator and without a `\r`
+    /// immediately preceding that terminator.
+    pub bytes: &'a [u8],
+    /// Byte offset of the next line, or the file length if this is the last.
+    pub next: u64,
 }
 
 impl Source {
@@ -110,18 +92,19 @@ impl Source {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if the file cannot be opened, or read when the
-    /// strategy preloads it.
-    pub fn open(path: &Path, storage: Storage) -> Result<Self> {
+    /// [`Error::Io`] if the file cannot be opened, or read when the strategy
+    /// preloads it; [`Error::FileTooLarge`] if [`Storage::Indexed`] is asked to
+    /// index a file of 4 GiB or more.
+    pub(crate) fn open(path: &Path, storage: Storage) -> Result<Self> {
         let len = std::fs::metadata(path)
             .map_err(|e| Error::io(path, e))?
             .len();
         let kind = match storage {
             Storage::Pread => Kind::Pread(File::open(path).map_err(|e| Error::io(path, e))?),
             Storage::LazyResident => {
-                // Fail fast on a missing file even though nothing is read yet:
-                // the reference's silent stall is precisely what this crate
-                // refuses to reproduce.
+                // Fail now on a missing or unreadable file even though nothing
+                // is read yet: a dictionary that reports success at open and
+                // fails at the first query is harder to diagnose, not easier.
                 File::open(path).map_err(|e| Error::io(path, e))?;
                 Kind::Lazy(OnceLock::new())
             }
@@ -131,7 +114,7 @@ impl Source {
             },
             Storage::Indexed => {
                 let bytes = read_all(path)?;
-                let line_starts = Some(build_line_starts(&bytes));
+                let line_starts = Some(build_line_starts(path, &bytes)?);
                 Kind::Memory { bytes, line_starts }
             }
         };
@@ -146,8 +129,8 @@ impl Source {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] if the file cannot be read.
-    pub fn open_with_line_starts(path: &Path, line_starts: Box<[u32]>) -> Result<Self> {
+    /// [`Error::Io`] if the file cannot be read.
+    pub(crate) fn open_with_line_starts(path: &Path, line_starts: Box<[u32]>) -> Result<Self> {
         let bytes = read_all(path)?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -159,30 +142,16 @@ impl Source {
         })
     }
 
-    /// The file's path.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// The file's length in bytes, as recorded when it was opened.
-    #[must_use]
-    pub fn len(&self) -> u64 {
+    pub(crate) fn len(&self) -> u64 {
         self.len
     }
 
-    /// Whether the file is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     /// The line-start table, when this source carries one.
-    #[must_use]
-    pub fn line_starts(&self) -> Option<&[u32]> {
+    fn line_starts(&self) -> Option<&[u32]> {
         match &self.kind {
             Kind::Memory { line_starts, .. } => line_starts.as_deref(),
-            _ => None,
+            Kind::Lazy(_) | Kind::Pread(_) => None,
         }
     }
 
@@ -196,7 +165,7 @@ impl Source {
                 }
                 let loaded = read_all(&self.path)?;
                 // A concurrent racer may have won; either copy is identical, so
-                // whichever landed first is the one everyone uses.
+                // whichever landed first is the one every thread then uses.
                 let _ = cell.set(loaded);
                 Ok(cell.get().map(|b| &**b))
             }
@@ -204,48 +173,45 @@ impl Source {
         }
     }
 
-    /// `findPrevEOL`: the start of the line enclosing byte `pos`.
+    /// The byte offset at which the line **containing** `pos` begins.
     ///
-    /// Reproduces the reference exactly, including its special case: `pos == 0`
-    /// answers `0` without looking at the byte there, and a `\n` **at** `pos`
-    /// answers `pos + 1` — the start of the *next* line, not this one.
+    /// A `\n` at `pos` belongs to the line it terminates, so `line_start` of a
+    /// newline is the start of that same line, not of the next one. A `pos` past
+    /// the last byte is treated as the last byte, so the answer is always the
+    /// start of a line that exists.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::NegativeProbe`] for a negative position and
     /// [`Error::Io`] if a positioned read fails.
-    pub fn prev_eol(&self, pos: i64) -> Result<u64> {
-        if pos < 0 {
-            return Err(Error::NegativeProbe {
-                path: self.path.clone(),
-                position: pos,
-            });
-        }
+    pub(crate) fn line_start(&self, pos: u64) -> Result<u64> {
+        let pos = pos.min(self.len.saturating_sub(1));
         if pos == 0 {
             return Ok(0);
         }
-        let pos = pos as u64;
 
         if let Some(starts) = self.line_starts() {
-            // The answer is the greatest line start <= pos + 1: a newline sitting
-            // exactly at `pos` opens the line beginning at `pos + 1`.
-            let bound = pos.saturating_add(1);
-            let idx = starts.partition_point(|&s| u64::from(s) <= bound);
-            return Ok(u64::from(starts[idx - 1]));
+            // The greatest recorded start that is <= pos. A table this crate
+            // built always begins with 0, so the partition point is at least 1;
+            // a table loaded from a sidecar is caller-supplied data, so the
+            // subtraction is checked rather than assumed.
+            let idx = starts.partition_point(|&s| u64::from(s) <= pos);
+            return Ok(idx
+                .checked_sub(1)
+                .and_then(|i| starts.get(i))
+                .map_or(0, |&s| u64::from(s)));
         }
 
         if let Some(bytes) = self.bytes()? {
-            let upto = (pos as usize).min(bytes.len().saturating_sub(1));
-            return Ok(match memchr::memrchr(b'\n', &bytes[..=upto]) {
+            let upto = (pos as usize).min(bytes.len());
+            return Ok(match memchr::memrchr(b'\n', &bytes[..upto]) {
                 Some(nl) => nl as u64 + 1,
                 None => 0,
             });
         }
 
-        // Positioned backwards scan, 512 bytes at a time. The reference does the
-        // same walk one byte per syscall.
+        // Positioned backwards scan, 512 bytes at a time.
         const BACK: u64 = 512;
-        let mut end = pos + 1;
+        let mut end = pos;
         let mut buf = [0u8; BACK as usize];
         while end > 0 {
             let start = end.saturating_sub(BACK);
@@ -259,55 +225,68 @@ impl Source {
         Ok(0)
     }
 
-    /// `appendLineChar`: the bytes from `start` up to, but not including, the
-    /// next `\n`.
+    /// Hands the line beginning at `start` to `f`, or answers `None` when
+    /// `start` is at or past the end of the file.
     ///
-    /// The returned slice borrows either the resident bytes or `scratch`,
-    /// whichever backs this source, so the hot path copies nothing.
+    /// A line runs to the next `\n` or to the end of the file, whichever comes
+    /// first; a final line without a trailing newline is still a line. One `\r`
+    /// immediately before the terminator is dropped, so a dictionary saved with
+    /// CRLF endings parses identically to one saved with LF.
     ///
-    /// Note that only `\n` terminates a line. A CRLF file leaves the `\r` in
-    /// place, exactly as the reference's `buff.slice(0, buffPos)` does — which is
-    /// then swallowed by the whitespace split into an extra empty token.
+    /// `scratch` is a caller-owned buffer the positioned-read backend fills;
+    /// resident backends ignore it and hand out a subslice of the file, so the
+    /// hot path copies nothing.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnterminatedLine`] when no `\n` follows `start` — the
-    /// case in which the reference spins forever — or [`Error::Io`].
-    pub fn line_at<'a>(&'a self, start: u64, scratch: &'a mut Vec<u8>) -> Result<&'a [u8]> {
+    /// [`Error::Io`] if a positioned read fails.
+    pub(crate) fn with_line<R>(
+        &self,
+        start: u64,
+        scratch: &mut Vec<u8>,
+        f: impl FnOnce(Line<'_>) -> R,
+    ) -> Result<Option<R>> {
+        if start >= self.len {
+            return Ok(None);
+        }
+
         if let Some(bytes) = self.bytes()? {
-            let s = start as usize;
-            if s >= bytes.len() {
-                return Err(self.unterminated(start));
-            }
-            return match memchr::memchr(b'\n', &bytes[s..]) {
-                Some(nl) => Ok(&bytes[s..s + nl]),
-                None => Err(self.unterminated(start)),
+            let s = (start as usize).min(bytes.len());
+            let (end, next) = match memchr::memchr(b'\n', &bytes[s..]) {
+                Some(nl) => (s + nl, (s + nl + 1) as u64),
+                // A final line without a newline still ends the file, and
+                // `next` is past `start`, so a forward scan terminates.
+                None => (bytes.len(), (bytes.len() as u64).max(start + 1)),
             };
+            return Ok(Some(f(Line {
+                bytes: strip_cr(&bytes[s..end]),
+                next,
+            })));
         }
 
         const FWD: usize = 4096;
         scratch.clear();
         let mut pos = start;
         let mut chunk = [0u8; FWD];
-        loop {
+        let next = loop {
             let got = self.read_at(&mut chunk, pos)?;
             if got == 0 {
-                return Err(self.unterminated(start));
+                // The file shrank under us. Report the line as ending here, and
+                // never at `start`: a caller scanning forward must always be
+                // able to make progress.
+                break pos.max(start.saturating_add(1));
             }
             if let Some(nl) = memchr::memchr(b'\n', &chunk[..got]) {
                 scratch.extend_from_slice(&chunk[..nl]);
-                return Ok(&scratch[..]);
+                break pos + nl as u64 + 1;
             }
             scratch.extend_from_slice(&chunk[..got]);
             pos += got as u64;
-        }
-    }
-
-    fn unterminated(&self, offset: u64) -> Error {
-        Error::UnterminatedLine {
-            path: self.path.clone(),
-            offset,
-        }
+        };
+        Ok(Some(f(Line {
+            bytes: strip_cr(scratch),
+            next,
+        })))
     }
 
     /// Fills `buf` from `offset`, returning how many bytes were available.
@@ -317,7 +296,10 @@ impl Source {
     /// possible short read.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         let Kind::Pread(file) = &self.kind else {
-            unreachable!("read_at is only used by the Pread backend")
+            // The two resident kinds are served entirely by `bytes()`; every
+            // call site checks that first. This is an internal invariant, not
+            // an input the caller can violate.
+            unreachable!("read_at is reachable only from the Pread backend")
         };
         let mut total = 0usize;
         while total < buf.len() {
@@ -329,6 +311,14 @@ impl Source {
             }
         }
         Ok(total)
+    }
+}
+
+/// Drops one `\r` immediately preceding the (already removed) `\n`.
+fn strip_cr(line: &[u8]) -> &[u8] {
+    match line.split_last() {
+        Some((b'\r', rest)) => rest,
+        _ => line,
     }
 }
 
@@ -348,19 +338,21 @@ fn read_all(path: &Path) -> Result<Box<[u8]>> {
 
 /// Byte offset of the start of every line: `0`, then one past each `\n`.
 ///
-/// Offsets are `u32` because the largest dictionary file is 15 MB; the builder
-/// refuses anything larger rather than truncating.
-#[must_use]
-pub fn build_line_starts(bytes: &[u8]) -> Box<[u32]> {
-    assert!(
-        bytes.len() <= u32::MAX as usize,
-        "line-start offsets are u32; this file is {} bytes",
-        bytes.len()
-    );
-    // A rough capacity estimate from a typical dictionary line width avoids
-    // most reallocation without a separate counting pass over the buffer:
-    // the loop below already visits every newline once via `memchr_iter`, so
-    // counting them first would scan the file twice for one result.
+/// # Errors
+///
+/// [`Error::FileTooLarge`] when `bytes` is 4 GiB or larger, which `u32` offsets
+/// cannot address.
+pub(crate) fn build_line_starts(path: &Path, bytes: &[u8]) -> Result<Box<[u32]>> {
+    if bytes.len() as u64 > MAX_INDEXED_FILE_LEN {
+        return Err(Error::FileTooLarge {
+            path: path.to_path_buf(),
+            len: bytes.len() as u64,
+            limit: MAX_INDEXED_FILE_LEN,
+        });
+    }
+    // A capacity estimate from a typical dictionary line width avoids most
+    // reallocation without a separate counting pass: the loop below already
+    // visits every newline once, so counting first would scan the file twice.
     let mut out = Vec::with_capacity(bytes.len() / 32 + 1);
     out.push(0u32);
     for nl in memchr::memchr_iter(b'\n', bytes) {
@@ -369,7 +361,7 @@ pub fn build_line_starts(bytes: &[u8]) -> Box<[u32]> {
             out.push(next);
         }
     }
-    out.into_boxed_slice()
+    Ok(out.into_boxed_slice())
 }
 
 #[cfg(unix)]
@@ -422,55 +414,73 @@ mod tests {
         .collect()
     }
 
+    /// `line_start` is defined arithmetically: the answer for byte `p` is
+    /// `1 + max{i < p : bytes[i] == b'\n'}`, or 0 when there is no such `i`.
+    /// The expectations below are that formula evaluated by hand over `BODY`,
+    /// whose newlines sit at bytes 8, 17 and 26.
     #[test]
     fn every_backend_agrees_on_line_starts() {
         let path = temp_file("agree", BODY);
         for (storage, src) in all_storages(&path) {
             assert_eq!(src.len(), BODY.len() as u64, "{storage:?}");
-            // pos 0 short-circuits, a newline at pos opens the next line.
-            assert_eq!(src.prev_eol(0).unwrap(), 0, "{storage:?}");
-            assert_eq!(src.prev_eol(3).unwrap(), 0, "{storage:?}");
-            assert_eq!(src.prev_eol(8).unwrap(), 9, "{storage:?} newline at 8");
-            assert_eq!(src.prev_eol(9).unwrap(), 9, "{storage:?}");
-            assert_eq!(src.prev_eol(20).unwrap(), 18, "{storage:?}");
+            assert_eq!(src.line_start(0).unwrap(), 0, "{storage:?}");
+            assert_eq!(src.line_start(3).unwrap(), 0, "{storage:?}");
+            // The newline at byte 8 terminates the line that starts at 0.
+            assert_eq!(src.line_start(8).unwrap(), 0, "{storage:?}");
+            assert_eq!(src.line_start(9).unwrap(), 9, "{storage:?}");
+            assert_eq!(src.line_start(17).unwrap(), 9, "{storage:?}");
+            assert_eq!(src.line_start(18).unwrap(), 18, "{storage:?}");
+            assert_eq!(src.line_start(20).unwrap(), 18, "{storage:?}");
+            assert_eq!(src.line_start(26).unwrap(), 18, "{storage:?}");
+            // Past the last byte clamps to it, so the answer is a real line.
+            assert_eq!(src.line_start(27).unwrap(), 18, "{storage:?}");
+            assert_eq!(src.line_start(9_999).unwrap(), 18, "{storage:?}");
         }
+    }
+
+    fn line(src: &Source, start: u64) -> Option<(Vec<u8>, u64)> {
+        let mut scratch = Vec::new();
+        src.with_line(start, &mut scratch, |l| (l.bytes.to_vec(), l.next))
+            .unwrap()
     }
 
     #[test]
     fn every_backend_agrees_on_lines() {
         let path = temp_file("lines", BODY);
         for (storage, src) in all_storages(&path) {
-            let mut scratch = Vec::new();
             assert_eq!(
-                src.line_at(0, &mut scratch).unwrap(),
-                b"aaa line",
+                line(&src, 0),
+                Some((b"aaa line".to_vec(), 9)),
                 "{storage:?}"
             );
-            let mut scratch = Vec::new();
             assert_eq!(
-                src.line_at(9, &mut scratch).unwrap(),
-                b"bbb line",
+                line(&src, 9),
+                Some((b"bbb line".to_vec(), 18)),
                 "{storage:?}"
             );
-            let mut scratch = Vec::new();
-            assert_eq!(
-                src.line_at(13, &mut scratch).unwrap(),
-                b"line",
-                "{storage:?}"
-            );
+            assert_eq!(line(&src, 13), Some((b"line".to_vec(), 18)), "{storage:?}");
+            assert_eq!(line(&src, 27), None, "{storage:?} at EOF");
+            assert_eq!(line(&src, 99), None, "{storage:?} past EOF");
         }
     }
 
     #[test]
-    fn a_line_without_a_newline_is_an_error_not_a_hang() {
+    fn a_final_line_without_a_newline_is_still_a_line() {
         let path = temp_file("noeol", b"aaa\nbbb");
         for (storage, src) in all_storages(&path) {
-            let mut scratch = Vec::new();
-            let err = src.line_at(4, &mut scratch).unwrap_err();
-            assert!(
-                matches!(err, Error::UnterminatedLine { .. }),
-                "{storage:?}: {err}"
-            );
+            assert_eq!(line(&src, 4), Some((b"bbb".to_vec(), 7)), "{storage:?}");
+            assert_eq!(line(&src, 7), None, "{storage:?}");
+        }
+    }
+
+    #[test]
+    fn crlf_endings_lose_only_the_carriage_return() {
+        let path = temp_file("crlf", b"aaa\r\nbbb\r\n");
+        for (storage, src) in all_storages(&path) {
+            assert_eq!(line(&src, 0), Some((b"aaa".to_vec(), 5)), "{storage:?}");
+            assert_eq!(line(&src, 5), Some((b"bbb".to_vec(), 10)), "{storage:?}");
+            // A `\r` that is not immediately before the terminator survives.
+            assert_eq!(src.line_start(4).unwrap(), 0, "{storage:?}");
         }
     }
 
@@ -480,12 +490,7 @@ mod tests {
         let long = format!("{}\n", "x".repeat(10_000));
         let path = temp_file("long", long.as_bytes());
         for (storage, src) in all_storages(&path) {
-            let mut scratch = Vec::new();
-            assert_eq!(
-                src.line_at(0, &mut scratch).unwrap().len(),
-                10_000,
-                "{storage:?}"
-            );
+            assert_eq!(line(&src, 0).unwrap().0.len(), 10_000, "{storage:?}");
         }
     }
 
@@ -497,28 +502,29 @@ mod tests {
         body.push(b'\n');
         let path = temp_file("longback", &body);
         for (storage, src) in all_storages(&path) {
-            assert_eq!(src.prev_eol(3000).unwrap(), 2001, "{storage:?}");
-            assert_eq!(src.prev_eol(1500).unwrap(), 0, "{storage:?}");
+            assert_eq!(src.line_start(3000).unwrap(), 2001, "{storage:?}");
+            assert_eq!(src.line_start(1500).unwrap(), 0, "{storage:?}");
         }
     }
 
     #[test]
-    fn negative_probes_are_reported() {
-        let path = temp_file("neg", BODY);
-        let src = Source::open(&path, Storage::Resident).unwrap();
-        assert!(matches!(
-            src.prev_eol(-1).unwrap_err(),
-            Error::NegativeProbe { .. }
-        ));
+    fn an_empty_file_has_no_lines() {
+        let path = temp_file("empty", b"");
+        for (storage, src) in all_storages(&path) {
+            assert_eq!(src.len(), 0, "{storage:?}");
+            assert_eq!(src.line_start(0).unwrap(), 0, "{storage:?}");
+            assert_eq!(line(&src, 0), None, "{storage:?}");
+        }
     }
 
     #[test]
-    fn line_starts_table_matches_a_manual_scan() {
-        assert_eq!(&*build_line_starts(BODY), &[0, 9, 18]);
-        assert_eq!(&*build_line_starts(b""), &[0]);
-        assert_eq!(&*build_line_starts(b"\n"), &[0]);
-        assert_eq!(&*build_line_starts(b"\n\n"), &[0, 1]);
-        assert_eq!(&*build_line_starts(b"abc"), &[0]);
+    fn line_starts_table_matches_the_arithmetic_definition() {
+        let p = Path::new("x");
+        assert_eq!(&*build_line_starts(p, BODY).unwrap(), &[0, 9, 18]);
+        assert_eq!(&*build_line_starts(p, b"").unwrap(), &[0]);
+        assert_eq!(&*build_line_starts(p, b"\n").unwrap(), &[0]);
+        assert_eq!(&*build_line_starts(p, b"\n\n").unwrap(), &[0, 1]);
+        assert_eq!(&*build_line_starts(p, b"abc").unwrap(), &[0]);
     }
 
     #[test]

@@ -55,13 +55,11 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use verbora_tokenizers::classes;
-
-use crate::among::AmongTable;
+use crate::among::{AmongTable, Buf};
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_ru;
-use crate::stopwords::{self, Language};
-use crate::units::{ends_with, slen, text, units};
+use crate::stopwords::Language;
+use crate::units::{ends_with, slen};
 
 /// The Russian stemmer.
 ///
@@ -88,7 +86,12 @@ fn is_vowel(c: u16) -> bool {
 // Shared scanners, also used by the Ukrainian stemmer
 // ---------------------------------------------------------------------------
 
-/// The reference's line terminators, the four code points `.` refuses to match.
+/// The four code points a JavaScript `.` refuses to match.
+///
+/// Retained because the region split is transcribed from a regular expression
+/// that carried this restriction; it has no basis in the Snowball Russian
+/// algorithm, which knows nothing about line terminators. See
+/// [`split_at_first_vowel`].
 #[inline]
 pub(crate) fn is_line_terminator(c: u16) -> bool {
     matches!(c, 0x000A | 0x000D | 0x2028 | 0x2029)
@@ -109,9 +112,14 @@ pub(crate) fn alt_suffix(w: &[u16], alts: &[&str]) -> Option<usize> {
 }
 
 /// `/[ая]в(ши|шись)$/`: the start index of the whole match.
-pub(crate) fn av_shi(w: &[u16]) -> Option<usize> {
+///
+/// `alts` is the caller's own copy of the alternation — [`SHI`] here and
+/// `uk::GERUND_AV_SHI` there — rather than a literal written a second time
+/// inside this function, so each language's table stays the single place its
+/// own suffixes are spelled and `data::table_audit` can enumerate them.
+pub(crate) fn av_shi(w: &[u16], alts: &[&str]) -> Option<usize> {
     let mut best: Option<usize> = None;
-    for a in ["ши", "шись"] {
+    for a in alts {
         let n = slen(a);
         if n + 2 <= w.len()
             && ends_with(w, a)
@@ -161,7 +169,11 @@ pub(crate) fn strip_final(w: &mut Vec<u16>, c: u16) {
     }
 }
 
-/// The reference's `x || fallback` for a rule result: the empty string is falsy.
+/// A rule result with the empty string treated as "no result".
+///
+/// The rule chain falls back to its input both when a rule does not match and
+/// when it matches but leaves nothing behind, which is why `stem("ся")` is
+/// `"ся"` rather than `""`.
 pub(crate) fn or_falsy(value: Option<Vec<u16>>, fallback: &[u16]) -> Vec<u16> {
     match value {
         Some(v) if !v.is_empty() => v,
@@ -198,17 +210,17 @@ struct RuTables {
 }
 
 static TABLES: LazyLock<RuTables> = LazyLock::new(|| RuTables {
-    shi: AmongTable::build(&["ши", "шись"]),
-    gerund2: AmongTable::build(&["ив", "ивши", "ившись", "ывши", "ывшись", "ыв"]),
-    reflexive: AmongTable::build(&["ся", "сь"]),
+    shi: AmongTable::build(SHI),
+    gerund2: AmongTable::build(GERUND2),
+    reflexive: AmongTable::build(REFLEXIVE),
     adjective: AmongTable::build(ADJECTIVE),
-    part1: AmongTable::build(&["ем", "нн", "вш", "ющ", "щ"]),
-    part2: AmongTable::build(&["ивш", "ывш", "ующ"]),
+    part1: AmongTable::build(PART1),
+    part2: AmongTable::build(PART2),
     verb1: AmongTable::build(VERB1),
     verb2: AmongTable::build(VERB2),
     noun: AmongTable::build(NOUN),
-    superlative: AmongTable::build(&["ейш", "ейше"]),
-    derivational: AmongTable::build(&["ост", "ость"]),
+    superlative: AmongTable::build(SUPERLATIVE),
+    derivational: AmongTable::build(DERIVATIONAL),
 });
 
 /// `perfectiveGerund` over `t[rv..end]`: the new end, or `None`.
@@ -268,6 +280,16 @@ fn noun_end(t: &[u16], rv: usize, end: usize, tb: &RuTables) -> Option<usize> {
     if m > 0 { Some(end - m) } else { None }
 }
 
+/// `(ши|шись)` — the alternation inside `/[ая]в(ши|шись)$/`.
+pub(crate) static SHI: &[&str] = &["ши", "шись"];
+/// The unconditional perfective-gerund alternatives.
+static GERUND2: &[&str] = &["ив", "ивши", "ившись", "ывши", "ывшись", "ыв"];
+static REFLEXIVE: &[&str] = &["ся", "сь"];
+/// The `[ая]`-conditioned participle alternatives.
+static PART1: &[&str] = &["ем", "нн", "вш", "ющ", "щ"];
+static PART2: &[&str] = &["ивш", "ывш", "ующ"];
+static SUPERLATIVE: &[&str] = &["ейш", "ейше"];
+static DERIVATIONAL: &[&str] = &["ост", "ость"];
 static ADJECTIVE: &[&str] = &[
     "ее", "ие", "ые", "ое", "ими", "ыми", "ей", "ий", "ый", "ой", "ем", "им", "ым", "ом", "его",
     "ого", "ему", "ому", "их", "ых", "ую", "юю", "ая", "яя", "ою", "ею",
@@ -297,40 +319,45 @@ impl PorterStemmerRu {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
         // `.toLowerCase().replace(/ё/g, 'е')` — global, so every ё folds.
-        let mut t = units(&token.to_lowercase());
-        for c in &mut t {
+        // The lowered units go straight into a stack buffer: Cyrillic
+        // lowercasing through `String` was measured at 82 µs per 1024 bench
+        // words, over a third of this stemmer's total.
+        let mut b = Buf::fill_lowercase(token);
+        for c in b.as_mut_slice() {
             if *c == 0x0451 {
                 *c = 0x0435;
             }
         }
+        let t = b.as_slice();
 
-        let Some((_, rv)) = split_at_first_vowel(&t, is_vowel) else {
-            return Cow::Owned(text(&t));
+        let Some((_, rv)) = split_at_first_vowel(t, is_vowel) else {
+            return Cow::Owned(b.into_text());
         };
         let full = t.len();
         // R2 is the same split applied to the original RV; only its tail is
         // ever read, and only through the guard below.
         let r2 = split_at_first_vowel(&t[rv..], is_vowel).map(|(_, after)| rv + after);
 
-        let mut end = match perfective_gerund_end(&t, rv, full, tb) {
+        let mut end = match perfective_gerund_end(t, rv, full, tb) {
             Some(e) => e,
             None => {
                 // `reflexive(RV) || RV` — the falsy fallback.
-                let refl = tb.reflexive.longest(&t, full, rv);
+                let refl = tb.reflexive.longest(t, full, rv);
                 let reflexed = if refl > 0 && full - refl > rv {
                     full - refl
                 } else {
                     full
                 };
-                adjectival_end(&t, rv, reflexed, tb)
-                    .or_else(|| verb_end(&t, rv, reflexed, tb))
-                    .or_else(|| noun_end(&t, rv, reflexed, tb))
+                adjectival_end(t, rv, reflexed, tb)
+                    .or_else(|| verb_end(t, rv, reflexed, tb))
+                    .or_else(|| noun_end(t, rv, reflexed, tb))
                     .unwrap_or(reflexed)
             }
         };
@@ -343,21 +370,22 @@ impl PorterStemmerRu {
         // working string — the regions were marked once. The reference throws
         // when this second `derivational` misses; keeping the string as-is is
         // the documented divergence (see the module docs).
-        if r2.is_some_and(|r2s| full > r2s && tb.derivational.longest(&t, full, r2s) > 0) {
-            let d = tb.derivational.longest(&t, end, rv);
+        if r2.is_some_and(|r2s| full > r2s && tb.derivational.longest(t, full, r2s) > 0) {
+            let d = tb.derivational.longest(t, end, rv);
             if d > 0 {
                 end -= d;
             }
         }
 
         // `superlative(x) || x` — falsy fallback.
-        let sup = tb.superlative.longest(&t, end, rv);
+        let sup = tb.superlative.longest(t, end, rv);
         if sup > 0 && end - sup > rv {
             end -= sup;
         }
 
         // `/(н)н/g → '$1'` over the RV region, compacted in place.
         {
+            let t = b.as_mut_slice();
             let mut write = rv;
             let mut read = rv;
             while read < end {
@@ -374,12 +402,12 @@ impl PorterStemmerRu {
             end = write;
         }
         // /ь$/.
-        if end > rv && t[end - 1] == 0x044C {
+        if end > rv && b.as_slice()[end - 1] == 0x044C {
             end -= 1;
         }
 
-        t.truncate(end);
-        Cow::Owned(text(&t))
+        b.truncate(end);
+        Cow::Owned(b.into_text())
     }
 }
 
@@ -387,12 +415,8 @@ impl TokenizeAndStem for PorterStemmerRu {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Lower;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_ru(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Ru, word)
+        Language::Ru.contains(word)
     }
 
     fn gate(token: &str) -> bool {
@@ -404,6 +428,43 @@ impl TokenizeAndStem for PorterStemmerRu {
     }
 }
 
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    use crate::among::Buf;
+
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("SHI", super::SHI),
+        ("GERUND2", super::GERUND2),
+        ("REFLEXIVE", super::REFLEXIVE),
+        ("ADJECTIVE", super::ADJECTIVE),
+        ("PART1", super::PART1),
+        ("PART2", super::PART2),
+        ("VERB1", super::VERB1),
+        ("VERB2", super::VERB2),
+        ("NOUN", super::NOUN),
+        ("SUPERLATIVE", super::SUPERLATIVE),
+        ("DERIVATIONAL", super::DERIVATIONAL),
+    ];
+
+    /// The prelude `stem` runs before any table is consulted, in isolation:
+    /// lowercase, then fold every `ё` to `е`.
+    pub(crate) fn prelude(token: &str) -> String {
+        let mut b = Buf::fill_lowercase(token);
+        for c in b.as_mut_slice() {
+            if *c == 0x0451 {
+                *c = 0x0435;
+            }
+        }
+        b.into_text()
+    }
+
+    /// The prelude writes no marker unit: it only folds one letter onto
+    /// another that is already in the alphabet.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[];
+}
+
 impl verbora_core::Stemmer for PorterStemmerRu {
     fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         Self::stem(self, token)
@@ -413,6 +474,7 @@ impl verbora_core::Stemmer for PorterStemmerRu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::units;
 
     fn s(t: &str) -> String {
         PorterStemmerRu::new().stem(t).into_owned()
@@ -448,10 +510,14 @@ mod tests {
         assert_eq!(collapse_double(&units("н"), 0x043D), units("н"));
     }
 
-    /// The cross-cutting battery from `docs/PARITY.md`: empty, one character,
-    /// uppercase, accented Latin, Greek, Cyrillic, CJK, an astral pair,
-    /// punctuation, digits, a line terminator, and a very long word. Every
-    /// expectation below was read off the reference with `node`.
+    /// The cross-cutting battery every stemmer in this crate answers: empty,
+    /// one character, uppercase, accented Latin, Greek, Cyrillic, CJK, an
+    /// astral pair, punctuation, digits, a line terminator, and a very long
+    /// word.
+    ///
+    /// The expectations are the *identity* in every row but the case fold,
+    /// which is the whole point: none of these is a word of this language, so
+    /// a stemmer that changes one is reaching outside its own alphabet.
     #[test]
     fn cross_script_battery() {
         for (input, want) in [
@@ -485,6 +551,7 @@ mod tests {
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
+        use crate::units::{text, units};
 
         /// `/([ая])(ла|на|…)$/`: the index just after the kept `[ая]`.
         fn alt_suffix_after(w: &[u16], keep: &[u16], alts: &[&str]) -> Option<usize> {
@@ -502,11 +569,10 @@ mod tests {
         }
 
         fn perfective_gerund(w: &[u16]) -> Option<Vec<u16>> {
-            if let Some(at) = av_shi(w) {
+            if let Some(at) = av_shi(w, SHI) {
                 return Some(w[..at].to_vec());
             }
-            alt_suffix(w, &["ив", "ивши", "ившись", "ывши", "ывшись", "ыв"])
-                .map(|at| w[..at].to_vec())
+            alt_suffix(w, GERUND2).map(|at| w[..at].to_vec())
         }
 
         fn adjective(w: &[u16]) -> Option<Vec<u16>> {
@@ -514,11 +580,10 @@ mod tests {
         }
 
         fn participle(w: &[u16]) -> Option<Vec<u16>> {
-            if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], &["ем", "нн", "вш", "ющ", "щ"])
-            {
+            if let Some(at) = alt_suffix_after(w, &[0x0430, 0x044F], PART1) {
                 return Some(w[..at].to_vec());
             }
-            alt_suffix(w, &["ивш", "ывш", "ующ"]).map(|at| w[..at].to_vec())
+            alt_suffix(w, PART2).map(|at| w[..at].to_vec())
         }
 
         fn adjectival(w: &[u16]) -> Option<Vec<u16>> {
@@ -527,7 +592,7 @@ mod tests {
         }
 
         fn reflexive(w: &[u16]) -> Option<Vec<u16>> {
-            alt_suffix(w, &["ся", "сь"]).map(|at| w[..at].to_vec())
+            alt_suffix(w, REFLEXIVE).map(|at| w[..at].to_vec())
         }
 
         fn verb(w: &[u16]) -> Option<Vec<u16>> {
@@ -542,11 +607,11 @@ mod tests {
         }
 
         fn superlative(w: &[u16]) -> Option<Vec<u16>> {
-            alt_suffix(w, &["ейш", "ейше"]).map(|at| w[..at].to_vec())
+            alt_suffix(w, SUPERLATIVE).map(|at| w[..at].to_vec())
         }
 
         fn derivational(w: &[u16]) -> Option<Vec<u16>> {
-            alt_suffix(w, &["ост", "ость"]).map(|at| w[..at].to_vec())
+            alt_suffix(w, DERIVATIONAL).map(|at| w[..at].to_vec())
         }
 
         pub(super) fn stem(token: &str) -> String {
@@ -577,9 +642,9 @@ mod tests {
             };
             strip_final(&mut result, 0x0438); // /и$/
 
-            let derived = if r2_tail.is_some_and(|tail| {
-                !tail.is_empty() && alt_suffix(tail, &["ост", "ость"]).is_some()
-            }) {
+            let derived = if r2_tail
+                .is_some_and(|tail| !tail.is_empty() && alt_suffix(tail, DERIVATIONAL).is_some())
+            {
                 derivational(&result).unwrap_or(result)
             } else {
                 result

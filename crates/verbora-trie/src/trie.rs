@@ -1,11 +1,11 @@
-//! The trie itself: arena storage, the code-unit walk, and the six public
-//! operations that mirror the reference `trie`.
+//! The trie itself: arena storage, the scalar walk, and the public operations
+//! built on it.
 
 use std::borrow::Cow;
 
 use smallvec::SmallVec;
 
-use crate::iter::{KeysWithPrefix, MatchesOnPath};
+use crate::iter::{KeysWithPrefix, PrefixMatches};
 use crate::membership::HashIndex;
 
 /// Arena index of the root node.
@@ -15,16 +15,52 @@ pub(crate) const ROOT: u32 = 0;
 ///
 /// Two is not arbitrary: with the `union` representation a `SmallVec` reserves
 /// `max(size_of::<[T; N]>(), 16)` bytes regardless, so `N = 2` for an 8-byte
-/// `Child` is the largest inline capacity that is *free*. In a natural-language
-/// trie the overwhelming majority of nodes have one child, so this keeps the
-/// heap out of the picture for everything below the first level or two.
+/// [`Child`] is the largest inline capacity that is *free*. In a
+/// natural-language trie the overwhelming majority of nodes have one child, so
+/// this keeps the heap out of the picture for everything below the first level
+/// or two.
 const INLINE_CHILDREN: usize = 2;
 
-/// One edge: the UTF-16 code unit that labels it and the child it leads to.
+/// The child-list length at which lookup switches from a linear scan to a
+/// binary search.
+///
+/// Below it the scan wins: the list is one cache line, already loaded, and the
+/// branch predictor sees a short fixed trip count. Above it the comparisons
+/// dominate. Both are correct at any size — the list is kept sorted either way
+/// — so this constant is a speed knob, never a semantic one.
+const BINARY_SEARCH_THRESHOLD: usize = 8;
+
+/// How a trie treats letter case.
+///
+/// Case handling is fixed when the trie is constructed and then applies to
+/// **every** argument of **every** method, with no exceptions: what is stored,
+/// what [`Trie::contains`] is asked, and the prefix or search string handed to
+/// any query. That uniformity is the contract — a method that folded some of
+/// its arguments and not others would make results depend on which entry point
+/// a caller happened to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CaseHandling {
+    /// Words and arguments are compared exactly, scalar for scalar. The
+    /// default, and the only mode in which a trie never rewrites its input.
+    Sensitive,
+    /// Words and arguments are lowercased with [`str::to_lowercase`] — full,
+    /// locale-independent Unicode `Lowercase_Mapping` (Unicode 16.0 §5.18,
+    /// `SpecialCasing.txt` included), so `'İ'` becomes the two scalars
+    /// `"i\u{307}"` and a Greek capital sigma becomes `'ς'` or `'σ'`
+    /// according to position.
+    ///
+    /// Folding is a *declared* transformation, not a silent one: it is chosen
+    /// at construction, reported by [`Trie::case_handling`], and applied to
+    /// every argument alike. Stored keys come back in their folded spelling,
+    /// because that is what was stored.
+    Folded,
+}
+
+/// One edge: the Unicode scalar that labels it and the child it leads to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Child {
-    /// The edge label, a single UTF-16 code unit — *not* a `char`.
-    pub(crate) key: u16,
+    /// The edge label: exactly one Unicode scalar value.
+    pub(crate) key: char,
     /// Arena index of the node this edge leads to.
     pub(crate) node: u32,
 }
@@ -32,10 +68,10 @@ pub(crate) struct Child {
 /// A node in the arena.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Node {
-    /// Outgoing edges, held in the reference `for…in` enumeration order so that
-    /// iteration is a straight scan with no sorting or bookkeeping.
+    /// Outgoing edges, kept sorted ascending by [`Child::key`] so that
+    /// enumeration is a straight scan and lookup can binary-search.
     pub(crate) children: SmallVec<[Child; INLINE_CHILDREN]>,
-    /// The reference's `$` flag: a word ends here.
+    /// Whether a stored word ends at this node.
     pub(crate) is_word: bool,
     /// The number of stored words in this node's subtree, counting the node's
     /// own word.
@@ -43,39 +79,22 @@ pub(crate) struct Node {
     /// Not observable directly — it exists so a prefix count (`descend` +
     /// read) is O(|prefix|) instead of a subtree walk, which is what turns
     /// `iter_keys_with_prefix(p).count()` from ~1 ms into ~0.1 µs on a 20k
-    /// word corpus (see [`KeysWithPrefix`]'s `count` override). It occupies
-    /// bytes that were already padding: `Node` stays 32 bytes, pinned by the
-    /// `the_inline_child_capacity_is_free` test below. Maintained
-    /// optimistically by [`Trie::add_string`] — incremented while descending,
-    /// rolled back by a re-walk only when the word turns out to be a
-    /// duplicate — because duplicates are rare in real word lists and the
-    /// non-duplicate path then needs no path buffer at all.
+    /// word corpus (see [`KeysWithPrefix`]'s `count` override), and what makes
+    /// [`Trie::len`] O(1). It occupies bytes that were already padding:
+    /// `Node` stays 32 bytes, pinned by the `the_inline_child_capacity_is_free`
+    /// test below. Maintained optimistically by [`Trie::insert`] —
+    /// incremented while descending, rolled back by a re-walk only when the
+    /// word turns out to be a duplicate — because duplicates are rare in real
+    /// word lists and the non-duplicate path then needs no path buffer at all.
     pub(crate) word_count: u32,
 }
 
-/// True for the code units the reference treats as array-index-like object keys.
-///
-/// A key is an array index when it is the canonical decimal spelling of an
-/// integer below `2^32 - 1`. Trie keys are single code units, so the only
-/// qualifying ones are the ASCII digits: `'10'` is two units and never appears
-/// as a key, and non-ASCII digits such as `'٣'` are not canonical spellings.
-#[inline]
-const fn is_index_key(unit: u16) -> bool {
-    unit >= b'0' as u16 && unit <= b'9' as u16
-}
-
-/// Lowercases `s` the way the reference's `String#toLowerCase` does.
+/// Lowercases `s` when `handling` says to.
 ///
 /// Returns a borrow when nothing changes, which is the common case for
 /// already-folded corpora and for every call on a case-sensitive trie.
-///
-/// Rust's `str::to_lowercase` and the reference's `toLowerCase` agree on every
-/// Unicode scalar value (verified by sweeping all 1.1M code points against
-/// Node), including the multi-character expansions such as `'İ'` → `"i̇"` and
-/// the context-sensitive Greek final sigma. Neither applies locale-specific
-/// Turkish or Lithuanian rules.
-pub(crate) fn fold(folds: bool, s: &str) -> Cow<'_, str> {
-    if !folds {
+pub(crate) fn fold(handling: CaseHandling, s: &str) -> Cow<'_, str> {
+    if handling == CaseHandling::Sensitive {
         return Cow::Borrowed(s);
     }
     if s.is_ascii() {
@@ -89,54 +108,143 @@ pub(crate) fn fold(folds: bool, s: &str) -> Cow<'_, str> {
     Cow::Owned(s.to_lowercase())
 }
 
-/// Where a walk stopped, in enough detail to rebuild every answer the reference
-/// derives from it.
+/// Where a walk stopped, in enough detail to answer both prefix queries.
 struct Walk {
     /// Byte offset, in the *folded* search string, one past the end of the
     /// longest stored word on the path. `None` when no node on the path was a
-    /// word — the reference's `lastWord === null`.
+    /// stored word.
     last_word: Option<usize>,
-    /// UTF-16 length of that word, tracked alongside so callers that only want
+    /// Scalar count of that word, tracked alongside so callers that only want
     /// the split need not re-measure.
-    last_word_units: usize,
-    /// Byte offset of the character at which the walk stopped.
+    last_word_scalars: usize,
+    /// Byte offset of the scalar at which the walk stopped. Always a character
+    /// boundary of the folded search string.
     stopped_at: usize,
-    /// Set when the walk died *between* the halves of a surrogate pair, so the
-    /// reference's remainder starts with an unpaired low surrogate.
-    split_pair: bool,
 }
 
-/// A prefix tree, mirroring the reference `Trie` class.
+/// The longest stored word that prefixes a search string, and the part of the
+/// search the walk could not consume.
 ///
-/// Construct with [`Trie::new`] for the case-sensitive default, or
-/// [`Trie::case_insensitive`] for the folding variant.
+/// Returned by [`Trie::longest_prefix`]. Both fields are cut from the search
+/// string itself (after folding), so on a case-sensitive trie they borrow it
+/// and the whole operation allocates nothing.
+///
+/// `word` is `None` when no node on the path was a stored word.
+/// `Some("")` — the trie stores the empty string — is a *different* answer
+/// from `None`, and a `if let Some(w) = .. if !w.is_empty()` guard conflates
+/// them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrefixSplit<'a> {
+    /// The longest stored word that is a prefix of the search string.
+    pub word: Option<Cow<'a, str>>,
+    /// What was left when the **walk** died — not what was left after `word`
+    /// ended. With only `["their", "and"]` stored, searching `"theyre"` walks
+    /// as far as `"the"` and leaves `"yre"`, with `word` still `None`.
+    pub rest: Cow<'a, str>,
+}
+
+/// The same split as [`PrefixSplit`], counted in Unicode scalars.
+///
+/// Returned by [`Trie::longest_prefix_lengths`], which allocates nothing at
+/// all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PrefixSplitLengths {
+    /// Scalar count of the longest stored word prefixing the search, or `None`
+    /// when there is none.
+    pub word: Option<usize>,
+    /// Scalar count of the unconsumed remainder.
+    pub rest: usize,
+}
+
+/// A prefix tree over `&str` keys.
+///
+/// # The unit
+///
+/// **One Unicode scalar value is one node label.** A key is a Rust `&str`, so
+/// the smallest piece of it that is itself text is a scalar; keying nodes by
+/// anything smaller (UTF-8 bytes, UTF-16 code units) puts positions in the tree
+/// that no `&str` can name, and makes a walk able to stop somewhere that is not
+/// a character boundary. With the scalar unit every node in the tree is a
+/// position a caller can hand in and get back:
+///
+/// * `'😀'` is one node, not two, and costs one position in every length this
+///   crate reports;
+/// * every remainder [`Trie::longest_prefix`] returns is a suffix of the
+///   caller's own text — no `U+FFFD`, no invented scalar, ever;
+/// * [`Trie::node_count`] counts scalars plus the root.
+///
+/// The unit is *not* the grapheme cluster. `"e\u{301}"` and `"é"` are two
+/// different keys here, as they are for `str` equality itself, and normalising
+/// them together is the caller's explicit choice — see `verbora-normalizers`.
+///
+/// # Order
+///
+/// Every enumeration this crate offers — [`Trie::keys`],
+/// [`Trie::keys_with_prefix`], [`Trie::iter_keys_with_prefix`],
+/// [`Trie::for_each_key_with_prefix`] and the [`FrozenTrie`](crate::FrozenTrie)
+/// counterparts — yields words in **ascending order of their scalar sequence**.
+/// For well-formed Rust strings that is byte-wise UTF-8 order, so it is exactly
+/// `<str as Ord>`:
+///
+/// ```
+/// use verbora_trie::Trie;
+///
+/// let mut t = Trie::new();
+/// t.insert_all(["cat", "0x", "car", "Ångström", "日本", "😀"]);
+///
+/// let mut expected = ["cat", "0x", "car", "Ångström", "日本", "😀"];
+/// expected.sort_unstable();
+/// assert_eq!(t.keys_with_prefix(""), expected);
+/// ```
+///
+/// A node's own word is emitted before its subtree, which is not an extra rule
+/// but a consequence of the one above: a node's word is a proper prefix of
+/// every word beneath it, and a proper prefix sorts first.
+///
+/// # Construction
+///
+/// [`Trie::new`] for the case-sensitive default, [`Trie::case_insensitive`] for
+/// the folding variant, or [`Trie::with_case_handling`] to pick explicitly.
+///
+/// ```
+/// use verbora_trie::Trie;
+///
+/// let mut t = Trie::new();
+/// t.insert_all(["a", "ab", "bc", "cd", "abc"]);
+///
+/// assert!(t.contains("abc"));
+/// assert_eq!(t.prefix_matches("abcd"), ["a", "ab", "abc"]);
+/// assert_eq!(t.keys_with_prefix("ab"), ["ab", "abc"]);
+/// ```
+///
+/// # Panics
+///
+/// Never, for any input, except on capacity overflow: a trie holding more than
+/// `u32::MAX` nodes, or a membership index holding more than `u32::MAX`
+/// distinct words, aborts the insertion with a panic the same way `Vec::push`
+/// panics when it cannot grow. Both bounds need hundreds of gigabytes of live
+/// keys to reach.
 #[derive(Clone, Debug)]
 pub struct Trie {
     /// All nodes, flat. Index 0 is the root and is never removed, so a `u32`
     /// index is always valid and needs no `Option`.
     nodes: Vec<Node>,
-    /// Whether stored and queried strings are lowercased first.
-    ///
-    /// Named for what it *does* rather than for the reference's `cs`, because
-    /// The reference's own three-state flag (`undefined` / `null` / `false`)
-    /// collapses to this single question: is it exactly `false`?
-    folds: bool,
-    /// Hash membership set over the folded stored words, maintained by
-    /// [`Trie::add_string`] and consulted by [`Trie::contains`] — see
+    handling: CaseHandling,
+    /// Hash membership set over the stored words, maintained by
+    /// [`Trie::insert`] and consulted by [`Trie::contains`] — see
     /// `membership.rs` for why it answers exactly what the arena walk did.
     index: HashIndex,
 }
 
-/// Equality deliberately ignores the membership index: the index's internal layout
-/// records the order in which distinct words were *first* inserted, which no
-/// query can observe — `["ab", "a"]` and `["a", "ab"]` build byte-identical
-/// arenas (and answer every method identically) but opposite index blobs.
-/// Comparing `nodes` (whose `word_count`s are fully determined by the
-/// `is_word` flags) and `folds` is exactly the observable state, and is what
-/// the former `derive(PartialEq)` compared before the index existed.
+/// Equality deliberately ignores the membership index: the index's internal
+/// layout records the order in which distinct words were *first* inserted,
+/// which no query can observe — `["ab", "a"]` and `["a", "ab"]` build
+/// byte-identical arenas (and answer every method identically) but opposite
+/// index blobs. Comparing `nodes` (whose `word_count`s are fully determined by
+/// the `is_word` flags) and `handling` is exactly the observable state.
 impl PartialEq for Trie {
     fn eq(&self, other: &Self) -> bool {
-        self.nodes == other.nodes && self.folds == other.folds
+        self.nodes == other.nodes && self.handling == other.handling
     }
 }
 
@@ -149,41 +257,33 @@ impl Default for Trie {
 }
 
 impl Trie {
-    /// Creates an empty, case-sensitive trie — the reference's `new Trie()`.
+    /// An empty, case-sensitive trie.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_case_sensitivity(true)
+        Self::with_case_handling(CaseHandling::Sensitive)
     }
 
-    /// Creates an empty trie that lowercases everything it stores and every
-    /// query it is given — the reference's `new Trie(false)`.
-    ///
-    /// [`Trie::keys_with_prefix`] is the one exception, and deliberately so; see
-    /// its documentation.
+    /// An empty trie that lowercases everything it stores and every argument
+    /// it is given — see [`CaseHandling::Folded`].
     #[must_use]
     pub fn case_insensitive() -> Self {
-        Self::with_case_sensitivity(false)
+        Self::with_case_handling(CaseHandling::Folded)
     }
 
-    /// Creates an empty trie, mirroring `new Trie(caseSensitive)`.
-    ///
-    /// The reference defaults the flag when the argument is `undefined` but
-    /// tests it with a strict `=== false` everywhere else, so `new Trie(null)`
-    /// and `new Trie(0)` are both case-*sensitive*. Only a literal `false`
-    /// enables folding, which is exactly what a Rust `bool` expresses.
+    /// An empty trie with the given case handling.
     #[must_use]
-    pub fn with_case_sensitivity(case_sensitive: bool) -> Self {
+    pub fn with_case_handling(handling: CaseHandling) -> Self {
         Self {
             nodes: vec![Node::default()],
-            folds: !case_sensitive,
+            handling,
             index: HashIndex::new(),
         }
     }
 
-    /// Whether this trie compares strings case-sensitively.
+    /// How this trie treats letter case.
     #[must_use]
-    pub fn is_case_sensitive(&self) -> bool {
-        !self.folds
+    pub fn case_handling(&self) -> CaseHandling {
+        self.handling
     }
 
     /// Reserves capacity for at least `additional` more nodes.
@@ -195,77 +295,387 @@ impl Trie {
         self.nodes.reserve(additional);
     }
 
-    /// Compresses this trie into a [`FrozenTrie`](crate::FrozenTrie): a
-    /// read-only, path-compressed
-    /// representation built once for query-heavy workloads.
+    // -----------------------------------------------------------------------
+    // Mutation
+    // -----------------------------------------------------------------------
+
+    /// Inserts `string`, returning `true` when it was **not** already stored.
     ///
-    /// # Why this exists
+    /// The convention is `HashSet::insert`'s: `true` means "this call added
+    /// it".
     ///
-    /// `docs/PERFORMANCE_GAPS.md` entry 32 measured a real, disclosed loss:
-    /// `fast_radix_trie` (a path-compressed radix map) beats this arena's
-    /// `predictive_search`/`keys_with_prefix` by 1.64×–2.19×, specifically
-    /// because a run of single-child, non-word nodes costs one node-hop each
-    /// here but one edge-label comparison there. `Trie` already wins
-    /// `build`/`contains` against the same competitor, so this is a targeted
-    /// fix for the one operation that loses, not a replacement representation:
-    /// `Trie` keeps building exactly as it does today, and this method is the
-    /// "Freeze" step of the Build → Freeze → Query pattern this crate already
-    /// follows for other Verbora-native query paths (see `AGENTS.md`'s
-    /// "Verbora-Native Extensions" policy — `FrozenTrie` is the fifth entry
-    /// there).
+    /// Inserting the empty string marks the root as a word; it creates no node,
+    /// so [`Trie::node_count`] does not change, but [`Trie::len`] does.
     ///
-    /// # What compresses, and why it is exact
-    ///
-    /// An original node is kept as a real frozen node when it is the root, is
-    /// itself a stored word (`is_word`), or has zero or more than one child —
-    /// in every other case it has exactly one child and marks no word, so it
-    /// cannot be an independently observable stopping point for any query and
-    /// is folded into the edge label leading to the next kept node. This is
-    /// exact, not approximate: every position a caller could ever land on
-    /// (`contains` returning `true`, a word emitted by `keys_with_prefix`, a
-    /// prefix argument ending exactly there) is preserved as a real frozen
-    /// node; only the *unobservable* pass-through nodes disappear.
-    ///
-    /// Compression never reorders anything: a kept node's children are
-    /// carried over in exactly their original position, which is what
-    /// already encodes this crate's the reference `for…in` enumeration order
-    /// (see this module's own `insert_position`) — so `FrozenTrie`
-    /// reproduces that order with no extra bookkeeping. Surrogate-pair
-    /// correctness is inherited the same way: a compressed edge is the exact
-    /// same sequence of UTF-16 code units the original chain held, just
-    /// stored inline instead of one node per unit.
-    ///
-    /// # What is *not* on `FrozenTrie` (yet)
-    ///
-    /// Only `contains` and `keys_with_prefix`/`iter_keys_with_prefix`/`keys`
-    /// are implemented — the operations the measured gap and the benchmarked
-    /// `predictive_search`/`contains_hit`/`contains_miss` groups are about.
-    /// `find_matches_on_path`/`find_prefix`/`find_prefix_lengths` have no
-    /// frozen counterpart: nothing in this crate's own benchmarks or the
-    /// competitive audit found a loss there, so extending compression to
-    /// those top-down, single-path walks (which would need byte-offset
-    /// tracking across a multi-unit edge label, not just node-hop counting)
-    /// is not attempted here. Call the equivalent method on the original
-    /// `Trie` for those.
-    ///
-    /// # Cost
-    ///
-    /// One linear pass over every original node (`O(n)` in node count,
-    /// `O(n)` extra space for the kept-node index map plus the compressed
-    /// unit buffer), then one pass over the compressed tree to precompute
-    /// the query-side tables `FrozenTrie` answers from: the
-    /// enumeration-order key table with per-node word ranges (what makes
-    /// `keys_with_prefix` a range copy and a prefix count a subtraction —
-    /// see [`FrozenTrie::keys_slice`](crate::FrozenTrie::keys_slice)) and
-    /// the hash membership set behind `FrozenTrie::contains`. All of it is
-    /// the same shape of one-time cost `verbora-tagger`'s `build.rs`
-    /// table-packing step already pays for its own frozen lexicon. Call this
-    /// once after bulk-loading with [`Trie::add_strings`], not per query.
+    /// Besides the arena path, each insertion maintains two query
+    /// accelerators: the per-node subtree word counts (behind [`Trie::len`] and
+    /// [`KeysWithPrefix`]'s O(1) `count`) and the hash membership set behind
+    /// [`Trie::contains`]. Together they add roughly a third to a bulk load —
+    /// a trade against `contains` running ~2× faster and prefix counts
+    /// ~10,000× faster, disclosed here rather than hidden.
     ///
     /// ```
     /// # use verbora_trie::Trie;
     /// let mut t = Trie::new();
-    /// t.add_strings(["cat", "cats", "car", "care", "careful"]);
+    /// assert!(t.insert("test"));
+    /// assert!(!t.insert("test"));
+    /// ```
+    pub fn insert(&mut self, string: &str) -> bool {
+        let folded = fold(self.handling, string);
+        let mut node = ROOT;
+        // Subtree word counts are bumped optimistically on the way down — see
+        // `Node::word_count` for why the rollback below is the cheap branch.
+        self.nodes[ROOT as usize].word_count += 1;
+        for scalar in folded.chars() {
+            node = self.child_or_insert(node, scalar);
+            self.nodes[node as usize].word_count += 1;
+        }
+        let was_word = std::mem::replace(&mut self.nodes[node as usize].is_word, true);
+        if was_word {
+            // A duplicate stores nothing, so the optimistic increments were
+            // wrong; re-walk the (now guaranteed present) path to undo them.
+            let mut n = ROOT;
+            self.nodes[ROOT as usize].word_count -= 1;
+            for scalar in folded.chars() {
+                n = self.child(n, scalar).expect("path was just walked");
+                self.nodes[n as usize].word_count -= 1;
+            }
+        } else {
+            self.index.insert_folded(folded.as_bytes());
+        }
+        !was_word
+    }
+
+    /// Inserts every string in `list`.
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert_all(["alpha", "beta"]);
+    /// t.insert_all(vec![String::from("gamma")]);
+    /// assert_eq!(t.keys_with_prefix(""), ["alpha", "beta", "gamma"]);
+    /// ```
+    pub fn insert_all<I>(&mut self, list: I)
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        let it = list.into_iter();
+        // A word contributes at least one node unless it duplicates an existing
+        // prefix entirely, so the item count is a safe lower bound: enough to
+        // skip the first few doublings of a bulk load without over-reserving for
+        // callers who pass one string at a time.
+        let hint = it.size_hint().0;
+        self.nodes.reserve(hint);
+        // Pre-slotting the membership table the same way spares the bulk load
+        // its incremental rehashes; key bytes stay amortized (their total
+        // length is unknowable from a count).
+        self.index.reserve(hint, 0);
+        for s in it {
+            self.insert(s.as_ref());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Queries
+    // -----------------------------------------------------------------------
+
+    /// Whether `string` was inserted as a complete word.
+    ///
+    /// A stored word's proper prefixes are *not* contained unless they were
+    /// inserted in their own right: with only `"tested"` stored,
+    /// `contains("test")` is `false`.
+    ///
+    /// Answered from the hash membership set rather than by walking the arena:
+    /// the walk costs one dependent cache miss per scalar, which no arena
+    /// layout recovers, while one hash of the folded bytes plus a short probe
+    /// is about twice as fast on a 20k-word corpus. The two are exactly
+    /// equivalent — see `membership.rs` — and this crate's tests hold them to
+    /// that differentially.
+    #[must_use]
+    pub fn contains(&self, string: &str) -> bool {
+        let folded = fold(self.handling, string);
+        self.index.contains_folded(folded.as_bytes())
+    }
+
+    /// [`Trie::contains`] by the original arena walk — the oracle this
+    /// crate's tests compare the membership index against.
+    #[cfg(test)]
+    pub(crate) fn contains_walk(&self, string: &str) -> bool {
+        let folded = fold(self.handling, string);
+        match self.descend_folded(&folded) {
+            Some(node) => self.nodes[node as usize].is_word,
+            None => false,
+        }
+    }
+
+    /// The number of distinct stored words.
+    ///
+    /// O(1): the root's maintained subtree word count.
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert_all(["a", "ab", "a", ""]);
+    /// assert_eq!(t.len(), 3);
+    /// assert_eq!(t.node_count(), 3); // root + 'a' + 'b'
+    /// ```
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.nodes[ROOT as usize].word_count as usize
+    }
+
+    /// Whether no word has been stored.
+    ///
+    /// Note that a trie storing only the empty string is **not** empty: the
+    /// empty string is a word like any other.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The number of **nodes** from the root down, including the root itself.
+    ///
+    /// This counts tree nodes, not words: an empty trie is 1, inserting `"a"`
+    /// makes it 2, and inserting `"ab"` afterwards makes it 3. Inserting the
+    /// empty string never changes it. One Unicode scalar is one node, whatever
+    /// plane it lives in:
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert("a👍");
+    /// assert_eq!(t.node_count(), 3); // root + 'a' + '👍'
+    /// ```
+    ///
+    /// O(1): the arena's length *is* the node count.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Every stored word that starts with `prefix`, in ascending scalar order.
+    ///
+    /// `prefix` is folded exactly like every other argument when the trie folds
+    /// case:
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::case_insensitive();
+    /// t.insert_all(["thEIr", "And", "theY"]);
+    /// assert_eq!(t.keys_with_prefix("th"), ["their", "they"]);
+    /// assert_eq!(t.keys_with_prefix("TH"), ["their", "they"]);
+    /// ```
+    ///
+    /// See the type-level "Choosing the Right API" section for when to reach
+    /// for this rather than [`Trie::iter_keys_with_prefix`],
+    /// [`Trie::for_each_key_with_prefix`] or [`Trie::freeze`].
+    #[must_use]
+    pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+        // Not `iter_keys_with_prefix(prefix).collect()`: the lazy iterator has
+        // to suspend and resume the whole traversal state once per word, which
+        // a caller who wants the entire subtree pays for and gets nothing
+        // from. The straight-line walk emits the same sequence with the
+        // cursor in registers; `word_count` sizes the vector exactly, so the
+        // only allocations left are the one per returned `String` — the floor
+        // for an owned result. See `for_each_key_with_prefix` to skip even
+        // those.
+        let folded = fold(self.handling, prefix);
+        let mut out = Vec::with_capacity(
+            self.descend_folded(&folded)
+                .map_or(0, |n| self.node(n).word_count as usize),
+        );
+        crate::iter::walk_keys(self, &folded, |key| out.push(String::from(key)));
+        out
+    }
+
+    /// Calls `f` with every stored word that starts with `prefix`, in the same
+    /// order as [`Trie::keys_with_prefix`], **without allocating one `String`
+    /// per word**.
+    ///
+    /// # Why a callback instead of borrows
+    ///
+    /// A stored word exists nowhere contiguously in this representation — it is
+    /// spelled out one scalar per arena node — so there is no `&str` inside the
+    /// trie to hand back, and an iterator of borrows is therefore impossible
+    /// without materialising something first. Passing the shared path buffer
+    /// down to `f` is the one shape that keeps the whole enumeration
+    /// allocation-free: the argument is valid only for the duration of the
+    /// call, which is exactly the lifetime the buffer has before the next edge
+    /// overwrites it.
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert_all(["cat", "cats", "car"]);
+    /// let mut bytes = 0;
+    /// t.for_each_key_with_prefix("ca", |k| bytes += k.len());
+    /// assert_eq!(bytes, 3 + 3 + 4);
+    /// ```
+    pub fn for_each_key_with_prefix<F: FnMut(&str)>(&self, prefix: &str, f: F) {
+        let folded = fold(self.handling, prefix);
+        crate::iter::walk_keys(self, &folded, f);
+    }
+
+    /// [`Trie::keys_with_prefix`] as a lazy iterator.
+    ///
+    /// Yields the same strings in the same order while holding only one path
+    /// buffer and one stack frame per level, so an early `take`/`find` stops
+    /// paying for the rest of the subtree. Counting is better still:
+    /// `iter_keys_with_prefix(p).count()` reads the maintained subtree word
+    /// count after the `p`-length descent — O(|prefix|), no traversal, no
+    /// allocation — so it is the way to ask "how many words start with `p`?".
+    #[must_use]
+    pub fn iter_keys_with_prefix(&self, prefix: &str) -> KeysWithPrefix<'_> {
+        KeysWithPrefix::new(self, &fold(self.handling, prefix))
+    }
+
+    /// Every stored word, in ascending scalar order.
+    ///
+    /// Equivalent to `iter_keys_with_prefix("")`.
+    #[must_use]
+    pub fn keys(&self) -> KeysWithPrefix<'_> {
+        self.iter_keys_with_prefix("")
+    }
+
+    /// Every stored word that is a prefix of `search`, shortest first.
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert_all(["a", "ab", "bc", "cd", "abc"]);
+    /// assert_eq!(t.prefix_matches("abcd"), ["a", "ab", "abc"]);
+    /// ```
+    ///
+    /// If the empty string was stored it is the first result, since the root is
+    /// on every path. Results are cut from `search` (after folding), not
+    /// rebuilt from the stored keys, so on a case-sensitive trie they borrow
+    /// rather than allocate.
+    #[must_use]
+    pub fn prefix_matches<'a>(&self, search: &'a str) -> Vec<Cow<'a, str>> {
+        self.iter_prefix_matches(search).collect()
+    }
+
+    /// [`Trie::prefix_matches`] as a lazy iterator.
+    ///
+    /// The walk is linear and single-pass, so this stops the moment the caller
+    /// does — useful when only the shortest or the first match is wanted.
+    #[must_use]
+    pub fn iter_prefix_matches<'a>(&self, search: &'a str) -> PrefixMatches<'_, 'a> {
+        PrefixMatches::new(self, fold(self.handling, search))
+    }
+
+    /// The longest stored word that prefixes `search`, and the part of `search`
+    /// the walk could not consume.
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert_all(["their", "and", "they"]);
+    /// let split = t.longest_prefix("theyre");
+    /// assert_eq!(split.word.as_deref(), Some("they"));
+    /// assert_eq!(split.rest, "re");
+    /// ```
+    ///
+    /// See [`PrefixSplit`] for the two details that are easy to get wrong: the
+    /// remainder is measured from where the *walk* died, and `Some("")` is a
+    /// different answer from `None`.
+    #[must_use]
+    pub fn longest_prefix<'a>(&self, search: &'a str) -> PrefixSplit<'a> {
+        let folded = fold(self.handling, search);
+        let walk = self.walk(&folded);
+
+        // Reborrowing through the `Cow` keeps the case-sensitive path
+        // allocation free: `search` outlives the return value, so its slices
+        // can be handed straight back.
+        let cut = |start: usize, end: usize| -> Cow<'a, str> {
+            match &folded {
+                Cow::Borrowed(s) => Cow::Borrowed(&s[start..end]),
+                Cow::Owned(s) => Cow::Owned(s[start..end].to_owned()),
+            }
+        };
+
+        PrefixSplit {
+            word: walk.last_word.map(|end| cut(0, end)),
+            rest: cut(walk.stopped_at, folded.len()),
+        }
+    }
+
+    /// The same split as [`Trie::longest_prefix`], counted in Unicode scalars
+    /// and allocating nothing at all.
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert_all(["their", "and", "they"]);
+    /// let lengths = t.longest_prefix_lengths("theyre");
+    /// assert_eq!(lengths.word, Some(4));
+    /// assert_eq!(lengths.rest, 2);
+    /// ```
+    #[must_use]
+    pub fn longest_prefix_lengths(&self, search: &str) -> PrefixSplitLengths {
+        let folded = fold(self.handling, search);
+        let walk = self.walk(&folded);
+        PrefixSplitLengths {
+            word: walk.last_word.is_some().then_some(walk.last_word_scalars),
+            rest: folded[walk.stopped_at..].chars().count(),
+        }
+    }
+
+    /// Compresses this trie into a [`FrozenTrie`](crate::FrozenTrie): a
+    /// read-only, path-compressed representation built once for query-heavy
+    /// workloads.
+    ///
+    /// # Why this exists
+    ///
+    /// A run of single-child, non-word nodes costs one node hop each here and
+    /// one edge-label comparison in a path-compressed radix map — the measured
+    /// gap `docs/PERFORMANCE_GAPS.md` entry 32 records against
+    /// `fast_radix_trie` on `keys_with_prefix`. `Trie` already wins
+    /// build and `contains` against the same competitor, so this is a targeted
+    /// fix for the operation that loses, not a replacement representation:
+    /// `Trie` keeps building exactly as it does today, and this method is the
+    /// "Freeze" step of the Build → Freeze → Query pattern.
+    ///
+    /// # What compresses, and why it is exact
+    ///
+    /// An original node is kept as a real frozen node when it is the root, is
+    /// itself a stored word, or has zero or more than one child — in every
+    /// other case it has exactly one child and marks no word, so it cannot be
+    /// an independently observable stopping point for any query and is folded
+    /// into the edge label leading to the next kept node. This is exact, not
+    /// approximate: every position a caller could ever land on (`contains`
+    /// returning `true`, a word emitted by `keys_with_prefix`, a prefix
+    /// argument ending exactly there) is preserved as a real frozen node; only
+    /// the *unobservable* pass-through nodes disappear.
+    ///
+    /// Compression never reorders anything: a kept node's children are carried
+    /// over in their original positions, which are already sorted ascending by
+    /// label, and two edges from one node always differ in their first scalar
+    /// — so the frozen tree enumerates in the same ascending scalar order.
+    ///
+    /// # What is *not* on `FrozenTrie`
+    ///
+    /// Only `contains` and the key enumerations are implemented — the
+    /// operations the measured gap is about. `prefix_matches` /
+    /// `longest_prefix` have no frozen counterpart: nothing found a loss
+    /// there, so extending compression to those top-down single-path walks
+    /// (which would need byte-offset tracking across a multi-scalar edge
+    /// label) is not attempted. Call the equivalent method on the original
+    /// `Trie` for those.
+    ///
+    /// # Cost
+    ///
+    /// One linear pass over every original node (`O(n)` in node count, `O(n)`
+    /// extra space for the kept-node index map plus the compressed label
+    /// buffer), then one pass over the compressed tree to precompute the
+    /// enumeration-order key table with per-node word ranges and the hash
+    /// membership set. Call this once after a bulk load, not per query.
+    ///
+    /// ```
+    /// # use verbora_trie::Trie;
+    /// let mut t = Trie::new();
+    /// t.insert_all(["cat", "cats", "car", "care", "careful"]);
     /// let frozen = t.freeze();
     /// assert!(frozen.contains("cats"));
     /// assert!(!frozen.contains("ca"));
@@ -291,24 +701,24 @@ impl Trie {
         // through however many pass-through nodes it takes to reach the next
         // kept node, recording the whole run as one compressed edge.
         let mut frozen_nodes = Vec::with_capacity(kept_count as usize);
-        let mut units: Vec<u16> = Vec::new();
+        let mut labels: Vec<char> = Vec::new();
         for (i, orig) in self.nodes.iter().enumerate() {
             if new_index[i] == u32::MAX {
                 continue;
             }
             let mut children = SmallVec::new();
             for child in &orig.children {
-                let label_start = units.len() as u32;
-                units.push(child.key);
+                let label_start = labels.len() as u32;
+                labels.push(child.key);
                 let mut cur = child.node;
                 while new_index[cur as usize] == u32::MAX {
                     // `cur` was not kept, so the keep check above guarantees
                     // it has exactly one child.
                     let only = self.nodes[cur as usize].children[0];
-                    units.push(only.key);
+                    labels.push(only.key);
                     cur = only.node;
                 }
-                let label_end = units.len() as u32;
+                let label_end = labels.len() as u32;
                 children.push(crate::frozen::FrozenChild {
                     label_start,
                     label_end,
@@ -321,329 +731,7 @@ impl Trie {
             });
         }
 
-        crate::frozen::FrozenTrie::from_parts(frozen_nodes, units, self.folds)
-    }
-
-    // -----------------------------------------------------------------------
-    // Mutation
-    // -----------------------------------------------------------------------
-
-    /// Adds `string`, returning `true` if it was **already** present.
-    ///
-    /// The return value is the reference's, and it is the opposite of the
-    /// "inserted?" convention most Rust set types use — `add_string` answers
-    /// "was this already a word?", so a first insertion returns `false`.
-    ///
-    /// Adding the empty string marks the root as a word; it creates no node, so
-    /// [`Trie::get_size`] does not change.
-    ///
-    /// Besides the arena path, each insertion maintains two query
-    /// accelerators: the per-node subtree word counts (behind
-    /// [`KeysWithPrefix`]'s O(1) `count`) and the hash membership set behind
-    /// [`Trie::contains`]. Together they add roughly a third to a bulk load —
-    /// a measured trade against `contains` running ~2× faster and prefix
-    /// counts ~10,000× faster, disclosed here rather than hidden.
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// let mut t = Trie::new();
-    /// assert!(!t.add_string("test"));
-    /// assert!(t.add_string("test"));
-    /// ```
-    pub fn add_string(&mut self, string: &str) -> bool {
-        let folded = fold(self.folds, string);
-        let mut node = ROOT;
-        // Subtree word counts are bumped optimistically on the way down — see
-        // `Node::word_count` for why the rollback below is the cheap branch.
-        self.nodes[ROOT as usize].word_count += 1;
-        // The reference re-lowercases the remaining suffix at every recursion
-        // level. Folding is idempotent and the only context-sensitive rule
-        // (Greek final sigma) cannot fire on already-folded text, so one pass
-        // here is observably identical and linear instead of quadratic.
-        for unit in folded.encode_utf16() {
-            node = self.child_or_insert(node, unit);
-            self.nodes[node as usize].word_count += 1;
-        }
-        let was = std::mem::replace(&mut self.nodes[node as usize].is_word, true);
-        if was {
-            // A duplicate stores nothing, so the optimistic increments were
-            // wrong; re-walk the (now guaranteed present) path to undo them.
-            let mut n = ROOT;
-            self.nodes[ROOT as usize].word_count -= 1;
-            for unit in folded.encode_utf16() {
-                n = self.child(n, unit).expect("path was just walked");
-                self.nodes[n as usize].word_count -= 1;
-            }
-        } else {
-            self.index.insert_folded(folded.as_bytes());
-        }
-        was
-    }
-
-    /// Adds every string in `list`.
-    ///
-    /// The reference iterates with `for…in`, which skips array holes and walks
-    /// the *characters* of a string argument. A Rust iterator has neither
-    /// behaviour, so this method is the faithful port of what that loop
-    /// actually visits: pass the sequence you want inserted.
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// let mut t = Trie::new();
-    /// t.add_strings(["alpha", "beta"]);
-    /// t.add_strings(vec![String::from("gamma")]);
-    /// assert_eq!(t.keys_with_prefix(""), ["alpha", "beta", "gamma"]);
-    /// ```
-    pub fn add_strings<I>(&mut self, list: I)
-    where
-        I: IntoIterator,
-        I::Item: AsRef<str>,
-    {
-        let it = list.into_iter();
-        // A word contributes at least one node unless it duplicates an existing
-        // prefix entirely, so the item count is a safe lower bound: enough to
-        // skip the first few doublings of a bulk load without over-reserving for
-        // callers who pass one string at a time.
-        let hint = it.size_hint().0;
-        self.nodes.reserve(hint);
-        // Pre-slotting the membership table the same way spares the bulk load
-        // its incremental rehashes; key bytes stay amortized (their total
-        // length is unknowable from a count).
-        self.index.reserve(hint, 0);
-        for s in it {
-            self.add_string(s.as_ref());
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Queries
-    // -----------------------------------------------------------------------
-
-    /// Whether `string` was added as a complete word.
-    ///
-    /// A stored word's proper prefixes are *not* contained unless they were
-    /// added in their own right: with only `"tested"` stored, `contains("test")`
-    /// is `false`.
-    ///
-    /// Answered from the hash membership set rather than by walking the
-    /// arena: the walk costs one dependent cache miss per UTF-16 code unit,
-    /// which no arena layout recovers, while one hash of the folded bytes
-    /// plus a short probe is about twice as fast on a 20k-word corpus. The
-    /// two are exactly equivalent — see `membership.rs` — and this crate's
-    /// tests hold them to that differentially.
-    #[must_use]
-    pub fn contains(&self, string: &str) -> bool {
-        let folded = fold(self.folds, string);
-        self.index.contains_folded(folded.as_bytes())
-    }
-
-    /// [`Trie::contains`] by the original arena walk — the oracle this
-    /// crate's tests compare the membership index against.
-    #[cfg(test)]
-    pub(crate) fn contains_walk(&self, string: &str) -> bool {
-        let folded = fold(self.folds, string);
-        match self.descend(folded.encode_utf16()) {
-            Some(node) => self.nodes[node as usize].is_word,
-            None => false,
-        }
-    }
-
-    /// The number of **nodes** from the root down, including the root itself.
-    ///
-    /// This counts tree nodes, not words: an empty trie is 1, adding `"a"` makes
-    /// it 2, and adding `"ab"` afterwards makes it 3. Adding the empty string
-    /// never changes it. A non-BMP character contributes **two** nodes, because
-    /// The reference keys nodes by UTF-16 code unit:
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// let mut t = Trie::new();
-    /// t.add_string("a👍");
-    /// assert_eq!(t.get_size(), 4); // root + 'a' + high surrogate + low surrogate
-    /// ```
-    ///
-    /// The reference traverses the whole structure on every call and warns
-    /// against frequent use. Here the arena's length *is* the node count, so
-    /// this is O(1) and the warning no longer applies.
-    #[must_use]
-    pub fn get_size(&self) -> usize {
-        self.nodes.len()
-    }
-
-    /// Every stored word that starts with `prefix`, in the reference's order.
-    ///
-    /// # This method does not fold case — on purpose
-    ///
-    /// The reference guards its lowercasing with `if (this.caseSensitive ===
-    /// false)`, but its constructor stores the flag as `this.cs`.
-    /// `this.caseSensitive` is therefore always `undefined`, and the prefix is
-    /// never folded — not even on a case-insensitive trie, where every stored
-    /// word *has* been folded and an upper-case prefix consequently matches
-    /// nothing:
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// let mut t = Trie::case_insensitive();
-    /// t.add_strings(["thEIr", "And", "theY"]);
-    /// assert_eq!(t.keys_with_prefix("th"), ["their", "they"]);
-    /// assert!(t.keys_with_prefix("TH").is_empty()); // not a typo — see above
-    /// ```
-    ///
-    /// Correcting this would silently change results for every caller who
-    /// depends on the recorded behaviour, so the bug is preserved. Fold the
-    /// prefix yourself if you want the intended semantics.
-    ///
-    /// # Order
-    ///
-    /// Depth-first, emitting a node's own word *before* descending, and visiting
-    /// children in the reference object-key order: ASCII digits first in ascending
-    /// numeric order, then every other key in insertion order.
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// let mut t = Trie::new();
-    /// t.add_strings(["b1", "a1", "9x", "1x", "0x", "zz"]);
-    /// assert_eq!(t.keys_with_prefix(""), ["0x", "1x", "9x", "b1", "a1", "zz"]);
-    /// ```
-    ///
-    /// Use [`Trie::iter_keys_with_prefix`] to stream the same sequence without
-    /// building the vector.
-    #[must_use]
-    pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
-        self.iter_keys_with_prefix(prefix).collect()
-    }
-
-    /// [`Trie::keys_with_prefix`] as a lazy iterator.
-    ///
-    /// Yields the same strings in the same order while holding only one path
-    /// buffer and one stack frame per level, so an early `take`/`find` stops
-    /// paying for the rest of the subtree. Counting is better still:
-    /// `iter_keys_with_prefix(p).count()` reads the maintained subtree word
-    /// count after the `p`-length descent — O(|prefix|), no traversal, no
-    /// allocation — so it is the way to ask "how many words start with `p`?".
-    #[must_use]
-    pub fn iter_keys_with_prefix(&self, prefix: &str) -> KeysWithPrefix<'_> {
-        // No folding here — see the note on `keys_with_prefix`.
-        KeysWithPrefix::new(self, prefix)
-    }
-
-    /// Every stored word, in the reference's enumeration order.
-    ///
-    /// Equivalent to `iter_keys_with_prefix("")`.
-    #[must_use]
-    pub fn keys(&self) -> KeysWithPrefix<'_> {
-        self.iter_keys_with_prefix("")
-    }
-
-    /// Every stored word that is a prefix of `search`, shortest first.
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// let mut t = Trie::new();
-    /// t.add_strings(["a", "ab", "bc", "cd", "abc"]);
-    /// assert_eq!(t.find_matches_on_path("abcd"), ["a", "ab", "abc"]);
-    /// ```
-    ///
-    /// If the empty string was added it is the first result, since the root is
-    /// on every path. Results are cut from `search` (after folding), not
-    /// rebuilt from the stored keys, so on a case-sensitive trie they borrow
-    /// rather than allocate.
-    #[must_use]
-    pub fn find_matches_on_path<'a>(&self, search: &'a str) -> Vec<Cow<'a, str>> {
-        self.iter_matches_on_path(search).collect()
-    }
-
-    /// [`Trie::find_matches_on_path`] as a lazy iterator.
-    ///
-    /// The walk is linear and single-pass, so this stops the moment the caller
-    /// does — useful when only the longest or the first match is wanted.
-    #[must_use]
-    pub fn iter_matches_on_path<'a>(&self, search: &'a str) -> MatchesOnPath<'_, 'a> {
-        MatchesOnPath::new(self, fold(self.folds, search))
-    }
-
-    /// The longest stored word that prefixes `search`, and the part of `search`
-    /// the walk could not consume.
-    ///
-    /// Mirrors the reference's two-element array `[lastWord, remainder]`:
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// # use std::borrow::Cow;
-    /// let mut t = Trie::new();
-    /// t.add_strings(["their", "and", "they"]);
-    /// let (word, rest) = t.find_prefix("theyre");
-    /// assert_eq!(word.as_deref(), Some("they"));
-    /// assert_eq!(rest, "re");
-    /// ```
-    ///
-    /// Two details are easy to get wrong:
-    ///
-    /// * The remainder is what was left when the **walk** died, not what was
-    ///   left after the last word ended. With only `["their", "and"]` stored,
-    ///   `find_prefix("theyre")` is `(None, "yre")` — the walk got as far as
-    ///   `"the"`.
-    /// * `Some("")` and `None` are different answers. A trie containing the
-    ///   empty string returns `(Some(""), "zzz")` for `find_prefix("zzz")`,
-    ///   so a `if let Some(w) = .. if !w.is_empty()` guard diverges.
-    ///
-    /// # Unpaired surrogates
-    ///
-    /// The walk advances one UTF-16 code unit at a time, so it can stop between
-    /// the halves of a surrogate pair; the reference then returns a remainder
-    /// beginning with an unpaired surrogate. Rust strings cannot represent one,
-    /// so that single position becomes `U+FFFD`. The split itself is exact —
-    /// [`Trie::find_prefix_lengths`] reports it losslessly.
-    #[must_use]
-    pub fn find_prefix<'a>(&self, search: &'a str) -> (Option<Cow<'a, str>>, Cow<'a, str>) {
-        let folded = fold(self.folds, search);
-        let walk = self.walk(&folded);
-
-        // Reborrowing through the `Cow` keeps the case-sensitive path allocation
-        // free: `search` outlives the return value, so its slices can be handed
-        // straight back.
-        let cut = |start: usize, end: usize| -> Cow<'a, str> {
-            match &folded {
-                Cow::Borrowed(s) => Cow::Borrowed(&s[start..end]),
-                Cow::Owned(s) => Cow::Owned(s[start..end].to_owned()),
-            }
-        };
-
-        let word = walk.last_word.map(|end| cut(0, end));
-        let remainder = if walk.split_pair {
-            // The dead unit is the low half of a 4-byte character; everything
-            // after that character is intact.
-            let mut s = String::with_capacity(3 + folded.len() - walk.stopped_at - 4);
-            s.push(char::REPLACEMENT_CHARACTER);
-            s.push_str(&folded[walk.stopped_at + 4..]);
-            Cow::Owned(s)
-        } else {
-            cut(walk.stopped_at, folded.len())
-        };
-        (word, remainder)
-    }
-
-    /// The same split as [`Trie::find_prefix`], measured in UTF-16 code units.
-    ///
-    /// Returns `(length of the longest matching word, length of the remainder)`.
-    /// Unlike [`Trie::find_prefix`] this is exact even when the walk stops
-    /// inside a surrogate pair, and it allocates nothing at all.
-    ///
-    /// ```
-    /// # use verbora_trie::Trie;
-    /// let mut t = Trie::new();
-    /// t.add_strings(["their", "and", "they"]);
-    /// assert_eq!(t.find_prefix_lengths("theyre"), (Some(4), 2));
-    /// ```
-    #[must_use]
-    pub fn find_prefix_lengths(&self, search: &str) -> (Option<usize>, usize) {
-        let folded = fold(self.folds, search);
-        let walk = self.walk(&folded);
-        // Only the unconsumed tail needs measuring; when the walk stopped inside
-        // a surrogate pair its high half is already gone, hence the -1.
-        let tail = utf16_len(&folded[walk.stopped_at..]) - usize::from(walk.split_pair);
-        let word = walk.last_word.is_some().then_some(walk.last_word_units);
-        (word, tail)
+        crate::frozen::FrozenTrie::from_parts(frozen_nodes, labels, self.handling)
     }
 
     // -----------------------------------------------------------------------
@@ -658,151 +746,94 @@ impl Trie {
     }
 
     /// Follows the edge labelled `key`, if there is one.
-    ///
-    /// A linear scan, not a hash lookup: in a natural-language trie almost every
-    /// node has one or two children, and scanning a contiguous inline array
-    /// matches hashing plus a pointer chase at those sizes while costing nothing
-    /// to build. The `contains_hit` and `contains_miss` benchmark groups measure
-    /// a walk built on this against a `HashMap`-per-node baseline (the walk
-    /// remains the insertion and `find_prefix` path even now that
-    /// [`Trie::contains`] itself answers from the membership set).
     #[inline]
-    pub(crate) fn child(&self, node: u32, key: u16) -> Option<u32> {
-        self.nodes[node as usize]
-            .children
-            .iter()
-            .find(|c| c.key == key)
-            .map(|c| c.node)
+    pub(crate) fn child(&self, node: u32, key: char) -> Option<u32> {
+        let children = &self.nodes[node as usize].children;
+        if children.len() < BINARY_SEARCH_THRESHOLD {
+            return children.iter().find(|c| c.key == key).map(|c| c.node);
+        }
+        children
+            .binary_search_by(|c| c.key.cmp(&key))
+            .ok()
+            .map(|i| children[i].node)
     }
 
-    /// Walks `units` from the root, returning the node reached or `None` if some
-    /// edge is missing.
+    /// Walks the scalars of an already-folded string from the root, returning
+    /// the node reached or `None` if some edge is missing.
     #[inline]
-    fn descend(&self, units: impl Iterator<Item = u16>) -> Option<u32> {
+    pub(crate) fn descend_folded(&self, folded: &str) -> Option<u32> {
         let mut node = ROOT;
-        for unit in units {
-            node = self.child(node, unit)?;
+        for scalar in folded.chars() {
+            node = self.child(node, scalar)?;
         }
         Some(node)
     }
 
-    /// Walks the code units of `prefix` from the root without folding.
-    ///
-    /// Used only by [`Trie::iter_keys_with_prefix`], which must not fold; see
-    /// the note there.
-    pub(crate) fn descend_exact(&self, prefix: &str) -> Option<u32> {
-        self.descend(prefix.encode_utf16())
-    }
-
     /// Adds the edge labelled `key` if it is missing, and returns the child.
-    fn child_or_insert(&mut self, node: u32, key: u16) -> u32 {
-        if let Some(existing) = self.child(node, key) {
-            return existing;
-        }
+    fn child_or_insert(&mut self, node: u32, key: char) -> u32 {
+        let at = match self.nodes[node as usize]
+            .children
+            .binary_search_by(|c| c.key.cmp(&key))
+        {
+            Ok(i) => return self.nodes[node as usize].children[i].node,
+            Err(i) => i,
+        };
         let new = u32::try_from(self.nodes.len()).expect("trie exceeds 2^32 nodes");
         self.nodes.push(Node::default());
-        let at = self.insert_position(node, key);
         self.nodes[node as usize]
             .children
             .insert(at, Child { key, node: new });
         new
     }
 
-    /// The slot a new `key` takes so the child list stays in the reference's
-    /// `for…in` order.
-    ///
-    /// Array-index-like keys (the ASCII digits) are hoisted into a
-    /// numerically-sorted block at the front; everything else is appended, which
-    /// is insertion order. Maintaining the invariant on write means iteration
-    /// never has to sort — and iteration is the only place the order is
-    /// observable.
-    fn insert_position(&self, node: u32, key: u16) -> usize {
-        let children = &self.nodes[node as usize].children;
-        if !is_index_key(key) {
-            return children.len();
-        }
-        children
-            .iter()
-            .position(|c| !is_index_key(c.key) || c.key > key)
-            .unwrap_or(children.len())
-    }
-
-    /// The shared walk behind `find_prefix` and `find_prefix_lengths`.
-    ///
-    /// Iterates characters rather than code units so byte offsets stay in step,
-    /// but consumes astral characters as the *two* units the reference sees, and
-    /// reports which half the walk died on.
+    /// The shared walk behind [`Trie::longest_prefix`] and
+    /// [`Trie::longest_prefix_lengths`].
     fn walk(&self, folded: &str) -> Walk {
         let mut node = ROOT;
         let mut last_word = self.nodes[ROOT as usize].is_word.then_some(0usize);
-        let mut last_word_units = 0usize;
-        let mut units = 0usize;
+        let mut last_word_scalars = 0usize;
+        let mut scalars = 0usize;
 
-        for (byte, ch) in folded.char_indices() {
-            let mut buf = [0u16; 2];
-            let encoded = ch.encode_utf16(&mut buf);
-            let mut consumed = 0usize;
-            for &unit in &*encoded {
-                match self.child(node, unit) {
-                    Some(next) => {
-                        node = next;
-                        consumed += 1;
-                    }
-                    None => {
-                        return Walk {
-                            last_word,
-                            last_word_units,
-                            stopped_at: byte,
-                            // Dying on the second unit means the remainder opens
-                            // with an unpaired low surrogate.
-                            split_pair: consumed == 1,
-                        };
-                    }
+        for (byte, scalar) in folded.char_indices() {
+            match self.child(node, scalar) {
+                Some(next) => node = next,
+                None => {
+                    return Walk {
+                        last_word,
+                        last_word_scalars,
+                        stopped_at: byte,
+                    };
                 }
             }
-            units += consumed;
-            // A node reached between two surrogate halves can never be a word:
-            // every stored word came from a `&str` and so is well-formed. That
-            // makes checking only at character boundaries exact, not an
-            // approximation.
+            scalars += 1;
             if self.nodes[node as usize].is_word {
-                last_word = Some(byte + ch.len_utf8());
-                last_word_units = units;
+                last_word = Some(byte + scalar.len_utf8());
+                last_word_scalars = scalars;
             }
         }
 
         Walk {
             last_word,
-            last_word_units,
+            last_word_scalars,
             stopped_at: folded.len(),
-            split_pair: false,
         }
     }
 }
 
-/// The reference's `String#length`: the UTF-16 code-unit count of `s`.
-#[inline]
-fn utf16_len(s: &str) -> usize {
-    if s.is_ascii() {
-        return s.len();
-    }
-    s.chars().map(char::len_utf16).sum()
-}
-
 impl<S: AsRef<str>> Extend<S> for Trie {
     fn extend<I: IntoIterator<Item = S>>(&mut self, iter: I) {
-        self.add_strings(iter);
+        self.insert_all(iter);
     }
 }
 
 impl<S: AsRef<str>> FromIterator<S> for Trie {
-    /// Builds a **case-sensitive** trie, matching `new Trie()`.
+    /// Builds a **case-sensitive** trie.
     ///
     /// For the folding variant, build with [`Trie::case_insensitive`] and
-    /// [`Trie::add_strings`].
+    /// [`Trie::insert_all`].
     fn from_iter<I: IntoIterator<Item = S>>(iter: I) -> Self {
         let mut t = Self::new();
-        t.add_strings(iter);
+        t.insert_all(iter);
         t
     }
 }
@@ -811,10 +842,10 @@ impl<'a> IntoIterator for &'a Trie {
     type Item = String;
     type IntoIter = KeysWithPrefix<'a>;
 
-    /// Iterates every stored word, in the reference's enumeration order.
+    /// Iterates every stored word, in ascending scalar order.
     ///
     /// Each item is an owned `String` because a stored word exists nowhere
-    /// contiguously — it is spelled out one code unit per node — so it has to be
+    /// contiguously — it is spelled out one scalar per node — so it has to be
     /// materialised. That cost is visible in the item type rather than hidden:
     /// the iterator itself allocates only one reusable path buffer and one
     /// stack, both proportional to the depth, not the number of words.
@@ -832,8 +863,8 @@ mod tests {
         // The `union` representation reserves `max(size_of::<[Child; N]>(), 16)`
         // bytes whatever `N` is, so capacity 2 costs exactly what a bare `Vec`
         // would while keeping one- and two-child nodes off the heap entirely.
-        // Raising `INLINE_CHILDREN` to 4 would grow every node by 16 bytes.
         assert_eq!(INLINE_CHILDREN, 2);
+        assert_eq!(std::mem::size_of::<Child>(), 8);
         assert_eq!(
             std::mem::size_of::<SmallVec<[Child; INLINE_CHILDREN]>>(),
             std::mem::size_of::<Vec<Child>>()
@@ -842,47 +873,27 @@ mod tests {
     }
 
     #[test]
-    fn index_keys_are_exactly_the_ascii_digits() {
-        for u in 0u16..=0xFF {
-            assert_eq!(
-                is_index_key(u),
-                (b'0' as u16..=b'9' as u16).contains(&u),
-                "for {u:#06x}"
-            );
-        }
-        // '٣' ARABIC-INDIC DIGIT THREE is a digit but not a canonical index.
-        assert!(!is_index_key(0x0663));
-    }
-
-    #[test]
     fn fold_borrows_when_nothing_changes() {
-        assert!(matches!(fold(false, "ABC"), Cow::Borrowed(_)));
-        assert!(matches!(fold(true, "abc"), Cow::Borrowed(_)));
-        assert!(matches!(fold(true, "ABC"), Cow::Owned(_)));
-        assert_eq!(fold(true, "ÜBER"), "über");
+        assert!(matches!(
+            fold(CaseHandling::Sensitive, "ABC"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(
+            fold(CaseHandling::Folded, "abc"),
+            Cow::Borrowed(_)
+        ));
+        assert!(matches!(fold(CaseHandling::Folded, "ABC"), Cow::Owned(_)));
+        assert_eq!(fold(CaseHandling::Folded, "ÜBER"), "über");
     }
 
     #[test]
-    fn fold_matches_the_reference_on_expanding_and_contextual_cases() {
-        // 'İ' lowercases to two code points in both languages.
-        assert_eq!(fold(true, "İ"), "i\u{307}");
-        // Greek final sigma is context sensitive; both languages apply it.
-        assert_eq!(fold(true, "ΟΣ"), "ος");
-        assert_eq!(fold(true, "Σ"), "σ");
-    }
-
-    #[test]
-    fn utf16_len_counts_code_units() {
-        for s in ["", "abc", "café", "Москва", "😀", "a😀b", "𝕳𝖊𝖑𝖑𝖔"] {
-            assert_eq!(utf16_len(s), s.encode_utf16().count(), "for {s:?}");
-        }
-    }
-
-    #[test]
-    fn digit_children_are_hoisted_and_sorted() {
-        let mut t = Trie::new();
-        t.add_strings(["zb", "z9", "za", "z0", "z1"]);
-        assert_eq!(t.keys_with_prefix("z"), ["z0", "z1", "z9", "zb", "za"]);
+    fn fold_applies_the_full_unicode_lowercase_mapping() {
+        // U+0130 LATIN CAPITAL LETTER I WITH DOT ABOVE lowercases to two
+        // scalars (Unicode `SpecialCasing.txt`).
+        assert_eq!(fold(CaseHandling::Folded, "İ"), "i\u{307}");
+        // Final sigma is positional (Unicode 16.0 §5.18, `SpecialCasing.txt`).
+        assert_eq!(fold(CaseHandling::Folded, "ΟΣ"), "ος");
+        assert_eq!(fold(CaseHandling::Folded, "Σ"), "σ");
     }
 
     // -----------------------------------------------------------------------
@@ -892,23 +903,41 @@ mod tests {
     #[test]
     fn a_fresh_trie_has_one_node_and_contains_nothing() {
         let t = Trie::new();
-        assert_eq!(t.get_size(), 1);
+        assert_eq!(t.node_count(), 1);
+        assert_eq!(t.len(), 0);
+        assert!(t.is_empty());
         assert!(!t.contains(""));
         assert!(!t.contains("a"));
         assert!(t.keys_with_prefix("").is_empty());
-        assert!(t.find_matches_on_path("abc").is_empty());
-        let (word, rest) = t.find_prefix("abc");
-        assert_eq!(word, None);
-        assert_eq!(rest, "abc");
+        assert!(t.prefix_matches("abc").is_empty());
+        let split = t.longest_prefix("abc");
+        assert_eq!(split.word, None);
+        assert_eq!(split.rest, "abc");
     }
 
     #[test]
     fn every_node_lists_each_key_once() {
         let mut t = Trie::new();
-        t.add_strings(["ab", "ab", "ac", "a", "b", "ab"]);
+        t.insert_all(["ab", "ab", "ac", "a", "b", "ab"]);
         // 'a' must not sprout a duplicate 'b' edge on the repeated insertions.
-        assert_eq!(t.get_size(), 5); // root + a + b(under a) + c(under a) + b
+        assert_eq!(t.node_count(), 5); // root + a + b(under a) + c(under a) + b
+        assert_eq!(t.len(), 4);
         assert_eq!(t.keys_with_prefix(""), ["a", "ab", "ac", "b"]);
+    }
+
+    #[test]
+    fn child_lists_stay_sorted_at_every_node() {
+        let mut t = Trie::new();
+        t.insert_all([
+            "zb", "z9", "za", "z0", "z1", "😀", "中", "A", "a", "0", "~", " ",
+        ]);
+        for node in &t.nodes {
+            assert!(
+                node.children.windows(2).all(|w| w[0].key < w[1].key),
+                "children out of order: {:?}",
+                node.children
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -918,17 +947,25 @@ mod tests {
     #[test]
     fn empty_string_is_a_word_that_creates_no_node() {
         let mut t = Trie::new();
-        assert!(!t.add_string(""));
-        assert!(t.add_string(""));
-        assert_eq!(t.get_size(), 1, "the root already existed");
+        assert!(t.insert(""));
+        assert!(!t.insert(""));
+        assert_eq!(t.node_count(), 1, "the root already existed");
+        assert_eq!(t.len(), 1);
+        assert!(!t.is_empty());
         assert!(t.contains(""));
         assert_eq!(t.keys_with_prefix(""), [""]);
-        assert_eq!(t.find_matches_on_path("abc"), [""]);
+        assert_eq!(t.prefix_matches("abc"), [""]);
         // `Some("")` is a real answer, distinct from `None`.
-        let (word, rest) = t.find_prefix("zzz");
-        assert_eq!(word.as_deref(), Some(""));
-        assert_eq!(rest, "zzz");
-        assert_eq!(t.find_prefix_lengths("zzz"), (Some(0), 3));
+        let split = t.longest_prefix("zzz");
+        assert_eq!(split.word.as_deref(), Some(""));
+        assert_eq!(split.rest, "zzz");
+        assert_eq!(
+            t.longest_prefix_lengths("zzz"),
+            PrefixSplitLengths {
+                word: Some(0),
+                rest: 3
+            }
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -938,59 +975,57 @@ mod tests {
     #[test]
     fn single_character_words() {
         let mut t = Trie::new();
-        t.add_strings(["a", "z", "0", "!"]);
-        assert_eq!(t.get_size(), 5);
+        t.insert_all(["a", "z", "0", "!"]);
+        assert_eq!(t.node_count(), 5);
         for w in ["a", "z", "0", "!"] {
             assert!(t.contains(w), "{w:?}");
         }
-        // '0' is array-index-like and so sorts ahead of the insertion order.
-        assert_eq!(t.keys_with_prefix(""), ["0", "a", "z", "!"]);
+        // Ascending scalar order: '!' (0x21), '0' (0x30), 'a' (0x61), 'z'.
+        assert_eq!(t.keys_with_prefix(""), ["!", "0", "a", "z"]);
     }
 
     #[test]
     fn all_uppercase_input() {
         let mut sensitive = Trie::new();
-        sensitive.add_string("ALLCAPS");
+        sensitive.insert("ALLCAPS");
         assert!(sensitive.contains("ALLCAPS"));
         assert!(!sensitive.contains("allcaps"));
 
         let mut folding = Trie::case_insensitive();
-        folding.add_string("ALLCAPS");
+        folding.insert("ALLCAPS");
         assert!(folding.contains("allcaps"));
         assert!(folding.contains("AllCaps"));
-        // Stored folded, and `keys_with_prefix` does not fold its argument.
+        // Stored folded, and every argument folds — including the prefix.
         assert_eq!(folding.keys_with_prefix("all"), ["allcaps"]);
-        assert!(folding.keys_with_prefix("ALL").is_empty());
+        assert_eq!(folding.keys_with_prefix("ALL"), ["allcaps"]);
     }
 
     #[test]
     fn accented_latin() {
         let mut t = Trie::case_insensitive();
-        t.add_strings(["café", "CAFÉ", "Ångström", "crème brûlée", "straße"]);
+        t.insert_all(["café", "CAFÉ", "Ångström", "crème brûlée", "straße"]);
         assert!(t.contains("CafÉ"));
         assert!(t.contains("ångström"));
         assert!(t.contains("CRÈME BRÛLÉE"));
-        // 'ß' has no single-character uppercase, so "STRASSE" is a different word.
+        // 'ß' has no single-scalar uppercase, so "STRASSE" is a different word.
         assert!(t.contains("straße"));
         assert!(!t.contains("strasse"));
-        // Each accented character is one BMP code unit, hence one node.
         let mut plain = Trie::new();
-        plain.add_string("café");
-        assert_eq!(plain.get_size(), 5);
+        plain.insert("café");
+        assert_eq!(plain.node_count(), 5);
     }
 
     #[test]
     fn cyrillic_and_greek() {
         let mut t = Trie::new();
-        t.add_strings(["Москва", "Москвич", "Ελλάδα", "Ελλάς"]);
+        t.insert_all(["Москва", "Москвич", "Ελλάδα", "Ελλάς"]);
         assert!(t.contains("Москва"));
         assert!(!t.contains("Москв"));
         assert_eq!(t.keys_with_prefix("Москв"), ["Москва", "Москвич"]);
-        assert_eq!(t.find_matches_on_path("Ελλάδας"), ["Ελλάδα"]);
+        assert_eq!(t.prefix_matches("Ελλάδας"), ["Ελλάδα"]);
 
-        // Greek final sigma: folding is context-sensitive in both languages.
         let mut folding = Trie::case_insensitive();
-        folding.add_string("ΟΣ");
+        folding.insert("ΟΣ");
         assert_eq!(folding.keys_with_prefix(""), ["ος"]);
         assert!(folding.contains("ΟΣ"));
         assert!(folding.contains("ος"));
@@ -999,137 +1034,147 @@ mod tests {
     #[test]
     fn cjk() {
         let mut t = Trie::new();
-        t.add_strings(["日本語", "日本", "中文测试", "한국어"]);
-        assert_eq!(t.find_matches_on_path("日本語です"), ["日本", "日本語"]);
+        t.insert_all(["日本語", "日本", "中文测试", "한국어"]);
+        assert_eq!(t.prefix_matches("日本語です"), ["日本", "日本語"]);
         assert_eq!(t.keys_with_prefix("日本"), ["日本", "日本語"]);
-        // Every CJK character here is in the BMP: one code unit, one node.
         let mut one = Trie::new();
-        one.add_string("日本語");
-        assert_eq!(one.get_size(), 4);
+        one.insert("日本語");
+        assert_eq!(one.node_count(), 4);
     }
 
     #[test]
-    fn astral_characters_occupy_two_nodes_each() {
+    fn astral_characters_occupy_one_node_each() {
         let mut t = Trie::new();
-        t.add_string("😀");
-        assert_eq!(t.get_size(), 3, "root + high surrogate + low surrogate");
+        t.insert("😀");
+        assert_eq!(t.node_count(), 2, "root + one scalar");
         assert!(t.contains("😀"));
         assert_eq!(t.keys_with_prefix(""), ["😀"]);
 
         let mut many = Trie::new();
-        many.add_strings(["a👍", "a👍b", "𝕳𝖊𝖑𝖑𝖔"]);
+        many.insert_all(["a👍", "a👍b", "𝕳𝖊𝖑𝖑𝖔"]);
         assert_eq!(many.keys_with_prefix("a"), ["a👍", "a👍b"]);
-        assert_eq!(many.find_matches_on_path("a👍bc"), ["a👍", "a👍b"]);
+        assert_eq!(many.prefix_matches("a👍bc"), ["a👍", "a👍b"]);
         assert!(many.contains("𝕳𝖊𝖑𝖑𝖔"));
     }
 
     #[test]
-    fn a_walk_can_die_between_surrogate_halves() {
+    fn a_walk_that_stops_hands_back_the_callers_own_text() {
         let mut t = Trie::new();
-        t.add_string("a👍"); // U+1F44D = D83D DC4D
+        t.insert("a👍");
 
-        // U+1F44C = D83D DC4C shares the high surrogate but not the low one, so
-        // the reference consumes three of the four code units and hands back a
-        // remainder that begins with an unpaired surrogate.
-        let (word, rest) = t.find_prefix("a👌");
-        assert_eq!(word, None);
-        assert_eq!(rest, "\u{FFFD}");
-        // The split itself is exact: three units in, one unit left.
-        assert_eq!(t.find_prefix_lengths("a👌"), (None, 1));
-
-        // '😀' U+1F600 = D83D DE00 shares the same high surrogate, so it dies the
-        // same way — one code unit of the two-unit character survives.
-        let (_, rest) = t.find_prefix("a😀x");
-        assert_eq!(rest, "\u{FFFD}x");
-        assert_eq!(t.find_prefix_lengths("a😀x"), (None, 2));
-
-        // '𝕳' U+1D573 = D835 DD73 differs in the *first* half, so the walk dies
-        // cleanly on a character boundary and the remainder is ordinary text.
-        let (_, rest) = t.find_prefix("a𝕳x");
-        assert_eq!(rest, "𝕳x");
-        assert_eq!(t.find_prefix_lengths("a𝕳x"), (None, 3));
+        // The scalar unit means the walk can only ever stop on a character
+        // boundary, so every remainder is a suffix of the input.
+        for (search, rest, rest_len) in [
+            ("a👌", "👌", 1usize),
+            ("a😀x", "😀x", 2),
+            ("a𝕳x", "𝕳x", 2),
+            ("a👍z", "z", 1),
+        ] {
+            let split = t.longest_prefix(search);
+            assert_eq!(split.rest, rest, "{search:?}");
+            assert!(!split.rest.contains('\u{FFFD}'));
+            assert!(search.ends_with(&*split.rest), "{search:?}");
+            assert_eq!(
+                t.longest_prefix_lengths(search).rest,
+                rest_len,
+                "{search:?}"
+            );
+        }
     }
 
     #[test]
     fn punctuation_and_whitespace() {
         let mut t = Trie::new();
-        t.add_strings(["e.g.", "e.g", "U.S.A.", "don't", "--", "a-b", "  double  "]);
+        t.insert_all(["e.g.", "e.g", "U.S.A.", "don't", "--", "a-b", "  double  "]);
         assert!(t.contains("e.g."));
-        assert_eq!(t.find_matches_on_path("e.g.!"), ["e.g", "e.g."]);
+        assert_eq!(t.prefix_matches("e.g.!"), ["e.g", "e.g."]);
         assert!(t.contains("  double  "));
         assert_eq!(t.keys_with_prefix("e.g"), ["e.g", "e.g."]);
-        // Whitespace is an ordinary code unit here: nothing is trimmed.
+        // Whitespace is an ordinary scalar here: nothing is trimmed.
         assert!(!t.contains("double"));
     }
 
     #[test]
     fn digits_and_numeric_looking_words() {
         let mut t = Trie::new();
-        t.add_strings(["123", "3.14", "1,000", "12", "1"]);
-        assert_eq!(t.find_matches_on_path("1234"), ["1", "12", "123"]);
-        // The whole first level is digits, so it enumerates in numeric order
-        // regardless of when each was inserted.
-        assert_eq!(t.keys_with_prefix(""), ["1", "12", "123", "1,000", "3.14"]);
+        t.insert_all(["123", "3.14", "1,000", "12", "1"]);
+        assert_eq!(t.prefix_matches("1234"), ["1", "12", "123"]);
+        // Ascending scalar order: ',' (0x2C) sorts before '2' (0x32).
+        assert_eq!(t.keys_with_prefix(""), ["1", "1,000", "12", "123", "3.14"]);
     }
 
     #[test]
     fn very_long_input_does_not_overflow_the_stack() {
-        // The reference recurses once per code unit and would need ~200k frames
-        // for this; every operation here is a loop.
         let long: String = "ab".repeat(100_000);
         let mut t = Trie::new();
-        assert!(!t.add_string(&long));
-        assert_eq!(t.get_size(), long.len() + 1);
+        assert!(t.insert(&long));
+        assert_eq!(t.node_count(), long.len() + 1);
         assert!(t.contains(&long));
         assert!(!t.contains(&long[..long.len() - 1]));
 
         let extended = format!("{long}tail");
-        let (word, rest) = t.find_prefix(&extended);
-        assert_eq!(word.as_deref(), Some(long.as_str()));
-        assert_eq!(rest, "tail");
+        let split = t.longest_prefix(&extended);
+        assert_eq!(split.word.as_deref(), Some(long.as_str()));
+        assert_eq!(split.rest, "tail");
         assert_eq!(t.keys_with_prefix(&long[..1000]).len(), 1);
         assert_eq!(t.keys().count(), 1);
     }
 
     // -----------------------------------------------------------------------
-    // Case sensitivity
+    // Case handling
     // -----------------------------------------------------------------------
 
     #[test]
     fn case_sensitive_is_the_default() {
-        assert!(Trie::new().is_case_sensitive());
-        assert!(Trie::default().is_case_sensitive());
-        assert!(Trie::with_case_sensitivity(true).is_case_sensitive());
-        assert!(!Trie::case_insensitive().is_case_sensitive());
+        assert_eq!(Trie::new().case_handling(), CaseHandling::Sensitive);
+        assert_eq!(Trie::default().case_handling(), CaseHandling::Sensitive);
+        assert_eq!(
+            Trie::with_case_handling(CaseHandling::Sensitive).case_handling(),
+            CaseHandling::Sensitive
+        );
+        assert_eq!(
+            Trie::case_insensitive().case_handling(),
+            CaseHandling::Folded
+        );
     }
 
     #[test]
-    fn folding_applies_to_every_method_except_keys_with_prefix() {
+    fn folding_applies_to_every_method_without_exception() {
         let mut t = Trie::case_insensitive();
-        t.add_strings(["thEIr", "And", "theY"]);
+        t.insert_all(["thEIr", "And", "theY"]);
 
         assert!(t.contains("THEIR"));
-        assert_eq!(t.find_matches_on_path("THEYRE"), ["they"]);
-        let (word, rest) = t.find_prefix("ThEyRe");
-        assert_eq!(word.as_deref(), Some("they"));
-        assert_eq!(rest, "re");
+        assert_eq!(t.prefix_matches("THEYRE"), ["they"]);
+        let split = t.longest_prefix("ThEyRe");
+        assert_eq!(split.word.as_deref(), Some("they"));
+        assert_eq!(split.rest, "re");
 
-        // The reference's bug: `keysWithPrefix` reads `this.caseSensitive`,
-        // which the constructor never sets.
-        assert_eq!(t.keys_with_prefix("th"), ["their", "they"]);
-        assert!(t.keys_with_prefix("TH").is_empty());
+        for prefix in ["th", "TH", "Th", "tH"] {
+            assert_eq!(t.keys_with_prefix(prefix), ["their", "they"], "{prefix:?}");
+            assert_eq!(
+                t.iter_keys_with_prefix(prefix).collect::<Vec<String>>(),
+                ["their", "they"],
+                "{prefix:?}"
+            );
+            let mut seen = Vec::new();
+            t.for_each_key_with_prefix(prefix, |k| seen.push(k.to_owned()));
+            assert_eq!(seen, ["their", "they"], "{prefix:?}");
+        }
     }
 
     #[test]
     fn folding_can_change_a_words_length() {
-        // 'İ' U+0130 lowercases to two code points, so the folded word is longer
+        // 'İ' U+0130 lowercases to two scalars, so the folded word is longer
         // than the input and occupies one extra node.
         let mut t = Trie::case_insensitive();
-        t.add_string("İ");
+        t.insert("İ");
         assert_eq!(t.keys_with_prefix(""), ["i\u{307}"]);
-        assert_eq!(t.get_size(), 3);
+        assert_eq!(t.node_count(), 3);
         assert!(t.contains("İ"));
         assert!(t.contains("i\u{307}"));
+        // A folded prefix reaches it from either spelling.
+        assert_eq!(t.keys_with_prefix("İ"), ["i\u{307}"]);
+        assert_eq!(t.keys_with_prefix("i"), ["i\u{307}"]);
     }
 
     // -----------------------------------------------------------------------
@@ -1137,70 +1182,69 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn find_prefix_reports_where_the_walk_died_not_where_the_word_ended() {
+    fn longest_prefix_reports_where_the_walk_died_not_where_the_word_ended() {
         let mut t = Trie::new();
-        t.add_strings(["their", "and"]);
-        // The walk reaches "the" before failing, so three characters are gone
+        t.insert_all(["their", "and"]);
+        // The walk reaches "the" before failing, so three scalars are gone
         // even though no word ever matched.
-        let (word, rest) = t.find_prefix("theyre");
-        assert_eq!(word, None);
-        assert_eq!(rest, "yre");
-        assert_eq!(t.find_prefix_lengths("theyre"), (None, 3));
+        let split = t.longest_prefix("theyre");
+        assert_eq!(split.word, None);
+        assert_eq!(split.rest, "yre");
+        assert_eq!(
+            t.longest_prefix_lengths("theyre"),
+            PrefixSplitLengths {
+                word: None,
+                rest: 3
+            }
+        );
     }
 
     #[test]
-    fn find_prefix_on_an_exact_hit_leaves_nothing() {
+    fn longest_prefix_on_an_exact_hit_leaves_nothing() {
         let mut t = Trie::new();
-        t.add_string("ab");
-        let (word, rest) = t.find_prefix("ab");
-        assert_eq!(word.as_deref(), Some("ab"));
-        assert_eq!(rest, "");
-        assert_eq!(t.find_prefix_lengths("ab"), (Some(2), 0));
+        t.insert("ab");
+        let split = t.longest_prefix("ab");
+        assert_eq!(split.word.as_deref(), Some("ab"));
+        assert_eq!(split.rest, "");
+        assert_eq!(
+            t.longest_prefix_lengths("ab"),
+            PrefixSplitLengths {
+                word: Some(2),
+                rest: 0
+            }
+        );
     }
 
     #[test]
-    fn find_prefix_borrows_when_no_folding_is_needed() {
+    fn longest_prefix_borrows_when_no_folding_is_needed() {
         let mut t = Trie::new();
-        t.add_string("ab");
-        let (word, rest) = t.find_prefix("abcd");
-        assert!(matches!(word, Some(Cow::Borrowed(_))));
-        assert!(matches!(rest, Cow::Borrowed(_)));
+        t.insert("ab");
+        let split = t.longest_prefix("abcd");
+        assert!(matches!(split.word, Some(Cow::Borrowed(_))));
+        assert!(matches!(split.rest, Cow::Borrowed(_)));
 
         let mut folding = Trie::case_insensitive();
-        folding.add_string("ab");
-        let (word, _) = folding.find_prefix("ABCD");
-        assert!(matches!(word, Some(Cow::Owned(_))));
+        folding.insert("ab");
+        let split = folding.longest_prefix("ABCD");
+        assert!(matches!(split.word, Some(Cow::Owned(_))));
     }
 
     #[test]
-    fn matches_on_path_borrows_when_no_folding_is_needed() {
+    fn prefix_matches_borrow_when_no_folding_is_needed() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab"]);
-        let got = t.find_matches_on_path("abc");
+        t.insert_all(["a", "ab"]);
+        let got = t.prefix_matches("abc");
         assert!(got.iter().all(|m| matches!(m, Cow::Borrowed(_))));
     }
 
     #[test]
     fn prefixes_and_extensions_of_a_stored_word_are_not_contained() {
         let mut t = Trie::new();
-        t.add_strings(["test", "tested"]);
+        t.insert_all(["test", "tested"]);
         assert!(t.contains("test"));
         assert!(!t.contains("tes"));
         assert!(!t.contains("teste"));
         assert!(!t.contains("est"));
-    }
-
-    #[test]
-    fn prototype_polluting_keys_are_ordinary_words() {
-        // The reference's node map is `Object.create(null)`, so these are safe
-        // there too; a Rust port has no way to get this wrong, which is exactly
-        // why it is worth pinning.
-        let mut t = Trie::new();
-        t.add_strings(["__proto__", "constructor", "toString"]);
-        assert!(t.contains("__proto__"));
-        assert!(t.contains("constructor"));
-        assert!(!t.contains("valueOf"));
-        assert_eq!(t.get_size(), 1 + 9 + 11 + 8);
     }
 
     // -----------------------------------------------------------------------
@@ -1210,7 +1254,7 @@ mod tests {
     #[test]
     fn iterators_agree_with_their_eager_counterparts() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab", "abc", "b", "0z", "9z", "😀", "日本"]);
+        t.insert_all(["a", "ab", "abc", "b", "0z", "9z", "😀", "日本"]);
         assert_eq!(
             t.keys_with_prefix("a"),
             t.iter_keys_with_prefix("a").collect::<Vec<_>>()
@@ -1218,22 +1262,22 @@ mod tests {
         assert_eq!(t.keys_with_prefix(""), t.keys().collect::<Vec<_>>());
         assert_eq!(t.keys_with_prefix(""), (&t).into_iter().collect::<Vec<_>>());
         assert_eq!(
-            t.find_matches_on_path("abcd"),
-            t.iter_matches_on_path("abcd").collect::<Vec<_>>()
+            t.prefix_matches("abcd"),
+            t.iter_prefix_matches("abcd").collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn iterators_stop_early_and_stay_fused() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab", "abc", "abcd"]);
+        t.insert_all(["a", "ab", "abc", "abcd"]);
         assert_eq!(t.keys().take(2).collect::<Vec<_>>(), ["a", "ab"]);
 
         let mut keys = t.iter_keys_with_prefix("zz");
         assert_eq!(keys.next(), None);
         assert_eq!(keys.next(), None);
 
-        let mut path = t.iter_matches_on_path("zz");
+        let mut path = t.iter_prefix_matches("zz");
         assert_eq!(path.next(), None);
         assert_eq!(path.next(), None);
     }
@@ -1241,29 +1285,29 @@ mod tests {
     #[test]
     fn from_iterator_and_extend_build_case_sensitive_tries() {
         let mut t: Trie = ["a", "ab"].into_iter().collect();
-        assert!(t.is_case_sensitive());
+        assert_eq!(t.case_handling(), CaseHandling::Sensitive);
         t.extend(["b", "bc"]);
         assert_eq!(t.keys_with_prefix(""), ["a", "ab", "b", "bc"]);
     }
 
     #[test]
-    fn add_strings_accepts_owned_and_borrowed_items() {
+    fn insert_all_accepts_owned_and_borrowed_items() {
         let owned = vec![String::from("alpha"), String::from("beta")];
         let mut t = Trie::new();
-        t.add_strings(&owned);
-        t.add_strings(owned.iter().map(String::as_str));
-        t.add_strings(["gamma"]);
+        t.insert_all(&owned);
+        t.insert_all(owned.iter().map(String::as_str));
+        t.insert_all(["gamma"]);
         assert_eq!(t.keys_with_prefix(""), ["alpha", "beta", "gamma"]);
     }
 
     #[test]
     fn clone_preserves_enumeration_order() {
         let mut t = Trie::case_insensitive();
-        t.add_strings(["b1", "a1", "9x", "1x", "0x", "zz"]);
+        t.insert_all(["b1", "a1", "9x", "1x", "0x", "zz"]);
         let copy = t.clone();
         assert_eq!(t, copy);
         assert_eq!(copy.keys_with_prefix(""), t.keys_with_prefix(""));
-        assert!(!copy.is_case_sensitive());
+        assert_eq!(copy.case_handling(), CaseHandling::Folded);
     }
 
     // -----------------------------------------------------------------------
@@ -1271,11 +1315,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A tiny, dependency-free PRNG — same Xorshift64 shape the frozen
-    /// module's randomized tests already use.
-    struct Xorshift64(u64);
+    /// module's randomized tests use.
+    pub(crate) struct Xorshift64(pub(crate) u64);
 
     impl Xorshift64 {
-        fn next_u64(&mut self) -> u64 {
+        pub(crate) fn next_u64(&mut self) -> u64 {
             let mut x = self.0;
             x ^= x << 13;
             x ^= x >> 7;
@@ -1284,13 +1328,13 @@ mod tests {
             x
         }
 
-        fn next_range(&mut self, bound: usize) -> usize {
+        pub(crate) fn next_range(&mut self, bound: usize) -> usize {
             (self.next_u64() % bound as u64) as usize
         }
     }
 
-    /// Uppercase letters exercise folding, digits exercise hoisting, and the
-    /// astral characters exercise surrogate-pair node splitting.
+    /// Uppercase letters exercise folding, digits exercise ordering across
+    /// scalar classes, and the astral characters exercise the widest scalars.
     const ALPHABET: &[char] = &[
         'a', 'b', 'c', 'A', 'B', '0', '1', '9', 'ñ', 'É', '中', '😀', '👍',
     ];
@@ -1321,20 +1365,16 @@ mod tests {
 
     #[test]
     fn word_counts_survive_duplicates_folding_and_expansion() {
-        // The optimistic maintenance's rollback path (duplicates), the
-        // folding path ('İ' even *lengthens* under folding), the empty
-        // string (root-only), and surrogate splitting all in one arena.
         let mut t = Trie::case_insensitive();
         for w in [
             "their", "THEIR", "they", "the", "", "İ", "i\u{307}", "a👍", "a👍", "a👍b", "0x", "9x",
         ] {
-            t.add_string(w);
+            t.insert(w);
         }
         let expected = recount(&t);
         let actual: Vec<u32> = t.nodes.iter().map(|n| n.word_count).collect();
         assert_eq!(actual, expected);
-        // The root's count is the total word count, which enumeration pins.
-        assert_eq!(t.nodes[ROOT as usize].word_count as usize, t.keys().count());
+        assert_eq!(t.len(), t.keys().count());
     }
 
     #[test]
@@ -1362,14 +1402,15 @@ mod tests {
             }
 
             for w in &words {
-                let expected = !oracle.insert(fold(t.folds, w).into_owned());
-                assert_eq!(t.add_string(w), expected, "r{round}: add_string({w:?})");
+                let expected = oracle.insert(fold(t.handling, w).into_owned());
+                assert_eq!(t.insert(w), expected, "r{round}: insert({w:?})");
             }
 
             // Counts: every node, against the structural recount.
             let expected = recount(&t);
             let actual: Vec<u32> = t.nodes.iter().map(|n| n.word_count).collect();
             assert_eq!(actual, expected, "r{round}: word_count diverged");
+            assert_eq!(t.len(), oracle.len(), "r{round}: len");
 
             // Membership: every stored word, its prefixes (near misses), and
             // random probes, against the arena walk.
@@ -1401,17 +1442,14 @@ mod tests {
     #[test]
     fn count_is_exact_before_during_and_after_iteration() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab", "abc", "abd", "b", "0x", "😀", "😀a"]);
+        t.insert_all(["a", "ab", "abc", "abd", "b", "0x", "😀", "😀a"]);
         for prefix in ["", "a", "ab", "abc", "b", "😀", "zz", "0"] {
             let full: Vec<String> = t.iter_keys_with_prefix(prefix).collect();
-            // Fresh: the O(1) count must equal what iteration would yield.
             assert_eq!(
                 t.iter_keys_with_prefix(prefix).count(),
                 full.len(),
                 "fresh count for {prefix:?}"
             );
-            // Partially consumed, at every possible stopping point: the
-            // remaining count must track what was already yielded.
             for k in 0..=full.len() {
                 let mut it = t.iter_keys_with_prefix(prefix);
                 for expected in full.iter().take(k) {
@@ -1419,7 +1457,6 @@ mod tests {
                 }
                 assert_eq!(it.count(), full.len() - k, "after {k} of {prefix:?}");
             }
-            // Exhausted: fused and empty.
             let mut it = t.iter_keys_with_prefix(prefix);
             for _ in 0..full.len() {
                 it.next();
@@ -1432,7 +1469,7 @@ mod tests {
     #[test]
     fn size_hint_is_exact_so_collect_allocates_once() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab", "abc", "b"]);
+        t.insert_all(["a", "ab", "abc", "b"]);
         let mut it = t.iter_keys_with_prefix("a");
         assert_eq!(it.size_hint(), (3, Some(3)));
         it.next();
@@ -1442,15 +1479,210 @@ mod tests {
         assert_eq!(t.iter_keys_with_prefix("zz").size_hint(), (0, Some(0)));
     }
 
+    /// Every stored word, its prefixes, its case variants, near misses on
+    /// both ends, and — the shape the first-byte gate exists for — misses
+    /// that differ from every stored word in their *first* byte.
+    fn membership_probes(words: &[String], rng: &mut Xorshift64) -> Vec<String> {
+        let mut probes = vec![String::new()];
+        for w in words {
+            probes.push(w.clone());
+            probes.push(w.to_uppercase());
+            probes.push(format!("{w}zz"));
+            for lead in ["Q", "~", "0", "中", "\u{7f}"] {
+                probes.push(format!("{lead}{w}"));
+            }
+            let mut acc = String::new();
+            for ch in w.chars() {
+                acc.push(ch);
+                probes.push(acc.clone());
+            }
+        }
+        for _ in 0..20 {
+            probes.push(random_word(rng, 6));
+        }
+        probes
+    }
+
+    #[test]
+    fn the_first_byte_gate_never_changes_an_answer() {
+        let mut rng = Xorshift64(0x51A7_1CE5_51A7_1CE5);
+        for round in 0..40 {
+            let mut t = if round % 3 == 0 {
+                Trie::case_insensitive()
+            } else {
+                Trie::new()
+            };
+            let mut words: Vec<String> = (0..5 + rng.next_range(60))
+                .map(|_| random_word(&mut rng, 6))
+                .collect();
+            if round % 5 == 0 {
+                words.push(String::new());
+            }
+            t.insert_all(words.iter().map(String::as_str));
+
+            for p in &membership_probes(&words, &mut rng) {
+                assert_eq!(
+                    t.contains(p),
+                    t.contains_walk(p),
+                    "r{round}: contains({p:?}) diverged from the walk"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_gate_rejects_only_bytes_no_stored_word_starts_with() {
+        let mut t = Trie::new();
+        t.insert("kilo");
+        assert!(t.contains("kilo"));
+        for lead in ['K', 'j', 'l', '0', ' '] {
+            assert!(!t.contains(&format!("{lead}ilo")));
+        }
+        assert!(!t.contains(""));
+        let mut with_empty = Trie::new();
+        with_empty.insert("");
+        assert!(with_empty.contains(""));
+        assert!(!with_empty.contains("k"));
+        let fresh = Trie::new();
+        assert!(!fresh.contains(""));
+        assert!(!fresh.contains("k"));
+    }
+
+    #[test]
+    fn folding_reaches_the_gate_with_the_folded_first_byte() {
+        let mut t = Trie::case_insensitive();
+        t.insert_all(["kilo", "İstanbul", "Ångström"]);
+        assert!(t.contains("KILO"));
+        assert!(t.contains("İstanbul"));
+        assert!(t.contains("i\u{307}stanbul"));
+        assert!(t.contains("ÅNGSTRÖM"));
+        assert!(t.contains("ångström"));
+        assert!(!t.contains("Qilo"));
+    }
+
+    // -----------------------------------------------------------------------
+    // The bulk walk behind `keys_with_prefix` / `for_each_key_with_prefix`
+    // -----------------------------------------------------------------------
+
+    /// The lazy iterator is the oracle: it is the implementation both bulk
+    /// paths replaced.
+    fn assert_walks_agree(t: &Trie, prefix: &str, whence: &str) {
+        let oracle: Vec<String> = t.iter_keys_with_prefix(prefix).collect();
+        assert_eq!(
+            t.keys_with_prefix(prefix),
+            oracle,
+            "{whence}: keys_with_prefix({prefix:?})"
+        );
+        let mut borrowed: Vec<String> = Vec::new();
+        t.for_each_key_with_prefix(prefix, |k| borrowed.push(k.to_owned()));
+        assert_eq!(
+            borrowed, oracle,
+            "{whence}: for_each_key_with_prefix({prefix:?})"
+        );
+    }
+
+    #[test]
+    fn the_bulk_walk_matches_the_lazy_iterator_on_the_hard_shapes() {
+        let mut t = Trie::new();
+        t.insert_all([
+            "",
+            "a",
+            "ab",
+            "abc",
+            "abcd",
+            "abd",
+            "b1",
+            "a1",
+            "9x",
+            "1x",
+            "0x",
+            "zz",
+            "😀",
+            "😀a",
+            "😀ab",
+            "x😀y",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaz",
+        ]);
+        for prefix in [
+            "", "a", "ab", "abc", "abcd", "abd", "b", "zz", "z", "0", "9", "x", "😀", "😀a",
+            "nothing", "abcde", "aaaa",
+        ] {
+            assert_walks_agree(&t, prefix, "hard shapes");
+        }
+        assert!(t.keys_with_prefix("\u{fffd}").is_empty());
+    }
+
+    #[test]
+    fn the_bulk_walk_matches_the_lazy_iterator_on_random_corpora() {
+        let mut rng = Xorshift64(0xD00D_FEED_D00D_FEED);
+        for round in 0..40 {
+            let mut t = if round % 3 == 0 {
+                Trie::case_insensitive()
+            } else {
+                Trie::new()
+            };
+            let words: Vec<String> = (0..5 + rng.next_range(80))
+                .map(|_| random_word(&mut rng, 7))
+                .collect();
+            t.insert_all(words.iter().map(String::as_str));
+
+            let mut prefixes = vec![String::new(), String::from("zzz")];
+            for w in &words {
+                let mut acc = String::new();
+                for ch in w.chars() {
+                    acc.push(ch);
+                    prefixes.push(acc.clone());
+                }
+                prefixes.push(w.clone());
+            }
+            for p in &prefixes {
+                assert_walks_agree(&t, p, &format!("r{round}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_bulk_walk_agrees_with_the_frozen_representation() {
+        let mut t = Trie::new();
+        t.insert_all([
+            "cat", "cats", "car", "care", "careful", "dog", "", "0a", "😀z",
+        ]);
+        let frozen = t.freeze();
+        for prefix in ["", "c", "ca", "car", "care", "d", "0", "😀", "nope"] {
+            let mut borrowed: Vec<String> = Vec::new();
+            t.for_each_key_with_prefix(prefix, |k| borrowed.push(k.to_owned()));
+            assert_eq!(borrowed, frozen.keys_slice(prefix), "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn a_deep_single_child_chain_neither_overflows_nor_reorders() {
+        let deep = "a".repeat(100_000);
+        let mut t = Trie::new();
+        t.insert_all([deep.clone(), format!("{deep}b"), String::from("a")]);
+        let keys = t.keys_with_prefix("");
+        assert_eq!(keys.len(), 3);
+        assert_eq!(keys[0], "a");
+        assert_eq!(keys[1], deep);
+        assert_eq!(keys[2], format!("{deep}b"));
+        assert_eq!(keys, t.iter_keys_with_prefix("").collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_borrowed_key_is_only_the_current_word() {
+        let mut t = Trie::new();
+        t.insert_all(["ab", "abcd", "b"]);
+        let mut seen = Vec::new();
+        t.for_each_key_with_prefix("", |k| seen.push(k.to_owned()));
+        assert_eq!(seen, ["ab", "abcd", "b"]);
+    }
+
     #[test]
     fn equality_ignores_word_insertion_history() {
-        // Both orders build byte-identical arenas; only the membership
-        // index's internal insertion record differs, and that is not
-        // observable — so the tries must compare equal and answer alike.
         let mut ab_first = Trie::new();
-        ab_first.add_strings(["ab", "a"]);
+        ab_first.insert_all(["ab", "a"]);
         let mut a_first = Trie::new();
-        a_first.add_strings(["a", "ab"]);
+        a_first.insert_all(["a", "ab"]);
         assert_eq!(ab_first, a_first);
         for probe in ["a", "ab", "abc", "b", ""] {
             assert_eq!(ab_first.contains(probe), a_first.contains(probe));

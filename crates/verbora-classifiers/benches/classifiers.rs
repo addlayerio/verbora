@@ -13,8 +13,12 @@
 //!   the cost of the model, not of the shared tokenising front end.
 //! * **What does a single classification cost?** `text_to_features` is
 //!   quadratic in the reference (`observation.indexOf(feature)` per feature);
-//!   this crate inverts it to a hash-set probe. Benchmarking it separately from
-//!   `classify` shows how much of a prediction is feature extraction.
+//!   this crate inverts it to one `OrderedMap::slot_of` lookup per *token*,
+//!   which makes it linear in the probe rather than in the vocabulary.
+//!   Benchmarking it separately from `classify` shows how much of a
+//!   prediction is feature extraction — on a 342-feature vocabulary the
+//!   answer is now "very little": the remainder is Porter stemming, which no
+//!   restructuring can remove because the stems *are* the features.
 //! * **How does maximum-entropy training scale?** Generalised iterative scaling
 //!   is `O(iterations x features x contexts x classes)`, and every one of those
 //!   factors grows with the corpus, so it is measured against corpus size.
@@ -34,7 +38,7 @@ use std::rc::Rc;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use verbora_classifiers::{
     BayesClassifier, Context, DynValue, FeatureSet, LogisticRegressionClassifier, MECorpus,
-    MaxEntClassifier, SEElement, Sample, TaggedWord, transcendental,
+    MaxEntClassifier, SEElement, Sample, TaggedWord,
 };
 
 /// A deterministic pseudo-random source, so every run measures the same corpus.
@@ -132,8 +136,11 @@ fn classification(c: &mut Criterion) {
 /// trained classifier and probe corpus `classification` uses for its
 /// single-item `classify` benchmark. This is the number to check before
 /// reaching for `par_classify_batch`: at small sizes `rayon`'s scheduling
-/// overhead can exceed the ~13 µs a single `classify` call costs, so the
-/// sequential loop wins until the batch is big enough to amortise it.
+/// overhead can exceed the ~2 µs a single `classify` call costs, so the
+/// sequential loop wins until the batch is big enough to amortise both that
+/// and each worker's own stem-memo warm-up (the sequential side answers from
+/// the classifier's single memo, which the repeated probe corpus below keeps
+/// hot from the first iteration on).
 #[cfg(feature = "parallel")]
 fn par_classification(c: &mut Criterion) {
     let data = corpus(64, 12, 400, 6);
@@ -278,13 +285,13 @@ fn reference_primitives(c: &mut Criterion) {
 
     // The two functions in the innermost loop of every model.
     group.bench_function("log", |b| {
-        b.iter(|| black_box(transcendental::log(black_box(0.123_456_789))));
+        b.iter(|| black_box(verbora_classifiers::log(black_box(0.123_456_789))));
     });
     group.bench_function("exp", |b| {
-        b.iter(|| black_box(transcendental::exp(black_box(-3.25))));
+        b.iter(|| black_box(verbora_classifiers::exp(black_box(-3.25))));
     });
     group.bench_function("sigmoid", |b| {
-        b.iter(|| black_box(transcendental::sigmoid(black_box(0.75))));
+        b.iter(|| black_box(verbora_classifiers::sigmoid(black_box(0.75))));
     });
 
     // One context key per element per training iteration.

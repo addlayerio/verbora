@@ -6,15 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Stemmers for sixteen languages"
+description = "Sixteen stemmers for fourteen languages"
 keywords = ["stemmer", "porter", "snowball"]
 categories.workspace = true
 
 [dependencies]
 verbora-core = { workspace = true }
-# The Norwegian and Swedish tokenizers fold diacritics before splitting, and the
-# folders are already parity-verified in the normalizers crate.
-verbora-normalizers = { workspace = true }
+# No dependency on `verbora-normalizers`, deliberately. Norwegian and Swedish
+# used to fold diacritics before splitting; they no longer do, because `å ä ö`
+# and `æ ø å` are letters of those alphabets rather than accents (see
+# `PorterStemmerSv` and `PorterStemmerNo`). Nothing else in this crate
+# normalizes, so the edge — and `unicode-normalization` behind it — would exist
+# only to render two doc links.
 verbora-tokenizers = { workspace = true }
 rayon = { workspace = true, optional = true }
 

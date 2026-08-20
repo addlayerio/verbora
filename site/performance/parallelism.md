@@ -1,6 +1,6 @@
 # Parallelism
 
-Thirteen crates ship an optional, feature-gated `par_*` batch API. For
+Fourteen crates ship an optional, feature-gated `par_*` batch API. For
 everything else, Verbora's types are built so that parallelising at your own
 call site is a two-line change.
 
@@ -19,19 +19,20 @@ existing sequential primitive:
 
 | Crate | API | Granularity |
 |---|---|---|
-| [`verbora-spellcheck`](../features/index) | `par_get_corrections_batch` | per word |
-| [`verbora-wordnet`](../features/wordnet) | `par_lookup_batch` | per word |
-| [`verbora-tagger`](../features/index) | `par_tag_batch` | per document |
+| [`verbora-spellcheck`](../features/spellcheck) | `Spellcheck::par_corrections_batch` | per word |
+| [`verbora-wordnet`](../features/wordnet) | `WordNet::par_lookup_batch` | per word |
+| [`verbora-tagger`](../features/tagger) | `BrillTagger::par_tag_batch` | per document |
 | [`verbora-distance`](../features/distance) | `par_levenshtein_batch` and siblings, one per metric | per pair |
 | [`verbora-tokenizers`](../features/tokenizers) | `par_tokenize_batch` | per document |
 | [`verbora-normalizers`](../features/normalizers) | `par_remove_diacritics_batch` | per document |
-| [`verbora-sentiment`](../features/sentiment) | `par_get_sentiment_batch` | per document |
-| [`verbora-analyzers`](../features/index) | `par_analyze_batch` | per sentence |
-| [`verbora-transliterators`](../features/transliterators) | `par_transliterate_batch` | per document |
-| [`verbora-stemmers`](../features/index) | `par_tokenize_and_stem_batch` | **per document, not per word** — per-word cost is as low as ~26 ns, far below task-dispatch overhead |
+| [`verbora-sentiment`](../features/sentiment) | `SentimentAnalyzer::par_get_sentiment_batch` | per document |
+| [`verbora-analyzers`](../features/analyzers) | `par_analyze_batch` | per sentence |
+| [`verbora-transliterators`](../features/transliterators) | `par_transliterate_ja_batch` | per document |
+| [`verbora-stemmers`](../features/stemmers) | `TokenizeAndStem::par_tokenize_and_stem_batch` | **per document, not per word** — per-word cost is as low as ~26 ns, far below task-dispatch overhead |
 | [`verbora-phonetics`](../features/phonetics) | `par_encode_batch` / `par_encode_double_batch` | **chunked** (`par_chunks`) — same overhead problem at ~42–183 ns/word |
 | [`verbora-classifiers`](../features/classifiers) | `par_classify_batch` on `Classifier<E>` | per document — `MaxEntClassifier` is excluded, its `Rc<RefCell<_>>` state is load-bearing |
-| [`verbora-tfidf`](../features/tfidf) | `par_add_documents_batch` | per document, split phase — see below |
+| [`verbora-tfidf`](../features/tfidf) | `TfIdf::par_add_documents` | per document, split phase — see below |
+| [`verbora-language`](../features/language) | `par_detect_batch` | per text; generic over any `LanguageDetector + Sync` |
 
 Two guarantees hold for all of them: **output is identical to the sequential
 call** (each is a fan-out over the primitive you would have called in a loop,
@@ -40,20 +41,21 @@ the feature is opt-in and the functions are called by name.
 
 <div class="callout callout-note">
 <strong><code>verbora-tfidf</code> is the one split case.</strong>
-<code>add_document</code> takes <code>&amp;mut self</code> and mutates the
-interner, the incremental document-frequency table and the idf cache, so
-<code>par_add_documents_batch</code> runs the stateless phase (tokenizing) in
-parallel and replays the stateful phase (interning, stop-word filtering, the idf
-update) sequentially, in the same order. The result is byte-for-byte identical
-to the sequential loop, and the sequential phase is a real, un-parallelised
-fraction of the total — which is why its speedups below are modest.
+<code>add_document</code> takes <code>&amp;mut self</code> and mutates the term
+interner and the incremental document-frequency table, so
+<code>par_add_documents</code> runs the stateless phase (tokenizing) in
+parallel and replays the stateful phase (interning, stop-word filtering, the
+document-frequency update) sequentially, in the same order. The result is
+byte-for-byte identical to the sequential loop — down to the term-id assignment
+order and the serialized bytes — and the sequential phase is a real,
+un-parallelised fraction of the total, which bounds what fan-out can buy.
 </div>
 
 ## Where there is deliberately no `par_*` API
 
-- **`verbora-trie`** — a query costs ~67 ns, at or below task-dispatch
-  overhead; construction is inherently sequential against one shared arena
-  (`add_string` takes `&mut self`).
+- **`verbora-trie`** — a `contains` is one hash of the folded bytes and a short
+  probe, at or below task-dispatch overhead; construction is inherently
+  sequential against one shared arena (`insert` takes `&mut self`).
 - **`verbora-inflectors`** — ~360 ns/word, the same overhead problem.
 - **`verbora-util`** — its graph algorithms operate on one shared graph per
   call, not independent items; there is no batch shape to parallelize.
@@ -70,26 +72,24 @@ distance and normalizer entry points are free functions, `Trie` is
 ## The exception you must know about
 
 <div class="callout callout-warn">
-<strong>Two APIs touch process-global mutable state.</strong> Both are stored
-behind a <code>RwLock</code> plus an <code>AtomicBool</code>, so neither is a
+<strong>One list in the workspace is process-global and mutable.</strong>
+<code>verbora_core</code>'s global stop-word list
+(<code>add_global_stopword</code>, <code>remove_global_stopword</code>,
+<code>reset_global_stopwords</code>, <code>is_global_stopword</code>) is stored
+behind an <code>RwLock</code> plus an <code>AtomicBool</code>, so it is not a
 memory-safety hazard — no data race, no undefined behaviour, whatever you do
 concurrently. The hazard is <em>correctness</em>: a thread calling
-<code>set_tokenizer</code> or <code>add_global_stopword</code> while others are
-reading gives those readers a nondeterministic mix of the old and new value,
-with no error to tell you.
-<ul>
-<li><code>verbora_ngrams::set_tokenizer</code> / <code>reset_tokenizer</code> —
-rebinds the tokenizer every <code>*_str</code> entry point reads. Use
-<code>ngrams_str_with</code>, which takes the tokenizer explicitly.</li>
-<li><code>verbora_core::stopwords</code>'s global list
-(<code>add_global_stopword</code>, <code>remove_global_stopword</code>,
-<code>reset_global_stopwords</code>) — read by
-<code>phoneticize_tokens</code>. Use <code>phoneticize_tokens_with</code>, which
-takes a <code>&amp;StopWords</code>.</li>
-</ul>
-The same applies to <code>verbora_tfidf</code>'s own tokenizer and stop-word
-globals (<a href="../features/tfidf#the-process-global-tokenizer-and-stop-word-list">documented on its
-page</a>). In concurrent code, always use the explicit-argument sibling.
+<code>add_global_stopword</code> while others are reading gives those readers a
+nondeterministic mix of the old and new value, with no error to tell you. Its
+one consumer inside the workspace is <code>verbora-stemmers</code>' English and
+Lancaster stop-word helpers.
+<br><br>
+Nothing else reads it. <code>phoneticize_tokens</code> takes an explicit
+<code>&amp;StopWords</code> and has no global-reading variant; a
+<code>TfIdf</code> owns its own <code>Analyzer</code> — its tokenizer, its case
+folding and its stop-word list — so two corpora in one program cannot silently
+change each other's answers. Prefer the owned or argument form everywhere; the
+global list exists for programs that genuinely want one process-wide setting.
 </div>
 
 ## Doing it yourself
@@ -104,15 +104,12 @@ rayon = "1"
 ### Independent documents
 
 ```rust  ignore
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
 use rayon::prelude::*;
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 let counts: Vec<usize> = corpus
     .par_iter()
-    .map(|doc| {
-        let tokenizer = AggressiveTokenizer::new();   // zero-sized: free
-        tokenizer.tokens(doc).count()
-    })
+    .map(|doc| WordTokenizer.tokens(doc).count())   // zero-sized: free
     .collect();
 ```
 
@@ -122,16 +119,14 @@ let counts: Vec<usize> = corpus
 [buffer reuse](buffer-reuse.md) with parallelism — a `&mut Vec` cannot be shared:
 
 ```rust  ignore
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
 use rayon::prelude::*;
-
-let tokenizer = AggressiveTokenizer::new();
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 let counts: Vec<usize> = corpus
     .par_iter()
     .map_init(Vec::new, |buf, doc| {
         buf.clear();
-        tokenizer.tokenize_into(doc, buf);
+        WordTokenizer.tokenize_borrowed_into(doc, buf);
         buf.len()
     })
     .collect();
@@ -152,8 +147,10 @@ let hits: Vec<bool> = queries
     .collect();
 ```
 
-`Trie` construction cannot be parallelised — `add_string` takes `&mut self`.
-Build on one thread, then share.
+`Trie` construction cannot be parallelised — `insert` takes `&mut self`. Build on
+one thread, then share. If the index never changes afterwards, share the
+`FrozenTrie` that `freeze()` returns instead: it is `Send + Sync` too, and its
+`keys_slice` hands each worker a borrowed `&[String]` rather than a fresh `Vec`.
 
 ### Chunking to control granularity
 
@@ -173,20 +170,33 @@ let total: usize = corpus
 
 > Parallel does not automatically mean faster.
 
-The crossover points for the two built-in APIs with the widest measured range:
+<div class="callout callout-warn">
+<strong>The two crossover tables this section carried are withdrawn.</strong>
+<code>verbora-spellcheck</code>'s correction contract and
+<code>verbora-tfidf</code>'s ingestion path both changed underneath the figures
+that described them, so neither set is current, and both crates now say so in
+their own documentation rather than carrying a number forward. Which batch size
+each one crosses over at must come from a re-run, not from the direction of the
+change. <code>spellcheck_par_corrections_batch_d2</code> in
+<code>benches/spellcheck.rs</code> and <code>parallel_batch</code> in
+<code>benches/tfidf.rs</code> compare the sequential loop against each parallel
+method across several batch sizes, and are what the next campaign should answer
+this with.
+</div>
 
-| API | Sequential | Parallel | Speedup | At |
-|---|--:|--:|--:|---|
-| `verbora-spellcheck::par_get_corrections_batch` | 104.2 ms | 57.2 ms | ~1.8× (high variance — near the crossover) | batch of 8 |
-| `verbora-spellcheck::par_get_corrections_batch` | 1.57 s | 168.6 ms | ~9.3× | batch of 64 |
-| `verbora-spellcheck::par_get_corrections_batch` | 8.22 s | 865.3 ms | ~9.5× | batch of 512 |
-| `verbora-tfidf::par_add_documents_batch` | 3.46 ms | 3.69 ms | ~7% *slower* | 128 small documents |
-| `verbora-tfidf::par_add_documents_batch` | 25.6 ms | 23.5 ms | ~8% faster | 1,024 small documents |
-| `verbora-tfidf::par_add_documents_batch` | 211.6 ms | 183.2 ms | ~13% faster | 8,192 small documents |
+What can be said without a measurement is the shape of each trade, which is a
+property of the code rather than of a run:
 
-Spellcheck is the ideal shape — each item is a millisecond of independent work.
-TF-IDF is Amdahl-limited by its sequential replay phase, and below ~1,000
-documents the fan-out does not even pay for itself.
+- **Spellcheck is the favourable shape.** Each correction is independent work of
+  its own, with no shared mutable state, so `par_corrections_batch` is a plain
+  fan-out and the only question is whether the batch is big enough to amortize
+  fork-join.
+- **TF-IDF is Amdahl-limited by construction.** `par_add_documents` parallelises
+  tokenizing and replays interning and counting sequentially, in order, so the
+  sequential fraction is real and bounded below by the corpus update itself. It
+  also allocates one `String` per term, which `add_document` does not — its terms
+  are borrowed from the text. A handful of short documents will be slower this
+  way.
 
 Four checks before you parallelise anything yourself:
 
@@ -199,19 +209,22 @@ allocates little. Sixteen cores scanning sixteen documents can saturate memory
 bandwidth long before they saturate the ALUs. Distance calculations on longer
 inputs, which do real arithmetic per cell, scale better.
 
-**Check whether the work is already small.** `hamming/4` is 6.6 ns. No amount of
-threading makes a 6.6 ns operation faster; you would be measuring the scheduler.
+**Check whether the work is already small.** `hamming/4` is 6.6 ns † — pending
+re-measurement, but orders of magnitude below a task's scheduling cost either
+way. No amount of threading makes an operation that small faster; you would be
+measuring the scheduler.
 
 **Check what else is running.** In a web server every request already occupies a
 thread. Adding intra-request parallelism there usually *reduces* total
 throughput by oversubscribing the CPU, even when it improves one request's
 latency.
 
-If the operation is in the table above, enable the `parallel` feature and call
-it — its doc comment states the measured crossover. Otherwise, leave it
-sequential unless total CPU time in the stage is measured in seconds, the items
-are independent, and you are not already running one request per thread. Then
-`par_chunks` with a chunk size that makes each task ≥ ~100 µs, and measure.
+If the operation has a built-in `par_*` API, enable the `parallel` feature and
+call it — each one's doc comment states what it costs and, where a crossover has
+been measured, where it sits. Otherwise, leave it sequential unless total CPU
+time in the stage is measured in seconds, the items are independent, and you are
+not already running one request per thread. Then `par_chunks` with a chunk size
+that makes each task ≥ ~100 µs, and measure.
 
 ## What to measure
 

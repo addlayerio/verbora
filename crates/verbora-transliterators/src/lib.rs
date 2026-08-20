@@ -1,82 +1,165 @@
-//! Kana-to-romaji transliteration for Rust.
-//!
-//! A port of the reference `transliterators` module, which has exactly one export:
-//! `TransliterateJa`, kana to modified-Hepburn romaji.
+//! Japanese kana romanized into modified-Hepburn romaji.
 //!
 //! ```
 //! use verbora_transliterators::transliterate_ja;
 //!
 //! assert_eq!(transliterate_ja("とうきょう"), "tōkyō");
-//! assert_eq!(transliterate_ja("ザッシ"), "zasshi");
+//! assert_eq!(transliterate_ja("ざっし"), "zasshi");
 //! assert_eq!(transliterate_ja("ほんや"), "hon'ya");
 //! ```
 //!
-//! # What makes this hard to port
+//! # What this crate does, exactly
 //!
-//! The function is 584 lines of table plus twelve lines of pipeline, and almost
-//! every line of the pipeline is a trap:
+//! It rewrites **kana**, mora by mora, and copies everything else through. It
+//! is a *romanization*: a mapping from one script to Latin letters that
+//! approximates how the text is pronounced. It is not a translation, not a
+//! phonetic key, and not a normalizer — see `AGENTS.md` and the crate list
+//! below for which Verbora crate answers which of those questions.
 //!
-//! * **Thirty of its rules use lookahead**, `/X(?=[…])/g`, which the Rust `regex`
-//!   crate cannot express at all. They are a hand-written scan here, and the
-//!   argument for why 30 ordered passes fuse into one is in
-//!   [`ja::Phase::rewrites`] — with a generator that re-proves it against the
-//!   real passes on every run.
-//! * **The closing pass keys on `\B`**, and the reference's `\w` is ASCII-only.
-//!   Rust's `\B` is Unicode-aware and gets `ッ漢` exactly backwards.
-//! * **The phases are order-dependent.** `ハイジャッンプ` is `haijanmpu` only
-//!   because the small-tsu rules run before the `ン` rules, and `カァ` is `kā`
-//!   only because the long-vowel table runs after the kana table has produced the
-//!   `a` it keys on.
-//! * **The tables have deliberate holes.** `ジ` is excluded from the `ッ` -> `z`
-//!   class and gets its own `j` rule; `フ` is excluded from `ッ` -> `h` and gets
-//!   `f`. Writing out "the whole ざ row" breaks `ざっし` and `バッファ`.
-//! * **`・` KATAKANA MIDDLE DOT maps to an ASCII space**, and only in the
-//!   katakana half of the table.
+//! It is also **grapheme-driven**: every decision is made from the kana on the
+//! page and its immediate neighbour. It has no dictionary, no morphological
+//! analyser and no notion of a word, and three consequences of that are
+//! visible in the output and are part of the contract rather than defects to
+//! be reported:
 //!
-//! None of the tables are transcribed. They were machine-derived: the reference
-//! module was loaded, what it actually built was dumped, the 30 lookahead rules
-//! were parsed out of the source text, and three properties were re-proved
-//! before anything was emitted: the prefix invariant that makes leftmost-longest
-//! matching
-//! equal to the reference's leftmost-first alternation, the fusion of the 30 passes,
-//! and the equivalence of the whole model to `TransliterateJa` over 160,401
-//! inputs.
+//! * **Particles are romanized by their kana value.** `こんにちは` is
+//!   `konnichiha`, not `konnichiwa`. The rule that spells the topic particle
+//!   `は` as `wa` is syntactic — `は` is `ha` in `はな` — and nothing here
+//!   knows what a particle is. The same goes for `へ` (`he`, never `e`).
+//! * **Kanji are copied through.** `これは日本語のテストです。` is
+//!   `koreha日本語notesutodesu。`. Reading kanji needs a dictionary; this
+//!   crate has none, and inventing a reading would be worse than leaving the
+//!   character alone.
+//! * **`おう` is always long.** `とうきょう` is `tōkyō`, and so `おもう` is
+//!   `omō` where a morphological analyser would say `omou`. ALA-LC resolves
+//!   this by word element; a grapheme-driven romanizer cannot.
 //!
-//! # Iterator first
+//! # Where the readings come from
 //!
-//! [`ja::Phase::rewrites`] is a lazy iterator of [`ja::Rewrite`]s and is the only
-//! implementation of any phase's behaviour; [`ja::Phase::apply`],
-//! [`transliterate_ja`] and [`ja::transliterate_into`] are all built on top of
-//! it. Nothing is allocated until a replacement is actually found, and text that
-//! needs no change is returned as [`Cow::Borrowed`](std::borrow::Cow) after a
-//! single vectorised scan.
+//! **Modified Hepburn**, as codified in the *ALA-LC Romanization Tables:
+//! Japanese* (American Library Association / Library of Congress), which
+//! follows ANSI Z39.11-1972 and BS 4812:1972 — plus 内閣告示第二号
+//! 「外来語の表記」 (Cabinet of Japan, Notification No. 2 of 1991) for the
+//! extended syllables Japanese writes foreign sounds with (`ファ`, `ティ`,
+//! `ヴァ`, `クォ`, …).
 //!
-//! # Deliberate divergences from the reference
+//! Every mora, its reading and the citation for it are in `src/syllabary.rs`,
+//! which is the crate's single source of truth: `build.rs` derives the
+//! katakana half, the long-vowel forms and the lookup index from that one
+//! file. Six characters take their reading from the Unicode Character Database
+//! instead, because their character names *are* their readings — the four
+//! `KATAKANA LETTER V*` (U+30F7..U+30FA) and the digraphs `ゟ` U+309F
+//! `HIRAGANA DIGRAPH YORI` and `ヿ` U+30FF `KATAKANA DIGRAPH KOTO`.
 //!
-//! One, and it is a consequence of the type system:
+//! Verbora adds five entries of its own to that list, each the voiced
+//! counterpart of a syllable the notification does list (`でぃ` beside `てぃ`,
+//! and so on), and makes one decision the standards do not cover: `・` U+30FB
+//! `KATAKANA MIDDLE DOT` romanizes as a single ASCII space. Both are argued
+//! for in `src/syllabary.rs`.
 //!
-//! * **This cannot throw.** `TransliterateJa(null)` and `TransliterateJa(42)`
-//!   raise a `TypeError` from inside `String#replace`; a `&str` parameter makes
-//!   those calls unrepresentable. The thrown messages are recorded in
-//!   `fixtures/transliterators.json` and asserted by `tests/parity.rs`, so the
-//!   claim that this is the only difference is checked rather than asserted.
+//! # The unit is the mora
 //!
-//! Everything else is byte-exact against that fixture, which records 143,060
-//! calls into the real library — including every ordered pair of kana, which is
-//! where leftmost-longest matching and all 30 lookahead rules are decided.
+//! Not the byte, not the scalar value, not the grapheme cluster. A mora is
+//! spelled in kana as **one or two Unicode scalar values**, optionally
+//! followed by one more that lengthens it:
+//!
+//! | Spelling | Scalars | Romaji |
+//! |---|---|---|
+//! | `か` | 1 | `ka` |
+//! | `きょ` | 2 (base + small `ょ`) | `kyo` |
+//! | `かー` | 1 + prolonged sound mark | `kā` |
+//! | `こう` | 1 + lengthening vowel kana | `kō` |
+//!
+//! The scalar value is the wrong unit here because `きょ` is one mora written
+//! with two of them, and the grapheme cluster is the wrong unit because `かー`
+//! is two clusters and one mora. [`Rewrites`] reports each mora's extent in
+//! **bytes**, which is what splicing a `&str` needs.
+//!
+//! Three marks carry a mora but have no reading of their own, because what
+//! they romanize as depends on their neighbour. They are resolved by the
+//! scanner rather than by a table:
+//!
+//! | Mark | Rule | Example |
+//! |---|---|---|
+//! | sokuon `っ` `ッ` | doubles the following consonant; `t` before `ch` | `ざっし` → `zasshi`, `まっちゃ` → `matcha` |
+//! | syllabic nasal `ん` `ン` | `m` before `b`/`m`/`p`, `n'` before a vowel or `y`, else `n` | `ばんび` → `bambi`, `ほんや` → `hon'ya` |
+//! | prolonged sound mark `ー` | macron over the preceding vowel | `スーパー` → `sūpā` |
+//!
+//! Applied to the *romanization* rather than to the kana, the sokuon rule
+//! reproduces the columns that look like exceptions when written in kana:
+//! `っし` is `sshi` because `し` is `shi`, and `っふ` is `ffu` because `ふ` is
+//! `fu`.
+//!
+//! # What is deliberately not romanized
+//!
+//! Twelve scalar values in the Hiragana and Katakana blocks are passed through
+//! unchanged, and `every_kana_block_scalar_is_romanized_or_deliberately_not`
+//! pins the list exactly:
+//!
+//! * **U+3040, U+3097, U+3098** — unassigned.
+//! * **U+3099, U+309A** — combining voiced and semi-voiced sound marks. They
+//!   are diacritics, not morae; [`transliterate_ja_normalized`] composes them
+//!   onto the kana they belong to.
+//! * **U+309B, U+309C** — the spacing forms of those two marks. Same reason,
+//!   and the same function handles them.
+//! * **U+309D, U+309E, U+30FD, U+30FE** — iteration marks. Expanding them is
+//!   an orthographic rewrite with no Unicode definition, and it is not
+//!   idempotent (`あ々々` gives a different answer applied twice), so Verbora
+//!   ships none.
+//! * **U+30A0 `゠` KATAKANA-HIRAGANA DOUBLE HYPHEN** — punctuation.
+//!
+//! A sokuon with no consonant after it, and a prolonged sound mark with no
+//! vowel before it, romanize as **nothing**: they are modifiers with nothing
+//! to modify. No romanization standard assigns either a segment of its own,
+//! and leaving the kana in place would put a character in romanized text that
+//! the caller asked to have romanized.
+//!
+//! # Lazy first
+//!
+//! [`Rewrites`] is the crate's single implementation of what romanization is —
+//! a lazy iterator of [`Rewrite`]s, each naming a byte range of the input and
+//! the `&'static str` that replaces it. [`transliterate_ja`],
+//! [`transliterate_ja_into`] and [`transliterate_ja_normalized`] are all built
+//! on it, so there is one description of the behaviour and no second copy to
+//! drift. Nothing is allocated until a replacement is actually spliced, and
+//! text that needs no change comes back as [`Cow::Borrowed`](std::borrow::Cow)
+//! after a single vectorised scan.
+//!
+//! [`transliterate_ja`]'s own documentation carries the comparison table and
+//! decision tree for choosing between the five call shapes.
 //!
 //! # Relationship to `verbora-normalizers`
 //!
-//! `TransliterateJa` ignores halfwidth katakana completely, because none of its
-//! keys are halfwidth; the reference's own Japanese stemmer and noun inflector
-//! run `normalizeJa` first. [`ja::transliterate_normalized`] is that pairing,
-//! built on the parity-verified `verbora-normalizers` rather than on a second
-//! copy of its tables.
+//! Halfwidth katakana is ignored completely, because no key of the syllabary
+//! is a halfwidth character. Folding width — and folding the halfwidth voiced
+//! sound mark onto the kana it belongs to — is Unicode compatibility
+//! normalization, [`verbora_normalizers::nfkc`], not romanization.
+//! [`transliterate_ja_normalized`] is that pairing, so this crate carries no
+//! second copy of a width table.
+//!
+//! It is that pairing plus exactly one two-scalar re-spelling. The **spacing**
+//! voiced sound marks U+309B `゛` and U+309C `゜` — the legacy Shift-JIS
+//! spelling — carry the compatibility mappings `<compat> 0020 3099` and
+//! `<compat> 0020 309A`, and that `U+0020` is a starter, so NFKC on its own
+//! strands the mark on an invented space instead of composing it onto the
+//! preceding kana. [`transliterate_ja_normalized`] re-spells those two scalars
+//! as the bare combining marks first, which is the standard's own mapping
+//! without the space and is what the halfwidth U+FF9E already decomposes to.
+//! The derivation is on that function.
 
+mod romanize;
 mod scan;
+mod syllabary;
 
-pub mod ja;
+/// The generated lookup index. Written by `build.rs` from `src/syllabary.rs`.
+mod tables {
+    #![allow(missing_docs)]
+    include!(concat!(env!("OUT_DIR"), "/index.rs"));
+}
 
 #[cfg(feature = "parallel")]
-pub use ja::par_transliterate_ja_batch;
-pub use ja::{Phase, Rewrite, Rewrites, transliterate as transliterate_ja, transliterate_into};
+pub use romanize::par_transliterate_ja_batch;
+pub use romanize::{
+    Rewrites, transliterate_ja, transliterate_ja_into, transliterate_ja_normalized,
+};
+pub use scan::Rewrite;

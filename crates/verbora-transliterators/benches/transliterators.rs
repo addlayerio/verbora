@@ -7,24 +7,26 @@
 //!
 //! Three costs are separated, because they have completely different shapes:
 //!
-//! * **Rejection** — text the transliterator has nothing to do with: Latin
-//!   prose, kanji, halfwidth katakana. This is the common case for any pipeline
-//!   that runs the transliterator over mixed-language documents, and it should
-//!   cost one vectorised scan of the input and no allocation at all. The
-//!   reference cannot do this: it runs 35 global regexes over every string it is
-//!   handed, whatever is in it.
-//! * **Work** — kana throughout, so every phase both scans and rewrites. This
-//!   measures the table lookups and the output buffer.
-//! * **Per phase** — the same kana input through each of the five phases
-//!   separately, which is what shows where the time actually goes and keeps a
-//!   regression in one phase from hiding inside the pipeline total.
+//! * **Rejection** — text the romanizer has nothing to do with: Latin prose,
+//!   kanji, halfwidth katakana. This is the common case for any pipeline that
+//!   runs the romanizer over mixed-language documents, and it should cost one
+//!   vectorised scan of the input and no allocation at all.
+//! * **Work** — kana throughout, so the scan both matches and rewrites. This
+//!   measures the index lookups and the output buffer.
+//! * **The lazy primitive on its own** — `Rewrites` counted rather than
+//!   spliced, which allocates nothing and is the floor the splicing numbers
+//!   are measured against.
+//!
+//! None of these has been run against the current implementation. No figure
+//! from an earlier one is repeated anywhere in this crate.
 
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use verbora_transliterators::ja::{Phase, transliterate_normalized};
-use verbora_transliterators::{transliterate_into, transliterate_ja};
+use verbora_transliterators::{
+    Rewrites, transliterate_ja, transliterate_ja_into, transliterate_ja_normalized,
+};
 
 /// Kana-only prose: every character is rewritten by some phase.
 fn kana_prose(repeats: usize) -> String {
@@ -84,34 +86,22 @@ fn bench_transliterate(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_phases(c: &mut Criterion) {
-    let mut group = c.benchmark_group("transliterate_phases");
-    // One shared input, run through each phase in isolation. Phases 4 and 5 see
-    // pure kana here rather than the partly-romanised text they get inside the
-    // pipeline, which is the honest way to measure a phase on its own: it is the
-    // same string for all five, so the numbers are comparable.
-    let input = mixed_prose(16);
-    group.throughput(Throughput::Bytes(input.len() as u64));
+fn bench_rewrites(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transliterate_rewrites");
 
-    for (id, phase) in [
-        ("compound_kana", Phase::CompoundKana),
-        ("sokuon_and_n", Phase::SokuonAndN),
-        ("kana", Phase::Kana),
-        ("long_vowels", Phase::LongVowels),
-        ("final_sokuon", Phase::FinalSokuon),
+    // The lazy primitive with nothing built on top. `Rewrites` allocates
+    // nothing at all, so the difference between this and the matching
+    // `transliterate/*` row is exactly what the output `String` costs.
+    for (label, input) in [
+        ("kana", kana_prose(16)),
+        ("mixed", mixed_prose(16)),
+        ("ascii", ascii_prose(16)),
     ] {
-        group.bench_with_input(BenchmarkId::from_parameter(id), &input, |b, s| {
-            b.iter(|| phase.apply(black_box(s)))
+        group.throughput(Throughput::Bytes(input.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(label), &input, |b, s| {
+            b.iter(|| Rewrites::new(black_box(s)).count())
         });
     }
-
-    // The lazy primitive with nothing built on top: counting matches allocates
-    // nothing at all, which is the floor the `apply` numbers are measured against.
-    group.bench_with_input(
-        BenchmarkId::from_parameter("kana_rewrites_only"),
-        &input,
-        |b, s| b.iter(|| Phase::Kana.rewrites(black_box(s)).count()),
-    );
 
     group.finish();
 }
@@ -123,13 +113,13 @@ fn bench_buffered(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(total as u64));
 
     // A caller that reuses one buffer across many inputs: the shape a document
-    // pipeline actually has, and the reason `transliterate_into` exists.
+    // pipeline actually has, and the reason `transliterate_ja_into` exists.
     group.bench_function("reused_buffer", |b| {
         let mut buf = String::new();
         b.iter(|| {
             buf.clear();
             for w in &words {
-                transliterate_into(black_box(w), &mut buf);
+                transliterate_ja_into(black_box(w), &mut buf);
             }
             buf.len()
         });
@@ -158,7 +148,7 @@ fn bench_normalized(c: &mut Criterion) {
     ] {
         group.throughput(Throughput::Bytes(input.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(id), &input, |b, s| {
-            b.iter(|| transliterate_normalized(black_box(s)))
+            b.iter(|| transliterate_ja_normalized(black_box(s)))
         });
     }
     group.finish();
@@ -178,11 +168,12 @@ fn bench_par_transliterate_ja_batch(c: &mut Criterion) {
         use verbora_transliterators::par_transliterate_ja_batch;
 
         let mut g = c.benchmark_group("par_transliterate_ja_batch");
-        // One representative all-kana, document-scale input (~23.5 KB, the
-        // size class this function's own doc comment cites) repeated out to a
-        // few batch sizes: a small batch close to rayon's scheduling
-        // break-even point, and larger ones where the fan-out should win
-        // clearly.
+        // One representative all-kana, document-scale input repeated out to a
+        // few batch sizes: a small batch near rayon's scheduling break-even
+        // point, and larger ones where the fan-out should win more clearly.
+        // Where the break-even actually falls is unmeasured on this
+        // implementation, which is why the group spans three sizes rather
+        // than asserting one.
         let doc = kana_prose(290);
         for &n in &[4usize, 32, 256] {
             let docs: Vec<&str> = std::iter::repeat_n(doc.as_str(), n).collect();
@@ -207,7 +198,7 @@ fn bench_par_transliterate_ja_batch(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_transliterate,
-    bench_phases,
+    bench_rewrites,
     bench_buffered,
     bench_normalized,
     bench_par_transliterate_ja_batch

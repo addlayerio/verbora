@@ -7,9 +7,9 @@ need and just want the answer. Each section links to the page that explains it.
 
 | You want | Shape | Example calls |
 |---|---|---|
-| a result you can hold, index or pass on | eager | `tokenize()`, `process()`, `keys_with_prefix()` |
-| to consume it once, in order — maybe not all of it | lazy | `tokens()`, `ngrams_iter()`, `iter_keys_with_prefix()` |
-| to do this millions of times with the same shape of output | into-buffer | `tokenize_into()`, `pluralize_into()` |
+| a result you can hold, index or pass on | eager | `tokenize_borrowed()`, `process()`, `keys_with_prefix()` |
+| to consume it once, in order — maybe not all of it | lazy | `tokens()`, `ngrams()`, `iter_keys_with_prefix()` |
+| to do this millions of times with the same shape of output | into-buffer | `tokenize_borrowed_into()`, `pluralize_into()` |
 | generic code over the trait | batch | `tokenize_batch()` (sequential today) |
 
 → [The four API shapes](api-shapes.md)
@@ -18,13 +18,12 @@ need and just want the answer. Each section links to the page that explains it.
 
 | Your situation | Call |
 |---|---|
-| I name a concrete tokenizer type, and look at each token once | `tokens()` |
-| I name a concrete type and want a `Vec` to keep, index or return | `tokenize()` |
-| I name a concrete type and am in a loop over many documents | `buf.clear(); tokenize_into(doc, &mut buf)` |
-| My function takes "some tokenizer" and needs owned `String`s | `verbora_core::Tokenizer` |
-| My function takes "some tokenizer" and only needs slices | `verbora_core::BorrowingTokenizer` (13 of 24 types) |
-| My tokenizer is `RegexpTokenizer` / `WordTokenizer` / `OrthographyTokenizer` / `WordPunctTokenizer` | the inherent methods — they return `Option`, `None` meaning "no match at all" |
-| I have a slice of documents and want one call | `Tokenizer::tokenize_batch` — a sequential map; `rayon` at your call site if the CPU cost justifies threads |
+| I look at each token once, or stop early | `tokens()` |
+| I want a `Vec` to index or iterate, and the input outlives it | `tokenize_borrowed()` |
+| I am in a loop over many documents that all outlive the loop | `buf.clear(); tokenize_borrowed_into(doc, &mut buf)` |
+| My tokens must outlive the text they came from | `Tokenizer::tokenize` → `Vec<String>` |
+| My function takes "some tokenizer" and only needs slices | `BorrowingTokenizer` — all three implement it |
+| I have a slice of documents and want one call | `Tokenizer::tokenize_batch` — a sequential map; `par_tokenize_batch` (feature `parallel`) if the CPU cost justifies threads |
 
 → [Choosing a tokenization API](tokenization.md)
 
@@ -32,14 +31,11 @@ need and just want the answer. Each section links to the page that explains it.
 
 | What you are splitting | Tokenizer |
 |---|---|
-| English words, fast and simple | `AggressiveTokenizer` |
-| Another language | `AggressiveTokenizer{De,Es,Fr,It,Nl,No,Pl,Pt,Ru,Sv,Uk,Vi,Id,Fa,Hi}` |
-| Finnish, or another orthography-driven language | `OrthographyTokenizer::new("fi")` |
+| Words, in any language that uses spaces | `WordTokenizer` |
+| Words *and* the punctuation and whitespace between them | `SegmentTokenizer` — concatenation reproduces the input |
 | Sentences | `SentenceTokenizer` — `with_abbreviations` if you have a list |
-| Words *and* punctuation as separate tokens | `WordPunctTokenizer` |
-| Penn Treebank conventions (contractions split) | `TreebankWordTokenizer` |
-| Japanese | `TokenizerJa` |
-| Your own pattern | `RegexpTokenizer::new(Pattern::new(re))` |
+| Text that needs re-assembly, highlighting or offsets | `SegmentTokenizer` |
+| Thai, Khmer, Chinese or Japanese word segmentation | nothing here — UAX #29 does not segment languages without spaces |
 
 → [Tokenizers](../features/tokenizers.md)
 
@@ -47,15 +43,15 @@ need and just want the answer. Each section links to the page that explains it.
 
 | What you are comparing | Metric | Working set |
 |---|---|---|
-| Same length by construction (codes, hashes, fixed fields), plain number | `hamming()` — `-1` means incomparable | — |
-| The same, with Rust's vocabulary for "no answer" | `hamming_checked()` → `Option<u64>` | — |
+| Same length by construction (codes, hashes, fixed fields) | `hamming()` → `Option<usize>`; `None` when the character counts differ | — |
 | Typos, and a swap is honestly two edits | `levenshtein()` | bit-vector / 1 row weighted |
-| Typos, adjacent swaps cost 1, never edited again | `damerau_levenshtein(.., restricted: true)` | bit-vector / 3 rows weighted |
-| Typos, swaps may be arbitrarily far apart | `damerau_levenshtein(.., restricted: false)` | 2 rows + per-symbol snapshots |
-| Position of the best approximate occurrence in a longer string | `levenshtein_search()` / `damerau_levenshtein_search()` | full matrix |
+| Typos, adjacent swaps cost 1, never edited again | `osa()` | bit-vector / 3 rows weighted |
+| Typos, swaps may be arbitrarily far apart | `damerau_levenshtein()` | Zhao–Sahni rows / full matrix weighted |
+| Position of the best approximate occurrence in a longer string | `levenshtein_search()` / `damerau_levenshtein_search()` / `osa_search()` | bit-vector columns (plain, unit cost) / full matrix |
 | Names or short records, raw score | `jaro()` | — |
 | Names or short records, prefix-boosted (the usual choice) | `jaro_winkler()` | — |
-| Shared content, not order or position | `dice_coefficient()` — bigram set overlap; `NaN` on two empties | — |
+| Shared content, not order or position | `dice_coefficient()` — bigram set overlap; case and whitespace significant | — |
+| Any of those edits priced differently | the matching `*_weighted()`, plus a cost set from `LevenshteinCosts` / `OsaCosts` / `DamerauCosts` | scalar dynamic program |
 
 → [Choosing a distance API](distance.md)
 
@@ -63,26 +59,30 @@ need and just want the answer. Each section links to the page that explains it.
 
 | What you need | Encoder | Key |
 |---|---|---|
-| English surnames, cheapest possible blocking key | `SoundEx` | 4 characters, very coarse |
-| General English words, one key, better precision | `Metaphone` | up to 32 characters |
-| English text with names of many origins, two indexable keys | `DoubleMetaphone` | two keys; match on either |
-| Slavic / Germanic / Ashkenazi-Jewish surnames | `SoundExDM` | 6 digits, multi-letter clusters |
+| English surnames, cheapest possible blocking key | `SoundEx` | a letter and 3 digits, very coarse |
+| General English words, one key, better precision | `Metaphone` | letters, unbounded |
+| English text with names of many origins, two indexable keys | `DoubleMetaphone` | two keys of up to 4 characters; match on either |
+| Slavic / Germanic / Ashkenazi-Jewish surnames | `DaitchMokotoff` | 6 digits; `codes()` returns every branch |
+| American surnames, US-census rules | `Nysiis` | letters |
+| German-language names and words | `Cologne` | digits |
+| Names whose language of origin is itself uncertain | `BeiderMorse` | a candidate list, per language set |
+| "Which encoder should I even use for this text?" | `verbora_language::recommend` | a recommendation, or `None` rather than a guess |
 
-→ [Phonetics](../features/phonetics.md)
+Twelve encoders ship in all — the eight rows above are the common answers.
+→ [Phonetics](../features/phonetics.md) · [Language](../features/language.md)
 
 ## Which n-gram call?
 
 | If you… | Call |
 |---|---|
-| stop early, or fold windows into a counter | `ngrams_iter()` |
-| consume everything and want indexable windows — **the default** | `ngrams()` (or `bigrams()` / `trigrams()`) |
-| need the tuples to outlive the token slice | `ngrams_owned()` |
-| need the `{ngrams, frequencies, Nr, numberOfNgrams}` shape | `ngrams_with_stats()` |
-| need counts only, with your own key format | `ngrams_iter()` folded into a `HashMap` |
-| need many lookups by key | `ngrams_with_stats()`, then index `frequencies` into a `HashMap` once |
-| have a string and control the tokenizer | `ngrams_str_with()` |
-| have Chinese BMP text | `zh::ngrams_zh()` |
-| have Chinese text that may contain astral characters | `zh::code_units()` + `zh::ngrams_zh_utf16()` |
+| have a slice of elements and want its windows — **the default** | `ngrams(seq, n)` |
+| stop early, or fold windows into a counter | `ngrams(seq, n)` — it is already lazy |
+| want indexable windows | `ngrams(seq, n).collect::<Vec<_>>()` |
+| want the ends of the sequence to appear in as many windows as the middle | `Padded::new(seq, n, Some(&start), Some(&end)).ngrams()` |
+| need counts | fold `ngrams(seq, n)` into a `HashMap`, keyed on the window itself |
+| need the windows to outlive the sequence | copy them out with `.map(<[_]>::to_vec)` |
+| have text and want character windows | `char_ngrams(text, n)` |
+| have text and want word windows | tokenize first, then `ngrams` over the token slice |
 
 → [Choosing an n-gram API](ngrams.md)
 
@@ -91,16 +91,19 @@ need and just want the answer. Each section links to the page that explains it.
 | Your question | Call |
 |---|---|
 | "Is this exact string stored?" | `contains()` |
-| "How big is the structure?" | `get_size()` — nodes, not words; `O(1)` |
+| "How many words are stored?" | `len()` — words, not nodes; `O(1)` |
+| "How big is the structure?" | `node_count()` — arena nodes, one per scalar; `O(1)` |
 | "Which stored words start with my string?" — all of them, indexable | `keys_with_prefix()` → `Vec<String>` |
 | The same, but only the first N, or I stop on a condition | `iter_keys_with_prefix().take(N)` |
+| The same, but I only read them — no `String` per key | `for_each_key_with_prefix()` |
+| "How many words start with this?" | `iter_keys_with_prefix(p).count()` — one descent, no traversal |
 | "Does anything start with this?" | `iter_keys_with_prefix().next().is_some()` |
 | "Give me every word in the trie" | `keys()` — lazy; same as `iter_keys_with_prefix("")` |
-| "Which stored words are prefixes of my string?" — all, shortest first | `find_matches_on_path()` → `Vec<Cow<str>>` |
-| The same, but only the shortest or the first few | `iter_matches_on_path().next()` / `.take(n)` |
-| Only the longest stored prefix | `find_prefix().0` — one walk, no iterator |
-| "Where does the longest stored prefix end?" — as text | `find_prefix()` → `(Option<Cow>, Cow)` |
-| The same, but as offsets, exact and allocation-free | `find_prefix_lengths()` → `(Option<usize>, usize)` |
+| "Which stored words are prefixes of my string?" — all, shortest first | `prefix_matches()` → `Vec<Cow<str>>` |
+| The same, but only the shortest or the first few | `iter_prefix_matches().next()` / `.take(n)` |
+| "Where does the longest stored prefix end?" — as text | `longest_prefix()` → `PrefixSplit { word, rest }` |
+| The same, but as scalar counts, exact and allocation-free | `longest_prefix_lengths()` → `PrefixSplitLengths` |
+| Built once, then queried forever | `freeze()` → `FrozenTrie`; `keys_slice()` borrows instead of allocating |
 
 → [Trie](../features/trie.md)
 
@@ -108,14 +111,13 @@ need and just want the answer. Each section links to the page that explains it.
 
 | What you are normalizing | Call |
 |---|---|
-| English contractions, over a token slice (the usual case) | `normalize(&tokens)` |
-| English contractions, exactly one token | `normalize_token(&token)` |
-| Latin diacritics, any language, fold everything the table knows | `remove_diacritics()` |
-| Norwegian — keep ä ö ü å ø æ | `normalize_no()` |
-| Swedish — keep those, plus â ç ê î ñ ó ô û š | `normalize_sv()` |
-| Japanese, the whole normalization | `normalize_ja()` |
-| Japanese, one width/kana conversion | `ja::converters::{alphabet_fh, katakana_hf, …}` |
-| Japanese, hiragana and katakana onto one syllabary | `ja::converters::{hiragana_to_katakana, katakana_to_hiragana}` |
+| Text you will store and show a human again | `nfc()` |
+| A lookup key that must ignore width, ligation and circling | `nfkc()` |
+| A lookup key that must ignore accents (Latin script) | `remove_diacritics()` |
+| Both of those at once | `remove_diacritics(&nfkc(text))` |
+| Text whose combining marks you will inspect yourself | `nfd()` / `nfkd()` |
+| Japanese halfwidth katakana and fullwidth alphanumerics | `nfkc()` |
+| Kana into Latin letters | nothing here — that is [Transliterators](../features/transliterators.md) |
 
 → [Normalizers](../features/normalizers.md)
 
@@ -129,10 +131,10 @@ Ask in this order:
    different API will not help; look at the algorithm, the input size, or how
    many candidates you are comparing.
 3. **Do I consume the result once, in order?** Yes → `tokens()`, no container at
-   all. No → `tokenize_into()`, one container reused.
+   all. No → `tokenize_borrowed_into()`, one container reused.
 
 Still not fast enough, and measured in seconds of CPU? Check whether the
-operation already has a `par_*_batch` (thirteen crates ship one, opt-in behind a
+operation already has a `par_*_batch` (fourteen crates ship one, opt-in behind a
 `parallel` feature); if not, chunk the input and parallelise at your own call
 site.
 

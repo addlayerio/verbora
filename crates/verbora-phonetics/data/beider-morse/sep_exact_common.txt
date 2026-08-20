@@ -18,7 +18,7 @@
 #include sep_exact_approx_common
 
 "h" "" "" ""
-//"C" "" "" "k"  // c that can actually be �
+//"C" "" "" "k"  // c that can actually be ç
 
 // VOICED - UNVOICED CONSONANTS
 "s" "[^t]" "[bgZd]" "z"

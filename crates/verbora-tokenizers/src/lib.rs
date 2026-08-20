@@ -1,317 +1,170 @@
-//! Twenty-five text tokenizers for Rust.
+//! Cuts text at [UAX #29] boundaries and returns the pieces, borrowed and in
+//! order.
 //!
-//! All twenty-five tokenizers exported by the reference `tokenizers` module, reproduced
-//! down to the bugs. Where the reference does something surprising — German
-//! treats `Ä` as a separator, Indonesian deletes every capital letter, the case
-//! tokenizer appends the literal string `"undefined"` — this crate does the same
-//! thing, and says why in the doc comment.
+//! Three tokenizers, one token shape. Every token this crate produces is a
+//! contiguous slice of the input it was given, returned as `&'a str` borrowed
+//! from that input:
+//!
+//! | Tokenizer | Yields |
+//! |---|---|
+//! | [`WordTokenizer`] | the word segments containing a letter or a digit |
+//! | [`SegmentTokenizer`] | *every* word segment, so concatenation is the input |
+//! | [`SentenceTokenizer`] | the sentences, untrimmed, with an optional abbreviation tailoring |
+//!
+//! # Nothing here rewrites its input
+//!
+//! No tokenizer in this crate folds case, strips punctuation, folds diacritics,
+//! trims, or substitutes placeholders. That is not a missing feature: a
+//! tokenizer that rewrote its input could not be composed with one that did
+//! not, and its tokens would not be substrings, which is the guarantee
+//! everything downstream is built on. Rewriting is `verbora-normalizers`' job,
+//! and every function there is named for the rewrite it performs.
+//!
+//! Nor can anything here emit `U+FFFD` unless `U+FFFD` was in the input — the
+//! crate has no UTF-16 representation to lose an astral scalar in, so
+//! `"a😀b"` tokenizes to `["a", "b"]` and never to a pair of replacement
+//! characters.
 //!
 //! # Iterator first
 //!
-//! Every tokenizer is built around a lazy iterator; the convenience methods are
-//! defined on top of it, so there is one implementation of the behaviour and no
-//! second copy to drift:
+//! [`BorrowingTokenizer::tokens`] is the primitive; everything else is defined
+//! on it, so there is one implementation of each behaviour and no second copy
+//! to drift.
 //!
 //! ```
-//! use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+//! use verbora_tokenizers::{BorrowingTokenizer, Tokenizer, WordTokenizer};
 //!
-//! let t = AggressiveTokenizer::new();
+//! let t = WordTokenizer;
 //!
 //! // Lazy, zero-copy: each token borrows the input.
-//! let first = t.tokens("the quick brown fox").next();
-//! assert_eq!(first, Some("the"));
+//! assert_eq!(t.tokens("the quick brown fox").next(), Some("the"));
 //!
-//! // Collected.
-//! assert_eq!(t.tokenize("the quick"), ["the", "quick"]);
+//! // Collected, still borrowed.
+//! assert_eq!(t.tokenize_borrowed("the quick"), ["the", "quick"]);
 //!
-//! // Into a buffer the caller reuses across documents.
+//! // Into a buffer reused across documents. NOTE: `buf` is not cleared for you.
 //! let mut buf = Vec::new();
 //! for doc in ["one two", "three four"] {
 //!     buf.clear();
-//!     t.tokenize_into(doc, &mut buf);
+//!     t.tokenize_borrowed_into(doc, &mut buf);
 //! }
+//!
+//! // Owned, when the tokens must outlive the input.
+//! let owned: Vec<String> = t.tokenize("one two");
+//! assert_eq!(owned, ["one", "two"]);
 //! ```
 //!
-//! # What each tokenizer's tokens are made of
+//! # Choosing the right API
 //!
-//! The token type is chosen per tokenizer to describe what that tokenizer can
-//! honestly produce, rather than being flattened to `String` everywhere:
-//!
-//! | Token type | Tokenizers | Why |
+//! | Call | Use when | Allocates |
 //! |---|---|---|
-//! | `&'a str` | the thirteen character-class tokenizers, [`WordTokenizer`] | every token is a slice of the input; nothing is allocated per token |
-//! | `Cow<'a, str>` | [`AggressiveTokenizerNo`], [`AggressiveTokenizerSv`], [`AggressiveTokenizerHi`] | these rewrite the text first (diacritics, deleted punctuation), so they borrow when the rewrite was a no-op and copy when it was not |
-//! | [`Utf16Token`] | [`WordPunctTokenizer`], [`TreebankWordTokenizer`], [`TokenizerJa`], [`CaseTokenizer`], [`OrthographyTokenizer`] | these cut at UTF-16 code-unit boundaries, so an astral character becomes two tokens holding **unpaired surrogates** — values no `String` can hold. Treebank and WordPunct still borrow every well-formed token |
-//! | `Option<&'a str>` | [`RegexpTokenizer`] | a capture group that did not participate is the reference's `undefined` |
-//! | `String` | [`SentenceTokenizer`] | placeholder substitution rewrites the text |
+//! | [`tokens`](BorrowingTokenizer::tokens) | streaming, composing with `map`/`filter`, early exit | nothing |
+//! | [`tokenize_borrowed`](BorrowingTokenizer::tokenize_borrowed) | you want a `Vec` and the input outlives it | one `Vec` of `&str` |
+//! | [`tokenize_borrowed_into`](BorrowingTokenizer::tokenize_borrowed_into) | one buffer reused across a corpus | nothing once warm — **`out` is not cleared** |
+//! | [`Tokenizer::tokenize`] | tokens must outlive the input | one `String` per token |
+//! | [`par_tokenize_batch`] | many independent documents | one `Vec` per document |
 //!
-//! # Parity hazards this crate handles
+//! The crossover point for [`par_tokenize_batch`] is **unmeasured**; prefer a
+//! sequential loop for a handful of short strings.
 //!
-//! * **UTF-16 indexing.** `"a😀b"` is four code units to the reference. Four
-//!   tokenizers therefore split emoji in half; see [`Utf16Token`].
-//! * **ASCII-scoped `\w`, `\W`, `\b`, `\d`.** Rust's `regex` makes them
-//!   Unicode-aware by default, which changes Italian tokenization and every
-//!   Treebank contraction boundary.
-//! * **`/i` is not case folding.** The reference language never folds a non-ASCII character
-//!   onto an ASCII one, so `ſ` does not match `s` and `K` does not match `k`;
-//!   Rust's `(?i)` folds both. Character classes here are generated by running
-//!   The reference regexes over the whole BMP rather than transcribed.
-//! * **`String#replace` with a string pattern replaces only the first match.**
-//!   Rust's [`str::replace`] replaces all of them, which changes Norwegian and
-//!   Swedish output on any repeated accent.
-//! * **`\s` is not `char::is_whitespace`.** U+FEFF is whitespace to the reference
-//!   and not to Rust; U+0085 is the reverse. See [`whitespace`].
-//! * **`Tokenizer#trim` removes empty tokens from the two ends only.** Interior
-//!   empties survive, which is visible in [`SentenceTokenizer`].
+//! # The Unicode version is part of the contract
 //!
-//! # Relationship to `verbora_core`
+//! Word and sentence boundaries are defined over the `Word_Break` and
+//! `Sentence_Break` properties of the Unicode Character Database, so this crate
+//! cannot promise results frozen for all time the way `verbora-distance` can —
+//! a boundary rule frozen today is simply wrong for every character encoded
+//! after the freeze. Instead:
 //!
-//! Tokenizers whose tokens are text also implement [`verbora_core::Tokenizer`]
-//! (and, where they borrow, [`verbora_core::BorrowingTokenizer`]) so that
-//! downstream crates written against the shared vocabulary can use them. Both
-//! that trait and [`Tokenize`] have a `tokenize` method, so importing both into
-//! one scope makes an unqualified call ambiguous; prefer importing just the one
-//! you need.
+//! * The Unicode version is whichever version `unicode-segmentation` ships,
+//!   pinned in `Cargo.lock`. At the version this crate is built against that is
+//!   **Unicode 17.0.0**; [`unicode_version`] reports it at runtime, and the
+//!   crate's conformance tests replay the UCD's own `WordBreakTest.txt` and
+//!   `SentenceBreakTest.txt` for it.
+//! * A UCD upgrade is a **semver-visible behaviour change** for this crate and
+//!   is released as one.
+//! * **Any structure that persists tokenizer-derived keys must stamp the
+//!   Unicode version and refuse to load across a change.** An index, a model or
+//!   an interned term table built before an upgrade does not match one built
+//!   after it, and nothing else will tell you.
 //!
-//! The four regex-driven tokenizers implement neither, because `String#match`
-//! can return `null` and the traits have no way to say so. They expose the same
-//! `tokens` / `tokenize` / `tokenize_into` shape wrapped in [`Option`].
+//! Within one Unicode version the crate is fully deterministic: the same input
+//! produces the same output on every platform and every build. There is no
+//! global mutable state, no hash-order dependence, and no interior mutability.
+//!
+//! [UAX #29]: https://www.unicode.org/reports/tr29/
 
-pub mod aggressive;
-pub mod case;
-pub mod classes;
-pub mod ja;
-pub mod regexp;
-pub mod scan;
-pub mod sentence;
-pub mod treebank;
-pub mod utf16;
-pub mod whitespace;
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-pub use aggressive::{
-    AggressiveTokenizer, AggressiveTokenizerDe, AggressiveTokenizerEs, AggressiveTokenizerFa,
-    AggressiveTokenizerFr, AggressiveTokenizerHi, AggressiveTokenizerId, AggressiveTokenizerIt,
-    AggressiveTokenizerNl, AggressiveTokenizerNo, AggressiveTokenizerPl, AggressiveTokenizerPt,
-    AggressiveTokenizerRu, AggressiveTokenizerSv, AggressiveTokenizerUk, AggressiveTokenizerVi,
-};
-pub use case::CaseTokenizer;
-pub use ja::TokenizerJa;
-pub use regexp::{
-    OrthographyTokenizer, Pattern, RegexpTokenizer, WordPunctTokenizer, WordTokenizer,
-};
-pub use sentence::{SentenceTokenizer, SentenceTokenizerNew};
-pub use treebank::TreebankWordTokenizer;
-pub use utf16::Utf16Token;
+mod sentence;
+mod word;
 
-/// A tokenizer, expressed as a lazy iterator.
+pub use sentence::{AbbreviationError, SentenceTokenizer};
+pub use word::{SegmentTokenizer, WordTokenizer};
+
+pub use verbora_core::{BorrowingTokenizer, Tokenizer};
+
+/// The Unicode version whose `Word_Break` and `Sentence_Break` assignments this
+/// crate's boundaries are computed from, as `(major, minor, update)`.
 ///
-/// [`Self::tokens`] is the only method an implementation must write; the other
-/// two are defined in terms of it, so there is a single source of behaviour.
+/// Stamp this into anything that persists tokenizer-derived keys, and refuse to
+/// load an artifact whose stamp differs: boundaries move between Unicode
+/// versions, so an index built under one and queried under another silently
+/// mismatches rather than failing.
 ///
-/// The associated type is generic over the input's lifetime so that a tokenizer
-/// which only *slices* its input can say so — `type Token<'a> = &'a str` — while
-/// one that must rewrite it can return owned or [`std::borrow::Cow`] tokens
-/// without every caller paying for the possibility.
-pub trait Tokenize {
-    /// What one token is: `&'a str`, `Cow<'a, str>`, [`Utf16Token`] or `String`,
-    /// depending on what the tokenizer can produce. See the crate documentation
-    /// for the table.
-    type Token<'a>;
-
-    /// Lazily yields the tokens of `text`.
-    fn tokens<'a>(&self, text: &'a str) -> impl Iterator<Item = Self::Token<'a>>;
-
-    /// Collects every token.
-    fn tokenize<'a>(&self, text: &'a str) -> Vec<Self::Token<'a>> {
-        self.tokens(text).collect()
-    }
-
-    /// Appends every token to `out`.
-    ///
-    /// `out` is **not** cleared, so a caller can accumulate across inputs or —
-    /// the intended use — reuse one buffer's capacity across a corpus.
-    fn tokenize_into<'a>(&self, text: &'a str, out: &mut Vec<Self::Token<'a>>) {
-        out.extend(self.tokens(text));
-    }
-
-    /// Tokenizes many independent documents in parallel, using `rayon`.
-    ///
-    /// Requires the `parallel` feature.
-    ///
-    /// # Why this exists
-    ///
-    /// Every tokenizer in this crate that implements `Tokenize` is a plain
-    /// value with no interior mutability — most are zero-sized — so running
-    /// one stateless instance over many independent documents has no
-    /// coordination cost between documents. This method is exactly
-    /// `texts.par_iter().map(|t| self.tokenize(t)).collect()`: a thin `rayon`
-    /// fan-out over [`Self::tokenize`], not a second implementation of
-    /// tokenization. [`Self::tokens`] and [`Self::tokenize_into`] are
-    /// untouched by this method and remain the primitives everything else is
-    /// built on; if you need the buffer-reusing shape in parallel, combine
-    /// `par_iter` with `map_init` at your own call site (see
-    /// `site/performance/parallelism.md`'s "With a per-thread buffer"
-    /// section).
-    ///
-    /// # When to reach for it vs. [`Self::tokenize`] / a sequential loop
-    ///
-    /// This crate's own benchmarks put a single `tokenize` call over an
-    /// ~8192-word document at roughly 118–120 microseconds, and — per this
-    /// crate's `api-shape` benchmark group — `tokenize` and `tokenize_into`
-    /// cost about the same per call, so there is no cheaper sequential
-    /// primitive to fall back to. A `rayon` task still costs on the order of
-    /// a microsecond to schedule, so per-document parallelism only pays for
-    /// itself once the batch is large enough, or the documents are large
-    /// enough, that scheduling overhead is a small fraction of the total.
-    /// Measure your own workload; for a handful of short strings prefer a
-    /// plain `texts.iter().map(|t| self.tokenize(t))` loop, which is what
-    /// this method degrades to per-item, minus the parallel scheduling.
-    ///
-    /// # Allocation behaviour
-    ///
-    /// One outer `Vec` sized to `texts.len()`, plus whatever [`Self::tokenize`]
-    /// itself allocates per document — one `Vec<Self::Token<'_>>` growing to
-    /// that document's token count. No buffer is shared across documents
-    /// (parallel workers cannot share a `&mut Vec`) and no thread pool is
-    /// constructed per call: this uses whichever global `rayon` pool is
-    /// already installed, or `rayon`'s default one, so pool configuration
-    /// remains the caller's responsibility, not this crate's.
-    ///
-    /// # Order
-    ///
-    /// Output order matches input order: `results[i]` is `self.tokenize(texts[i])`,
-    /// via `rayon`'s order-preserving `map` + `collect`.
-    #[cfg(feature = "parallel")]
-    fn par_tokenize_batch<'a>(&self, texts: &[&'a str]) -> Vec<Vec<Self::Token<'a>>>
-    where
-        Self: Sync,
-        Self::Token<'a>: Send,
-    {
-        use rayon::prelude::*;
-        texts.par_iter().map(|text| self.tokenize(text)).collect()
-    }
+/// ```
+/// // The version is a fact about the build, not a constant to assert against
+/// // in application code — record it, compare it, do not hardcode it.
+/// let (major, _minor, _update) = verbora_tokenizers::unicode_version();
+/// assert!(major >= 17);
+/// ```
+#[must_use]
+pub fn unicode_version() -> (u64, u64, u64) {
+    unicode_segmentation::UNICODE_VERSION
 }
 
-/// Removes empty tokens from both ends of a list — the reference's
-/// `Tokenizer#trim`.
+/// Tokenizes many independent documents in parallel, preserving input order.
 ///
-/// Re-exported from `verbora_core` because it is part of this cluster's
-/// contract: it removes **only** the leading and trailing empties, leaving
-/// interior ones alone, and that asymmetry is observable in
-/// [`SentenceTokenizer`] (`"   "` tokenizes to `[""]`, not `[]`).
-pub use verbora_core::trim_edge_empties;
+/// `results[i]` is `tokenizer.tokenize_borrowed(texts[i])`. This is exactly
+/// `texts.par_iter().map(|t| tokenizer.tokenize_borrowed(t)).collect()` — a
+/// thin `rayon` fan-out over the sequential path, not a second implementation
+/// of tokenization. It uses whichever global rayon pool is already installed,
+/// and constructs none of its own.
+///
+/// It is a free function rather than a trait method so that `verbora-core`
+/// acquires neither a `parallel` feature nor a `rayon` dependency for one
+/// method body.
+///
+/// # When to reach for it
+///
+/// The crossover — the batch size and document length at which parallel fan-out
+/// beats a sequential loop — is **unmeasured** for this implementation. Rayon
+/// costs on the order of a microsecond to schedule a task, so for a handful of
+/// short strings a plain `texts.iter().map(...)` loop is the better default.
+///
+/// Requires the `parallel` feature.
+///
+/// ```
+/// # #[cfg(feature = "parallel")] {
+/// use verbora_tokenizers::{WordTokenizer, par_tokenize_batch};
+///
+/// let docs = ["one two", "three"];
+/// assert_eq!(
+///     par_tokenize_batch(&WordTokenizer, &docs),
+///     [vec!["one", "two"], vec!["three"]],
+/// );
+/// # }
+/// ```
+#[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
+#[must_use]
+pub fn par_tokenize_batch<'a, T>(tokenizer: &T, texts: &[&'a str]) -> Vec<Vec<&'a str>>
+where
+    T: BorrowingTokenizer + Sync,
+{
+    use rayon::prelude::*;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The pathological-input battery every tokenizer in this crate is
-    /// exercised against — empty, whitespace-only, every reference-whitespace
-    /// oddity, and a script/astral/case-folding sweep. Shared at module scope
-    /// so more than one test can reuse it rather than inventing new edge
-    /// cases.
-    const INPUTS: &[&str] = &[
-        "",
-        " ",
-        "\t\n\r",
-        "\u{feff}",
-        "\u{85}",
-        "a",
-        "Z",
-        "0",
-        "!",
-        "...",
-        "--",
-        "don't",
-        "ALLCAPS",
-        "café",
-        "Ångström",
-        "straße",
-        "Москва",
-        "Ελλάδα",
-        "العربية",
-        "日本語",
-        "한국어",
-        "ภาษาไทย",
-        "हिन्दी",
-        "e\u{301}",
-        "😀",
-        "a😀b",
-        "𝕳𝖊𝖑𝖑𝖔",
-        "İstanbul",
-        "\u{212a}\u{17f}",
-    ];
-
-    /// Every tokenizer must survive the whole awkward-input battery without
-    /// panicking, whatever it decides the answer is.
-    #[test]
-    fn nothing_panics_on_pathological_input() {
-        for s in INPUTS {
-            let _ = AggressiveTokenizer::new().tokenize(s);
-            let _ = AggressiveTokenizerNl::new().tokenize(s);
-            let _ = AggressiveTokenizerFa::new().tokenize(s);
-            let _ = AggressiveTokenizerFr::new().tokenize(s);
-            let _ = AggressiveTokenizerDe::new().tokenize(s);
-            let _ = AggressiveTokenizerRu::new().tokenize(s);
-            let _ = AggressiveTokenizerEs::new().tokenize(s);
-            let _ = AggressiveTokenizerIt::new().tokenize(s);
-            let _ = AggressiveTokenizerPl::new().tokenize(s);
-            let _ = AggressiveTokenizerPt::new().tokenize(s);
-            let _ = AggressiveTokenizerNo::new().tokenize(s);
-            let _ = AggressiveTokenizerSv::new().tokenize(s);
-            let _ = AggressiveTokenizerVi::new().tokenize(s);
-            let _ = AggressiveTokenizerId::new().tokenize(s);
-            let _ = AggressiveTokenizerHi::new().tokenize(s);
-            let _ = AggressiveTokenizerUk::new().tokenize(s);
-            let _ = CaseTokenizer::new().tokenize(s);
-            let _ = CaseTokenizer::preserving_apostrophes().tokenize(s);
-            let _ = WordTokenizer::new().tokenize(s);
-            let _ = WordTokenizer::matching().tokenize(s);
-            let _ = OrthographyTokenizer::new("fi").tokenize(s);
-            let _ = OrthographyTokenizer::new("zz").tokenize(s);
-            let _ = WordPunctTokenizer::new().tokenize(s);
-            let _ = WordPunctTokenizer::matching().tokenize(s);
-            let _ = TreebankWordTokenizer::new().tokenize(s);
-            let _ = TokenizerJa::new().tokenize(s);
-            let _ = SentenceTokenizer::new().tokenize(s);
-            let _ = SentenceTokenizer::with_abbreviations(["e.g.", "i.e."]).tokenize(s);
-            let _ = RegexpTokenizer::without_pattern().tokenize(s);
-        }
-    }
-
-    /// `par_tokenize_batch` must produce exactly what a sequential loop over
-    /// `tokenize` produces.
-    ///
-    /// Reuses `INPUTS` — the same pathological-input battery every tokenizer
-    /// in this crate is already exercised against above, covering every
-    /// script and the reference-whitespace/astral/case-folding oddities — rather
-    /// than inventing new edge cases, and additionally covers the
-    /// empty-batch and single-item edges that battery does not exercise on
-    /// its own. Tokenizers are chosen to cover every `Token` shape this crate
-    /// produces: `&str`, `Cow<str>`, [`utf16::Utf16Token`] and `String`.
-    #[cfg(feature = "parallel")]
-    #[test]
-    fn par_tokenize_batch_matches_sequential_loop() {
-        fn check<T>(t: &T, texts: &[&str])
-        where
-            T: Tokenize + Sync,
-            for<'a> T::Token<'a>: Send + PartialEq + std::fmt::Debug,
-        {
-            let sequential: Vec<Vec<T::Token<'_>>> = texts.iter().map(|s| t.tokenize(s)).collect();
-            let parallel = t.par_tokenize_batch(texts);
-            assert_eq!(sequential, parallel);
-        }
-
-        // Empty batch: no documents at all.
-        check(&AggressiveTokenizer::new(), &[]);
-        // A single document.
-        check(&AggressiveTokenizer::new(), &["hello world"]);
-        // Many documents, covering every `Token` shape.
-        check(&AggressiveTokenizer::new(), INPUTS); // &str
-        check(&AggressiveTokenizerHi::new(), INPUTS); // Cow<str>
-        check(&CaseTokenizer::new(), INPUTS); // Utf16Token
-        check(&TreebankWordTokenizer::new(), INPUTS); // Utf16Token
-        check(&TokenizerJa::new(), INPUTS); // Utf16Token
-        check(&SentenceTokenizer::new(), INPUTS); // String
-    }
+    texts
+        .par_iter()
+        .map(|text| tokenizer.tokenize_borrowed(text))
+        .collect()
 }

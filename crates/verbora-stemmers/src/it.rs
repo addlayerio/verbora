@@ -34,13 +34,11 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use verbora_tokenizers::classes;
-
-use crate::among::AmongTable;
+use crate::among::{AmongTable, Buf, UnionTable, longest_at_most};
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_it;
-use crate::stopwords::{self, Language};
-use crate::units::{ends_with, text, text_lowercase, u, units};
+use crate::stopwords::Language;
+use crate::units::{ends_with, text_lowercase, u};
 
 /// The Italian Snowball stemmer.
 ///
@@ -63,9 +61,9 @@ fn is_vowel(c: u16) -> bool {
     )
 }
 
-fn cut(w: &mut Vec<u16>, n: usize, tail: &str) {
-    w.truncate(w.len().saturating_sub(n));
-    w.extend(tail.encode_utf16());
+fn cut(buf: &mut Buf, n: usize, tail: &str) {
+    buf.truncate(buf.len().saturating_sub(n));
+    buf.push_str(tail);
 }
 
 /// The lowercased, acute-to-grave, `qU`/`I`/`U`-marked form of `t` — the
@@ -138,37 +136,64 @@ fn mark_regions(t: &[u16]) -> (usize, usize, usize) {
 
 /// The sorted search tables, built once from the ordered rule tables below.
 struct ItTables {
+    /// Every step-1 rule table merged into one search; the `T_*` constants
+    /// name each table's slot in the mask array.
+    step1: UnionTable,
     pronoun: AmongTable,
     /// `["ando", "endo"]` — the pre-pronoun gerund test.
     ando_endo: AmongTable,
     /// `["ar", "er", "ir"]` — the pre-pronoun infinitive test.
     ar_er_ir: AmongTable,
-    amente: AmongTable,
-    azione: AmongTable,
-    logia: AmongTable,
-    uzione: AmongTable,
-    enza: AmongTable,
-    amento: AmongTable,
-    atrice: AmongTable,
-    ita: AmongTable,
-    icativa: AmongTable,
     step2: AmongTable,
     step3: AmongTable,
 }
 
+/// The step-1 rule tables, in chain order; their positions are the `T_*`
+/// constants and the ids [`UnionTable::length_masks`] writes.
+static STEP1_TABLE_LIST: &[&[&str]] = &[
+    STEP1_AMENTE,
+    STEP1_AZIONE,
+    LOGIA,
+    UZIONE,
+    ENZA,
+    AMENTO,
+    AMENTE_LIT,
+    STEP1_ATRICE,
+    ITA,
+    STEP1_ICATIVA,
+];
+/// The number of step-1 tables, and so the size of the mask array.
+const STEP1_TABLES: usize = 10;
+const T_AMENTE: usize = 0;
+const T_AZIONE: usize = 1;
+const T_LOGIA: usize = 2;
+const T_UZIONE: usize = 3;
+const T_ENZA: usize = 4;
+const T_AMENTO: usize = 5;
+const T_AMENTE_LIT: usize = 6;
+const T_ATRICE: usize = 7;
+const T_ITA: usize = 8;
+const T_ICATIVA: usize = 9;
+
+/// `["ando", "endo"]` — the pre-pronoun gerund test.
+static ANDO_ENDO: &[&str] = &["ando", "endo"];
+/// `["ar", "er", "ir"]` — the pre-pronoun infinitive test.
+static AR_ER_IR: &[&str] = &["ar", "er", "ir"];
+/// The two digraphs the final rule undoes.
+static CH_GH: &[&str] = &["ch", "gh"];
+static LOGIA: &[&str] = &["logia", "logie"];
+static UZIONE: &[&str] = &["uzione", "uzioni", "usione", "usioni"];
+static ENZA: &[&str] = &["enza", "enze"];
+static AMENTO: &[&str] = &["amento", "amenti", "imento", "imenti"];
+/// `['amente']` in R1 — one literal, but a chain step of its own.
+static AMENTE_LIT: &[&str] = &["amente"];
+static ITA: &[&str] = &["abilità", "icità", "ività", "ità"];
+
 static TABLES: LazyLock<ItTables> = LazyLock::new(|| ItTables {
+    step1: UnionTable::build(STEP1_TABLE_LIST),
     pronoun: AmongTable::build(PRONOUN),
-    ando_endo: AmongTable::build(&["ando", "endo"]),
-    ar_er_ir: AmongTable::build(&["ar", "er", "ir"]),
-    amente: AmongTable::build(STEP1_AMENTE),
-    azione: AmongTable::build(STEP1_AZIONE),
-    logia: AmongTable::build(&["logia", "logie"]),
-    uzione: AmongTable::build(&["uzione", "uzioni", "usione", "usioni"]),
-    enza: AmongTable::build(&["enza", "enze"]),
-    amento: AmongTable::build(&["amento", "amenti", "imento", "imenti"]),
-    atrice: AmongTable::build(STEP1_ATRICE),
-    ita: AmongTable::build(&["abilità", "icità", "ività", "ità"]),
-    icativa: AmongTable::build(STEP1_ICATIVA),
+    ando_endo: AmongTable::build(ANDO_ENDO),
+    ar_er_ir: AmongTable::build(AR_ER_IR),
     step2: AmongTable::build(STEP2),
     step3: AmongTable::build(STEP3),
 });
@@ -183,33 +208,34 @@ impl PorterStemmerIt {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let mut t = units(&token.to_lowercase());
+        let mut t = Buf::fill_lowercase(token);
 
         // --- Prelude -------------------------------------------------------
-        prelude(&mut t);
+        prelude(t.as_mut_slice());
         if t.len() < 3 {
             // Already lowercased, acute-replaced and qU-marked.
-            return Cow::Owned(text(&t));
+            return Cow::Owned(t.into_text());
         }
 
         // --- Regions -------------------------------------------------------
-        let (r1, r2, rv) = mark_regions(&t);
+        let (r1, r2, rv) = mark_regions(t.as_slice());
 
         // --- Step 0: attached pronoun --------------------------------------
         let len = t.len();
-        let i = tb.pronoun.find(&t, len, 0);
+        let i = tb.pronoun.find(t.as_slice(), len, 0);
         if i >= 0 {
-            let n = tb.pronoun.entries[i as usize].0.len();
+            let n = tb.pronoun.len_at(i);
             let start = rv.min(len);
             let head_end = start + (len - start).saturating_sub(n);
             // Two consecutive `if`s in the reference, not an if/else. The two
             // lists are disjoint, so a double truncation cannot actually happen.
-            let pre1 = tb.ando_endo.longest(&t, head_end, start) > 0;
-            let pre2 = tb.ar_er_ir.longest(&t, head_end, start) > 0;
+            let pre1 = tb.ando_endo.longest(t.as_slice(), head_end, start) > 0;
+            let pre2 = tb.ar_er_ir.longest(t.as_slice(), head_end, start) > 0;
             if pre1 {
                 cut(&mut t, n, "");
             }
@@ -230,54 +256,62 @@ impl PorterStemmerIt {
         // Expressed as a labeled block with one early exit per rule: the
         // first rule whose (region-limited) search hits fires and ends the
         // step, which is exactly the reference's else-if ladder.
+        // One union search answers every step-1 table at once: the walk of
+        // its substring links records, per rule table, the lengths of that
+        // table's entries that are suffixes of the word, and each rule reads
+        // its own region-restricted longest match out of that mask. The
+        // ladder below is otherwise the reference's, unchanged and in order.
+        let mut lm = [0u32; STEP1_TABLES];
+        tb.step1.length_masks(t.as_slice(), len, &mut lm);
+        let (av1, av2, avv) = (len - lb1, len - lb2, len - lbv);
         let mut step1_changed = true;
         'step1: {
-            let m = tb.amente.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_AMENTE], av2);
             if m > 0 {
                 cut(&mut t, m, "");
                 break 'step1;
             }
-            let m = tb.azione.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_AZIONE], av2);
             if m > 0 {
                 cut(&mut t, m, "");
                 break 'step1;
             }
-            let m = tb.logia.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_LOGIA], av2);
             if m > 0 {
                 cut(&mut t, m, "log");
                 break 'step1;
             }
-            let m = tb.uzione.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_UZIONE], av2);
             if m > 0 {
                 cut(&mut t, m, "u");
                 break 'step1;
             }
-            let m = tb.enza.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ENZA], av2);
             if m > 0 {
                 cut(&mut t, m, "ente");
                 break 'step1;
             }
-            let m = tb.amento.longest(&t, len, lbv);
+            let m = longest_at_most(lm[T_AMENTO], avv);
             if m > 0 {
                 cut(&mut t, m, "");
                 break 'step1;
             }
-            // `['amente']` in R1 — a single literal, checked directly.
-            if ends_with(&t, "amente") && len - 6 >= lb1 {
+            // `['amente']` in R1 — a single literal, but its own chain step.
+            if longest_at_most(lm[T_AMENTE_LIT], av1) > 0 {
                 cut(&mut t, 6, "");
                 break 'step1;
             }
-            let m = tb.atrice.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ATRICE], av2);
             if m > 0 {
                 cut(&mut t, m, "");
                 break 'step1;
             }
-            let m = tb.ita.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ITA], av2);
             if m > 0 {
                 cut(&mut t, m, "");
                 break 'step1;
             }
-            let m = tb.icativa.longest(&t, len, lb2);
+            let m = longest_at_most(lm[T_ICATIVA], av2);
             if m > 0 {
                 cut(&mut t, m, "");
                 break 'step1;
@@ -288,7 +322,7 @@ impl PorterStemmerIt {
         // --- Step 2: verb suffixes, only if step 1 changed nothing ---------
         if !step1_changed {
             let len = t.len();
-            let m = tb.step2.longest(&t, len, rv.min(len));
+            let m = tb.step2.longest(t.as_slice(), len, rv.min(len));
             if m > 0 {
                 cut(&mut t, m, "");
             }
@@ -297,7 +331,7 @@ impl PorterStemmerIt {
         // --- Step 3: vowel suffix, always ----------------------------------
         {
             let len = t.len();
-            let m = tb.step3.longest(&t, len, rv.min(len));
+            let m = tb.step3.longest(t.as_slice(), len, rv.min(len));
             if m > 0 {
                 cut(&mut t, m, "");
             }
@@ -305,13 +339,13 @@ impl PorterStemmerIt {
 
         let len = t.len();
         let lbv = rv.min(len);
-        if ends_with(&t[lbv..], "ch") {
+        if ends_with(&t.as_slice()[lbv..], CH_GH[0]) {
             cut(&mut t, 2, "c");
-        } else if ends_with(&t[lbv..], "gh") {
+        } else if ends_with(&t.as_slice()[lbv..], CH_GH[1]) {
             cut(&mut t, 2, "g");
         }
 
-        Cow::Owned(text_lowercase(&mut t))
+        Cow::Owned(text_lowercase(t.as_mut_slice()))
     }
 }
 
@@ -341,17 +375,23 @@ static STEP1_ICATIVA: &[&str] = &[
     "icativa", "icativo", "icativi", "icative", "ativa", "ativo", "ativi", "ative", "iva", "ivo",
     "ivi", "ive",
 ];
-/// The verb list. `"Yamo"` is dead — `vowelMarking` only ever writes `I` and `U`
-/// — and is preserved for byte parity with the reference table.
+/// The verb list.
+///
+/// It used to carry `"Yamo"`, which nothing could ever match: `stem`
+/// lowercases the token before [`prelude`] runs, and `prelude` writes only
+/// `I` and `U`, so no `Y` can be in the buffer when this table is searched.
+/// Removing a suffix that cannot occur changes no stem, and
+/// `no_capital_but_i_or_u_survives_the_prelude` pins the reason rather than
+/// the removal.
 static STEP2: &[&str] = &[
     "erebbero", "irebbero", "assero", "assimo", "eranno", "erebbe", "eremmo", "ereste", "eresti",
     "essero", "iranno", "irebbe", "iremmo", "ireste", "iresti", "iscano", "iscono", "issero",
     "arono", "avamo", "avano", "avate", "eremo", "erete", "erono", "evamo", "evano", "evate",
     "iremo", "irete", "irono", "ivamo", "ivano", "ivate", "ammo", "ando", "asse", "assi", "emmo",
-    "enda", "ende", "endi", "endo", "erai", "Yamo", "iamo", "immo", "irai", "irei", "isca", "isce",
-    "isci", "isco", "erei", "uti", "uto", "ita", "ite", "iti", "ito", "iva", "ivi", "ivo", "ono",
-    "uta", "ute", "ano", "are", "ata", "ate", "ati", "ato", "ava", "avi", "avo", "erà", "ere",
-    "erò", "ete", "eva", "evi", "evo", "irà", "ire", "irò", "ar", "ir",
+    "enda", "ende", "endi", "endo", "erai", "iamo", "immo", "irai", "irei", "isca", "isce", "isci",
+    "isco", "erei", "uti", "uto", "ita", "ite", "iti", "ito", "iva", "ivi", "ivo", "ono", "uta",
+    "ute", "ano", "are", "ata", "ate", "ati", "ato", "ava", "avi", "avo", "erà", "ere", "erò",
+    "ete", "eva", "evi", "evo", "irà", "ire", "irò", "ar", "ir",
 ];
 static STEP3: &[&str] = &[
     "ia", "ie", "ii", "io", "ià", "iè", "iì", "iò", "a", "e", "i", "o", "à", "è", "ì", "ò",
@@ -361,12 +401,8 @@ impl TokenizeAndStem for PorterStemmerIt {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Lower;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_it(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::It, word)
+        Language::It.contains(word)
     }
 
     fn gate(token: &str) -> bool {
@@ -376,6 +412,44 @@ impl TokenizeAndStem for PorterStemmerIt {
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    use crate::among::Buf;
+
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("PRONOUN", super::PRONOUN),
+        ("ANDO_ENDO", super::ANDO_ENDO),
+        ("AR_ER_IR", super::AR_ER_IR),
+        ("STEP1_AMENTE", super::STEP1_AMENTE),
+        ("STEP1_AZIONE", super::STEP1_AZIONE),
+        ("LOGIA", super::LOGIA),
+        ("UZIONE", super::UZIONE),
+        ("ENZA", super::ENZA),
+        ("AMENTO", super::AMENTO),
+        ("AMENTE_LIT", super::AMENTE_LIT),
+        ("STEP1_ATRICE", super::STEP1_ATRICE),
+        ("ITA", super::ITA),
+        ("STEP1_ICATIVA", super::STEP1_ICATIVA),
+        ("STEP2", super::STEP2),
+        ("STEP3", super::STEP3),
+        ("CH_GH", super::CH_GH),
+    ];
+
+    /// The prelude `stem` runs before any table is consulted, in isolation.
+    pub(crate) fn prelude(token: &str) -> String {
+        let mut t = Buf::fill_lowercase(token);
+        super::prelude(t.as_mut_slice());
+        t.into_text()
+    }
+
+    /// The units the prelude writes, paired with what it writes them for.
+    /// It writes `I` and `U` and nothing else — which is why an entry
+    /// spelled with any other capital can never match.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[("I", "i"), ("U", "u")];
 }
 
 impl verbora_core::Stemmer for PorterStemmerIt {
@@ -421,6 +495,54 @@ mod tests {
         assert_eq!(s("123"), "123");
     }
 
+    /// `I` and `U` are the only characters the tables may be spelled with that
+    /// are not already lower case — the invariant removing `"Yamo"` rests on.
+    ///
+    /// Checked rather than asserted, and enumerated rather than sampled.
+    /// `Buf::fill_lowercase` runs `str::to_lowercase`, after which every
+    /// character equals its own lower case; [`prelude`] then writes `I` and
+    /// `U` and nothing else. So the set of characters in the buffer that
+    /// *differ* from their own lower case must be exactly `{I, U}`, whatever
+    /// the input. Every scalar value is fed through in four positions — alone,
+    /// between two vowels (where `i` and `u` are marked), after a `q` (where
+    /// `u` is) and interleaved with vowels — and the union is compared by
+    /// equality.
+    ///
+    /// Stating it as "no capital survives" would be wrong rather than merely
+    /// strict: `ℂ`, `𝐀` and `🄰` are upper case with no lower-case mapping at
+    /// all, so they pass through unchanged and always have. None of them is a
+    /// letter any Italian suffix is spelled with, and none is `Y`.
+    #[test]
+    fn only_i_and_u_reach_the_tables_in_upper_case() {
+        use std::collections::BTreeSet;
+
+        let mut unfolded: BTreeSet<char> = BTreeSet::new();
+        for cp in 0..=0x10_FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            for probe in [
+                c.to_string(),
+                format!("a{c}a"),
+                format!("q{c}"),
+                format!("{c}a{c}a{c}"),
+            ] {
+                let mut buf = Buf::fill_lowercase(&probe);
+                prelude(buf.as_mut_slice());
+                unfolded.extend(
+                    buf.into_text()
+                        .chars()
+                        .filter(|c| !c.to_lowercase().eq(std::iter::once(*c))),
+                );
+            }
+        }
+        assert_eq!(
+            unfolded.into_iter().collect::<Vec<_>>(),
+            ['I', 'U'],
+            "the Italian prelude emits a character the rule tables do not expect"
+        );
+    }
+
     /// Italian is a **first-match** language; routing its tables through the
     /// longest-match search is only sound while every nested pair is ordered
     /// longest-first. See the module docs.
@@ -450,7 +572,13 @@ mod tests {
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
-        use crate::units::{first_suffix, slen};
+        use crate::units::{first_suffix, slen, text, units};
+
+        /// The pre-`Buf` `cut`, over the owned `Vec` the oracle still uses.
+        fn cut(w: &mut Vec<u16>, n: usize, tail: &str) {
+            w.truncate(w.len().saturating_sub(n));
+            w.extend(tail.encode_utf16());
+        }
 
         fn from(w: &[u16], at: usize) -> &[u16] {
             &w[at.min(w.len())..]
@@ -470,8 +598,8 @@ mod tests {
                 let n = slen(suf);
                 let rv_slice = from(&t, rv);
                 let head = &rv_slice[..rv_slice.len().saturating_sub(n)];
-                let pre1 = first_suffix(head, &["ando", "endo"]).is_some();
-                let pre2 = first_suffix(head, &["ar", "er", "ir"]).is_some();
+                let pre1 = first_suffix(head, ANDO_ENDO).is_some();
+                let pre2 = first_suffix(head, AR_ER_IR).is_some();
                 if pre1 {
                     cut(&mut t, n, "");
                 }
@@ -527,9 +655,9 @@ mod tests {
                 cut(&mut t, slen(sfx), "");
             }
 
-            if ends_with(from(&t, rv), "ch") {
+            if ends_with(from(&t, rv), CH_GH[0]) {
                 cut(&mut t, 2, "c");
-            } else if ends_with(from(&t, rv), "gh") {
+            } else if ends_with(from(&t, rv), CH_GH[1]) {
                 cut(&mut t, 2, "g");
             }
 

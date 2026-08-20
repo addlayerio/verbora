@@ -6,15 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Sentence structure analysis for Rust"
-keywords = ["nlp", "sentence", "analysis"]
+description = "Rule-based clause analysis over POS-tagged English sentences"
+keywords = ["nlp", "sentence", "analysis", "syntax", "pos"]
 categories.workspace = true
 
 [dependencies]
-verbora-core = { workspace = true }
-# `par_analyze_batch`: data-parallel fan-out over the per-sentence
-# `SentenceAnalyzer` pipeline, gated behind the `parallel` feature. See
-# `src/par.rs` for when to reach for it.
+# Deliberately no `verbora-core`: this crate never tokenizes, splits on
+# whitespace, or looks inside a token. Its input unit is the tagged word, which
+# the caller supplies already formed, so none of `verbora-core`'s traits or
+# helpers applies here.
+#
+# `par_analyze_batch`: data-parallel fan-out over the per-sentence `analyze`
+# pipeline, gated behind the `parallel` feature. See `par_analyze_batch`'s own
+# documentation for when to reach for it.
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -23,9 +27,9 @@ serde_json = { workspace = true }
 
 [features]
 default = []
-# Adds `par_analyze_batch`, a `rayon`-backed fan-out over the existing
-# sequential `SentenceAnalyzer` pipeline (`part` + `type_of` + rendering). See
-# `src/par.rs` for when to reach for it.
+# Adds `par_analyze_batch`, a `rayon`-backed fan-out that calls the sequential
+# `analyze` once per sentence. See its own documentation for when to reach for
+# it.
 parallel = ["dep:rayon"]
 
 [[bench]]

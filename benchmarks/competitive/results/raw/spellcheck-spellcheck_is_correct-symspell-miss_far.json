@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 479619.203125,
-      "upper_bound": 481458.46875
+      "lower_bound": 470980.9658755711,
+      "upper_bound": 492502.80882108957
     },
-    "point_estimate": 480538.8359375,
-    "standard_error": 651.1780988118711
+    "point_estimate": 480029.53454815154,
+    "standard_error": 5583.9049905359325
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 479619.203125,
-      "upper_bound": 481458.46875
+      "lower_bound": 465841.5798782157,
+      "upper_bound": 470117.6324786325
     },
-    "point_estimate": 480538.8359375,
-    "standard_error": 651.1780988118711
+    "point_estimate": 468225.4036297641,
+    "standard_error": 1126.4571230178433
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 1363.4475836064667
+      "lower_bound": 5478.905665933094,
+      "upper_bound": 10068.811423832416
     },
-    "point_estimate": 1363.4475836064667,
-    "standard_error": 681.7244897581236
+    "point_estimate": 8027.684401342029,
+    "standard_error": 1266.7845227588507
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 479619.203125,
-      "upper_bound": 481458.46875
+      "lower_bound": 468177.9414449771,
+      "upper_bound": 488063.2692772958
     },
-    "point_estimate": 479987.05625,
-    "standard_error": 708.4311693555057
+    "point_estimate": 475995.5543470765,
+    "standard_error": 5267.0672901547605
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 1300.5571958408136
+      "lower_bound": 14286.278723337797,
+      "upper_bound": 88450.06417297255
     },
-    "point_estimate": 1300.5571958408136,
-    "standard_error": 650.279263681555
+    "point_estimate": 56112.76928257507,
+    "standard_error": 19856.85655469948
   }
 }

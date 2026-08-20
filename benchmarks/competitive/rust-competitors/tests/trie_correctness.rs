@@ -73,7 +73,7 @@ fn load_words() -> Vec<String> {
 
 fn build_all(words: &[String]) -> (Trie, TrieRs<u8>, QpTrie<BString, ()>, StringRadixMap<()>) {
     let mut verbora = Trie::new();
-    verbora.add_strings(words.iter().map(String::as_str));
+    verbora.insert_all(words.iter().map(String::as_str));
 
     let mut b = TrieBuilder::new();
     for w in words {
@@ -314,7 +314,7 @@ fn predictive_search_one_char_prefixes_match_as_a_set() {
     }
 }
 
-/// `Trie::find_matches_on_path` / `trie_rs::common_prefix_search` /
+/// `Trie::prefix_matches` / `trie_rs::common_prefix_search` /
 /// `fast_radix_trie::GenericRadixMap::common_prefixes` agree as a set, for a
 /// real probe sample. `qp-trie` and `fst` have no native equivalent (see
 /// `benches/trie.rs`'s module doc comment) so neither is checked here.
@@ -333,7 +333,7 @@ fn common_prefix_search_matches_as_a_set() {
             .collect();
 
         let verbora_set: BTreeSet<String> = verbora
-            .find_matches_on_path(probe)
+            .prefix_matches(probe)
             .into_iter()
             .map(|c| c.into_owned())
             .collect();
@@ -748,7 +748,7 @@ fn common_prefix_search_extended_and_second_slice_match_as_a_set() {
             .collect();
 
         let verbora_set: BTreeSet<String> = verbora
-            .find_matches_on_path(probe)
+            .prefix_matches(probe)
             .into_iter()
             .map(|c| c.into_owned())
             .collect();

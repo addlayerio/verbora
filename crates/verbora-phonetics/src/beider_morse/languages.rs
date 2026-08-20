@@ -36,16 +36,22 @@ impl Language {
 }
 
 /// A set of up to 19 languages, as a bitset — comfortably inside a `u32`,
-/// `Copy`, no allocation, cheap to intersect. This is the type every
-/// candidate [`Phoneme`](super::rule::Phoneme) carries: "still valid under
-/// every language in this set."
+/// `Copy`, no allocation, cheap to intersect. Every candidate phoneme the
+/// encoder builds carries one of these while it is being built, meaning
+/// "still valid under every language in this set."
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LanguageSet(pub(crate) u32);
 
 impl LanguageSet {
     /// The empty set — no language left. A candidate phoneme reaching this
-    /// state is dropped ([`super::engine::PhonemeBuilder::apply`] never
-    /// keeps an empty-language-set join).
+    /// state is dropped: applying a rule cross-products the running
+    /// candidates against that rule's phonetic alternatives and keeps only
+    /// the combinations whose two language sets still [`intersect`] to
+    /// something, so a join that narrows all the way to this value never
+    /// reaches
+    /// [`BeiderMorseCode::spellings`](crate::BeiderMorseCode::spellings).
+    ///
+    /// [`intersect`]: Self::intersect
     pub const EMPTY: Self = Self(0);
 
     /// A set containing only `language`.

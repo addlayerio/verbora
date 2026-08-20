@@ -31,7 +31,7 @@
 //! that the rotation/chunking formulas genuinely nest, wrap, and size
 //! themselves as every benchmark group implicitly assumes.
 
-use verbora_tfidf::{DocKey, DocumentInput, Terms, TfIdf};
+use verbora_tfidf::TfIdf;
 
 /// Duplicated from `benches/tfidf.rs` — kept in exact lock-step; see that
 /// file for why (byte-identical to `crates/verbora-tfidf/benches/tfidf.rs`'s
@@ -78,12 +78,14 @@ fn vectorize(doc: &str) -> Vec<(String, usize)> {
     counts.into_iter().collect()
 }
 
+/// Mirrors `benches/tfidf.rs`'s corpus builder exactly, including its use of
+/// the keyless `add_document` — see that function's own doc comment for why
+/// the synthetic per-document key the pre-migration API required is not
+/// reintroduced here.
 fn verbora_corpus(docs: &[String]) -> TfIdf {
     let mut t = TfIdf::new();
-    #[expect(clippy::cast_precision_loss, reason = "test corpora are tiny")]
-    for (i, doc) in docs.iter().enumerate() {
-        t.add_document(DocumentInput::Text(doc), DocKey::Num(i as f64), false)
-            .expect("a fresh instance always has a documents array");
+    for doc in docs {
+        t.add_document(doc);
     }
     t
 }
@@ -99,9 +101,9 @@ fn verbora_corpus_matches_lib_doc_example() {
         "this document is about ruby and node.".to_owned(),
         "this document is about node. it has node examples".to_owned(),
     ];
-    let mut t = verbora_corpus(&docs);
+    let t = verbora_corpus(&docs);
     assert_eq!(t.idf("node").unwrap(), 1.0 + (4.0f64 / 4.0).ln());
-    assert_eq!(t.tfidfs(Terms::Text("node")).unwrap(), [1.0, 0.0, 1.0, 2.0]);
+    assert_eq!(t.tfidfs("node"), [1.0, 0.0, 1.0, 2.0]);
 }
 
 /// The property every `bench_build`/`bench_idf`/`bench_tfidf` group in
@@ -202,10 +204,11 @@ fn verbora_corpus_has_one_score_per_document() {
         .repeat(4);
     for n in [1usize, 2, 4, 8, 16, 32] {
         let docs = rotated_texts(&text, n);
-        let mut t = verbora_corpus(&docs);
-        let scores = t
-            .tfidfs(Terms::Text("falcon"))
-            .expect("corpus was built with a documents array");
+        let t = verbora_corpus(&docs);
+        // `tfidfs` returns the scores directly now; it used to return a
+        // `Result` whose only error was "this instance has no documents
+        // array", a state the Rust-native API cannot represent.
+        let scores = t.tfidfs("falcon");
         assert_eq!(
             scores.len(),
             n,
@@ -260,10 +263,10 @@ fn all_implementations_order_idf_by_rarity_identically() {
         "falcon".to_owned(),
     ];
 
-    let mut verbora = verbora_corpus(&docs);
+    let verbora = verbora_corpus(&docs);
     let v: Vec<f64> = ["violet", "copper", "meadow", "falcon"]
         .iter()
-        .map(|t| verbora.idf(t).expect("corpus has a documents array"))
+        .map(|t| verbora.idf(t).expect("corpus is non-empty"))
         .collect();
     assert!(
         v[0] > v[1] && v[1] > v[2] && v[2] > v[3],
@@ -314,9 +317,9 @@ fn all_implementations_order_tfidf_by_term_frequency_at_equal_df() {
         "river".to_owned(),
     ];
 
-    let mut verbora = verbora_corpus(&docs);
-    let v_wolf = verbora.tfidf(Terms::Text("wolf"), 0).expect("has docs");
-    let v_moon = verbora.tfidf(Terms::Text("moon"), 0).expect("has docs");
+    let verbora = verbora_corpus(&docs);
+    let v_wolf = verbora.tfidf("wolf", 0).expect("has docs");
+    let v_moon = verbora.tfidf("moon", 0).expect("has docs");
     assert!(
         v_wolf > v_moon,
         "verbora: tfidf(wolf, d0)={v_wolf} must exceed tfidf(moon, d0)={v_moon}"

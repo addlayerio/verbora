@@ -66,6 +66,21 @@ smallvec = { version = "1", features = ["union", "const_generics"] }
 rustc-hash = "2"
 criterion = { version = "0.5", features = ["html_reports"] }
 rayon = "1"
+# UAX #29 text segmentation. `verbora-tokenizers` is defined in terms of the
+# standard, and a standard whose property assignments change with every Unicode
+# release cannot be served by a frozen hand table (see
+# `docs/design/text-shaping-contract.md` §4.2). 1.13.3 implements Unicode 17.0.0
+# and is dual-licensed MIT OR Apache-2.0.
+unicode-segmentation = "1.13.3"
+# UAX #15 normalization forms plus the `Canonical_Combining_Class` lookup
+# `verbora-normalizers::remove_diacritics` is defined over. Same reasoning as
+# above: normalization *is* a UCD operation, so the alternative is a hand table
+# that is wrong for every character encoded after it was frozen. 0.1.25
+# implements Unicode 17.0.0 — the same version as `unicode-segmentation`
+# 1.13.3, which is what lets the two crates agree — and is dual-licensed
+# MIT OR Apache-2.0 with one transitive dependency, `tinyvec`
+# (Zlib OR Apache-2.0 OR MIT). Both are maintained by the unicode-rs project.
+unicode-normalization = "0.1.25"
 
 [workspace.lints.rust]
 missing_docs = "warn"

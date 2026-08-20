@@ -2,16 +2,18 @@
 //!
 //! `stem` is the **identity function**. The reference says so in a comment —
 //! "disabled stemming for Farsi / Farsi stemming will be supported soon" — and
-//! the whole of the exported behaviour is therefore in `tokenizeAndStem`: split
-//! on whitespace, drop the 26 stop words, return the tokens verbatim. Nothing is
-//! lowercased and no gate is applied.
+//! the whole of the exported behaviour is therefore in `tokenize_and_stem`:
+//! cut at UAX #29 word boundaries, drop the 26 stop words, return the tokens
+//! verbatim. Nothing is lowercased and no gate is applied.
+//!
+//! The token stream is the shared [`verbora_tokenizers::WordTokenizer`] one,
+//! not the whitespace split this used to do, so Persian punctuation and the
+//! Arabic comma now separate words instead of clinging to them.
 
 use std::borrow::Cow;
 
-use verbora_core::whitespace::is_whitespace;
-
 use crate::base::{Casing, TokenizeAndStem};
-use crate::stopwords::{self, Language};
+use crate::stopwords::Language;
 
 /// The (disabled) Persian stemmer.
 ///
@@ -80,7 +82,8 @@ impl PorterStemmerFa {
     /// Returns `token` unchanged. Persian stemming is disabled upstream.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         Cow::Borrowed(token)
@@ -91,16 +94,12 @@ impl TokenizeAndStem for PorterStemmerFa {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Raw;
 
-    fn is_word_char(c: char) -> bool {
-        !is_whitespace(c)
-    }
-
     fn prepare(t: &str) -> Cow<'_, str> {
         clear_text(t)
     }
 
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Fa, word)
+        Language::Fa.contains(word)
     }
 
     fn stem_token(&self, token: &str) -> String {
@@ -126,11 +125,25 @@ mod tests {
         }
     }
 
+    /// Persian now cuts at UAX #29 word boundaries like every other language,
+    /// not on runs of non-whitespace.
+    ///
+    /// U+060C ARABIC COMMA and U+0021 EXCLAMATION MARK are `Word_Break=Other`,
+    /// so they are their own segments and are dropped by the word filter — they
+    /// no longer cling to the preceding token. This is a behaviour change and
+    /// it is the intended one: a token that carries its own trailing
+    /// punctuation cannot match a stop-word list, and the whitespace split that
+    /// produced it was ECMAScript's `\s`, not a property of Persian text.
     #[test]
-    fn tokenizing_splits_on_whitespace_only() {
+    fn tokenizing_cuts_at_word_boundaries() {
         let s = PorterStemmerFa::new();
-        // Punctuation stays attached: the class the author meant never compiled.
-        assert_eq!(s.tokenize_and_stem("سلام، دنیا!", true), ["سلام،", "دنیا!"]);
+        assert_eq!(s.tokenize_and_stem("سلام، دنیا!", true), ["سلام", "دنیا"]);
+        // U+200C ZERO WIDTH NON-JOINER is Format, so WB4 attaches it to the
+        // preceding letter and a Persian compound stays one token.
+        assert_eq!(
+            s.tokenize_and_stem("کتاب\u{200c}ها", true),
+            ["کتاب\u{200c}ها"]
+        );
         assert_eq!(s.tokenize_and_stem("", false), Vec::<String>::new());
         assert_eq!(s.tokenize_and_stem("   ", false), Vec::<String>::new());
     }

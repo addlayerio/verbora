@@ -1,8 +1,8 @@
 # Installation
 
 Verbora is a Cargo workspace of focused crates. Depend on the ones you need, not
-on a monolith: `verbora-distance` pulls in no data assets, and
-`verbora-normalizers` has no dependencies at all.
+on a monolith: `verbora-distance` pulls in no data assets and no Unicode
+character database, and `verbora-ngrams` has no dependencies at all.
 
 ## Requirements
 
@@ -43,30 +43,33 @@ verbora-tokenizers = { path = "../verbora/crates/verbora-tokenizers" }
 ## Which crate do I need?
 
 Each crate stands alone. `verbora-core` is pulled in transitively when a crate
-needs the shared traits; you only name it yourself if you are writing generic
-code or implementing the traits.
+needs the shared traits or the stop-word tables; you only name it yourself if
+you are writing generic code or implementing the traits.
 
 | Crate | Depend on it for | Pulls in |
 |---|---|---|
-| `verbora-tokenizers` | 25 tokenizers, the `Tokenize` trait | `verbora-core`, `regex` |
-| `verbora-distance` | Levenshtein, Damerau, Jaro–Winkler, Dice, Hamming | `verbora-core`, `rustc-hash` |
-| `verbora-phonetics` | SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff | `verbora-core`, `regex` |
-| `verbora-ngrams` | n-gram windows, frequency stats, Chinese n-grams | `verbora-core`, `rustc-hash` |
-| `verbora-normalizers` | diacritic folding, English contractions, Japanese width/kana | *nothing* |
-| `verbora-inflectors` | pluralise/singularise, ordinals (en/fr/ja) | `verbora-core`, `regex` |
-| `verbora-trie` | prefix tree, prefix search, path matching | `smallvec` |
-| `verbora-core` | the shared traits, `Token`, `StopWords`, whitespace helpers | *nothing* (optional `serde`) |
-| `verbora-stemmers` | stemming for sixteen languages | core, tokenizers, normalizers |
-| `verbora-spellcheck` | correction and fuzzy/deletion indexes | core, distance, trie, `rustc-hash` |
-| `verbora-tagger` | Brill POS tagging, training and testing | core, `rustc-hash`, embedded lexicons |
-| `verbora-analyzers` | sentence structure analysis over POS-tagged input | core |
-| `verbora-language` | script/language detection and phonetic recommendations | core, phonetics, transliterators |
+| `verbora-tokenizers` | word, segment and sentence tokenizers | core, `unicode-segmentation` |
+| `verbora-distance` | Levenshtein, Damerau, OSA, Jaro–Winkler, Dice, Hamming | `rustc-hash` |
+| `verbora-phonetics` | twelve encoders plus `PhoneticIndex` | core, tokenizers, `regex` |
+| `verbora-ngrams` | n-gram windows, padding, character windows | *nothing* |
+| `verbora-normalizers` | the four Unicode normalization forms, diacritic folding | `unicode-normalization` |
+| `verbora-inflectors` | pluralise/singularise, ordinals (en/fr/ja) | `regex` |
+| `verbora-trie` | prefix tree, prefix search, path matching, `FrozenTrie` | `smallvec` |
+| `verbora-core` | the shared traits and `StopWords` | `rustc-hash` |
+| `verbora-stemmers` | sixteen stemmers across fourteen languages | core, tokenizers |
+| `verbora-spellcheck` | correction and fuzzy/deletion indexes | distance, `rustc-hash` |
+| `verbora-tagger` | Brill POS tagging, training and testing | `rustc-hash`, embedded lexicons |
+| `verbora-analyzers` | sentence structure analysis over POS-tagged input | *nothing* |
+| `verbora-language` | script/language detection and phonetic recommendations | phonetics, transliterators, optional `whatlang` |
 | `verbora-transliterators` | Japanese kana-to-romaji transliteration | normalizers |
-| `verbora-wordnet` | WordNet lookup and relation traversal | core, `memchr` |
-| `verbora-tfidf` | sparse TF-IDF indexing and querying | core, tokenizers, `rustc-hash`, `serde` |
-| `verbora-sentiment` | multilingual lexicon sentiment | stemmers, `rustc-hash` |
-| `verbora-classifiers` | Bayes, logistic regression and MaxEnt | core, stemmers, `rustc-hash` |
-| `verbora-util` | stop words, abbreviations, graphs and storage | core, `rustc-hash`, `serde` |
+| `verbora-wordnet` | WordNet lookup and relation traversal | `memchr`, `rustc-hash` |
+| `verbora-tfidf` | sparse TF-IDF indexing, querying and JSON persistence | core, tokenizers, `rustc-hash`, `serde` |
+| `verbora-sentiment` | multilingual lexicon sentiment | stemmers, tokenizers, `rustc-hash` |
+| `verbora-classifiers` | Bayes, logistic regression and MaxEnt | stemmers, tokenizers, `rustc-hash` |
+| `verbora-util` | stop words, abbreviations, graphs, path trees | core, `rustc-hash` |
+
+`rayon` is absent from every row above because it is optional everywhere it is
+used — see [Cargo features](cargo-features.md).
 
 A typical text pipeline:
 

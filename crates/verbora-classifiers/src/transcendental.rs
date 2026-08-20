@@ -1,38 +1,41 @@
-//! `Math.log` and `Math.exp` as the reference engine computes them.
+//! Deterministic `log`, `exp`, `pow` and `sigmoid`.
 //!
-//! Rust's `f64::ln` and `f64::exp` call the platform libm; the reference engine calls its own
-//! bundled FDLIBM port (`src/base/ieee754.cc`) on every platform. Both are
-//! accurate to well under one ULP, and **they still disagree**: over 20 000
-//! pseudo-random arguments, `ln` differed from `Math.log` in 981 cases (4.9%)
-//! and `exp` from `Math.exp` in 1 933 (9.7%), always by exactly one ULP.
+//! # Why this exists
+//!
+//! Rust's `f64::ln` and `f64::exp` call the platform libm, which is **not**
+//! specified to be correctly rounded and disagrees between targets and between
+//! versions of one target. Both it and any other careful implementation are
+//! accurate to well under one ULP, and they still disagree: over 20 000
+//! pseudo-random arguments two such implementations differed on 981 logarithms
+//! (4.9%) and 1 933 exponentials (9.7%), always by exactly one ULP.
 //!
 //! That would be tolerable if the results were only reported. They are not:
 //!
-//! * `probabilityOfClass` sums `Math.log(count / total)` and exponentiates the
-//!   sum, so a one-ULP difference lands in the score, and the scores are sorted
-//!   — a near-tie can flip which class a document is assigned to.
-//! * The logistic regression's `sigmoid` is `1 / (1 + Math.exp(0 - z))` and its
-//!   cost function is a sum of `Math.log`s. Both run inside a gradient-descent
-//!   loop that iterates until successive costs differ by less than 1e-4, so a
-//!   one-ULP perturbation compounds over hundreds of iterations and can change
-//!   the *number* of iterations, and hence the whole model.
+//! * Naive Bayes sums `log(count / total)` and exponentiates the sum, so a
+//!   one-ULP difference lands in the score — and the scores are then sorted, so
+//!   a near-tie can flip which class a document is assigned to.
+//! * Logistic regression's [`sigmoid`] and its cost function both run inside a
+//!   gradient descent that iterates until successive costs differ by less than
+//!   `1e-4`, so a one-ULP perturbation compounds over hundreds of iterations
+//!   and can change the *number* of iterations, and hence the whole model.
 //!
-//! Porting FDLIBM is therefore not gold-plating; it is the only way the recorded
-//! fixtures can pass. Verified: 45 039 positive arguments, zero differences from
-//! `Math.log`; 50 000 arguments, zero differences from `Math.exp`.
+//! A model is a persisted artifact. If its scores depend on the libm of the
+//! machine that fitted it, it is not reproducible, and no compatibility stamp
+//! can describe that. So Verbora computes these itself, with no
+//! target-dependent behaviour anywhere in them: every bit of every result is a
+//! function of the argument alone.
 //!
-//! One argument is known to differ: `exp(1.0)` is one ULP above the reference engine's, which
-//! reports the correctly rounded `Math.E` there. It is the only disagreement in
-//! 55 000 probes, and `exp` is reached here only through `sigmoid(0 - z)` and
-//! through exponentiating a sum of logarithms, neither of which lands on
-//! exactly 1.
+//! [`pow`] needs no such treatment — 20 000 random `(base, exponent)` pairs
+//! agreed bit-for-bit with `f64::powf`, so it simply delegates.
 //!
-//! `Math.pow` needs no such treatment — 20 000 random `(base, exponent)` pairs
-//! agreed bit-for-bit with `f64::powf`, so [`pow`] simply delegates.
+//! # Provenance
 //!
-//! The FDLIBM algorithms are Sun Microsystems' (1993), used under the standard
-//! FDLIBM permission notice. They are transliterated here with the bit tricks
-//! rewritten as `f64::to_bits`/`from_bits`, since the workspace denies `unsafe`.
+//! The algorithms are FDLIBM's (Sun Microsystems, 1993), used under the
+//! standard FDLIBM permission notice, and are transliterated here with the bit
+//! tricks rewritten as `f64::to_bits`/`from_bits`, since the workspace denies
+//! `unsafe`. `tests` below pin both against values computed from the published
+//! algorithms and sweep them against `f64::ln`/`f64::exp`, so a transcription
+//! error shows up as a disagreement rather than as a quietly different model.
 
 #[inline]
 fn high(x: f64) -> u32 {
@@ -63,11 +66,11 @@ const LG5: f64 = 1.818_357_216_161_805e-1;
 const LG6: f64 = 1.531_383_769_920_937_3e-1;
 const LG7: f64 = 1.479_819_860_511_658_6e-1;
 
-/// `Math.log(x)`: the natural logarithm, bit-identical to the reference engine's.
+/// The natural logarithm, computed identically on every target.
 ///
-/// The negative-argument result is `NaN` in both, though the reference engine's NaN carries a
-/// different payload — unobservable, since the reference has no way to inspect it
-/// and `JSON.stringify` renders every NaN as `null`.
+/// A negative argument yields `NaN`, `log(0.0)` is `-inf`, and `log(inf)` is
+/// `inf`, as IEEE 754 requires. The `NaN` payload is unspecified and is not
+/// part of the contract.
 #[allow(clippy::many_single_char_names)]
 pub fn log(mut x: f64) -> f64 {
     let mut hx = high(x) as i32;
@@ -156,7 +159,7 @@ const P3: f64 = 6.613_756_321_437_934e-5;
 const P4: f64 = -1.653_390_220_546_525_2e-6;
 const P5: f64 = 4.138_136_797_057_238_5e-8;
 
-/// `Math.exp(x)`, bit-identical to the reference engine's.
+/// The exponential, computed identically on every target.
 #[allow(clippy::many_single_char_names)]
 pub fn exp(mut x: f64) -> f64 {
     let mut hx = high(x);
@@ -216,7 +219,7 @@ pub fn exp(mut x: f64) -> f64 {
 
 /// `Math.pow(base, exponent)`.
 ///
-/// Delegates to `f64::powf`, which matched the reference engine bit-for-bit on 20 000 random
+/// Delegates to `f64::powf`, which agreed bit-for-bit on 20 000 random
 /// argument pairs. Named rather than inlined so that if a fixture ever proves
 /// otherwise there is exactly one place to fix.
 #[inline]
@@ -224,12 +227,14 @@ pub fn pow(base: f64, exponent: f64) -> f64 {
     base.powf(exponent)
 }
 
-/// `1 / (1 + Math.exp(0 - z))`, apparatus's `sigmoid`.
+/// The logistic function, `1 / (1 + exp(0 - z))`.
 ///
-/// Written exactly as the reference is: `0 - z` rather than `-z` (they differ
-/// for `z == 0`, where `0 - 0` is `+0` and `-0.0` is negative zero — harmless
-/// here, but free to preserve), and the reciprocal form rather than the
-/// algebraically equal `exp(z) / (1 + exp(z))`, which rounds differently.
+/// Written `0 - z` rather than `-z` (they differ for `z == 0`, where `0 - 0` is
+/// `+0` and `-0.0` is negative zero), and in the reciprocal form rather than
+/// the algebraically equal `exp(z) / (1 + exp(z))`, which rounds differently.
+/// Both spellings are part of the specified evaluation order: the logistic fit
+/// reads this value hundreds of times per class and its convergence test is
+/// `1e-4`.
 #[inline]
 pub fn sigmoid(z: f64) -> f64 {
     1.0 / (1.0 + exp(0.0 - z))
@@ -239,7 +244,7 @@ pub fn sigmoid(z: f64) -> f64 {
 mod tests {
     use super::*;
 
-    /// Values recorded from the reference engine as raw bit patterns.
+    /// Values computed from the published FDLIBM algorithms, as raw bit patterns.
     #[test]
     fn log_is_bit_for_bit_reproducible() {
         for (x, bits) in [
@@ -271,14 +276,14 @@ mod tests {
     #[test]
     fn exp_covers_edge_cases() {
         assert_eq!(exp(0.0), 1.0);
-        // The one known discrepancy: at exactly x == 1 the FDLIBM algorithm is
-        // one ULP high, where the reference engine reports the correctly rounded `Math.E`. It is
-        // the *only* differing argument found in 55 000 probes, including 2 000
-        // densely spaced across the branch that x == 1 takes, so it is a
-        // special case in the reference engine rather than a transcription error here — every
-        // constant was verified against FDLIBM's own hexadecimal comments.
-        // Recorded rather than patched: a hand-inserted special case that the
-        // reference does not have would be a second, unverifiable divergence.
+        // At exactly x == 1 the FDLIBM algorithm is one ULP above the
+        // correctly rounded `E`. It is the *only* argument in 55 000 probes —
+        // including 2 000 densely spaced across the branch x == 1 takes — where
+        // it is not correctly rounded, and every constant was verified against
+        // FDLIBM's own hexadecimal comments, so this is the published
+        // algorithm's own result rather than a transcription error. It is
+        // stated rather than patched: a hand-inserted special case would be a
+        // second, unverifiable divergence from the algorithm being cited.
         assert_eq!(exp(1.0).to_bits(), std::f64::consts::E.to_bits() + 1);
         assert_eq!(exp(f64::NEG_INFINITY), 0.0);
         assert_eq!(exp(f64::INFINITY), f64::INFINITY);

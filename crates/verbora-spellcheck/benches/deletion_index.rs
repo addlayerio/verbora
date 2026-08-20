@@ -23,7 +23,7 @@
 //! every other benchmark in this crate uses.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use verbora_distance::levenshtein;
+use verbora_distance::damerau_levenshtein;
 use verbora_spellcheck::{DeletionIndex, DeletionIndexBuilder, FuzzyIndex, FuzzyIndexBuilder};
 
 /// Corpus sizes, in words — matches `benches/fuzzy_index.rs`'s own range.
@@ -134,7 +134,10 @@ fn bench_query_vs_brute_force(c: &mut Criterion) {
                 b.iter(|| {
                     let mut n = 0usize;
                     for &q in queries {
-                        n += deletion_index.neighbors(black_box(q), MAX_DISTANCE).count();
+                        n += deletion_index
+                            .neighbors(black_box(q), MAX_DISTANCE)
+                            .expect("MAX_DISTANCE is the index's build-time ceiling")
+                            .count();
                     }
                     n
                 });
@@ -163,8 +166,7 @@ fn bench_query_vs_brute_force(c: &mut Criterion) {
                         n += corpus
                             .iter()
                             .filter(|w| {
-                                (levenshtein(black_box(q), w, &Default::default()).round() as u32)
-                                    <= MAX_DISTANCE
+                                damerau_levenshtein(black_box(q), w) <= MAX_DISTANCE as usize
                             })
                             .count();
                     }

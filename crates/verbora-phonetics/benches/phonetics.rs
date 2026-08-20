@@ -8,14 +8,13 @@
 //! Phonetic encoding is per-word work on short strings, so the costs that matter
 //! are the ones a naive port pays *per call*:
 //!
-//! * **allocation** — the reference builds a fresh string at every one of
-//!   Metaphone's twenty-two stages; this port reuses two buffers, so the
-//!   `metaphone` group measures whether that actually shows up;
-//! * **leaving the ASCII fast path** — non-ASCII input is promoted to
-//!   `Vec<u16>` to keep the reference's code-unit indexing exact, and the
-//!   `ascii_vs_utf16` group prices that promotion;
-//! * **case folding**, which every encoder does first and which is the only
-//!   unavoidable allocation for mixed-case input.
+//! * **allocation** — every encoder here builds its key into one `String`,
+//!   after collecting the input's letters into one reused `Vec<u8>`;
+//! * **input preparation** — the letter scan skips every scalar outside
+//!   `A`-`Z`, and the `ascii_vs_accented` group prices what an accented corpus
+//!   costs that scan;
+//! * **case folding**, which is simple ASCII folding done during that same
+//!   scan.
 //!
 //! Word input comes from `benches/data/words.json`, the same list the other
 //! crates' benchmarks use, so figures are comparable across the workspace.
@@ -23,7 +22,7 @@
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use verbora_phonetics::{DoubleMetaphone, Metaphone, SoundEx, SoundExDM};
+use verbora_phonetics::{DaitchMokotoff, DoubleMetaphone, Metaphone, SoundEx};
 
 #[cfg(feature = "parallel")]
 use std::time::Duration;
@@ -95,7 +94,7 @@ fn bench_encoders(c: &mut Criterion) {
     let soundex = SoundEx::new();
     let metaphone = Metaphone::new();
     let double = DoubleMetaphone::new();
-    let dm = SoundExDM::new();
+    let dm = DaitchMokotoff::new();
 
     let mut g = c.benchmark_group("encoders");
     g.throughput(Throughput::Elements(BATCH as u64));
@@ -122,13 +121,13 @@ fn bench_encoders(c: &mut Criterion) {
         b.iter(|| {
             let mut n = 0;
             for w in black_box(&batch) {
-                let (p, s) = double.process(w);
-                n += p.len() + s.len();
+                let code = double.process(w);
+                n += code.primary().len() + code.alternate().map_or(0, str::len);
             }
             n
         });
     });
-    g.bench_function("dm_soundex", |b| {
+    g.bench_function("daitch_mokotoff", |b| {
         b.iter(|| {
             let mut n = 0;
             for w in black_box(&batch) {
@@ -141,19 +140,19 @@ fn bench_encoders(c: &mut Criterion) {
     g.finish();
 }
 
-/// The cost of leaving the ASCII fast path.
+/// The cost of an accented corpus.
 ///
-/// The same words, with and without an accent. Non-ASCII input is promoted to
-/// `Vec<u16>` so that the reference's code-unit indexing stays exact; this is what
-/// that exactness costs, and it is only paid by input that needs it.
-fn bench_ascii_vs_utf16(c: &mut Criterion) {
+/// The same words, with and without an accent. An accented scalar is skipped
+/// rather than coded, so the difference here is the cost of decoding a
+/// multi-byte scalar during the letter scan -- not a different code path.
+fn bench_ascii_vs_accented(c: &mut Criterion) {
     let metaphone = Metaphone::new();
     let double = DoubleMetaphone::new();
 
     let ascii: Vec<String> = SURNAMES.iter().map(|s| (*s).to_owned()).collect();
     let accented: Vec<String> = SURNAMES.iter().map(|s| format!("{s}é")).collect();
 
-    let mut g = c.benchmark_group("ascii_vs_utf16");
+    let mut g = c.benchmark_group("ascii_vs_accented");
     g.throughput(Throughput::Elements(SURNAMES.len() as u64));
 
     for (label, input) in [("ascii", &ascii), ("accented", &accented)] {
@@ -173,7 +172,7 @@ fn bench_ascii_vs_utf16(c: &mut Criterion) {
                 b.iter(|| {
                     let mut n = 0;
                     for w in black_box(input) {
-                        n += double.process(w).0.len();
+                        n += double.process(w).primary().len();
                     }
                     n
                 });
@@ -192,7 +191,7 @@ fn bench_surnames(c: &mut Criterion) {
     let soundex = SoundEx::new();
     let metaphone = Metaphone::new();
     let double = DoubleMetaphone::new();
-    let dm = SoundExDM::new();
+    let dm = DaitchMokotoff::new();
 
     let mut g = c.benchmark_group("surnames");
     g.throughput(Throughput::Elements(SURNAMES.len() as u64));
@@ -217,11 +216,11 @@ fn bench_surnames(c: &mut Criterion) {
         b.iter(|| {
             SURNAMES
                 .iter()
-                .map(|w| double.process(black_box(w)).0.len())
+                .map(|w| double.process(black_box(w)).primary().len())
                 .sum::<usize>()
         });
     });
-    g.bench_function("dm_soundex", |b| {
+    g.bench_function("daitch_mokotoff", |b| {
         b.iter(|| {
             SURNAMES
                 .iter()
@@ -280,43 +279,50 @@ fn bench_compare(c: &mut Criterion) {
     g.finish();
 }
 
-/// Metaphone's individual rewrite stages.
+/// `process` against `process_into` over a reused buffer.
 ///
-/// `process` chains twenty-one of these through two reusable buffers; each
-/// public stage method allocates its own. The gap between one stage here and
-/// `encoders/metaphone` above is the payoff for the shared pipeline.
-fn bench_metaphone_stages(c: &mut Criterion) {
+/// `process` allocates one `String` per word; `process_into` appends into a
+/// buffer the caller owns, so this group prices exactly one allocation per
+/// call -- the only difference between the two entry points.
+fn bench_process_into(c: &mut Criterion) {
     let m = Metaphone::new();
+    let soundex = SoundEx::new();
     let corpus = words();
     let batch: Vec<&str> = corpus.iter().take(256).map(String::as_str).collect();
 
-    let mut g = c.benchmark_group("metaphone_stages");
+    let mut g = c.benchmark_group("process_into");
     g.throughput(Throughput::Elements(batch.len() as u64));
 
-    // The three shapes of rule: a pair-collapsing backreference, a
-    // context-consuming alternation, and a plain literal replace.
-    g.bench_function("dedup", |b| {
+    g.bench_function("metaphone_process", |b| {
         b.iter(|| {
             batch
                 .iter()
-                .map(|w| m.dedup(black_box(w)).len())
+                .map(|w| m.process(black_box(w)).len())
                 .sum::<usize>()
         });
     });
-    g.bench_function("c_transform", |b| {
+    g.bench_function("metaphone_process_into", |b| {
+        let mut buf = String::with_capacity(64);
         b.iter(|| {
-            batch
-                .iter()
-                .map(|w| m.c_transform(black_box(w)).len())
-                .sum::<usize>()
+            let mut n = 0;
+            for w in &batch {
+                buf.clear();
+                m.process_into(black_box(w), &mut buf);
+                n += buf.len();
+            }
+            n
         });
     });
-    g.bench_function("transform_ck", |b| {
+    g.bench_function("soundex_process_into", |b| {
+        let mut buf = String::with_capacity(8);
         b.iter(|| {
-            batch
-                .iter()
-                .map(|w| m.transform_ck(black_box(w)).len())
-                .sum::<usize>()
+            let mut n = 0;
+            for w in &batch {
+                buf.clear();
+                soundex.process_into(black_box(w), &mut buf);
+                n += buf.len();
+            }
+            n
         });
     });
 
@@ -408,10 +414,10 @@ fn bench_parallel_batch(c: &mut Criterion) {
 criterion_group!(
     base_benches,
     bench_encoders,
-    bench_ascii_vs_utf16,
+    bench_ascii_vs_accented,
     bench_surnames,
     bench_compare,
-    bench_metaphone_stages
+    bench_process_into
 );
 
 #[cfg(feature = "parallel")]

@@ -1,5 +1,5 @@
-//! Accuracy report for `docs/COMPETITIVE_BENCHMARKS.md` §1.9's three real
-//! language detectors — Verbora (via `WhatlangDetector`), `lingua`
+//! Accuracy report for `docs/COMPETITIVE_BENCHMARKS.md` §1.9's real
+//! language detectors — Verbora (three configurations, below), `lingua`
 //! (21-language restricted via `from_languages()`), and `whichlang`
 //! (13-language, forced-choice, cannot abstain) — over
 //! `datasets/language-accuracy/dataset.json` (see that directory's own
@@ -12,6 +12,41 @@
 //! the spec's `ACCURACY + PERFORMANCE` section ("Una librería 10x más
 //! rápida pero sustancialmente menos correcta no debe presentarse
 //! simplemente como '10x faster' sin contexto").
+//!
+//! # Three Verbora rows, because Verbora ships three detector configurations
+//!
+//! `benches/language.rs` times the same three, under the same names, so a
+//! reader can put a latency next to every accuracy number here — the
+//! spec's `ACCURACY + PERFORMANCE` rule ("una librería 10x más rápida pero
+//! sustancialmente menos correcta no debe presentarse simplemente como
+//! '10x faster' sin contexto") is only satisfiable if both halves exist
+//! for each row.
+//!
+//! Each row id names its own detector rather than saying `verbora` three
+//! times, so a reader of either this table or a Criterion report can tell
+//! which of three genuinely different detectors — their latencies differ
+//! by up to ~400x — produced any given number:
+//!
+//! * `verbora_default_whatlang` — `WhatlangDetector`, the crate's accuracy
+//!   reference and **the default** (`verbora_language::DefaultDetector`
+//!   resolves to it; `crates/verbora-language/tests/default_detector.rs`
+//!   pins that, and re-scores this same corpus as an executed test).
+//! * `verbora_fast_hashed_linear` — `HashedLinearDetector`
+//!   (`fast-language-detection`), the hashed-linear model. Same *family*
+//!   of algorithm as `whichlang`, which is why benchmarking `whichlang`
+//!   only against the default would report an algorithm difference as a
+//!   library difference. It is opt-in, not the default, and this report is
+//!   where the reason is visible: it loses items at the short tiers, which
+//!   leaves it below `whichlang` overall (45/52 vs. 48/52) even though it
+//!   is measurably faster than `whichlang` at every tier. A speed win
+//!   quoted without that number is the exact presentation this project's
+//!   benchmark charter forbids, so the fast model gets its own labelled
+//!   row and never stands in for the default's.
+//! * `verbora_fallback_hashed_whatlang` —
+//!   `FallbackDetector<HashedLinear, Whatlang>`, the composition that runs
+//!   the fast model and consults `WhatlangDetector` only when the fast
+//!   model abstains. It is the one configuration that buys speed back
+//!   without an accuracy trade: it matches the default tier for tier.
 //!
 //! Run with: `cargo run --release --example language_accuracy`
 //!
@@ -38,7 +73,9 @@ use competitive_rust::language_support::{
     TIERS, lingua_iso, lingua_restricted_languages, load_dataset, whichlang_iso,
 };
 use serde::Serialize;
-use verbora_language::{LanguageDetector, WhatlangDetector};
+use verbora_language::{
+    FallbackDetector, HashedLinearDetector, LanguageDetector, WhatlangDetector,
+};
 
 /// One detector's answer for one dataset item.
 #[derive(Debug, Clone, Serialize)]
@@ -125,7 +162,10 @@ fn compute_metrics(preds: &[&Prediction]) -> Metrics {
 
 fn print_row(detector: &str, tier: &str, m: &Metrics) {
     println!(
-        "{detector:<10} {tier:<12} n={:<3} correct={:<3} abstained={:<3} accuracy={:>6.1}% coverage={:>6.1}% macroP={:.3} macroR={:.3} macroF1={:.3}",
+        // Width 33 is the longest row id (`verbora_fallback_hashed_whatlang`)
+        // plus one space, so every row's columns stay aligned without the
+        // ids themselves being abbreviated back into ambiguity.
+        "{detector:<33} {tier:<12} n={:<3} correct={:<3} abstained={:<3} accuracy={:>6.1}% coverage={:>6.1}% macroP={:.3} macroR={:.3} macroF1={:.3}",
         m.total,
         m.correct,
         m.abstained,
@@ -147,6 +187,9 @@ fn main() {
     );
 
     let verbora = WhatlangDetector::new();
+    let verbora_fast = HashedLinearDetector::new();
+    let verbora_fallback =
+        FallbackDetector::new(HashedLinearDetector::new(), WhatlangDetector::new());
     let lingua_detector =
         lingua::LanguageDetectorBuilder::from_languages(&lingua_restricted_languages()).build();
 
@@ -161,12 +204,29 @@ fn main() {
                 .detect(text)
                 .best()
                 .map(|c| c.language.iso639_1().to_owned());
+            let verbora_fast_predicted = verbora_fast
+                .detect(text)
+                .best()
+                .map(|c| c.language.iso639_1().to_owned());
+            let verbora_fallback_predicted = verbora_fallback
+                .detect(text)
+                .best()
+                .map(|c| c.language.iso639_1().to_owned());
             let lingua_predicted = lingua_detector.detect_language_of(text).map(lingua_iso);
             let whichlang_predicted =
                 Some(whichlang_iso(whichlang::detect_language(text)).to_owned());
 
+            // These ids are the same strings `benches/language.rs` uses for
+            // its Criterion rows -- that correspondence is what lets a
+            // reader put a latency next to every accuracy number here, so
+            // the two files' id sets must be renamed together or not at all.
             for (name, predicted) in [
-                ("verbora", verbora_predicted),
+                ("verbora_default_whatlang", verbora_predicted),
+                ("verbora_fast_hashed_linear", verbora_fast_predicted),
+                (
+                    "verbora_fallback_hashed_whatlang",
+                    verbora_fallback_predicted,
+                ),
                 ("lingua", lingua_predicted),
                 ("whichlang", whichlang_predicted),
             ] {

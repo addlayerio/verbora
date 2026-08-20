@@ -20,7 +20,6 @@
 //! incremental `train()` calls, `keep_stops` both ways, and corpora that
 //! tokenise to nothing (the error paths).
 
-use verbora_classifiers::transcendental;
 use verbora_classifiers::{
     BayesClassifier, BayesEngine, ClassifierError, Engine, LogisticEngine,
     LogisticRegressionClassifier,
@@ -263,7 +262,7 @@ mod dense_reference {
                     k -= 1;
                     sum += row[k] * theta[k];
                 }
-                transcendental::sigmoid(sum)
+                verbora_classifiers::sigmoid(sum)
             })
             .collect()
     }
@@ -273,8 +272,8 @@ mod dense_reference {
         let m = examples.len();
         let mut sum = 0.0;
         for k in 0..m {
-            let cost_1 = (0.0 - y[k]) * transcendental::log(h[k]);
-            let cost_0 = (1.0 - y[k]) * transcendental::log(1.0 - h[k]);
+            let cost_1 = (0.0 - y[k]) * verbora_classifiers::log(h[k]);
+            let cost_0 = (1.0 - y[k]) * verbora_classifiers::log(1.0 - h[k]);
             sum += cost_1 - cost_0;
         }
         (1.0 / m as f64) * sum
@@ -336,7 +335,7 @@ mod dense_reference {
                     }
                 }
                 if i >= max_it {
-                    return Err(ClassifierError::UnableToFindMinimum);
+                    return Err(ClassifierError::NoMinimum);
                 }
                 last = current;
             }

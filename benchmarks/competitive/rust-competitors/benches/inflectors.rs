@@ -2,24 +2,28 @@
 //!
 //! See `docs/COMPETITIVE_BENCHMARKS.md` §1.5 for the research dossier.
 //!
-//! # `CountInflector`: two competitors now
+//! # `OrdinalInflector`: one competitor
 //!
 //! `ordinal` 0.4.0 (heaths/ordinal-rs) is the matrix's single `Yes` — full
 //! algorithmic equivalence — row in the entire Inflectors group: "same narrow
-//! job, actively maintained... best single match found." This pass adds a
-//! second, genuinely different comparison rather than a redundant one:
-//! `Inflector` 0.11.4's `numbers::ordinalize::ordinalize` operates on the
-//! decimal **string** directly (`&str -> String`), the same shape as
-//! `CountInflector::nth_str`, not `CountInflector::nth`'s `i64 -> String` —
-//! so `bench_count_inflector_nth_str` is a distinct group from
-//! `bench_count_inflector_nth`, not a second entry in the same one. Found
-//! while implementing this pass, not in the matrix's original dossier:
-//! `ordinalize` has **no** version of `ordinal`'s `% 20`/`% 100` bug (it
-//! never computes a remainder at all — see `../tests/
-//! inflectors_correctness.rs`'s own doc comment) and fully agrees with
-//! `CountInflector::nth_str` over every non-negative `i64` in `0..2_000_000`,
-//! exhaustively checked in that same file before this benchmark's numbers are
-//! trusted.
+//! job, actively maintained... best single match found." It is now the only
+//! competitor here.
+//!
+//! **Coverage deliberately dropped by the Rust-native migration.** This file
+//! previously carried a second group, `count_inflector_nth_str`, comparing
+//! `Inflector` 0.11.4's `numbers::ordinalize::ordinalize` (`&str -> String`)
+//! against `CountInflector::nth_str`, Verbora's own string-in ordinal twin.
+//! `CountInflector` is now [`OrdinalInflector`] and it has **no string-in
+//! form at all**: its surface is `nth(i64) -> String`, `nth_into(i64, &mut
+//! String)` and `suffix(i64) -> &'static str`. Taking a decimal string,
+//! parsing it and re-emitting it is not an operation Verbora performs, so
+//! there is no Verbora side of that comparison left to time. Per this
+//! project's fairness rules a benchmark of a capability one side does not
+//! have measures nothing, so the group is deleted rather than faked by
+//! wrapping `nth` in a `str::parse` the library never does — that would time
+//! a parse Verbora does not own and report it as Verbora's cost. The
+//! `inflector` crate remains pinned and benchmarked, via
+//! `string::{pluralize, singularize}` below.
 //!
 //! # `NounInflector`: two competitors, narrowed to a verified-agreeing domain
 //!
@@ -43,7 +47,20 @@
 //! `singularize`, verified in `../tests/inflectors_correctness.rs`'s
 //! `benchmarked_pairs_agree_across_all_three_implementations`, which is kept
 //! in sync with this file's `PAIRS` array by hand — drift would be caught by
-//! that test failing. `inflector-plus` (matrix: `Selected cases`, a weaker
+//! that test failing.
+//!
+//! **Two pairs left that domain in the Rust-native migration**, found by
+//! re-running the unanimity probe rather than by inspection:
+//! `("virus", "viri")` — Verbora now pluralizes `virus` to `"viruses"` while
+//! both competitors still say `"viri"` — and `("alias", "aliases")`, where
+//! Verbora's `singularize("aliases")` now returns `"aliase"` and so no longer
+//! round-trips. Both are removed from `PAIRS` here and from the test's wider
+//! array, because a timing row whose two sides answer differently is exactly
+//! what this domain exists to exclude. They are not simply dropped:
+//! `../tests/inflectors_correctness.rs`'s
+//! `the_two_pairs_the_migration_removed_from_the_unanimous_domain` pins each
+//! divergence explicitly, so the exclusion stays visible and cannot silently
+//! widen. `inflector-plus` (matrix: `Selected cases`, a weaker
 //! fork/continuation of `Inflector`) is deliberately not pinned: once
 //! `Inflector` itself is benchmarked, `inflector-plus` would add a second,
 //! strictly-inferior implementation of the identical comparison for no
@@ -56,17 +73,16 @@
 //! of the three. See `docs/PERFORMANCE.md`'s Inflectors section for the
 //! honest reasoning on each.
 //!
-//! # Two real `CountInflector`/`ordinal` divergences — and the domain that
-//! sidesteps both
+//! # One real `OrdinalInflector`/`ordinal` divergence — and the domain that
+//! sidesteps it, plus a bug found in the competitor
 //!
-//! **Negative integers.** For *negative* integers not ending in `11`/`12`/
-//! `13`, Verbora and `ordinal` genuinely disagree: `CountInflector::nth(-1)`
-//! is `"-1th"` (the reference's `%` keeps the dividend's sign, so no negative
-//! number ever matches the `1`/`2`/`3` cases — see `count.rs`'s own doc
-//! comment), while `ordinal` takes the input's absolute value first, so
-//! `(-1i64).to_ordinal_string()` is `"-1st"`. `Inflector::ordinalize` shares
-//! this same shape of divergence, independently verified in
-//! `../tests/inflectors_correctness.rs`.
+//! **Negative integers — no longer a divergence.** Verbora's ordinal suffix
+//! is now specified on `n.unsigned_abs() % 100` (see `ordinal.rs`'s
+//! `OrdinalInflector::suffix`), so `OrdinalInflector::nth(-1)` is `"-1st"`
+//! and agrees with `ordinal`'s `(-1i64).to_ordinal_string()`. The migration
+//! resolved this divergence in the competitor's favour; the sign is
+//! orthographic on both sides. `../tests/inflectors_correctness.rs` asserts
+//! the agreement directly rather than this file merely claiming it.
 //!
 //! **A real bug in `ordinal` 0.4.0, found while verifying this benchmark, not
 //! in the matrix's dossier.** Its teens-exception check uses `n % 20` where
@@ -80,35 +96,44 @@
 //! than quietly worked around — see `docs/PERFORMANCE.md`'s Inflectors
 //! section.
 //!
-//! Both divergences are verified explicitly, with assertions, not just
-//! described, in `../tests/inflectors_correctness.rs`. This benchmark's
-//! domain — the [`sample`] function's fixed, hand-picked value set — was
-//! chosen *before* the bug above was found and, by chance, avoids every
-//! affected value; `agrees_on_benchmarked_values` is the regression check
-//! that keeps that true. The domain is non-negative (sidestepping the first
-//! divergence deliberately: the overwhelming common real-world use of an
-//! ordinal formatter — ranks, page numbers, "1st place" — is non-negative
-//! anyway) and bug-range-free (sidestepping the second, now that it is
-//! known) — exactly as `distance.rs` narrows to ASCII input and says so.
+//! Both facts are verified explicitly, with assertions, not just described,
+//! in `../tests/inflectors_correctness.rs`. This benchmark's domain — the
+//! [`sample`] function's fixed, hand-picked value set — was chosen *before*
+//! the bug above was found and, by chance, avoids every affected value;
+//! `agrees_on_benchmarked_values` is the regression check that keeps that
+//! true. The domain is non-negative and bug-range-free — exactly as
+//! `distance.rs` narrows to ASCII input and says so.
 //!
 //! # Shape
 //!
-//! Four groups, each with `BenchmarkId::new(competitor, n)` for `n` in
+//! Three groups, each with `BenchmarkId::new(competitor, n)` for `n` in
 //! [`SIZES`], throughput in elements:
 //!
 //! - `count_inflector_nth` — `n` calls to `nth`/`to_ordinal_string` over the
-//!   fixed non-negative range from [`sample`].
-//! - `count_inflector_nth_str` — the same range, decimal-string-formatted
-//!   first, `n` calls to `nth_str`/`ordinalize`.
+//!   fixed non-negative range from [`sample`]. The group name is kept as-is
+//!   across the `CountInflector` → [`OrdinalInflector`] rename so this row's
+//!   Criterion directory, and the historical raw results already committed
+//!   under it, stay continuous.
 //! - `noun_inflector_pluralize` / `noun_inflector_singularize` — `n` calls to
 //!   `pluralize`/`singularize`, cycling through [`PAIRS`]'s verified-agreeing
 //!   singular/plural forms.
+//!
+//! # Owned output on both sides
+//!
+//! [`OrdinalInflector::nth`] returns an owned `String`, as do
+//! `to_ordinal_string`, `pluralizer::pluralize` and `Inflector`'s
+//! `to_plural`/`to_singular`: every side of every group below allocates its
+//! result, so no side is credited with an allocation the other pays. Verbora
+//! additionally offers the allocation-free `suffix`/`nth_into`, which are
+//! *not* benchmarked here precisely because no competitor has a counterpart —
+//! they belong to Verbora's own in-workspace bench, not to a cross-
+//! implementation comparison.
 //!
 //! Every call's input and output is wrapped in `black_box`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use ordinal::ToOrdinal;
-use verbora_inflectors::{CountInflector, NounInflector};
+use verbora_inflectors::{NounInflector, OrdinalInflector};
 
 /// Batch sizes: `nth` calls per measured iteration. Matches `distance.rs`'s
 /// `SIZES` so `scripts/collect-results.py`'s hardcoded size set finds every
@@ -135,7 +160,7 @@ fn bench_count_inflector(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("verbora", n), &nums, |bch, nums| {
             bch.iter(|| {
                 nums.iter()
-                    .map(|&i| CountInflector::nth(black_box(i)).len())
+                    .map(|&i| OrdinalInflector::nth(black_box(i)).len())
                     .sum::<usize>()
             });
         });
@@ -143,35 +168,6 @@ fn bench_count_inflector(c: &mut Criterion) {
             bch.iter(|| {
                 nums.iter()
                     .map(|&i| black_box(i).to_ordinal_string().len())
-                    .sum::<usize>()
-            });
-        });
-    }
-    g.finish();
-}
-
-/// `count_inflector_nth_str`: the same [`sample`] range, pre-formatted as
-/// decimal strings (formatting happens once, outside the timed closure, so
-/// both sides measure only the ordinal-suffix decision, not `i64::to_string`)
-/// — `Inflector::ordinalize`'s real API shape is `&str -> String`, not
-/// `i64 -> String`, so `nth_str` (`CountInflector::nth`'s own string-in
-/// twin) is the fair Verbora counterpart, not `nth`.
-fn bench_count_inflector_nth_str(c: &mut Criterion) {
-    let mut g = c.benchmark_group("count_inflector_nth_str");
-    for n in SIZES {
-        let strs: Vec<String> = sample(n).iter().map(i64::to_string).collect();
-        g.throughput(Throughput::Elements(n as u64));
-        g.bench_with_input(BenchmarkId::new("verbora", n), &strs, |bch, strs| {
-            bch.iter(|| {
-                strs.iter()
-                    .map(|s| CountInflector::nth_str(black_box(s)).len())
-                    .sum::<usize>()
-            });
-        });
-        g.bench_with_input(BenchmarkId::new("inflector", n), &strs, |bch, strs| {
-            bch.iter(|| {
-                strs.iter()
-                    .map(|s| inflector::numbers::ordinalize::ordinalize(black_box(s)).len())
                     .sum::<usize>()
             });
         });
@@ -231,7 +227,6 @@ const PAIRS: &[(&str, &str)] = &[
     ("bench", "benches"),
     ("watch", "watches"),
     ("tax", "taxes"),
-    ("virus", "viri"),
     ("status", "statuses"),
     ("sky", "skies"),
     ("story", "stories"),
@@ -281,7 +276,7 @@ fn bench_noun_inflector_pluralize(c: &mut Criterion) {
             bch.iter(|| {
                 words
                     .iter()
-                    .map(|w| verbora.pluralize(black_box(w)).unwrap().len())
+                    .map(|w| verbora.pluralize(black_box(w)).len())
                     .sum::<usize>()
             });
         });
@@ -315,7 +310,7 @@ fn bench_noun_inflector_singularize(c: &mut Criterion) {
             bch.iter(|| {
                 words
                     .iter()
-                    .map(|w| verbora.singularize(black_box(w)).unwrap().len())
+                    .map(|w| verbora.singularize(black_box(w)).len())
                     .sum::<usize>()
             });
         });
@@ -342,7 +337,6 @@ fn bench_noun_inflector_singularize(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_count_inflector,
-    bench_count_inflector_nth_str,
     bench_noun_inflector_pluralize,
     bench_noun_inflector_singularize,
 );

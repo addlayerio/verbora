@@ -27,10 +27,10 @@ locality: whatever the loop touches   locality: can be arranged
 **Preallocation.** When you know there are 10,000 documents you can size the
 output once instead of doubling a `Vec` fourteen times.
 
-**Shared setup.** Anything constructed per item can be hoisted. In Verbora most
-tokenizers are zero-sized types so this is nearly free, but it is real for
-`OrthographyTokenizer::new(lang)`, `SentenceTokenizer::with_abbreviations(...)`
-and the regex-driven tokenizers, which hold compiled patterns.
+**Shared setup.** Anything constructed per item can be hoisted. In Verbora two of
+the three tokenizers are zero-sized types so this is nearly free, but it is real
+for `SentenceTokenizer::with_abbreviations(...)`, for a stemmed
+`SentimentAnalyzer`, and for anything holding a compiled index.
 
 **Cache behaviour.** Processing documents that are contiguous in memory beats
 chasing pointers to documents scattered across the heap. This is the same
@@ -50,15 +50,14 @@ document size.
 of the corpus:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let t = AggressiveTokenizer::new();
 let corpus = ["alpha beta", "gamma delta", "epsilon zeta"];
 
 // Stops at document 2, token 1. Documents 3 onward are never touched.
 let found = corpus
     .iter()
-    .flat_map(|doc| t.tokens(doc))
+    .flat_map(|doc| WordTokenizer.tokens(doc))
     .position(|w| w == "gamma");
 
 assert_eq!(found, Some(2));
@@ -76,29 +75,28 @@ item. For a batch it is the cost of all of them.
 not optimisation.</strong> Both are default trait methods on
 <code>verbora_core</code>: a plain <code>map</code> over the inputs, one fresh
 allocation per item, no shared buffer. <code>tokenize_batch</code> therefore
-allocates <em>more</em> than a <code>tokenize_into</code> loop, and yields
-<code>Vec&lt;Vec&lt;String&gt;&gt;</code> — owned strings — where
-<code>Tokenize::tokenize</code> gives you borrowed <code>&amp;str</code>. They
+allocates <em>more</em> than a <code>tokenize_borrowed_into</code> loop, and
+yields <code>Vec&lt;Vec&lt;String&gt;&gt;</code> — owned strings — where
+<code>tokenize_borrowed</code> gives you borrowed <code>&amp;str</code>. They
 exist so generic code over the traits can say "process all of these", and so an
 implementor can override them later without breaking callers.
 </div>
 
-For parallel batching there are thirteen opt-in `par_*_batch` APIs — see
+For parallel batching there are fourteen opt-in `par_*_batch` APIs — see
 [Parallelism](parallelism.md). None of them reuse a buffer across items either,
 so the allocation-conscious batch loop is still code you write:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 /// A batch loop with the three batch advantages made explicit.
 fn token_counts(corpus: &[&str]) -> Vec<usize> {
-    let tokenizer = AggressiveTokenizer::new();   // setup hoisted
     let mut counts = Vec::with_capacity(corpus.len());  // output pre-sized
-    let mut buf = Vec::new();                     // working buffer reused
+    let mut buf: Vec<&str> = Vec::new();                // working buffer reused
 
     for document in corpus {
         buf.clear();
-        tokenizer.tokenize_into(document, &mut buf);
+        WordTokenizer.tokenize_borrowed_into(document, &mut buf);
         counts.push(buf.len());
     }
 
@@ -128,18 +126,17 @@ Chunked streaming gets most of both: bounded memory, plus a slice big enough to
 amortise setup and to hand to a thread pool.
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn process_chunked(corpus: &[&str], chunk: usize) -> usize {
-    let tokenizer = AggressiveTokenizer::new();
-    let mut buf = Vec::new();
+    let mut buf: Vec<&str> = Vec::new();
     let mut total = 0;
 
     for window in corpus.chunks(chunk) {
         // Peak memory is bounded by `chunk`, not by `corpus.len()`.
         for document in window {
             buf.clear();
-            tokenizer.tokenize_into(document, &mut buf);
+            WordTokenizer.tokenize_borrowed_into(document, &mut buf);
             total += buf.len();
         }
     }

@@ -1,19 +1,37 @@
-//! Generated rule and word tables.
+//! The rule and word tables the stemmers read.
 //!
-//! Everything in here was machine-derived by reading the reference tree
-//! directly. Nothing is transcribed by hand: the
-//! Lancaster rule order, the Carry suffix maps, the thirteen stop-word lists,
-//! the 29,932-word Indonesian dictionary, and the per-language gate character
-//! classes are all mechanically derived, because every one of them contains at
-//! least one detail a human transcriber would have "corrected" — the Spanish
-//! character class in the *German* gate, the `/i` flag that widens Cyrillic
-//! `а-я` to include U+1C80..U+1C86, the two-leading-space `'  aseis'` entry.
+//! Four kinds of table live here: the Lancaster rule order, the Carry suffix
+//! maps, the Indonesian root dictionary, and the per-language gate character
+//! classes. All are checked-in data — nothing here is computed at build time
+//! and nothing has a generator in the tree.
 //!
-//! DO NOT EDIT BY HAND: these are checked in as data.
+//! The thirteen stop-word lists used to live here as well, twice over: once in
+//! source order and once as a hand-written sorted table. Both are gone. The
+//! data has one home, `verbora-core`, and the sorted view is derived there;
+//! `crate::stopwords` keeps only the per-language mutability this crate adds
+//! on top of it.
+//!
+//! **Data is not exempt from review.** These files were previously headed "do
+//! not edit by hand", and that is exactly how two stop words stayed dead for
+//! the life of the crate: Dutch `"je "` carried a trailing space and German
+//! `"ei,"` a trailing comma, so neither could ever equal a token, and no test
+//! looked. A table nothing checks is a table nothing knows is right. This
+//! module's test-only `audit` submodule walks every entry of every stop-word
+//! list through the pipeline that consumes it, and [`gates`]' own test module
+//! walks all seven gated lists through the gate that guards them — which is
+//! how the German gate was found to be a verbatim copy of the Spanish one,
+//! holding `á é í ñ ó ú` and not `ä ö ß`. The equivalent for the remaining
+//! three tables (Lancaster rules, Carry suffixes, the Indonesian dictionary)
+//! is still owed — see the per-file notes.
 
 pub(crate) mod carry_tables;
 pub(crate) mod charsets;
 pub(crate) mod gates;
 pub(crate) mod indonesian_dict;
 pub(crate) mod lancaster_rules;
-pub(crate) mod stopwords;
+
+#[cfg(test)]
+pub(crate) mod audit;
+
+#[cfg(test)]
+mod table_audit;

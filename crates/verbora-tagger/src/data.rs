@@ -1,59 +1,31 @@
-//! Access to the bundled data, embedded in the binary at build time.
+//! The bundled Brill data, embedded in the binary at build time.
 //!
 //! `build.rs` packs the two lexicon JSON files into a compact index that this
-//! module reads *in place*: no parsing, no allocation, and no `OnceLock`
-//! initialisation of a 92,662-entry hash map. Startup cost is the cost of
-//! slicing a byte array — see [`crate::lexicon`] for the measured comparison
-//! against parsing the JSON.
+//! module reads *in place*: no parsing, no allocation, and no lazily-initialised
+//! 92,662-entry hash map. Start-up cost is the cost of slicing a byte array.
 //!
-//! # Layout
-//!
-//! All integers little-endian; every section is a contiguous run of fixed-width
-//! values so a lookup is arithmetic plus a binary search.
-//!
-//! ```text
-//! 0   magic "LEX1"
-//! 4   n_entries, n_tags, n_numeric
-//! 16  section offsets: tag_off, tag_bytes, key_off, key_bytes, val_off, val_ids, sorted
-//! 44  tag_off[n_tags+1]     u32  -> tag_bytes
-//!     tag_bytes             u8   interned tag strings
-//!     key_off[n_entries+1]  u32  -> key_bytes
-//!     key_bytes             u8   keys, in the reference enumeration order
-//!     val_off[n_entries+1]  u32  -> val_ids (in u16 units)
-//!     val_ids               u16  tag indices
-//!     sorted[n_entries]     u32  entry indices, in key byte order
-//! ```
-//!
-//! Entries are stored in **the reference enumeration order** — array-index-like
-//! keys first in ascending numeric order, then insertion order — because that
-//! order reaches the output through `prettyPrint` and through the sequence of
-//! `addWord` calls `Corpus.buildLexicon` makes. `n_numeric` is the length of the
-//! hoisted prefix, so runtime additions can be spliced into it.
-//!
-//! The byte array is `align_of == 1`, so multi-byte values are read with
-//! `from_le_bytes` rather than transmuted. A lookup performs ~17 of those reads;
-//! they are not measurable next to the string comparisons.
+//! Entries are stored sorted by key bytes, which for well-formed UTF-8 is the
+//! same order as by Unicode scalar value, so a lookup is a binary search over
+//! bytes and iteration is in a documented, deterministic order.
 
-include!(concat!(env!("OUT_DIR"), "/rules.rs"));
+include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
-/// The packed English lexicon: 92,662 entries, 122 distinct tags.
+/// The packed English lexicon.
 static ENGLISH_LEXICON_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/english.lex"));
-/// The packed Dutch lexicon: 11,699 entries, 194 distinct tags.
+/// The packed Dutch lexicon.
 static DUTCH_LEXICON_BLOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/dutch.lex"));
 
 /// A dictionary read directly out of the executable.
 #[derive(Debug, Clone, Copy)]
-pub struct StaticLexicon {
+pub(crate) struct StaticLexicon {
     blob: &'static [u8],
     n_entries: usize,
-    n_numeric: usize,
     tag_off: usize,
     tag_bytes: usize,
     key_off: usize,
     key_bytes: usize,
     val_off: usize,
     val_ids: usize,
-    sorted: usize,
 }
 
 #[inline]
@@ -80,94 +52,61 @@ impl StaticLexicon {
             };
         }
         assert!(
-            blob[0] == b'L' && blob[1] == b'E' && blob[2] == b'X' && blob[3] == b'1',
+            blob[0] == b'L' && blob[1] == b'E' && blob[2] == b'X' && blob[3] == b'2',
             "packed lexicon has the wrong magic"
         );
         Self {
             blob,
             n_entries: word!(1),
-            n_numeric: word!(3),
-            tag_off: word!(4),
-            tag_bytes: word!(5),
-            key_off: word!(6),
-            key_bytes: word!(7),
-            val_off: word!(8),
-            val_ids: word!(9),
-            sorted: word!(10),
+            tag_off: word!(3),
+            tag_bytes: word!(4),
+            key_off: word!(5),
+            key_bytes: word!(6),
+            val_off: word!(7),
+            val_ids: word!(8),
         }
     }
 
     /// The bundled English dictionary.
-    #[must_use]
-    pub const fn english() -> Self {
+    pub(crate) const fn english() -> Self {
         Self::header(ENGLISH_LEXICON_BLOB)
     }
 
     /// The bundled Dutch dictionary.
-    #[must_use]
-    pub const fn dutch() -> Self {
+    pub(crate) const fn dutch() -> Self {
         Self::header(DUTCH_LEXICON_BLOB)
     }
 
     /// Number of entries.
     #[inline]
-    #[must_use]
-    pub const fn len(self) -> usize {
+    pub(crate) const fn len(self) -> usize {
         self.n_entries
     }
 
-    /// Whether the dictionary is empty. Never true for the bundled data.
+    /// The key of entry `i`, in ascending byte order.
     #[inline]
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.n_entries == 0
-    }
-
-    /// How many leading entries have array-index-like keys.
-    ///
-    /// The Dutch lexicon has 122 (`"1"`…`"2000"`); the English one has none.
-    #[inline]
-    #[must_use]
-    pub const fn numeric_prefix_len(self) -> usize {
-        self.n_numeric
-    }
-
-    /// The key of entry `i`, in enumeration order.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i >= len()`.
-    #[inline]
-    #[must_use]
-    pub fn key(self, i: usize) -> &'static str {
+    pub(crate) fn key(self, i: usize) -> &'static str {
         // Written from `&str` in build.rs, so the bytes are valid UTF-8.
         std::str::from_utf8(self.key_raw(i)).expect("packed keys are UTF-8")
     }
 
     /// The key of entry `i` as raw bytes, skipping UTF-8 validation.
     ///
-    /// A lookup makes ~17 probes and only the *last* one is ever converted to a
+    /// A lookup makes ~17 probes and only the last can ever be handed back as a
     /// `&str`. Validating the other sixteen costs `O(key length)` each for an
-    /// answer the packer already guaranteed, and it showed up as roughly a third
-    /// of `Lexicon::first_category` in `benches/tagger.rs`. Byte comparison is
-    /// also the correct ordering here: the permutation table is sorted by bytes,
-    /// and for UTF-8 that is the same order as by code point.
+    /// answer the packer already guaranteed. Byte comparison is also the correct
+    /// ordering: the table is sorted by bytes, and for UTF-8 that is the same
+    /// order as by scalar value.
     #[inline]
-    #[must_use]
-    pub fn key_raw(self, i: usize) -> &'static [u8] {
+    pub(crate) fn key_raw(self, i: usize) -> &'static [u8] {
         let lo = self.key_bytes + u32_at(self.blob, self.key_off + i * 4);
         let hi = self.key_bytes + u32_at(self.blob, self.key_off + (i + 1) * 4);
         &self.blob[lo..hi]
     }
 
-    /// The tags of entry `i`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `i >= len()`.
+    /// The tags of entry `i`. Never empty: `build.rs` rejects entries with none.
     #[inline]
-    #[must_use]
-    pub fn tags(self, i: usize) -> StaticTags {
+    pub(crate) fn tags(self, i: usize) -> StaticTags {
         StaticTags {
             lex: self,
             at: u32_at(self.blob, self.val_off + i * 4),
@@ -183,39 +122,32 @@ impl StaticLexicon {
         std::str::from_utf8(&self.blob[lo..hi]).expect("packed tags are UTF-8")
     }
 
-    /// The enumeration-order index of `word`, or `None`.
-    #[must_use]
-    pub fn find(self, word: &str) -> Option<usize> {
+    /// The index of `word`, or `None`.
+    pub(crate) fn find(self, word: &str) -> Option<usize> {
         let (mut lo, mut hi) = (0usize, self.n_entries);
         let needle = word.as_bytes();
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let entry = u32_at(self.blob, self.sorted + mid * 4);
-            match self.key_raw(entry).cmp(needle) {
+            match self.key_raw(mid).cmp(needle) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return Some(entry),
+                std::cmp::Ordering::Equal => return Some(mid),
             }
         }
         None
     }
 
-    /// The first tag of `word`, if the word is present.
-    ///
-    /// Returns `Some(None)` for a word present with an **empty** tag list — the
-    /// English key `""` is exactly that, and the distinction from "absent"
-    /// decides whether the default category applies.
+    /// The most frequent tag of `word`, if the word is present.
     #[inline]
-    #[must_use]
-    pub fn first_tag(self, word: &str) -> Option<Option<&'static str>> {
+    pub(crate) fn primary_tag(self, word: &str) -> Option<&'static str> {
         let i = self.find(word)?;
-        Some(self.tags(i).next())
+        self.tags(i).next()
     }
 }
 
 /// Iterator over one entry's tags.
 #[derive(Debug, Clone)]
-pub struct StaticTags {
+pub(crate) struct StaticTags {
     lex: StaticLexicon,
     at: usize,
     end: usize,
@@ -246,62 +178,69 @@ impl ExactSizeIterator for StaticTags {}
 mod tests {
     use super::*;
 
+    /// The build script rejects exactly the entries the lexicon entry contract
+    /// forbids, and nothing else. As of the bundled data that is one English
+    /// entry — the key `""`, whose tag list is also empty — and no Dutch one.
     #[test]
-    fn english_matches_the_recorded_shape() {
-        let en = StaticLexicon::english();
-        assert_eq!(en.len(), 92_662);
-        assert_eq!(en.numeric_prefix_len(), 0);
-        assert_eq!(en.key(0), "'");
-        assert_eq!(en.key(2), "Ranavan");
-        assert_eq!(en.tags(2).collect::<Vec<_>>(), ["NNP"]);
-    }
-
-    #[test]
-    fn the_empty_key_maps_to_an_empty_tag_list() {
-        // Present, but with no tags: `tagWord('')` returns `[]`, so the word
-        // survives untagged instead of taking the default category.
-        let en = StaticLexicon::english();
-        assert_eq!(en.first_tag(""), Some(None));
-        assert_eq!(en.first_tag("no-such-word-anywhere"), None);
-    }
-
-    #[test]
-    fn words_that_look_like_reference_internals_are_real_entries() {
-        let en = StaticLexicon::english();
+    fn build_rejected_exactly_the_contract_violations() {
+        assert_eq!(ENGLISH_ENTRIES_REJECTED, 1);
+        assert_eq!(DUTCH_ENTRIES_REJECTED, 0);
         assert_eq!(
-            en.tags(en.find("undefined").unwrap()).collect::<Vec<_>>(),
-            ["JJ"]
+            StaticLexicon::english().len(),
+            92_662 - ENGLISH_ENTRIES_REJECTED
         );
         assert_eq!(
-            en.tags(en.find("null").unwrap()).collect::<Vec<_>>(),
-            ["JJ", "NN"]
+            StaticLexicon::dutch().len(),
+            11_699 - DUTCH_ENTRIES_REJECTED
         );
-        assert_eq!(
-            en.tags(en.find("length").unwrap()).collect::<Vec<_>>(),
-            ["NN"]
-        );
-        // ...whereas these are not in the dictionary at all.
-        assert!(en.find("__proto__").is_none());
-        assert!(en.find("toString").is_none());
     }
 
+    /// Every packed key and every packed tag satisfies the literal contract, and
+    /// every entry carries at least one tag. Enumerated, not sampled.
     #[test]
-    fn dutch_hoists_its_numeric_keys() {
-        let du = StaticLexicon::dutch();
-        assert_eq!(du.len(), 11_699);
-        assert_eq!(du.numeric_prefix_len(), 122);
-        assert_eq!(du.key(0), "1");
-        assert_eq!(du.key(9), "10");
-        assert_eq!(du.key(122), "nijptangen");
-    }
-
-    #[test]
-    fn every_key_is_findable() {
+    fn every_packed_entry_satisfies_the_contract() {
         for lex in [StaticLexicon::english(), StaticLexicon::dutch()] {
             for i in 0..lex.len() {
+                let key = lex.key(i);
+                assert!(!key.is_empty(), "empty key at {i}");
+                assert!(
+                    !key.chars().any(char::is_whitespace),
+                    "key {key:?} contains whitespace"
+                );
+                let tags: Vec<&str> = lex.tags(i).collect();
+                assert!(!tags.is_empty(), "entry {key:?} has no tags");
+                for t in tags {
+                    assert!(!t.is_empty(), "empty tag on {key:?}");
+                    assert!(
+                        !t.chars().any(char::is_whitespace),
+                        "tag {t:?} on {key:?} contains whitespace"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Keys are stored in strictly ascending byte order, and every one of them
+    /// is findable at its own index. Enumerated over all 104,360 entries.
+    #[test]
+    fn keys_are_sorted_and_every_key_is_findable() {
+        for lex in [StaticLexicon::english(), StaticLexicon::dutch()] {
+            for i in 0..lex.len() {
+                if i > 0 {
+                    assert!(
+                        lex.key_raw(i - 1) < lex.key_raw(i),
+                        "keys out of order at {i}"
+                    );
+                }
                 assert_eq!(lex.find(lex.key(i)), Some(i), "{:?}", lex.key(i));
             }
         }
+    }
+
+    #[test]
+    fn the_empty_key_is_gone() {
+        assert_eq!(StaticLexicon::english().find(""), None);
+        assert_eq!(StaticLexicon::english().primary_tag(""), None);
     }
 
     #[test]

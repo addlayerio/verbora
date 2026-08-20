@@ -19,13 +19,13 @@
 //!
 //! # Two regimes: shape-parity rows and byte-exact rows
 //!
-//! The four reference-ported groups (`soundex`, `metaphone`,
-//! `double_metaphone`, `dm_soundex`) are marked `Partial` in the matrix,
-//! never `Yes`: Verbora transcribes the reference's own variants
-//! (condense-before-drop Soundex, a Metaphone/Double Metaphone with a
-//! documented stage-ordering quirk and a family of the reference-truthiness
-//! accidents, a single-branch Daitch-Mokotoff), while rphonetic implements
-//! the textbook / Apache commons-codec originals. The two sides are expected
+//! The three reference-ported groups (`soundex`, `metaphone`,
+//! `double_metaphone`) are marked `Partial` in the matrix, never `Yes`:
+//! Verbora transcribes its own variants (condense-before-drop Soundex, a
+//! Metaphone/Double Metaphone with a documented stage-ordering quirk), while
+//! rphonetic implements the textbook / Apache commons-codec originals. A
+//! fourth such group, `dm_soundex`, is gone — see the Daitch-Mokotoff
+//! section below. The two sides are expected
 //! to disagree on the literal encoded string for real input — that is
 //! documented, not a bug in this bench — so **those benchmarks never assert
 //! output equality between Verbora and rphonetic**, only that both are doing
@@ -55,7 +55,8 @@
 //!   and a pair-shaped batch would break this file's one-name-per-element
 //!   `Throughput` convention.
 //! * `daitch_mokotoff` — see the Daitch-Mokotoff section below: this group
-//!   pairs with `.soundex()`, the *other* D-M method than `dm_soundex`'s.
+//!   pairs with `.soundex()`, the branching D-M method, and is now the only
+//!   D-M group.
 //!
 //! What genuine correctness properties there are to check (byte-exact
 //! equality for the seven extension groups, crash-safety on the whole shared
@@ -66,34 +67,101 @@
 //!
 //! # Fairness reconfiguration: `max_code_length`
 //!
-//! rphonetic's `Metaphone`/`DoubleMetaphone` default to a maximum code
-//! length of **4** (`Metaphone::default()`); Verbora's default is **32**
-//! (`Metaphone::new().process(...)`, i.e. `process_with(_, None)`, which
-//! resolves to 32 — see `crates/verbora-phonetics/src/metaphone.rs`). Both
-//! encoders below are therefore constructed with `new(Some(32))`, not
-//! `default()` — using the default would have rphonetic doing strictly less
-//! work (truncating four times earlier) and make it look faster than it
-//! fairly is. `tests/phonetics_correctness.rs` proves this reconfiguration
-//! actually changes the observed output length rather than silently no-op'ing.
+//! rphonetic's `Metaphone` and `DoubleMetaphone` both take an optional
+//! maximum code length, and both default to **4**. Verbora's two encoders
+//! now sit on *opposite* sides of that default, so each rphonetic encoder is
+//! configured separately to match its Verbora counterpart. Getting this
+//! wrong in either direction silently changes how much work one side does.
 //!
-//! # Daitch-Mokotoff: each Verbora type against its own matching method
+//! * **Metaphone — `RMetaphone::new(None)`, uncapped.**
+//!   `crates/verbora-phonetics/src/metaphone.rs` states the contract: "The
+//!   key is not truncated. `process` returns the complete key, however long
+//!   the word makes it," on the reasoning that a fixed-width key is an
+//!   indexing decision rather than a property of Philips's rules. rphonetic
+//!   documents `None` as "the resulting code can be of any length"
+//!   (`rphonetic-3.0.6/src/metaphone.rs`), which is the match. `default()`
+//!   (cap 4) would have rphonetic truncating where Verbora does not.
+//!
+//! * **Double Metaphone — `RDoubleMetaphone::new(Some(4))`, capped at 4.**
+//!   `crates/verbora-phonetics/src/double_metaphone.rs` states "**Both keys
+//!   are at most four characters**, per the algorithm," and enforces it with
+//!   a `MAX_KEY_LEN = 4` that also ends the scan early once both keys are
+//!   full. Four is rphonetic's own default here, so `Some(4)` and
+//!   `default()` are the same configuration; it is written explicitly to
+//!   make the pairing legible next to Metaphone's `None`.
+//!
+//! Both encoders previously used `new(Some(32))`, matching a pre-migration
+//! Verbora whose Metaphone *and* Double Metaphone defaulted to a 32-character
+//! cap. Neither still does, and leaving `Some(32)` in place would now have
+//! rphonetic's Metaphone doing less work than Verbora and its Double
+//! Metaphone doing far more. `tests/phonetics_correctness.rs` asserts both
+//! configurations against Verbora's live behaviour rather than trusting this
+//! comment.
+//!
+//! # Double Metaphone: reading the result
+//!
+//! `DoubleMetaphone::process` now returns a `DoubleMetaphoneCode` rather than
+//! a `(String, String)` pair. Both sides still *encode* identically — one
+//! call producing both keys — but the two results are read differently, and
+//! both differences are disclosed here rather than smoothed over, because
+//! each shifts the measured number slightly.
+//!
+//! **`Option` vs. a repeated primary.** Verbora's `alternate()` is
+//! `Option<&str>`, `None` exactly when the encoder never forked or the
+//! alternate came out equal to the primary
+//! (`crates/verbora-phonetics/src/double_metaphone.rs`); rphonetic
+//! materializes a duplicate primary in that case. The two therefore carry
+//! the *same two logical keys* in different shapes, and the Verbora row
+//! accumulates `alternate().unwrap_or(primary)` so that both sinks sum the
+//! same quantity rather than Verbora's silently summing less. `unwrap_or` on
+//! an `Option<&str>` is one branch and no allocation, so this makes the sink
+//! comparable without fabricating work on Verbora's side.
+//!
+//! Verbora genuinely does *not* allocate that duplicate key where rphonetic
+//! does. That is a real difference between the libraries, not a benchmark
+//! artifact, and it is left in the measurement.
+//!
+//! **rphonetic's accessors clone; Verbora's borrow.**
+//! `DoubleMetaphoneResult`'s fields are private and its only public readers,
+//! `primary()` and `alternate()`, are `pub fn primary(&self) -> String {
+//! self.primary.clone() }` (`rphonetic-3.0.6/src/double_metaphone.rs`), so
+//! the rphonetic row pays **two heap allocations per name** that Verbora's
+//! `&str` accessors do not. That cost is *not* removed here and must not be
+//! read as an encoding-speed difference: there is no non-cloning path
+//! through rphonetic's public API, so every real caller of rphonetic's
+//! Double Metaphone pays it too. It is a genuine cost of that crate's API
+//! shape, reported as such. The inverse mistake — making Verbora clone into
+//! owned `String`s to match — is what this project's fairness rules forbid:
+//! it would time an allocation Verbora does not perform.
+//!
+//! # Daitch-Mokotoff
 //!
 //! rphonetic's `DaitchMokotoffSoundex` has two public methods: `.soundex()`,
 //! the genuine multi-branch D-M algorithm that can return up to 8
 //! pipe-separated codes, and `.encode()` (the `Encoder` trait method,
-//! single-branch, exactly one code). Verbora now ships both shapes, and
-//! each gets the method that matches its output exactly:
+//! single-branch, exactly one code).
 //!
-//! * `dm_soundex` — Verbora's `SoundExDM::process` returns one `String`
-//!   (the JS reference's single-branch variant), so only `.encode()`
-//!   matches that output shape and only `.encode()` is benchmarked there —
-//!   using `.soundex()` would silently compare a materially larger amount
-//!   of work.
+//! Verbora ships **one** D-M encoder, the branching `DaitchMokotoff`, so
+//! there is one group:
+//!
 //! * `daitch_mokotoff` — Verbora's branching `DaitchMokotoff::process`
 //!   returns the pipe-joined branch codes, byte-identical to rphonetic's
 //!   `.soundex()` (branch order included; `tests/phonetics_correctness.rs`
 //!   proves it, quirks and all), so `.soundex()` is *exactly* the fair
-//!   counterpart there — same amount of work, same output format.
+//!   counterpart — same amount of work, same output format.
+//!
+//! **The `dm_soundex` group is gone.** It paired rphonetic's single-branch
+//! `.encode()` against `SoundExDM::process`, Verbora's single-branch D-M
+//! variant. `SoundExDM` existed only to reproduce the JS reference's
+//! single-branch output shape, and the Rust-native migration deleted it —
+//! leaving no Verbora side to time. Timing rphonetic's `.encode()` against
+//! Verbora's *branching* `process` would compare a single walk against up to
+//! eight, which is precisely the "silently compare a materially larger
+//! amount of work" trap the old group's own doc comment warned about, so the
+//! group is deleted rather than repointed. Coverage lost: the
+//! single-branch D-M timing row. Correctness coverage of rphonetic's
+//! `.encode()` is unaffected — `tests/phonetics_correctness.rs` still pins
+//! `DaitchMokotoff::codes()[0]` against it byte for byte.
 //!
 //! Construction cost is deliberately excluded on both rows: rphonetic's
 //! `DaitchMokotoffSoundex::default()` parses the embedded commons-codec
@@ -235,7 +303,6 @@ use rphonetic::{
 use verbora_phonetics::{
     BeiderMorse, Caverphone1, Caverphone2, Cologne, DaitchMokotoff, DoubleMetaphone,
     MatchRatingApproach, Metaphone, NameType, Nysiis, Phonex, RefinedSoundex, RuleType, SoundEx,
-    SoundExDM,
 };
 
 /// One fixed, realistic, moderately complex surname for the "single encode"
@@ -370,7 +437,7 @@ fn bench_metaphone(c: &mut Criterion) {
     let verbora = Metaphone::new();
     // `Some(32)`, not `default()` (which is `Some(4)`) — see the module doc
     // comment's "Fairness reconfiguration" section.
-    let rphonetic = RMetaphone::new(Some(32));
+    let rphonetic = RMetaphone::new(None);
 
     let mut g = c.benchmark_group("metaphone");
     for (label, elements, batch) in &scales {
@@ -402,21 +469,25 @@ fn bench_double_metaphone(c: &mut Criterion) {
     let scales = batches(&names);
 
     let verbora = DoubleMetaphone::new();
-    let rphonetic = RDoubleMetaphone::new(Some(32));
+    let rphonetic = RDoubleMetaphone::new(Some(4));
 
     let mut g = c.benchmark_group("double_metaphone");
     for (label, elements, batch) in &scales {
         g.throughput(Throughput::Elements(*elements));
         // Both sides compute *both* keys (primary + alternate) per call —
-        // Verbora's `process` always returns the pair, so the fair rphonetic
+        // Verbora's `process` always returns both, so the fair rphonetic
         // counterpart is `.double_metaphone(...)` (both codes), not the
         // `Encoder::encode` trait method (primary only, half the work).
+        //
+        // Two disclosed asymmetries in how the two results are *read*; see
+        // this file's "Double Metaphone: reading the result" section.
         g.bench_with_input(BenchmarkId::new("verbora", label), batch, |b, batch| {
             b.iter(|| {
                 let mut total = 0usize;
                 for w in black_box(batch.as_slice()) {
-                    let (primary, alternate) = verbora.process(black_box(w));
-                    total += primary.len() + alternate.len();
+                    let code = verbora.process(black_box(w));
+                    let primary = code.primary();
+                    total += primary.len() + code.alternate().unwrap_or(primary).len();
                 }
                 black_box(total)
             });
@@ -427,40 +498,6 @@ fn bench_double_metaphone(c: &mut Criterion) {
                 for w in black_box(batch.as_slice()) {
                     let result = rphonetic.double_metaphone(black_box(w));
                     total += result.primary().len() + result.alternate().len();
-                }
-                black_box(total)
-            });
-        });
-    }
-    g.finish();
-}
-
-fn bench_dm_soundex(c: &mut Criterion) {
-    let names = load_names();
-    let scales = batches(&names);
-
-    let verbora = SoundExDM::new();
-    let rphonetic = DaitchMokotoffSoundex::default();
-
-    let mut g = c.benchmark_group("dm_soundex");
-    for (label, elements, batch) in &scales {
-        g.throughput(Throughput::Elements(*elements));
-        g.bench_with_input(BenchmarkId::new("verbora", label), batch, |b, batch| {
-            b.iter(|| {
-                let mut total = 0usize;
-                for w in black_box(batch.as_slice()) {
-                    total += verbora.process(black_box(w)).len();
-                }
-                black_box(total)
-            });
-        });
-        // `.encode()`, never `.soundex()` — see the module doc comment's
-        // "Daitch-Mokotoff: encode(), never soundex()" section.
-        g.bench_with_input(BenchmarkId::new("rphonetic", label), batch, |b, batch| {
-            b.iter(|| {
-                let mut total = 0usize;
-                for w in black_box(batch.as_slice()) {
-                    total += rphonetic.encode(black_box(w)).len();
                 }
                 black_box(total)
             });
@@ -817,7 +854,6 @@ criterion_group!(
     bench_soundex,
     bench_metaphone,
     bench_double_metaphone,
-    bench_dm_soundex,
     bench_cologne,
     bench_nysiis,
     bench_caverphone1,

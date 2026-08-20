@@ -1,218 +1,145 @@
-//! Ordered, deduplicated collections of transformation rules.
-//!
-//! The reference stores rules in a plain object keyed by `rule.key()`, so the
-//! collection is *insertion-ordered* and *first-wins* on duplicates — and both
-//! properties are observable. Rule order decides the outcome, because every rule
-//! runs at every position and later rules see earlier rules' edits:
-//!
-//! ```text
-//! (the/DT a/NN b/NN) + ["NN VB PREV-TAG DT", "NN JJ NEXT-TAG NN"] -> DT VB NN
-//! (the/DT a/NN b/NN) + ["NN JJ NEXT-TAG NN", "NN VB PREV-TAG DT"] -> DT JJ NN
-//! ```
-//!
-//! No rule key is array-index-like (every key contains commas), so the reference's
-//! integer-key hoisting never applies here and object order is exactly insertion
-//! order — which is why `RuleSet::new(Language::Dutch).rules()` reproduces
-//! `brill_CONTEXTRULES.json` line for line.
+//! An ordered, duplicate-free sequence of transformation rules.
 
-use rustc_hash::FxHashMap;
+use std::fmt;
+use std::str::FromStr;
 
-use crate::data;
-use crate::parser::SyntaxError;
-use crate::rule::TransformationRule;
+use rustc_hash::FxHashSet;
 
-/// Which bundled data set to load.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Language {
-    /// `'EN'` — 18 rules, 92,662 lexicon entries.
-    #[default]
-    English,
-    /// `'DU'` — 285 rules, 11,699 lexicon entries.
-    Dutch,
+use crate::language::Language;
+use crate::parse::RuleParseError;
+use crate::rule::Rule;
+
+/// Why a multi-rule text did not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleSetParseError {
+    /// One-based line number of the offending rule.
+    pub line: usize,
+    /// What was wrong with it.
+    pub cause: RuleParseError,
 }
 
-impl Language {
-    /// Resolves a language code the way `RuleSet`'s `switch` does.
-    ///
-    /// The switch has **no `default` case** and `data` is pre-initialised to the
-    /// English rule set, so every unrecognised code — including `undefined` and
-    /// `''` — yields English. `Lexicon`'s switch *does* have a default, and it
-    /// selects **Dutch**; the two disagree, which is why
-    /// [`Language::for_lexicon`] exists separately.
-    #[must_use]
-    pub fn for_rule_set(code: Option<&str>) -> Self {
-        match code {
-            Some("DU") => Self::Dutch,
-            _ => Self::English,
-        }
-    }
-
-    /// Resolves a language code the way `Lexicon`'s `switch` does.
-    ///
-    /// `'EN'` is English; **everything else**, `undefined` included, is Dutch.
-    /// `new Lexicon()` is therefore a Dutch lexicon — which is how
-    /// [`crate::Corpus::build_lexicon`] ends up returning one.
-    #[must_use]
-    pub fn for_lexicon(code: Option<&str>) -> Self {
-        match code {
-            Some("EN") => Self::English,
-            _ => Self::Dutch,
-        }
-    }
-
-    /// The bundled rule strings for this language.
-    #[must_use]
-    pub const fn rule_strings(self) -> &'static [&'static str] {
-        match self {
-            Self::English => data::ENGLISH_RULES,
-            Self::Dutch => data::DUTCH_RULES,
-        }
+impl fmt::Display for RuleSetParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "line {}: {}", self.line, self.cause)
     }
 }
 
-/// An insertion-ordered set of transformation rules.
-#[derive(Debug, Clone, Default)]
+impl std::error::Error for RuleSetParseError {}
+
+/// The rules a [`BrillTagger`](crate::BrillTagger) applies, in order.
+///
+/// # Order is the meaning
+///
+/// Rules are applied **one at a time, each to the whole sentence**, in the order
+/// they appear here — the order Brill (1995) §2 specifies. Two rule sets with
+/// the same members in a different order are different taggers:
+///
+/// ```
+/// use verbora_tagger::{BrillTagger, Lexicon, RuleSet, Tag};
+///
+/// let lexicon = Lexicon::new(Tag::new("NN")?);
+/// let forward: RuleSet = "NN VB PREV-TAG DT\nNN JJ NEXT-TAG NN".parse()?;
+/// let reverse: RuleSet = "NN JJ NEXT-TAG NN\nNN VB PREV-TAG DT".parse()?;
+///
+/// let words = ["the", "a", "b"];
+/// let mut seed = Lexicon::new(Tag::new("NN")?);
+/// seed.insert("the", vec![Tag::new("DT")?])?;
+///
+/// let a = BrillTagger::new(&seed, &forward).tag(words);
+/// let b = BrillTagger::new(&seed, &reverse).tag(words);
+/// assert_eq!(a[1].tag().as_str(), "VB");
+/// assert_eq!(b[1].tag().as_str(), "JJ");
+/// # let _ = lexicon;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Duplicates
+///
+/// A rule already present — same pattern, same new tag, same condition — is not
+/// added a second time, and the first occurrence keeps its position. Identity is
+/// structural, on the three fields; there is no string key to collide, which
+/// matters because Dutch tags contain commas and a comma-joined key really can
+/// merge two different rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuleSet {
-    rules: Vec<TransformationRule>,
-    index: FxHashMap<Box<str>, usize>,
+    rules: Vec<Rule>,
+    seen: FxHashSet<Rule>,
 }
 
 impl RuleSet {
     /// An empty rule set.
-    ///
-    /// # Not `new RuleSet()`
-    ///
-    /// The reference's zero-argument constructor loads the **English** rules, which
-    /// is why `BrillPOSTrainer` seeds all eighteen of them into every rule set it
-    /// derives. Use [`RuleSet::for_language`] with
-    /// [`Language::for_rule_set`] to reproduce that; this constructor is the
-    /// genuinely empty one, which the reference has no way to express.
     #[must_use]
-    pub fn empty() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    /// Loads a bundled rule set.
+    /// The rules Verbora bundles for `language`.
     ///
     /// # Panics
     ///
-    /// Never, for the bundled data: all 303 rule strings are parsed at start-up
-    /// in a debug assertion and in the crate's tests.
+    /// Never: every bundled rule string is parsed by
+    /// `tests::every_bundled_rule_parses`, which enumerates all 313 of them.
     #[must_use]
-    pub fn for_language(language: Language) -> Self {
-        let mut set = Self::empty();
-        for source in language.rule_strings() {
-            let rule = TransformationRule::parse(source)
-                .unwrap_or_else(|e| panic!("bundled rule {source:?} does not parse: {e}"));
-            set.add_rule(rule);
-        }
-        set
+    pub fn bundled(language: Language) -> Self {
+        Self::parse_lines(language.rule_strings())
+            .unwrap_or_else(|e| panic!("bundled rule set does not parse: {e}"))
     }
 
-    /// Parses and adds each rule string in order.
+    /// Parses one rule string per element, in order.
     ///
     /// # Errors
     ///
-    /// Returns the first syntax error, exactly as the reference constructor
-    /// propagates a `peg$SyntaxError` out of itself.
-    pub fn from_rule_strings<S: AsRef<str>>(sources: &[S]) -> Result<Self, SyntaxError> {
-        let mut set = Self::empty();
-        for s in sources {
-            set.add_rule(TransformationRule::parse(s.as_ref())?);
+    /// The first rule that does not parse, with its index as the line number.
+    pub fn parse_lines<S: AsRef<str>>(sources: &[S]) -> Result<Self, RuleSetParseError> {
+        let mut set = Self::new();
+        for (i, s) in sources.iter().enumerate() {
+            let rule = s
+                .as_ref()
+                .parse::<Rule>()
+                .map_err(|cause| RuleSetParseError { line: i + 1, cause })?;
+            set.push(rule);
         }
         Ok(set)
     }
 
-    /// Adds a rule, returning `false` if its key is already present.
-    ///
-    /// First-wins: the existing rule keeps its position *and* its training
-    /// counters.
-    pub fn add_rule(&mut self, rule: TransformationRule) -> bool {
-        if self.index.contains_key(rule.key()) {
+    /// Appends a rule, returning `false` if an identical one is already present.
+    pub fn push(&mut self, rule: Rule) -> bool {
+        if !self.seen.insert(rule.clone()) {
             return false;
         }
-        self.index.insert(rule.key().into(), self.rules.len());
         self.rules.push(rule);
         true
     }
 
-    /// Removes the rule with the same key, if present, preserving the order of
-    /// the rest.
-    pub fn remove_rule(&mut self, rule: &TransformationRule) {
-        self.remove_key(rule.key());
-    }
-
-    /// Removes by key.
-    pub fn remove_key(&mut self, key: &str) {
-        let Some(at) = self.index.remove(key) else {
-            return;
-        };
-        self.rules.remove(at);
-        for slot in self.index.values_mut() {
-            if *slot > at {
-                *slot -= 1;
-            }
-        }
-    }
-
-    /// Keeps only the rules `keep` accepts, preserving order.
-    ///
-    /// Equivalent to iterating a snapshot and calling [`Self::remove_rule`] on
-    /// the rejects — which is what the trainer's pruning step does — but in one
-    /// pass instead of one `Vec::remove` per rule.
-    pub fn retain(&mut self, mut keep: impl FnMut(&TransformationRule) -> bool) {
-        self.rules.retain(|r| keep(r));
-        self.reindex();
-    }
-
-    fn reindex(&mut self) {
-        self.index.clear();
-        for (i, r) in self.rules.iter().enumerate() {
-            self.index.insert(r.key().into(), i);
-        }
-    }
-
-    /// Whether a rule with the same key is present.
+    /// Whether an identical rule is present.
     #[must_use]
-    pub fn has_rule(&self, rule: &TransformationRule) -> bool {
-        self.index.contains_key(rule.key())
+    pub fn contains(&self, rule: &Rule) -> bool {
+        self.seen.contains(rule)
     }
 
-    /// The rules, in insertion order.
-    ///
-    /// The reference's `getRules()` materialises a **fresh array on every call**,
-    /// and `applyRules` calls it once per token position; returning a borrowed
-    /// slice removes O(positions × rules) allocations without changing what is
-    /// iterated.
+    /// The rules, in application order.
     #[inline]
     #[must_use]
-    pub fn rules(&self) -> &[TransformationRule] {
+    pub fn rules(&self) -> &[Rule] {
         &self.rules
     }
 
-    /// Mutable access, for the trainer's score counters.
-    #[inline]
-    pub fn rules_mut(&mut self) -> &mut [TransformationRule] {
-        &mut self.rules
-    }
-
-    /// Consumes the set, yielding its rules in insertion order.
+    /// Consumes the set, yielding its rules in application order.
     #[inline]
     #[must_use]
-    pub fn into_rules(self) -> Vec<TransformationRule> {
+    pub fn into_rules(self) -> Vec<Rule> {
         self.rules
     }
 
-    /// Looks a rule up by key.
-    #[must_use]
-    pub fn get(&self, key: &str) -> Option<&TransformationRule> {
-        self.index.get(key).map(|i| &self.rules[*i])
-    }
-
-    /// Mutable lookup by key.
-    pub fn get_mut(&mut self, key: &str) -> Option<&mut TransformationRule> {
-        let i = *self.index.get(key)?;
-        self.rules.get_mut(i)
+    /// Keeps only the rules `keep` accepts, preserving order.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Rule) -> bool) {
+        self.rules.retain(|r| {
+            let k = keep(r);
+            if !k {
+                self.seen.remove(r);
+            }
+            k
+        });
     }
 
     /// Number of rules.
@@ -227,82 +154,184 @@ impl RuleSet {
         self.rules.is_empty()
     }
 
-    /// One `prettyPrint()` line per rule, each followed by a newline.
+    /// How far the whole set can read from a site, as `(left, right)`.
     ///
-    /// For the bundled data this round-trips the source JSON strings exactly.
+    /// Each rule is applied to the entire sentence before the next one runs, so
+    /// rule *k*'s answer at position *i* can depend on rule *k-1*'s answers
+    /// within its own reach, and the reaches add. The sum is exactly the context
+    /// [`BrillTagger::tag_stream`](crate::BrillTagger::tag_stream) must buffer
+    /// on each side for its output to equal
+    /// [`BrillTagger::tag`](crate::BrillTagger::tag)'s.
     #[must_use]
-    pub fn pretty_print(&self) -> String {
-        let mut out = String::new();
+    pub fn context_span(&self) -> (usize, usize) {
+        self.rules.iter().fold((0, 0), |(l, r), rule| {
+            let (a, b) = rule.reach();
+            (l + a, r + b)
+        })
+    }
+}
+
+impl fmt::Display for RuleSet {
+    /// One rule per line, each followed by a newline. Parses back to an equal
+    /// rule set.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for r in &self.rules {
-            out.push_str(&r.to_string());
-            out.push('\n');
+            writeln!(f, "{r}")?;
         }
-        out
+        Ok(())
+    }
+}
+
+impl FromStr for RuleSet {
+    type Err = RuleSetParseError;
+
+    /// One rule per line. Blank and whitespace-only lines are skipped, so a
+    /// trailing newline is fine.
+    fn from_str(s: &str) -> Result<Self, RuleSetParseError> {
+        let mut set = Self::new();
+        for (i, line) in s.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let rule = line
+                .parse::<Rule>()
+                .map_err(|cause| RuleSetParseError { line: i + 1, cause })?;
+            set.push(rule);
+        }
+        Ok(set)
+    }
+}
+
+impl FromIterator<Rule> for RuleSet {
+    fn from_iter<T: IntoIterator<Item = Rule>>(iter: T) -> Self {
+        let mut set = Self::new();
+        for r in iter {
+            set.push(r);
+        }
+        set
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::language::brill_paper_rule_strings;
 
+    /// Every bundled rule string parses, and every one of them round-trips
+    /// through its canonical form. Enumerated over all 313 strings, which is
+    /// what makes `RuleSet::bundled`'s `# Panics` note true.
     #[test]
-    fn bundled_sets_have_the_recorded_sizes() {
-        assert_eq!(RuleSet::for_language(Language::English).len(), 18);
-        assert_eq!(RuleSet::for_language(Language::Dutch).len(), 285);
+    fn every_bundled_rule_parses() {
+        let mut checked = 0;
+        for source in Language::English
+            .rule_strings()
+            .iter()
+            .chain(Language::Dutch.rule_strings())
+            .chain(brill_paper_rule_strings())
+        {
+            let rule: Rule = source
+                .parse()
+                .unwrap_or_else(|e| panic!("{source:?} does not parse: {e}"));
+            assert_eq!(
+                rule.to_string().parse::<Rule>().unwrap(),
+                rule,
+                "{source:?} does not round-trip"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 18 + 285 + 10);
+        assert_eq!(RuleSet::bundled(Language::English).len(), 18);
+        assert_eq!(RuleSet::bundled(Language::Dutch).len(), 285);
     }
 
     #[test]
-    fn unknown_languages_resolve_differently_for_rules_and_lexicons() {
-        // The single most surprising asymmetry in this module.
-        assert_eq!(Language::for_rule_set(None), Language::English);
-        assert_eq!(Language::for_rule_set(Some("FR")), Language::English);
-        assert_eq!(Language::for_rule_set(Some("")), Language::English);
-        assert_eq!(Language::for_lexicon(None), Language::Dutch);
-        assert_eq!(Language::for_lexicon(Some("FR")), Language::Dutch);
-        assert_eq!(Language::for_lexicon(Some("EN")), Language::English);
+    fn duplicates_are_dropped_and_order_is_kept() {
+        let mut rs: RuleSet = "A B PREV-TAG X\nC D NEXT-TAG Y".parse().unwrap();
+        assert_eq!(rs.len(), 2);
+        assert!(!rs.push("A B PREV-TAG X".parse().unwrap()));
+        assert_eq!(rs.len(), 2);
+        assert!(rs.push("E F PREV-TAG X".parse().unwrap()));
+        assert_eq!(
+            rs.rules()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["A B PREV-TAG X", "C D NEXT-TAG Y", "E F PREV-TAG X"]
+        );
+    }
+
+    /// Rules whose comma-containing tags would collide under a comma-joined
+    /// string key stay distinct under structural identity.
+    ///
+    /// Both rules below flatten to the same key `A,B,WORD-AND-PREV-TAG,x,y,z`
+    /// when their five fields are concatenated with commas, which is how the
+    /// pre-migration implementation deduplicated — and Dutch tags such as
+    /// `N(soort,mv,neut)` contain commas, so the collision is reachable from
+    /// real data rather than only from a contrived one.
+    #[test]
+    fn comma_bearing_tags_do_not_collide() {
+        let mut rs = RuleSet::new();
+        assert!(rs.push("A B WORD-AND-PREV-TAG x,y z".parse().unwrap()));
+        assert!(rs.push("A B WORD-AND-PREV-TAG x y,z".parse().unwrap()));
+        assert_eq!(rs.len(), 2);
+        assert_ne!(rs.rules()[0], rs.rules()[1]);
     }
 
     #[test]
-    fn duplicate_keys_are_dropped_first_wins() {
-        let mut rs = RuleSet::for_language(Language::English);
-        let before = rs.len();
-        assert!(!rs.add_rule(TransformationRule::parse("VBD NN PREV-TAG DT").unwrap()));
-        assert_eq!(rs.len(), before);
-        assert!(rs.add_rule(TransformationRule::parse("QQ ZZ NEXT-TAG DT").unwrap()));
-        assert_eq!(rs.len(), before + 1);
+    fn display_round_trips() {
+        let rs = RuleSet::bundled(Language::Dutch);
+        let text = rs.to_string();
+        assert_eq!(text.parse::<RuleSet>().unwrap(), rs);
+        assert_eq!(text.lines().count(), 285);
     }
 
     #[test]
-    fn removal_preserves_order() {
-        let mut rs = RuleSet::from_rule_strings(&["A B P", "C D P", "E F P"]).unwrap();
-        rs.remove_key("C,D,P,,");
-        let keys: Vec<&str> = rs.rules().iter().map(TransformationRule::key).collect();
-        assert_eq!(keys, ["A,B,P,,", "E,F,P,,"]);
-        assert!(rs.get("A,B,P,,").is_some());
-        assert!(rs.get("E,F,P,,").is_some());
-        // Removing something absent is a no-op.
-        rs.remove_key("C,D,P,,");
+    fn parse_reports_the_offending_line() {
+        let err = "A B PREV-TAG X\nA B NOPE X".parse::<RuleSet>().unwrap_err();
+        assert_eq!(err.line, 2);
+        assert_eq!(
+            err.cause,
+            RuleParseError::UnknownCondition {
+                name: "NOPE".to_owned()
+            }
+        );
+        assert_eq!(err.to_string(), "line 2: unknown condition \"NOPE\"");
+    }
+
+    #[test]
+    fn blank_lines_are_skipped() {
+        let rs: RuleSet = "\nA B PREV-TAG X\n\n   \nC D NEXT-TAG Y\n".parse().unwrap();
         assert_eq!(rs.len(), 2);
     }
 
     #[test]
-    fn pretty_print_round_trips_the_bundled_rules() {
-        let rs = RuleSet::for_language(Language::English);
-        let expected: String = data::ENGLISH_RULES
-            .iter()
-            .map(|r| format!("{r}\n"))
-            .collect();
-        assert_eq!(rs.pretty_print(), expected);
+    fn context_span_is_the_sum_of_the_rule_reaches() {
+        let rs: RuleSet = "A B PREV-1-OR-2-OR-3-TAG X\nC D NEXT-TAG Y"
+            .parse()
+            .unwrap();
+        assert_eq!(rs.context_span(), (3, 1));
+        assert_eq!(RuleSet::new().context_span(), (0, 0));
+        // Both bundled sets stay small enough to stream comfortably.
+        assert_eq!(RuleSet::bundled(Language::English).context_span(), (4, 0));
+        let (l, r) = RuleSet::bundled(Language::Dutch).context_span();
+        assert!(l > 0 && r > 0, "Dutch reads in both directions");
+    }
 
-        let rs = RuleSet::for_language(Language::Dutch);
-        let expected: String = data::DUTCH_RULES.iter().map(|r| format!("{r}\n")).collect();
-        assert_eq!(rs.pretty_print(), expected);
+    #[test]
+    fn retain_keeps_membership_consistent() {
+        let mut rs: RuleSet = "A B PREV-TAG X\nC D NEXT-TAG Y".parse().unwrap();
+        let dropped: Rule = "C D NEXT-TAG Y".parse().unwrap();
+        rs.retain(|r| r != &dropped);
+        assert_eq!(rs.len(), 1);
+        assert!(!rs.contains(&dropped));
+        assert!(rs.push(dropped), "the dropped rule can be added again");
     }
 
     #[test]
     fn empty_set() {
-        let rs = RuleSet::empty();
+        let rs = RuleSet::new();
         assert!(rs.is_empty());
-        assert_eq!(rs.pretty_print(), "");
+        assert_eq!(rs.to_string(), "");
+        assert_eq!("".parse::<RuleSet>().unwrap(), rs);
     }
 }

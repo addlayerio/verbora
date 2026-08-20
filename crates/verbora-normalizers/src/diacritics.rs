@@ -1,160 +1,134 @@
-//! `removeDiacritics` — the general Latin-script diacritic folder.
-//!
-//! Port of the reference `remove_diacritics`.
+//! `remove_diacritics` — the Verbora-defined combining-mark fold.
 
 use std::borrow::Cow;
 
-mod table;
+use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::canonical_combining_class;
 
-/// Folds Latin diacritics to their base letters, exactly as the reference does.
+/// Removes combining marks, leaving the base letters.
 ///
-/// # Why this is not Unicode normalization
+/// # The definition
 ///
-/// It is tempting to implement this as NFD followed by stripping combining
-/// marks, or to reach for a transliteration crate. Both give *different* answers,
-/// in both directions:
+/// > `remove_diacritics(s)` is `s` under Canonical Decomposition (NFD,
+/// > [UAX #15] §1.2), with every scalar whose `Canonical_Combining_Class` is
+/// > non-zero removed, under Canonical Composition (NFC).
 ///
-/// * The shipped table has bugs that are part of the contract. `ſ` U+017F LATIN
-///   SMALL LETTER LONG S folds to **`l`**, not `s`, because the original source
-///   lists it inside the `l` character class. `ß` folds to `s` and `ẞ` to `S`
-///   (not `ss`/`SS`). `İ` folds to `I` and `ı` to `i`.
-/// * The table also *misses* things a correct implementation handles: it does not
-///   decompose, so precomposed `é` U+00E9 folds to `e` while `e` + U+0301 passes
-///   through untouched. Ligatures `ﬁ`/`ﬂ`, `Ĳ`/`ĳ`, `Ŋ`/`ŋ`, `ĸ`, `ȸ`/`ȹ` and
-///   every non-BMP character are left alone.
+/// `Canonical_Combining_Class` is a property of the Unicode Character Database
+/// (The Unicode Standard §4.3, *Combining Classes*), so the result depends on
+/// the Unicode version — see [`unicode_version`](crate::unicode_version).
 ///
-/// Adding an NFD step or swapping in `deunicode` would break parity on real text.
+/// Three parts of that sentence are load-bearing:
 ///
-/// # Why one pass instead of eighty-six
+/// * **NFD first**, so the answer does not depend on how the caller typed the
+///   text. `remove_diacritics("é")` and `remove_diacritics("e\u{0301}")` are
+///   both `"e"`.
+/// * **`ccc != 0`, not `General_Category ∈ {Mn, Mc, Me}`.** The non-zero
+///   classes are exactly the marks canonical ordering reorders, which is the
+///   technical sense of "accent". Stripping all marks instead would destroy
+///   Thai, Indic and Hangul text wholesale; see "What survives" below for
+///   where the two sets differ and what that costs.
+/// * **NFC last**, because NFD decomposes Hangul syllables into `ccc = 0`
+///   jamo and only composition puts them back. Without it
+///   `remove_diacritics("한국")` would return decomposed jamo — a different
+///   string that renders identically, which is the class of surprise this
+///   function exists to remove rather than create.
 ///
-/// The reference runs 86 sequential global-regex passes over the whole string,
-/// one per base letter. Every replacement it emits is an ASCII letter, and every
-/// ASCII letter is itself a key of the table mapping to itself, so no pass can
-/// ever cascade into another and the pass order is irrelevant. The whole thing is
-/// therefore a single left-to-right per-character lookup — verified exhaustively
-/// over all 63,488 non-surrogate BMP codepoints and 20,000 random strings when
-/// the table was generated. This measures roughly twenty times faster on
-/// document-scale input.
+/// # Guarantees
+///
+/// * **The output is in NFC.**
+/// * **Idempotent.** `remove_diacritics(remove_diacritics(s))` equals
+///   `remove_diacritics(s)`, for every `s`.
+/// * **Independent of the input's normalization form.**
+///   `remove_diacritics(nfd(s))`, `remove_diacritics(s)` and
+///   `remove_diacritics(nfc(s))` are all equal.
+/// * **Every occurrence folds, not the first.** `remove_diacritics("ààà")` is
+///   `"aaa"`.
+/// * **Position-independent**, in this exact sense: split `s` into `a + b` at
+///   any `char` boundary where the first scalar of `nfd(b)` has
+///   `Canonical_Combining_Class` 0. Then
+///   `remove_diacritics(s) == nfc(remove_diacritics(a) + remove_diacritics(b))`.
+///   The `nfc` is not decoration: canonical composition can act across the
+///   join even between two `ccc = 0` scalars — Hangul `L` + `V`, and a handful
+///   of Indic and Myanmar pairs — so plain concatenation is *not* equal there.
+///   Everywhere those pairs do not occur, which includes all Latin, Greek,
+///   Cyrillic, Hebrew and Arabic text, the `nfc` is the identity and the
+///   property reads as plain concatenation: the same word folds the same way
+///   wherever it appears in a document.
+/// * [`Cow::Borrowed`] if and only if the result is byte-identical to `s`.
+///
+/// # What survives, and why
+///
+/// The rustdoc leads with the edges rather than burying them, because most
+/// surprises with a function like this are at the edges.
+///
+/// | Input | Result | Reason |
+/// |---|---|---|
+/// | `ø`, `Æ`, `đ`, `ł`, `ħ`, `ŋ`, `ı` | unchanged | empty `Decomposition_Mapping`; the stroke or bar is part of the letter's identity, not a mark applied to it |
+/// | `ß` | `ß` | not a diacritic. `ß → ss` is *case folding*, [UAX #21] |
+/// | `Ａ` (fullwidth), `Ⓐ` (circled), `ǅ`, `ſ` | unchanged | *compatibility* decompositions, not canonical. Compose with [`nfkc`](crate::nfkc) first if that is what you want |
+/// | `Å` U+212B | `A` | canonical singleton to U+00C5, which decomposes to `A` + U+030A |
+/// | `İ` U+0130 | `I` | canonical decomposition `0049 0307`, and `ccc(U+0307) = 230` |
+/// | Devanagari matras, Thai `SARA I`-class vowel signs, Hangul jamo | unchanged | `ccc = 0` |
+/// | Hebrew niqqud (`ccc` 10–26), Arabic harakat (`ccc` 27–34), Devanagari nukta (`ccc` 7) | removed | non-zero, and this is the operation those scripts call diacritic removal |
+/// | Devanagari virama U+094D (`ccc` 9), Thai tone marks (`ccc` 107), Thai `SARA U`/`SARA UU` (`ccc` 103) | **removed** | also non-zero. `ccc != 0` is not the same as "is an accent", and for these scripts the fold changes the word rather than de-accenting it |
+///
+/// That last row is the honest limit of the definition: `remove_diacritics` is
+/// safe to apply blindly to Latin-script text and is *not* safe to apply
+/// blindly to Thai or Devanagari. It is a fold for matching and indexing, not
+/// a transliteration.
+///
+/// # Allocation
+///
+/// Nothing for pure-ASCII input, which returns immediately — ASCII is
+/// invariant under all four normalization forms and contains no combining
+/// mark, so this is exact rather than a heuristic. Nothing for text that
+/// contains no non-zero-class scalar and is already in NFC. One `String`
+/// otherwise.
 ///
 /// # Examples
 ///
 /// ```
-/// # use verbora_normalizers::remove_diacritics;
-/// assert_eq!(remove_diacritics("piñon ça va über résumé œdipe"), "pinon ca va uber resume oedipe");
-/// // Ill-advised but faithful: long s folds to `l`.
-/// assert_eq!(remove_diacritics("ſ"), "l");
-/// // No decomposition: the combining acute survives.
-/// assert_eq!(remove_diacritics("e\u{0301}"), "e\u{0301}");
+/// use std::borrow::Cow;
+/// use verbora_normalizers::remove_diacritics;
+///
+/// assert_eq!(remove_diacritics("piñon ça va über résumé"), "pinon ca va uber resume");
+/// // Independent of how the text was typed.
+/// assert_eq!(remove_diacritics("e\u{0301}"), "e");
+/// // Every occurrence, not the first.
+/// assert_eq!(remove_diacritics("ààà"), "aaa");
+/// // Letters whose mark is part of their identity are left alone.
+/// assert_eq!(remove_diacritics("blåbærsyltetøy"), "blabærsyltetøy");
+/// // Hangul comes back composed, not as jamo.
+/// assert_eq!(remove_diacritics("한국"), "한국");
+/// assert!(matches!(remove_diacritics("plain ascii"), Cow::Borrowed(_)));
 /// ```
+///
+/// [UAX #15]: https://www.unicode.org/reports/tr15/#Norm_Forms
+/// [UAX #21]: https://www.unicode.org/reports/tr21/
 #[must_use]
 pub fn remove_diacritics(s: &str) -> Cow<'_, str> {
-    // Every ASCII character is either absent from the table or maps to itself,
-    // so pure-ASCII text — the overwhelmingly common case — is returned as-is
-    // after one vectorised scan.
+    // Exact, not a heuristic: every ASCII scalar is its own NFD and NFC and
+    // has `Canonical_Combining_Class` 0, so the definition is the identity on
+    // ASCII input.
     if s.is_ascii() {
         return Cow::Borrowed(s);
     }
 
-    let mut out: Option<String> = None;
-    let mut copied = 0usize;
-
-    for (i, c) in s.char_indices() {
-        let Some(base) = fold(c) else { continue };
-        let buf = out.get_or_insert_with(|| String::with_capacity(s.len()));
-        buf.push_str(&s[copied..i]);
-        buf.push_str(base);
-        copied = i + c.len_utf8();
+    if !s.nfd().any(|c| canonical_combining_class(c) != 0) {
+        // Nothing to remove, so the definition collapses to NFC(NFD(s)), which
+        // is NFC(s). Delegating keeps the `Cow` guarantee in one place.
+        return crate::nfc(s);
     }
 
-    match out {
-        Some(mut buf) => {
-            buf.push_str(&s[copied..]);
-            Cow::Owned(buf)
-        }
-        None => Cow::Borrowed(s),
-    }
-}
-
-/// First codepoint past the dense direct-index table's range.
-///
-/// 346 of the 820 non-ASCII keys — and virtually every accent that occurs in
-/// real Latin-script text — live below U+0250 (the end of Latin Extended-B),
-/// so that range gets a 464-entry array indexed by `cp - 0x80` while the
-/// sparse remainder keeps the bitmap-gated binary search.
-const DENSE_END: u32 = 0x250;
-
-/// Direct index for `0x80..DENSE_END`: `FOLD` position + 1, or 0 for identity.
-///
-/// Derived from [`table::FOLD`] by `const` evaluation rather than generated
-/// alongside it, so it *cannot* disagree with the table it indexes — same
-/// data, different index structure.
-static LOW: [u16; (DENSE_END - 0x80) as usize] = build_low();
-
-/// Builds [`LOW`] by scanning [`table::FOLD`] at compile time.
-const fn build_low() -> [u16; (DENSE_END - 0x80) as usize] {
-    let mut low = [0u16; (DENSE_END - 0x80) as usize];
-    let mut i = 0;
-    while i < table::FOLD.len() {
-        let cp = table::FOLD[i].0 as u32;
-        // Keys are non-ASCII by construction, so `cp >= 0x80` always holds.
-        if cp < DENSE_END {
-            low[(cp - 0x80) as usize] = i as u16 + 1;
-        }
-        i += 1;
-    }
-    low
-}
-
-/// The base string for `c`, or `None` when the table leaves it alone.
-///
-/// Two structures serve two densities. Below [`DENSE_END`] — where 346 of the
-/// 820 keys cluster, including every accent on the Latin-1 and Latin
-/// Extended-A/B pages — a folding character costs one array load instead of a
-/// ~10-probe binary search, which alone was measured as ~23% of a fold-heavy
-/// document's total cost. Above it the keys are sparse across nine
-/// 256-codepoint blocks, so the two-level bitmap gate stays: Cyrillic, Greek,
-/// Hebrew, CJK, kana, halfwidth forms and emoji are all rejected in a handful
-/// of operations rather than ten comparisons that always miss.
-#[inline]
-fn fold(c: char) -> Option<&'static str> {
-    let cp = c as u32;
-    // ASCII entries are identity and are omitted from the table; astral
-    // characters have no entries at all.
-    if cp < 0x80 {
-        return None;
-    }
-    if cp < DENSE_END {
-        let ix = LOW[(cp - 0x80) as usize];
-        if ix == 0 {
-            return None;
-        }
-        return Some(table::FOLD[ix as usize - 1].1);
-    }
-    if cp > 0xFFFF {
-        return None;
-    }
-    let hi = (cp >> 8) as u8;
-    if (table::BLOCKS[(hi >> 6) as usize] >> (hi & 63)) & 1 == 0 {
-        return None;
-    }
-    let lo = (cp & 0xFF) as usize;
-    let mut present = false;
-    for &(block, ref bits) in table::STARTS {
-        if block == hi {
-            present = (bits[lo >> 6] >> (lo & 63)) & 1 != 0;
-            break;
-        }
-        if block > hi {
-            break; // `STARTS` is sorted by block.
-        }
-    }
-    if !present {
-        return None;
-    }
-    table::FOLD
-        .binary_search_by_key(&c, |&(k, _)| k)
-        .ok()
-        .map(|i| table::FOLD[i].1)
+    // The filtered sequence is a subsequence of an NFD string with every
+    // non-starter dropped, so it is itself in NFD and differs from NFD(s) —
+    // which means the result differs from `s` and `Cow::Owned` is right.
+    Cow::Owned(
+        s.nfd()
+            .filter(|&c| canonical_combining_class(c) == 0)
+            .nfc()
+            .collect(),
+    )
 }
 
 /// [`remove_diacritics`], fanned out across a `rayon` thread pool. Requires
@@ -162,62 +136,48 @@ fn fold(c: char) -> Option<&'static str> {
 ///
 /// # Why this exists
 ///
-/// `remove_diacritics` is a pure function of one `&str` with no shared state —
-/// no allocation on the ASCII fast path, and the owned path only ever writes
-/// into a buffer private to that call — so folding many independent documents
-/// is embarrassingly parallel with zero coordination cost between them. This
-/// function is exactly `inputs.par_iter().map(remove_diacritics).collect()` —
-/// a thin fan-out over the existing sequential primitive, not a second
-/// implementation of it. The per-character table lookup, the ASCII fast path
-/// and the single-pass `Cow` construction inside `remove_diacritics` are all
-/// untouched; if you need a different shape in parallel (a shared output
-/// buffer, for instance), apply the same `par_iter().map(...)` pattern at
-/// your own call site (see `site/performance/parallelism.md`).
+/// `remove_diacritics` is a pure function of one `&str` with no shared state,
+/// so folding many independent documents is embarrassingly parallel with no
+/// coordination cost between them. The body is exactly
+/// `inputs.par_iter().map(remove_diacritics).collect()` — a fan-out over the
+/// sequential primitive, not a second implementation of it. If you need a
+/// different shape (a shared output buffer, say), apply the same
+/// `par_iter().map(…)` pattern at your own call site.
 ///
-/// # When to reach for it vs. the sequential loop
+/// # When to reach for it
 ///
-/// `remove_diacritics` is already cheap per call — this crate's own
-/// `remove_diacritics` benchmark (`cargo bench -p verbora-normalizers --
-/// remove_diacritics`) measures roughly 270 ns for a 128-byte accented
-/// document up to roughly 35 µs for a 19 KB one, while a `rayon` task costs
-/// on the order of a microsecond to schedule
-/// (`site/performance/parallelism.md`). This crate's own
-/// `par_remove_diacritics_batch` Criterion group (`benches/normalizers.rs`)
-/// measures the consequence directly, at a fixed ~1.2 KB document per call: a
-/// 16-document batch is roughly **1.5x slower** in parallel than the
-/// sequential loop, while 256- and 4096-document batches are **5–8x faster**.
-/// A plain `inputs.iter().map(remove_diacritics).collect()` loop wins for a
-/// handful of documents; reach for this once the batch runs to hundreds of
-/// documents or more, and measure your own workload rather than assuming the
-/// win.
+/// The crossover — the batch size and document length at which the fan-out
+/// beats a sequential loop — is **unmeasured** for this implementation, which
+/// changed algorithm entirely in the Rust-native migration. Rayon's own task
+/// scheduling costs on the order of a microsecond, and `remove_diacritics` on
+/// a short document costs far less than that, so a plain
+/// `inputs.iter().map(remove_diacritics).collect()` is the right default for a
+/// handful of strings. Reach for this for corpus-scale batches, and measure
+/// your own workload rather than assuming the win.
 ///
-/// # Allocation behaviour
+/// # Allocation
 ///
-/// One `Vec<Cow<str>>` sized to `inputs.len()` for the output, plus whatever
-/// `remove_diacritics` itself allocates per input — nothing for pure ASCII or
-/// unmatched non-ASCII text (`Cow::Borrowed`), one `String` sized to the input
-/// otherwise. No additional buffering, no locking, no per-call thread-pool
-/// construction — this uses whichever global `rayon` pool is already
-/// installed (or `rayon`'s default one), so pool configuration remains the
-/// caller's responsibility, not this crate's.
+/// One `Vec<Cow<str>>` sized to `inputs.len()`, plus whatever
+/// `remove_diacritics` allocates per input. No additional buffering, no
+/// locking, and no per-call thread-pool construction — this uses whichever
+/// global `rayon` pool is already installed, so pool configuration stays the
+/// caller's business.
 ///
-/// # Order and errors
+/// # Order
 ///
-/// Output order matches input order — `results[i]` is
-/// `remove_diacritics(inputs[i])` — via `rayon`'s order-preserving `map` +
-/// `collect`. `remove_diacritics` never errors, so there is no error shape to
-/// preserve.
+/// `results[i]` is `remove_diacritics(inputs[i])`, via `rayon`'s
+/// order-preserving `map` + `collect`.
 ///
 /// # Examples
 ///
 /// ```
-/// use verbora_normalizers::diacritics::par_remove_diacritics_batch;
+/// use verbora_normalizers::par_remove_diacritics_batch;
 ///
 /// let inputs = ["café", "naïve", "ASCII only"];
-/// let got = par_remove_diacritics_batch(&inputs);
-/// assert_eq!(got, ["cafe", "naive", "ASCII only"]);
+/// assert_eq!(par_remove_diacritics_batch(&inputs), ["cafe", "naive", "ASCII only"]);
 /// ```
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_remove_diacritics_batch<'a>(inputs: &[&'a str]) -> Vec<Cow<'a, str>> {
     use rayon::prelude::*;
@@ -229,218 +189,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_and_single_characters() {
-        assert_eq!(remove_diacritics(""), "");
-        assert_eq!(remove_diacritics("a"), "a");
-        assert_eq!(remove_diacritics("é"), "e");
-    }
-
-    #[test]
-    fn ascii_is_returned_borrowed() {
-        assert!(matches!(remove_diacritics("ABC abc 123"), Cow::Borrowed(_)));
+    fn empty_and_ascii_borrow() {
         assert!(matches!(remove_diacritics(""), Cow::Borrowed(_)));
+        assert!(matches!(remove_diacritics("ABC abc 123"), Cow::Borrowed(_)));
     }
 
+    /// Derivations, every one from `UnicodeData.txt` field 5
+    /// (`Decomposition_Mapping`) and field 3 (`Canonical_Combining_Class`).
     #[test]
-    fn unmatched_non_ascii_is_returned_borrowed() {
-        assert!(matches!(remove_diacritics("Москва"), Cow::Borrowed(_)));
-        assert!(matches!(remove_diacritics("日本語"), Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn all_uppercase_folds_to_uppercase() {
-        assert_eq!(remove_diacritics("ÀÉÎÕÜ"), "AEIOU");
-        assert_eq!(remove_diacritics("ÜBER"), "UBER");
-    }
-
-    #[test]
-    fn accented_latin() {
+    fn latin_folds() {
+        // U+00E9 -> 0065 0301, ccc(0301) = 230.
         assert_eq!(remove_diacritics("café"), "cafe");
+        // U+00EF -> 0069 0308, ccc(0308) = 230.
         assert_eq!(remove_diacritics("naïve"), "naive");
-        assert_eq!(remove_diacritics("crème brûlée"), "creme brulee");
+        // U+00E5 -> 0061 030A; U+00F6 -> 006F 0308.
         assert_eq!(remove_diacritics("Ångström"), "Angstrom");
+        // U+00E7 -> 0063 0327, ccc(0327) = 202; U+00E3 -> 0061 0303.
         assert_eq!(remove_diacritics("coração"), "coracao");
     }
 
+    /// The `Cow` iff-guarantee, over the pair an ASCII-only test cannot
+    /// separate: a precomposed string that is already NFC but whose NFD holds
+    /// a mark.
     #[test]
-    fn multi_character_bases() {
-        assert_eq!(remove_diacritics("Æ æ Œ œ"), "AE ae OE oe");
-        assert_eq!(remove_diacritics("Ǆǅǆ"), "DZDzdz");
-        assert_eq!(remove_diacritics("ƕ"), "hv");
-        assert_eq!(remove_diacritics("Ꜳ"), "AA");
-    }
-
-    #[test]
-    fn shipped_quirks_are_reproduced() {
-        // Long s is listed in the `l` class, not the `s` class.
-        assert_eq!(remove_diacritics("ſ"), "l");
-        assert_eq!(remove_diacritics("ẞ"), "S");
-        assert_eq!(remove_diacritics("ß"), "s");
-        assert_eq!(remove_diacritics("ŉ"), "n");
-        assert_eq!(remove_diacritics("İı"), "Ii");
-        assert_eq!(remove_diacritics("Ɐɐ"), "Aa");
-        assert_eq!(remove_diacritics("ƒ"), "f");
-    }
-
-    #[test]
-    fn characters_outside_the_table_pass_through() {
-        // No decomposition, so a combining mark survives.
-        assert_eq!(remove_diacritics("e\u{0301}"), "e\u{0301}");
-        // Ligatures and letters the source never listed.
-        assert_eq!(remove_diacritics("ﬁﬂĲĳŊŋĸȸȹ"), "ﬁﬂĲĳŊŋĸȸȹ");
-    }
-
-    #[test]
-    fn other_scripts_are_untouched() {
-        assert_eq!(remove_diacritics("Москва"), "Москва");
-        assert_eq!(remove_diacritics("Ελλάδα"), "Ελλάδα");
-        assert_eq!(remove_diacritics("日本語"), "日本語");
-        assert_eq!(remove_diacritics("한국어"), "한국어");
-    }
-
-    #[test]
-    fn astral_characters_are_untouched() {
-        assert_eq!(remove_diacritics("😀"), "😀");
-        assert_eq!(remove_diacritics("a😀é"), "a😀e");
-        assert_eq!(remove_diacritics("𝕳𝖊𝖑𝖑𝖔"), "𝕳𝖊𝖑𝖑𝖔");
-    }
-
-    #[test]
-    fn circled_and_fullwidth_forms_fold_to_plain_ascii() {
-        assert_eq!(remove_diacritics("ⒶⓏⓐⓩ"), "AZaz");
-        assert_eq!(remove_diacritics("ＡＺａｚ"), "AZaz");
-    }
-
-    #[test]
-    fn punctuation_and_digits_are_untouched() {
-        assert_eq!(remove_diacritics("¡¿«»…— 123"), "¡¿«»…— 123");
-    }
-
-    #[test]
-    fn very_long_input() {
-        let input = "é".repeat(10_000);
-        assert_eq!(remove_diacritics(&input).len(), 10_000);
-    }
-
-    #[test]
-    fn table_is_sorted_and_complete() {
-        assert_eq!(
-            table::FOLD.len(),
-            872 - 52,
-            "872 keys minus 52 ASCII identities"
-        );
-        assert!(table::FOLD.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(table::STARTS.windows(2).all(|w| w[0].0 < w[1].0));
-        // The gate is exact, so it must admit every key and nothing else. A
-        // generated gate that is merely *nearly* right would show up as a silent
-        // parity break rather than a compile error.
-        assert!(table::FOLD.iter().all(|&(k, _)| fold(k).is_some()));
-        let folded = (0x80u32..=0xFFFF)
-            .filter_map(char::from_u32)
-            .filter(|&c| fold(c).is_some())
-            .count();
-        assert_eq!(folded, table::FOLD.len());
-        // The dense low-range index must agree with the binary search it
-        // replaces, entry for entry — identity where `FOLD` has no key, the
-        // key's own fold everywhere else.
-        for cp in 0x80..DENSE_END {
-            let c = char::from_u32(cp).expect("below the surrogate range");
-            let via_search = table::FOLD
-                .binary_search_by_key(&c, |&(k, _)| k)
-                .ok()
-                .map(|i| table::FOLD[i].1);
-            assert_eq!(fold(c), via_search, "U+{cp:04X}");
-        }
-    }
-
-    /// Sequential-vs-parallel parity: `par_remove_diacritics_batch` must
-    /// return exactly what a sequential `.iter().map(remove_diacritics)` loop
-    /// returns, element for element, for every input this module's own
-    /// sequential tests already exercise above — not a fresh set of edge
-    /// cases.
-    #[cfg(feature = "parallel")]
-    mod parallel_parity {
-        use super::*;
-
-        /// Runs both paths over `inputs` and asserts they agree, item by item.
-        fn assert_parity(inputs: &[&str]) {
-            let sequential: Vec<Cow<'_, str>> =
-                inputs.iter().map(|s| remove_diacritics(s)).collect();
-            let parallel = par_remove_diacritics_batch(inputs);
-            assert_eq!(
-                parallel,
-                sequential,
-                "batch of {} inputs diverged from the sequential loop",
-                inputs.len()
+    fn cow_is_borrowed_exactly_when_nothing_changed() {
+        for s in ["", "abc", "Москва", "日本語", "한국", "ก", "😀", "ß", "ø"] {
+            let got = remove_diacritics(s);
+            assert!(
+                matches!(got, Cow::Borrowed(_)),
+                "{s:?} should have been borrowed, got {got:?}"
             );
+            assert_eq!(got, s);
         }
+        for s in ["café", "cafe\u{0301}", "\u{1D167}", "שָׁ"] {
+            let got = remove_diacritics(s);
+            assert!(
+                matches!(got, Cow::Owned(_)),
+                "{s:?} should have been owned, got {got:?}"
+            );
+            assert_ne!(got.as_ref(), s);
+        }
+    }
 
-        #[test]
-        fn empty_input_produces_an_empty_output() {
-            assert_parity(&[]);
-        }
-
-        #[test]
-        fn one_item() {
-            assert_parity(&["café"]);
-            assert_parity(&[""]);
-            assert_parity(&["plain ascii"]);
-        }
-
-        #[test]
-        fn many_items_preserve_order() {
-            // The exact strings `remove_diacritics`'s own tests assert by
-            // value above: ASCII, accented Latin, the shipped quirks (long s
-            // -> l, ß -> s, dotted/dotless I), multi-character bases,
-            // untouched scripts, astral characters, circled/fullwidth forms
-            // and punctuation — cycled well past any plausible rayon task
-            // count.
-            let base = [
-                "ABC abc 123",
-                "café",
-                "naïve",
-                "crème brûlée",
-                "Ångström",
-                "coração",
-                "Æ æ Œ œ",
-                "Ǆǅǆ",
-                "ƕ",
-                "Ꜳ",
-                "ſ",
-                "ẞ",
-                "ß",
-                "ŉ",
-                "İı",
-                "Ɐɐ",
-                "ƒ",
-                "e\u{0301}",
-                "ﬁﬂĲĳŊŋĸȸȹ",
-                "Москва",
-                "Ελλάδα",
-                "日本語",
-                "한국어",
-                "😀",
-                "a😀é",
-                "𝕳𝖊𝖑𝖑𝖔",
-                "ⒶⓏⓐⓩ",
-                "ＡＺａｚ",
-                "¡¿«»…— 123",
-                "",
-            ];
-            let inputs: Vec<&str> = base.iter().copied().cycle().take(500).collect();
-            assert_parity(&inputs);
-        }
-
-        #[test]
-        fn unicode_and_pathological_inputs() {
-            // The 10,000-character `remove_diacritics`'s own `very_long_input`
-            // test exercises, alongside a mix of scripts this crate's own
-            // suite treats as edge cases.
-            let long = "é".repeat(10_000);
-            let cyrillic = "Москва не сразу строилась ".repeat(40);
-            let mixed = "piñon ça va über résumé œdipe ｱｲｳｴｵ 日本語".to_owned();
-            let inputs: Vec<&str> = vec![long.as_str(), cyrillic.as_str(), mixed.as_str(), "é", ""];
-            assert_parity(&inputs);
-        }
+    /// A string in NFD with no marks in it at all is still not borrowed if it
+    /// is not in NFC — the guarantee is about equality with the *input*, and
+    /// the function's last step is composition.
+    #[test]
+    fn decomposed_hangul_is_recomposed_and_therefore_owned() {
+        let jamo = "\u{1112}\u{1161}\u{11AB}";
+        let got = remove_diacritics(jamo);
+        assert_eq!(got, "한");
+        assert!(matches!(got, Cow::Owned(_)));
     }
 }

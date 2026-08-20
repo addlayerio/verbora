@@ -9,50 +9,47 @@ Every snippet on this page compiles and runs against the real crates.
 ## 1. The straightforward version
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn long_tokens(text: &str) -> usize {
-    let tokenizer = AggressiveTokenizer::new();
-    let tokens = tokenizer.tokenize(text);
+    let tokens = WordTokenizer.tokenize_borrowed(text);
     tokens.iter().filter(|t| t.len() > 6).count()
 }
 
 assert_eq!(long_tokens("tokenizing documents efficiently is not automatic"), 4);
 ```
 
-`tokenize()` returns a `Vec<&str>` — one heap allocation for the vector, and the
-tokens themselves are slices borrowed from `text`. Reach for this by default.
-For a program that tokenizes a few thousand strings, that one allocation is not
-measurable.
+`tokenize_borrowed()` returns a `Vec<&str>` — one heap allocation for the vector,
+and the tokens themselves are slices borrowed from `text`. Reach for this by
+default. For a program that tokenizes a few thousand strings, that one allocation
+is not measurable.
 
 
 ## 2. The lazy version
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn long_tokens(text: &str) -> usize {
-    let tokenizer = AggressiveTokenizer::new();
-    tokenizer.tokens(text).filter(|t| t.len() > 6).count()
+    WordTokenizer.tokens(text).filter(|t| t.len() > 6).count()
 }
 
 assert_eq!(long_tokens("tokenizing documents efficiently is not automatic"), 4);
 ```
 
-`tokens()` is an iterator. No `Vec` is built at all: each token is produced,
-tested and dropped before the next one is scanned, and the filter fuses into the
-scan rather than running as a second pass over a materialised collection.
+`tokens()` is an iterator, and it is the primitive every other method here is
+built on. No `Vec` is built at all: each token is produced, tested and dropped
+before the next one is scanned, and the filter fuses into the scan rather than
+running as a second pass over a materialised collection.
 
 Laziness pays twice as much when you can stop early:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let tokenizer = AggressiveTokenizer::new();
-
-// Stops scanning at the first match. `tokenize()` would have split the whole
-// string first, then searched it.
-let first_long = tokenizer
+// Stops scanning at the first match. `tokenize_borrowed()` would have split the
+// whole string first, then searched it.
+let first_long = WordTokenizer
     .tokens("a bb ccc dddddddd eeeeeeeee")
     .find(|t| t.len() > 6);
 
@@ -66,16 +63,15 @@ Now the task changes shape: you have a corpus, and you need *all* the tokens of
 each document at once — perhaps to pass a slice to something else.
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn count_across(corpus: &[&str]) -> usize {
-    let tokenizer = AggressiveTokenizer::new();
-    let mut buf = Vec::new();
+    let mut buf: Vec<&str> = Vec::new();
     let mut total = 0;
 
     for document in corpus {
         buf.clear();                                // keeps the capacity
-        tokenizer.tokenize_into(document, &mut buf);
+        WordTokenizer.tokenize_borrowed_into(document, &mut buf);
         total += buf.iter().filter(|t| t.len() > 6).count();
     }
 
@@ -85,13 +81,13 @@ fn count_across(corpus: &[&str]) -> usize {
 assert_eq!(count_across(&["tokenizing documents", "efficiently automatic"]), 4);
 ```
 
-`tokenize_into` **appends** to the buffer — it does not clear it for you. The
-`buf.clear()` is yours to write, and forgetting it is the classic bug here.
-Clearing a `Vec` drops its elements but keeps its allocation, so after the first
-few documents the loop stops calling the allocator entirely.
+`tokenize_borrowed_into` **appends** to the buffer — it does not clear it for
+you. The `buf.clear()` is yours to write, and forgetting it is the classic bug
+here. Clearing a `Vec` drops its elements but keeps its allocation, so after the
+first few documents the loop stops calling the allocator entirely.
 
 <div class="callout callout-warn">
-<strong>Careful.</strong> <code>Tokenize::tokenize_into</code> appends;
+<strong>Careful.</strong> <code>tokenize_borrowed_into</code> appends;
 <code>verbora_core::Stemmer::stem_into</code> clears first. The two conventions
 differ deliberately, and each is documented on its own trait. Check before you
 assume.
@@ -100,20 +96,18 @@ assume.
 
 ## 4. The parallel version
 
-`Tokenize::par_tokenize_batch`, behind `verbora-tokenizers`' `parallel` Cargo
-feature, fans `tokenize()` out across documents with `rayon` and hands back
-`Vec<Vec<Self::Token<'a>>>` — the tokens themselves. This task wants a count
-rather than the tokens, so the fan-out goes at your call site instead:
+`par_tokenize_batch`, behind `verbora-tokenizers`' `parallel` Cargo feature, fans
+`tokenize_borrowed()` out across documents with `rayon` and hands back
+`Vec<Vec<&str>>` — the tokens themselves. This task wants a count rather than the
+tokens, so the fan-out goes at your call site instead:
 
 ```rust  ignore
 use rayon::prelude::*;
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 let total: usize = corpus
     .par_iter()
-    .map(|doc| {
-        let tokenizer = AggressiveTokenizer::new();  // cheap: a unit struct
-        tokenizer.tokens(doc).filter(|t| t.len() > 6).count()
-    })
+    .map(|doc| WordTokenizer.tokens(doc).filter(|t| t.len() > 6).count())
     .sum();
 ```
 
@@ -129,9 +123,9 @@ always yes.
 
 | What you are doing | Call |
 |---|---|
-| Counting tokens in one string, once | `tokenize()` — start here |
+| Counting tokens in one string, once | `tokenize_borrowed()` — start here |
 | Feeding tokens into a pipeline, or stopping early | `tokens()` |
-| Re-tokenizing document after document in a loop | `tokenize_into()` with one reused buffer |
+| Re-tokenizing document after document in a loop | `tokenize_borrowed_into()` with one reused buffer |
 | A corpus large enough that CPU time actually matters | `par_tokenize_batch` (`parallel` feature) if it fits, otherwise `rayon` at your call site over `tokens()` |
 
 The full version of this reasoning, with comparison tables and every subsystem's
@@ -140,6 +134,7 @@ variants, is in [Choosing the right API](../choosing/index.md).
 ## Where to go next
 
 - [The workspace map](workspace.md) — what each crate is for.
-- [Tokenizers](../features/tokenizers.md) — all 25 of them.
+- [Tokenizers](../features/tokenizers.md) — the three of them, and what each
+  cuts at.
 - [Iterator vs reusable buffer](../performance/iterator-vs-into.md) — why
   versions 2 and 3 are *not* substitutes for one another.

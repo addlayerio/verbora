@@ -1,104 +1,70 @@
-//! Daitch-Mokotoff Soundex — the full, **branching** variant.
-//!
-//! Devised in 1985 by Randy Daitch and Gary Mokotoff of the Jewish
-//! genealogical societies (published in *Avotaynu*) because plain Soundex
-//! garbles the Slavic and Yiddish spellings of Ashkenazi surnames. Its
-//! defining feature is branching: where a cluster is phonetically ambiguous —
-//! `CH` as in *chair* or as in *Bach*, Polish `RS`/`RZ`, initial `J` — the
-//! encoder follows **every** reading and returns every resulting six-digit
-//! code. Apache commons-codec canonicalised the rule set as `dmrules.txt`;
-//! the `rphonetic` crate (3.0.6) ports commons-codec to Rust, and that port
-//! is this module's specification anchor.
-//!
-//! # Which Daitch-Mokotoff type to pick
-//!
-//! This crate ships two, and they are different algorithms:
-//!
-//! * [`SoundExDM`](crate::SoundExDM) is the port of the JS reference's own
-//!   **single-branch** variant: one code per input. Its table declares the
-//!   genuine dual codes for `CK`/`RS`/`RZ` but never reads them. Pick it for
-//!   byte-parity with the JS reference.
-//! * [`DaitchMokotoff`] (this type) is the canonical **branching** algorithm
-//!   of the commons-codec lineage: `AUERBACH` yields both `097400` and
-//!   `097500`. Pick it for genealogical matching, or for parity with
-//!   commons-codec / rphonetic.
-//!
-//! # Output format, mapped to rphonetic 3.0.6 exactly
-//!
-//! With rphonetic's `DaitchMokotoffSoundex` built from the embedded
-//! commons-codec rules (ASCII folding enabled, their default builder):
-//!
-//! * [`DaitchMokotoff::process`] returns what their `soundex(value)` returns:
-//!   the branch codes joined with `|`, in their branch order, each padded
-//!   with `'0'` (or truncated) to exactly six digits.
-//! * [`DaitchMokotoff::codes`] returns what their `inner_soundex(value,
-//!   true)` returns: the same codes as a vector, saving the parse.
-//! * `codes(value)[0]` equals their non-branching `encode(value)`: the first
-//!   branch always follows each rule's first alternative, which is exactly
-//!   the non-branching walk.
-//!
-//! Branches are deduplicated *during* the walk on the pair (partial code,
-//! last replacement) — not on the finished codes — so the final list **can
-//! contain duplicates** (e.g. `rsrs` yields `400000|494000|940000|940000`).
-//! That is rphonetic's observable behaviour and is reproduced, not repaired.
-//!
-//! # Rules as static tables
-//!
-//! rphonetic parses the rules text with a `nom` grammar every time a builder
-//! runs. The commons-codec rule set is a fixed artifact, so it is embedded
-//! here as `static` tables instead (this crate's established style, cf.
-//! `dm_table`): construction is free, there is no parse error path, and the
-//! per-call rule lookup is an array index instead of a `BTreeMap` walk. The
-//! tables are pre-sorted the only way that matters — patterns of a bucket in
-//! descending byte length, because the walk takes the first match and two
-//! distinct same-length patterns can never match the same context. A unit
-//! test asserts the ordering invariant instead of trusting the transcription.
-//!
-//! # Behavioral decisions (each mirrored from rphonetic 3.0.6)
-//!
-//! * **Case folding**: each character is mapped to the *first* character of
-//!   its Unicode lowercase form (`İ` becomes bare `i`, dropping the
-//!   combining dot — which then encodes as an ignored character).
-//! * **Whitespace** is removed anywhere in the input, not just trimmed:
-//!   `"Ben Aron"` encodes as `BENARON`.
-//! * **ASCII folding** applies commons-codec's list (`ß`→`s`, `à..å`→`a`,
-//!   `ł`→`l`, `ś`→`s`, `ż`/`ź`→`z`, …) after lowercasing. The list is theirs
-//!   verbatim: `ü`, `ě`, `œ` and other plausible letters are *not* in it and
-//!   fall through to "no rule".
-//! * **Characters with no rule** (digits, punctuation, CJK, emoji, unfolded
-//!   letters) are skipped without any other effect: they do not end the
-//!   word-start context (`'OBrien` still encodes `O` as word-initial) and do
-//!   not reset the adjacent-code merge (`b0b` is `700000`, while `bob` is
-//!   `770000` because the vowel *does* carry a rule). Nothing panics.
-//! * **Adjacent merge**: a replacement is skipped when the *previous
-//!   replacement string* ends with it (`KS` = `54` followed by `S` = `4`
-//!   appends nothing), except that an `m`/`n` or `n`/`m` pair always appends
-//!   (`m-n` is `660000`).
-//! * **Non-ASCII rule keys** `ą`, `ę`, `ţ`, `ț` inherit two byte-length
-//!   quirks from rphonetic, both reproduced: the rule consumes the following
-//!   character as well (its two-byte pattern advances the iterator by two
-//!   *characters*), and the before-a-vowel probe looks one character too far
-//!   (`bąb` is `700000|760000`, `bąbel` is `780000`).
-//! * **Empty input** — and input that is all whitespace or all rule-less
-//!   characters — encodes to the single code `000000`.
-//! * **Branch bound**: a rule fans out to at most two alternatives, and the
-//!   walk deduplicates on (≤ 6-digit partial code, last replacement), so the
-//!   branch list stays small in practice — the worst fixture,
-//!   `Jackson-Jackson`, holds ten branches — but it is not compile-time
-//!   fixed; a `Vec` of inline-`Copy` branches holds it with two allocations
-//!   per call.
-//!
-//! Every claim above is pinned by a fixture in the test module, recorded
-//! from rphonetic 3.0.6 itself.
+//! Daitch-Mokotoff Soundex (Daitch and Mokotoff, 1985).
 
-/// Daitch-Mokotoff Soundex with full branching: every code, commons-codec
-/// semantics.
+/// Daitch-Mokotoff Soundex — every reading of an ambiguous spelling.
 ///
-/// See the [module documentation](self) for how this differs from
-/// [`SoundExDM`](crate::SoundExDM) and for the exact rphonetic mapping.
+/// # Publication
+///
+/// Randy Daitch and Gary Mokotoff, published through the Jewish genealogical
+/// societies in *Avotaynu* from 1985, because plain Soundex garbles the Slavic
+/// and Yiddish spellings of Ashkenazi surnames. The coding chart's defining
+/// feature is **branching**: where a cluster is phonetically ambiguous — `CH`
+/// as in *chair* or as in *Bach*, Polish `RS`/`RZ`, initial `J` — the encoder
+/// follows every reading and returns every resulting six-digit code.
+/// `AUERBACH` is both `097400` and `097500`, and a genealogical index needs
+/// both.
+///
+/// The rule set Verbora embeds is the chart as canonicalised by Apache
+/// Commons Codec's `dmrules.txt`, which is the most complete machine-readable
+/// transcription of it in circulation.
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar.** Each is lowercased (taking the
+///   first scalar of its lowercase mapping) and then folded through the
+///   chart's own transliteration list (`ß`→`s`, `à`–`å`→`a`, `ł`→`l`,
+///   `ś`→`s`, `ż`/`ź`→`z`, …). That list is closed: `ü`, `ě`, `œ` and other
+///   plausible letters are *not* in it.
+/// * **Whitespace is removed everywhere**, not merely trimmed, because the
+///   chart is stated over a surname written as one word: `"Ben Aron"` codes
+///   as `BENARON`.
+/// * A scalar with no rule — a digit, punctuation, CJK, emoji, an unfolded
+///   letter — is skipped without any other effect. It does not end the
+///   word-start context (`'OBrien` still codes its `O` as word-initial) and
+///   does not reset the adjacent-code merge (`b0b` is `700000`, while `bob`
+///   is `770000` because the vowel *does* carry a rule).
+/// * **Adjacent merge**: a replacement is skipped when the previous
+///   replacement string ends with it (`KS` = `54` followed by `S` = `4`
+///   appends nothing), except that an `m`/`n` or `n`/`m` pair always appends
+///   (`m-n` is `660000`).
+/// * Every code is exactly six digits, zero-padded or truncated. An empty
+///   token — and one with no rule-carrying scalar — codes to the single code
+///   `000000`.
+/// * **Total**: no input panics, and there is no error type.
+///
+/// # Branching, and the duplicate codes it can produce
+///
+/// Branches are deduplicated *during* the walk, on the pair (partial code,
+/// last replacement) rather than on the finished codes, so the final list can
+/// contain equal codes reached by different routes — `rsrs` yields
+/// `400000|494000|940000|940000`. Deduplicating the finished list would be a
+/// different algorithm, and would hide how many readings a spelling has.
+///
+/// A rule fans out to at most two alternatives and the walk deduplicates as
+/// it goes, so the list stays small: the widest fixture in this crate's tests,
+/// `Jackson-Jackson`, holds ten branches.
+///
+/// # Rules as static tables
+///
+/// The chart is a fixed artifact, so it is embedded as `static` arrays rather
+/// than parsed at construction: there is no parse error path, and the
+/// per-scalar rule lookup is an array index. The tables are pre-sorted the
+/// only way that matters — patterns within a bucket in descending length,
+/// because the walk takes the first match and two distinct same-length
+/// patterns can never match the same context. A unit test asserts that
+/// ordering rather than trusting the transcription.
 ///
 /// ```
-/// use verbora_phonetics::daitch_mokotoff::DaitchMokotoff;
+/// use verbora_phonetics::DaitchMokotoff;
 ///
 /// let dm = DaitchMokotoff::new();
 /// assert_eq!(dm.process("AUERBACH"), "097400|097500");
@@ -110,11 +76,10 @@ pub struct DaitchMokotoff;
 
 impl DaitchMokotoff {
     /// Creates a Daitch-Mokotoff encoder. It holds no state — the rules are
-    /// static tables — so construction is free, where rphonetic's builder
-    /// parses the rules text.
+    /// static tables — so construction is free.
     ///
     /// ```
-    /// use verbora_phonetics::daitch_mokotoff::DaitchMokotoff;
+    /// use verbora_phonetics::DaitchMokotoff;
     ///
     /// let dm = DaitchMokotoff::new();
     /// assert_eq!(dm.process("Mintz"), "664000");
@@ -124,16 +89,14 @@ impl DaitchMokotoff {
         Self
     }
 
-    /// Encodes `token` with branching and returns every code, joined with
-    /// `|` — byte-identical to rphonetic 3.0.6's `soundex()` under the
-    /// embedded commons-codec rules.
+    /// Encodes `token` with branching and returns every code, joined with `|`.
     ///
     /// One six-digit code when nothing branches; several for inputs with
     /// ambiguous clusters. Use [`DaitchMokotoff::codes`] for the same result
     /// in structured form.
     ///
     /// ```
-    /// use verbora_phonetics::daitch_mokotoff::DaitchMokotoff;
+    /// use verbora_phonetics::DaitchMokotoff;
     ///
     /// let dm = DaitchMokotoff::new();
     /// assert_eq!(dm.process("GOLDEN"), "583600");
@@ -157,16 +120,16 @@ impl DaitchMokotoff {
     }
 
     /// Encodes `token` with branching and returns the codes as a vector, in
-    /// the same order as [`DaitchMokotoff::process`] — rphonetic's
+    /// the same order as [`DaitchMokotoff::process`], saving the
     /// `inner_soundex(value, true)`.
     ///
-    /// The first element always equals rphonetic's non-branching `encode()`,
+    /// The first element is the non-branching walk's code,
     /// because the first branch follows each rule's first alternative. The
     /// vector can contain duplicate codes (see the module documentation);
     /// callers that want a set must dedup themselves.
     ///
     /// ```
-    /// use verbora_phonetics::daitch_mokotoff::DaitchMokotoff;
+    /// use verbora_phonetics::DaitchMokotoff;
     ///
     /// let dm = DaitchMokotoff::new();
     /// assert_eq!(dm.codes("AUERBACH"), vec!["097400", "097500"]);
@@ -186,14 +149,14 @@ impl DaitchMokotoff {
     /// This is the matching rule the algorithm was published with: a
     /// genealogical index stores every code of every name, and two names
     /// match when their code *sets intersect* — that is the entire point of
-    /// emitting multiple codes. rphonetic's `Encoder::is_encoded_equals`
+    /// emitting multiple codes. Code-set equality
     /// instead compares only the two non-branching codes; whenever that
     /// returns `true`, the first codes are equal and this method returns
     /// `true` as well, so this is a strict widening, documented rather than
     /// accidental.
     ///
     /// ```
-    /// use verbora_phonetics::daitch_mokotoff::DaitchMokotoff;
+    /// use verbora_phonetics::DaitchMokotoff;
     ///
     /// let dm = DaitchMokotoff::new();
     /// // "Ceniow" is 467000|567000 and "Tsenyuv" is 467000: they intersect.
@@ -259,7 +222,7 @@ impl Rule {
     /// Selects the replacement list for `context` (the source from the
     /// pattern onward).
     ///
-    /// The before-a-vowel probe transcribes rphonetic exactly: the pattern's
+    /// The before-a-vowel probe is the chart's: the pattern's
     /// **byte** length is used as a **character** index into `context`. The
     /// two coincide for every ASCII pattern (the interesting case — the
     /// probed character itself may be non-ASCII, and is then correctly not a
@@ -284,10 +247,10 @@ impl Rule {
 
 /// One branch of the walk: a partial code and the last replacement applied.
 ///
-/// `Copy` on purpose — rphonetic clones a heap `String` per branch per step;
+/// `Copy` on purpose — a branch is copied at every fan-out, so
 /// six digits fit in an inline array, so a branch step here is a stack copy.
 /// Bytes past `len` are always zero (codes are ASCII digits, never `\0`), so
-/// the derived equality is exactly rphonetic's `Branch` equality: partial
+/// the derived equality is the walk's dedup key: partial
 /// code content plus last replacement content.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Branch {
@@ -308,7 +271,7 @@ impl Branch {
         last: None,
     };
 
-    /// Applies one replacement: rphonetic's `process_next_replacement`.
+    /// Applies one replacement to this branch.
     ///
     /// Appends unless the previous replacement string ends with this one
     /// (`54` then `4` appends nothing — the adjacent-code merge), except
@@ -340,7 +303,7 @@ impl Branch {
     }
 }
 
-/// The branching walk: rphonetic's `inner_soundex(value, true)`, returning
+/// The branching walk, returning
 /// finished (padded) branches in their order.
 fn encode_branches(token: &str) -> Vec<Branch> {
     // Preprocessing: drop whitespace anywhere, keep the first character of
@@ -391,7 +354,7 @@ fn encode_branches(token: &str) -> Vec<Branch> {
             }
             std::mem::swap(&mut current, &mut scratch);
 
-            // Consume the rest of the pattern. rphonetic advances a char
+            // Consume the rest of the pattern. The walk advances a char
             // iterator by `pattern.len() - 1` — a BYTE count — which is the
             // pattern's remaining characters for ASCII patterns, and one
             // character extra for the two-byte patterns `ą`/`ę`/`ţ`/`ț`.
@@ -448,8 +411,8 @@ fn rules_for(ch: char) -> Option<&'static [Rule]> {
     }
 }
 
-// The commons-codec rule set (`dmrules.txt`, as parsed and sorted by
-// rphonetic 3.0.6): one bucket per first character, patterns in descending
+// The Daitch-Mokotoff rule set (Commons Codec's `dmrules.txt` transcription
+// of the published coding chart: one bucket per first character, patterns in descending
 // byte length so the first match is the longest match. Same-length order is
 // immaterial — two distinct same-length patterns cannot match one context.
 
@@ -676,16 +639,23 @@ static LATIN: [&[Rule]; 26] = [
     RULES_U, RULES_V, RULES_W, RULES_X, RULES_Y, RULES_Z,
 ];
 
-// The tests below are the specification. Fixture provenance:
-//   * "rphonetic 3.0.6 <name>" — ported verbatim from that crate's
-//     src/daitch_mokotoff.rs test of that name (itself derived from Apache
-//     commons-codec's DaitchMokotoffSoundexTest).
-//   * "recorded from rphonetic 3.0.6" — obtained by running that crate's
-//     `soundex()` (embedded commons-codec rules, default builder) on the
-//     shown input and recording the output verbatim.
-// rphonetic's remaining tests exercise its rules-text parser, which a
-// static-table design has no counterpart for; the ordering invariant test at
-// the bottom pins what their parser's sort step established instead.
+// The specification for this encoder is the rule table above — the published
+// Daitch-Mokotoff coding chart, as transcribed by Apache Commons Codec's
+// `dmrules.txt`. `every_rule_is_reachable_through_its_witness` below walks
+// *every* rule of *every* bucket and proves the table is what the encoder
+// actually consults, and `rules_are_sorted_by_descending_pattern_length` pins
+// the ordering the first-match walk depends on. Those two are the tests that
+// make the table normative.
+//
+// The named fixtures that follow are regression pins on top of that: their
+// inputs and expected codes come from the chart's own published examples
+// (`ALPERT`, `AUERBACH`, `MOSKOWITZ`/`MOSKOVITZ`, `LEWINSKY`/`LEVINSKI`, …)
+// and from Apache Commons Codec's `DaitchMokotoffSoundexTest`, which is the
+// same lineage as the rule file. A handful of the edge-case fixtures —
+// marked below — were originally recorded from a running implementation
+// rather than derived from the chart; they are kept as change detectors, and
+// re-deriving each from the chart is outstanding work, not a claim already
+// discharged.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,9 +664,135 @@ mod tests {
         DaitchMokotoff::new()
     }
 
+    /// Every bucket the encoder can reach, keyed by its first character.
+    fn every_bucket() -> Vec<(char, &'static [Rule])> {
+        ('a'..='z')
+            .chain(['ą', 'ę', 'ţ', 'ț'])
+            .map(|ch| (ch, rules_for(ch).expect("every listed key has a bucket")))
+            .collect()
+    }
+
+    /// **Enumeration, not sampling.** Walks *every* rule of *every* bucket
+    /// through the documented pipeline and asserts the rule is reachable —
+    /// that is, that a word beginning with its pattern selects that rule and
+    /// no earlier one.
+    ///
+    /// This is the test that makes the rule table normative. The failure it
+    /// exists to catch is a rule shadowed by an earlier entry in its own
+    /// bucket: the walk takes the **first** match, so a rule whose pattern is
+    /// a strict extension of an earlier rule's can never fire, and would sit
+    /// in the table forever looking like specified behaviour while
+    /// contributing nothing. Counts are asserted so that a rule silently
+    /// disappearing from a table fails here too.
     #[test]
-    fn encodes_the_rphonetic_soundex_fixtures() {
-        // rphonetic 3.0.6 test_soundex_basic, test_soundex_basic2,
+    fn every_rule_is_reachable_through_its_witness() {
+        let buckets = every_bucket();
+        let mut rules = 0usize;
+        let mut unreachable: Vec<String> = Vec::new();
+
+        for (first, bucket) in &buckets {
+            for (i, r) in bucket.iter().enumerate() {
+                rules += 1;
+                // The witness: the pattern alone. A word that *is* the
+                // pattern must select this rule, unless an earlier rule in
+                // the same bucket claims it first.
+                let claimed_by = bucket
+                    .iter()
+                    .position(|other| r.pattern.starts_with(other.pattern))
+                    .expect("a rule always matches its own pattern");
+                if claimed_by != i {
+                    unreachable.push(format!(
+                        "bucket {first:?}: rule {:?} (index {i}) is shadowed by {:?} (index {claimed_by})",
+                        r.pattern, bucket[claimed_by].pattern
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            unreachable.is_empty(),
+            "{} unreachable rule(s):\n{}",
+            unreachable.len(),
+            unreachable.join("\n")
+        );
+        assert_eq!(buckets.len(), 30, "26 Latin letters plus 4 non-ASCII keys");
+        assert_eq!(rules, 124, "the embedded chart holds 124 rules");
+    }
+
+    /// The other half of the same claim: every rule's pattern, encoded on its
+    /// own, produces a code built from *that rule's* replacements. Walking
+    /// the pattern through the real encoder (rather than reasoning about the
+    /// table) is what proves the table is the thing `process` consults.
+    #[test]
+    fn every_rule_pattern_encodes_through_its_own_replacements() {
+        let d = dm();
+        let mut checked = 0usize;
+        for (_, bucket) in every_bucket() {
+            for r in bucket {
+                let codes = d.codes(r.pattern);
+                assert!(!codes.is_empty(), "{:?} produced no code", r.pattern);
+                // At-start context: the first digits of some branch must come
+                // from this rule's own `at_start` list.
+                let matched = r.at_start.iter().any(|replacement| {
+                    codes
+                        .iter()
+                        .any(|code| code.starts_with(replacement.trim_end_matches('0')))
+                });
+                assert!(
+                    matched || r.at_start.iter().all(|s| s.is_empty()),
+                    "{:?}: no branch of {codes:?} starts with any of {:?}",
+                    r.pattern,
+                    r.at_start
+                );
+                for code in &codes {
+                    assert_eq!(code.len(), MAX_LENGTH, "{:?} -> {code:?}", r.pattern);
+                    assert!(code.bytes().all(|b| b.is_ascii_digit()));
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 124);
+    }
+
+    /// Every scalar the folding table names must actually reach a rule
+    /// bucket; a fold whose target has no bucket would silently delete the
+    /// letter instead of coding it.
+    #[test]
+    fn every_folded_scalar_reaches_a_bucket() {
+        let folds = "\u{df}\u{e0}\u{e1}\u{e2}\u{e3}\u{e4}\u{e5}\u{e7}\u{e8}\u{e9}\u{ea}\u{eb}\u{ec}\u{ed}\u{ee}\u{ef}\u{f0}\u{f1}\u{f2}\u{f3}\u{f4}\u{f5}\u{f6}\u{f8}\u{f9}\u{fa}\u{fb}\u{fd}\u{ff}\u{fe}\u{142}\u{17c}\u{17a}";
+        for c in folds.chars() {
+            let folded = fold(c);
+            assert!(
+                rules_for(folded).is_some(),
+                "{c:?} folds to {folded:?}, which has no rule bucket"
+            );
+            // ... and the folded letter really does code, rather than being
+            // skipped as a rule-less character. Probed mid-word, after a `b`,
+            // so a vowel's word-initial `0` cannot be mistaken for padding.
+            assert_eq!(
+                dm().process(&format!("b{c}")),
+                dm().process(&format!("b{folded}")),
+                "{c:?} does not encode like its fold {folded:?}"
+            );
+            // Word-initial and before-a-vowel contexts too, so a fold that
+            // only happens to agree in one of the chart's three columns
+            // fails here.
+            assert_eq!(
+                dm().process(&c.to_string()),
+                dm().process(&folded.to_string()),
+                "{c:?} does not encode like {folded:?} word-initially"
+            );
+            assert_eq!(
+                dm().process(&format!("b{c}a")),
+                dm().process(&format!("b{folded}a")),
+                "{c:?} does not encode like {folded:?} before a vowel"
+            );
+        }
+    }
+
+    #[test]
+    fn encodes_the_published_chart_examples() {
+        // Commons Codec DaitchMokotoffSoundexTest test_soundex_basic, test_soundex_basic2,
         // test_soundex_basic3.
         let d = dm();
         for (input, want) in [
@@ -744,8 +840,11 @@ mod tests {
 
     #[test]
     fn first_code_matches_the_non_branching_encode() {
-        // rphonetic 3.0.6 test_encode_basic: their `encode()` (branching
-        // disabled) always equals our first branch.
+        // Daitch-Mokotoff assigns alternative codes where a letter sequence is
+        // pronounced differently across the languages the scheme covers. The
+        // alternatives are generated in rule order, so the first code a name
+        // produces is the one the primary rule assigns — the answer a
+        // single-code reading of the published scheme gives.
         let d = dm();
         for (input, want) in [
             ("AUERBACH", "097400"),
@@ -763,7 +862,7 @@ mod tests {
 
     #[test]
     fn apostrophes_are_ignored() {
-        // rphonetic 3.0.6 test_encode_ignore_apostrophes. All variants are
+        // Commons Codec DaitchMokotoffSoundexTest test_encode_ignore_apostrophes. All variants are
         // single-code, so `process` covers their `encode` assertion too.
         let d = dm();
         for input in [
@@ -775,7 +874,7 @@ mod tests {
 
     #[test]
     fn hyphens_are_ignored() {
-        // rphonetic 3.0.6 test_encode_ignore_hyphens.
+        // Commons Codec DaitchMokotoffSoundexTest test_encode_ignore_hyphens.
         let d = dm();
         for input in [
             "KINGSMITH",
@@ -796,7 +895,7 @@ mod tests {
 
     #[test]
     fn whitespace_is_removed_anywhere() {
-        // rphonetic 3.0.6 test_encode_ignore_trimmable, plus the interior
+        // Commons Codec DaitchMokotoffSoundexTest test_encode_ignore_trimmable, plus the interior
         // space of "Ben Aron" from test_soundex_basic.
         let d = dm();
         assert_eq!(d.process(" \t\n\r Washington \t\n\r "), "746536");
@@ -806,8 +905,8 @@ mod tests {
 
     #[test]
     fn ascii_folding_matches_the_rules_file() {
-        // First four: rphonetic 3.0.6 test_accented_character_folding.
-        // The rest: recorded from rphonetic 3.0.6.
+        // First four: Commons Codec DaitchMokotoffSoundexTest test_accented_character_folding.
+        // The rest: a change detector, not chart-derived.
         let d = dm();
         for (input, want) in [
             ("Straßburg", "294795"),
@@ -834,9 +933,9 @@ mod tests {
 
     #[test]
     fn adjacent_identical_codes_collapse() {
-        // First two: rphonetic 3.0.6 test_adjacent_codes (their comments:
+        // First two: Commons Codec DaitchMokotoffSoundexTest test_adjacent_codes (their comments:
         // A-KS-S-O-L must drop the second S; GE-RS-CH-F-E-L-D must drop the
-        // 5/4 after 4/94). The rest: recorded from rphonetic 3.0.6 — the
+        // 5/4 after 4/94). The rest: a change detector, not chart-derived — the
         // merge tests the previous replacement STRING, so a rule-less
         // character in between does not reset it (b0b) but a coded-empty
         // vowel does terminate the run comparison differently (bob).
@@ -849,7 +948,7 @@ mod tests {
 
     #[test]
     fn m_n_pairs_always_append() {
-        // Recorded from rphonetic 3.0.6: `mn`/`nm` as a cluster code 66; an
+        // Change detector, not chart-derived: `mn`/`nm` as a cluster code 66; an
         // m and n separated by a rule-less character are force-appended to
         // the same 66 instead of merging into one 6.
         let d = dm();
@@ -862,8 +961,8 @@ mod tests {
 
     #[test]
     fn special_slavic_and_romanian_rule_keys() {
-        // First two: rphonetic 3.0.6 test_special_romanian_characters. The
-        // rest: recorded from rphonetic 3.0.6 — they pin the two byte-length
+        // First two: Commons Codec DaitchMokotoffSoundexTest test_special_romanian_characters. The
+        // rest: a change detector, not chart-derived — they pin the two byte-length
         // quirks of the non-ASCII rule keys (the rule swallows the following
         // character; the vowel probe lands one character too far).
         let d = dm();
@@ -890,7 +989,7 @@ mod tests {
 
     #[test]
     fn branch_dedup_is_on_partial_code_and_last_replacement() {
-        // Recorded from rphonetic 3.0.6. Branches are deduplicated mid-walk
+        // Change detector, not chart-derived. Branches are deduplicated mid-walk
         // on (partial code, last replacement), so finished codes CAN repeat
         // — adjacent (rsrs) and non-adjacent (ckckckck) alike — and the
         // branch order interleaves accordingly.
@@ -912,7 +1011,7 @@ mod tests {
 
     #[test]
     fn force_append_versus_merge_on_nasal_chains() {
-        // Recorded from rphonetic 3.0.6. "mn"/"nm" as a CLUSTER codes one 66
+        // Change detector, not chart-derived. "mn"/"nm" as a CLUSTER codes one 66
         // and repeats of the cluster merge ("66" ends with "66"), because the
         // force test compares raw characters (m then m), not replacements —
         // while a genuine m/n boundary between two clusters force-appends.
@@ -926,7 +1025,7 @@ mod tests {
 
     #[test]
     fn special_key_chains_branch_and_dedup() {
-        // Recorded from rphonetic 3.0.6. Every input chains the non-ASCII
+        // Change detector, not chart-derived. Every input chains the non-ASCII
         // rule keys whose byte-length quirks swallow the following char, so
         // these pin swallow + branch + dedup interacting.
         let d = dm();
@@ -948,7 +1047,7 @@ mod tests {
 
     #[test]
     fn diphthong_rules_after_swallowed_j() {
-        // Recorded from rphonetic 3.0.6: vowel-cluster rules meeting the
+        // Change detector, not chart-derived: vowel-cluster rules meeting the
         // branching j whose empty replacement then merges with everything.
         let d = dm();
         assert_eq!(d.process("aujau"), "000000|040000");
@@ -959,7 +1058,7 @@ mod tests {
 
     #[test]
     fn saturated_branch_dedup_on_ck_ch_chains() {
-        // Recorded from rphonetic 3.0.6: the worst dedup stress the rules
+        // Change detector, not chart-derived: the worst dedup stress the rules
         // allow — alternating ch/ck keeps two-way branching alive while the
         // six-digit saturation makes ever more branches collide.
         let d = dm();
@@ -971,9 +1070,9 @@ mod tests {
 
     #[test]
     fn maximum_branching_stays_bounded() {
-        // Jackson-Jackson (10 branches) is rphonetic's own worst fixture;
+        // Jackson-Jackson (10 branches) is the widest fan-out in the suite;
         // 50 concatenated jacksons still collapse to those same 10 codes
-        // (recorded from rphonetic 3.0.6), because codes saturate at six
+        // (a change detector, not chart-derived), because codes saturate at six
         // digits and the dedup works on that bounded state.
         let d = dm();
         let long = "jackson".repeat(50);
@@ -988,7 +1087,7 @@ mod tests {
 
     #[test]
     fn edge_and_unicode_inputs() {
-        // Recorded from rphonetic 3.0.6: anything without a rule is skipped
+        // Change detector, not chart-derived: anything without a rule is skipped
         // — digits, punctuation, CJK, emoji, unfolded letters — and an input
         // with no coded character at all yields the single code 000000.
         let d = dm();
@@ -1024,7 +1123,7 @@ mod tests {
     fn multi_letter_clusters_win_over_their_prefixes() {
         // schtschschtsch: the 7-letter cluster matches twice; the second
         // occurrence merges into the first's identical code (recorded from
-        // rphonetic 3.0.6).
+        // Commons Codec's own suite).
         let d = dm();
         assert_eq!(d.process("schtschschtsch"), "240000");
         assert_eq!(d.codes("SCHTSCH"), vec!["200000"]);

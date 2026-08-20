@@ -11,11 +11,17 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-serde = { workspace = true, optional = true }
+# The stop-word lookup set. `FxHashSet` rather than `std`'s: the keys are words
+# drawn from the caller's own text, never from untrusted network input, so
+# SipHash's DoS resistance buys nothing here — and `StopWords::contains` runs on
+# every token of every document a stemmer filters. This matches the workspace
+# default recorded in `AGENTS.md`'s "Data Structures" section.
+rustc-hash = { workspace = true }
 
-[features]
-default = []
-serde = ["dep:serde"]
+# Deliberately no optional `serde` feature. One was declared here and never
+# used: no item in this crate derived or implemented a `serde` trait, and no
+# crate in the workspace enabled it. A feature that compiles to nothing is a
+# promise the crate does not keep.
 
 [lints]
 workspace = true

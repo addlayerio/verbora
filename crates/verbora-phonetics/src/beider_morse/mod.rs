@@ -1,58 +1,28 @@
-//! Beider-Morse Phonetic Matching (BMPM) — a Verbora-native extension, not
-//! a reference-parity port (the reference has no Beider-Morse implementation).
-//!
-//! # What this is, and why it exists alongside [`crate::SoundExDM`]
-//!
-//! [`crate::SoundExDM`] (Daitch-Mokotoff) already covers Slavic/Germanic/
-//! Ashkenazi-Jewish surname matching with one fixed rule table. Beider-Morse
-//! solves a different, harder problem: the *same* historical family name
-//! plausibly has different phonetically-equivalent spellings depending on
-//! *which country's* orthographic conventions transcribed it — a name
-//! carried from Russia through Poland to Germany accumulates several
-//! "correct" spellings, not one. Beider-Morse's rule tables are
-//! per-language, and its engine can either target one specific language's
-//! conventions or blend the "any"-language fallback rules to hedge across
-//! all of them at once.
+//! Beider-Morse Phonetic Matching (BMPM).
 //!
 //! # Provenance and licensing — read before touching `data/beider-morse/`
 //!
-//! The 127 rule files this module reads (`crates/verbora-phonetics/data/beider-morse/`)
-//! are Apache-2.0-licensed data copied from Apache Commons Codec (itself a
-//! Java port of Alexander Beider and Stephen P. Morse's original,
-//! GPL-3.0-licensed PHP reference implementation) — **not** a copy of the
-//! GPL-licensed PHP source itself. See `data/beider-morse/NOTICE.md` for the
-//! full provenance chain and why embedding Apache-2.0 data in this
-//! MIT-licensed crate is fine. The engine and parser in this module
-//! (`rule.rs`, `engine.rs`, this file) are Verbora's own MIT-licensed Rust,
-//! written from this module's own understanding of the algorithm — not a
-//! transliteration of any other implementation's source code.
+//! The 127 rule files this module reads
+//! (`crates/verbora-phonetics/data/beider-morse/`) are Apache-2.0-licensed
+//! data copied from Apache Commons Codec — itself a Java port of Alexander
+//! Beider and Stephen P. Morse's original, GPL-3.0-licensed PHP — and **not**
+//! a copy of that PHP. See `data/beider-morse/NOTICE.md` for the full
+//! provenance chain, the thirteen characters this crate restores where the
+//! import lost them, the coverage gaps the corpus still has, and why
+//! embedding Apache-2.0 data in this MIT-licensed crate is fine. Read it
+//! before editing any rule file.
 //!
-//! # Design reference used, not a runtime dependency
+//! The engine and parser here (`rule.rs`, `engine.rs`, this file) are
+//! Verbora's own MIT-licensed Rust, written from the algorithm as described
+//! by its authors — not a transliteration of any other implementation.
 //!
-//! The [`rphonetic`](https://crates.io/crates/rphonetic) crate (a mature,
-//! independently-verified Rust port of the same Commons Codec algorithm)
-//! was read closely during design and used as a live cross-checking oracle
-//! during development (running the exact same rule files through both
-//! implementations and diffing output) — it is not a dependency of this
-//! crate, published or otherwise; see `docs/COMPETITIVE_BENCHMARKS.md` for
-//! where it *is* a real dependency (the isolated `benchmarks/competitive/`
-//! workspace, for an unrelated purpose: benchmarking Verbora's other four
-//! phonetic encoders against it).
+//! `the_corpus_dead_rule_count_is_exactly_what_upstream_left_behind` below
+//! records a real defect in that upstream corpus, with the reasoning for
+//! leaving it in place. Read that test before assuming the tables are clean.
 //!
-//! # Output shape — deliberately not [`crate::PhoneticCodes`]
-//!
-//! Every other encoder in this crate produces exactly one or two codes per
-//! word, which is what [`crate::PhoneticCodes`]'s `One`/`Two` shape is
-//! built around. Beider-Morse's real output is a *variable-length* set of
-//! plausible spellings — bounded by `max_phonemes` (default 20), not by 1
-//! or 2 (a name like `"Renault"` alone produces 8 alternatives under
-//! Generic/Approx/any). Forcing that into `PhoneticCodes` would either
-//! silently truncate real candidates or require widening every other
-//! encoder's shape to accommodate a cardinality only this one needs.
-//! [`BeiderMorseCode`] is its own type instead; whether/how this composes
-//! with [`crate::PhoneticIndex`] is left for a follow-up once this engine's
-//! correctness is established across its full language matrix — not
-//! designed speculatively ahead of that.
+//! User-facing prose lives on [`BeiderMorse`] and [`BeiderMorseCode`], not
+//! here: this module is private, so a `//!` comment on it would not reach
+//! docs.rs.
 
 mod engine;
 mod lang;
@@ -330,7 +300,15 @@ impl NameTypeData {
                     raw_rule.pattern
                 )
             });
-            let ch = raw_rule.pattern.chars().next().unwrap_or('\u{0}');
+            // Key off the *compiled* pattern, never `raw_rule.pattern`.
+            // The two differ exactly where the DSL's one escape is used:
+            // `Rule::compile` unescapes `\"` to `"`, and `Rule::matches`
+            // then matches on `"` -- so keying off the raw field would file
+            // those rules under `\` and no lookup could ever reach them.
+            // `by_first_char` is an index into rules, and an index must be
+            // built with the same spelling it will be consulted with.
+            // Pinned by `every_rule_is_bucketed_under_its_compiled_patterns_first_character`.
+            let ch = compiled.pattern.chars().next().unwrap_or('\u{0}');
             by_first_char.entry(ch).or_default().push(compiled);
         }
         let compiled = std::sync::Arc::new(CompiledTable {
@@ -357,8 +335,21 @@ fn name_type_data(name_type: NameType) -> &'static NameTypeData {
 }
 
 /// One name's Beider-Morse encoding: every plausible phonetic spelling
-/// [`BeiderMorse::encode`] produced, deduplicated by text. See this
-/// module's own doc comment for why this is not [`crate::PhoneticCodes`].
+/// [`BeiderMorse::encode`] produced, deduplicated by text.
+///
+/// # Why this is not [`PhoneticCodes`](crate::PhoneticCodes)
+///
+/// Every other encoder in this crate produces exactly one code or two, which
+/// is what `PhoneticCodes`'s `One`/`Two` shape is built around. Beider-Morse's
+/// output is a genuinely *variable-length* set — `"Renault"` alone yields
+/// eight alternatives under Generic/Approx — bounded only by the encoder's
+/// `max_phonemes` cap (default 20). Forcing it into `PhoneticCodes` would
+/// either silently drop real candidates, which for a blocking key means
+/// *missing* matches, or widen every other encoder's shape to carry a
+/// cardinality only this one needs. It gets its own type instead, and
+/// deliberately does not implement
+/// [`PhoneticEncoder`](crate::PhoneticEncoder) — see that trait for the
+/// alternative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeiderMorseCode {
     /// Independent candidate spellings, deduplicated by text and merged by
@@ -382,10 +373,55 @@ pub struct BeiderMorseCode {
     pub compound: bool,
 }
 
-/// The Beider-Morse encoder for one [`NameType`] and [`RuleType`]
-/// combination. Cheap to construct (holds only a few small fields; the
-/// actual rule tables are cached process-wide, not per-instance — see
-/// [`name_type_data`]).
+/// Beider-Morse Phonetic Matching — every plausible spelling of a name,
+/// across the languages that might have transcribed it.
+///
+/// # Publication
+///
+/// Alexander Beider and Stephen P. Morse, *Beider-Morse Phonetic Matching: An
+/// Alternative to Soundex with Fewer False Hits*, and the rule corpus they
+/// publish with it. Verbora reads the Apache Commons Codec transcription of
+/// that corpus; see this crate's `data/beider-morse/NOTICE.md` for the
+/// licensing chain.
+///
+/// # The problem it solves that the other encoders do not
+///
+/// [`DaitchMokotoff`](crate::DaitchMokotoff) covers Slavic, Germanic and
+/// Ashkenazi surname matching with one fixed rule table. Beider-Morse solves
+/// a harder problem: the *same* historical family name plausibly has
+/// different phonetically-equivalent spellings depending on **which
+/// country's** orthographic conventions transcribed it. A name carried from
+/// Russia through Poland to Germany accumulates several "correct" spellings,
+/// not one. The rule tables are therefore per-language, and the engine either
+/// targets one language's conventions ([`BeiderMorse::encode_language`]) or
+/// blends the `any`-language fallback rules to hedge across all of them
+/// ([`BeiderMorse::encode`]).
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar.** The rule patterns are the
+///   corpus's own, and they include accented Latin vowels, so unlike this
+///   crate's Latin-alphabet encoders this one reads `è é ò ó` as themselves.
+/// * The output is a **variable-length candidate list**, not one key or two —
+///   see [`BeiderMorseCode`].
+/// * **Total**: no input panics, and there is no error type. A word no rule
+///   covers yields an empty candidate list.
+///
+/// # Scope
+///
+/// `encode`/`encode_language` **generate** candidate spellings. They do not
+/// rank them, do not apply an edit-distance threshold, and do not index
+/// anything — compose with [`PhoneticIndex`](crate::PhoneticIndex) or
+/// `verbora-distance` at the call site, the same boundary
+/// [`PhoneticIndex::neighbors`](crate::PhoneticIndex::neighbors) draws.
+///
+/// # Cost
+///
+/// Cheap to construct and cheap to copy: the value holds only a few small
+/// fields, and the rule tables are parsed once per [`NameType`] and cached
+/// process-wide rather than per instance, so building, cloning or dropping an
+/// encoder never touches them. The first encode of a given `NameType` pays
+/// the parse.
 #[derive(Debug, Clone, Copy)]
 pub struct BeiderMorse {
     name_type: NameType,
@@ -431,8 +467,15 @@ impl BeiderMorse {
     }
 
     /// Encodes `word`, first guessing which language(s) it's plausibly
-    /// spelled under from the spelling itself (see [`lang::LangGuesser`]) —
-    /// matches every reference implementation's own default behavior. A
+    /// spelled under from the spelling itself — matching every reference
+    /// implementation's own default behavior. The guess is the `*_lang.txt`
+    /// heuristic layer: it starts from every language this [`NameType`] has
+    /// and narrows one rule at a time, in file order, an "accept" rule
+    /// intersecting the running guess down to just its own listed languages
+    /// when its pattern matches and a "reject" rule removing its listed
+    /// languages instead. A guess that narrows all the way to nothing falls
+    /// back to the full set, since "no candidate spelling is plausible under
+    /// any language" is never the intent of the heuristic. A
     /// confident single-language guess (e.g. `"Renault"` → French) loads
     /// that language's own rule file and starts every candidate phoneme
     /// pre-filtered to it; an ambiguous guess falls back to the `"any"` file
@@ -680,7 +723,7 @@ mod tests {
         let bm = BeiderMorse::new(NameType::Generic, RuleType::Approx);
         let code = bm.encode("Renault");
         // "Renault" guesses to a singleton French match and its 8-candidate
-        // output was diffed byte-for-byte against a live `rphonetic` oracle
+        // output was diffed byte-for-byte against a live `Commons Codec` oracle
         // (built from the identical rule corpus) during development -- see
         // this module's own doc comment for why that oracle isn't a
         // committed dependency, so it isn't re-asserted verbatim here.
@@ -854,6 +897,403 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The four accented-vowel rules `*_rules_italian.txt` carries, and the
+    /// unaccented vowel each is phonetically identical to. Shared by the
+    /// tests below so the set is stated once and every one of them
+    /// enumerates all four rather than sampling.
+    const ITALIAN_ACCENTED_VOWELS: [(char, char); 4] =
+        [('é', 'e'), ('è', 'e'), ('ó', 'o'), ('ò', 'o')];
+
+    #[test]
+    fn italian_accented_vowels_are_encoded_not_dropped() {
+        // `gen_rules_italian.txt` and `sep_rules_italian.txt` each carry
+        // `"é" "" "" "e"`, `"è" "" "" "e"`, `"ó" "" "" "o"` and
+        // `"ò" "" "" "o"` -- so each accented vowel hands the Rules pass
+        // exactly the phoneme its unaccented twin does. The Rules pass's
+        // output text is the *only* input the Approx/Exact passes ever see
+        // (see `encode_for_language_file`), so identical Rules-pass text
+        // forces identical final output whatever those later passes do:
+        // the accented and unaccented spellings must encode alike.
+        //
+        // `tr` + vowel is deliberate. No rule in either Italian file gives
+        // `t` or `r` a left or right context, and the vowel is word-final,
+        // so swapping the vowel cannot change how any other position is
+        // scanned -- the equality is a property of the vowel rules alone.
+        //
+        // Enumerated over all four vowels x both name types x both rule
+        // types: when the corpus carried U+FFFD for all four patterns they
+        // collapsed into a single `by_first_char` bucket, and since
+        // `RuleTable::apply_to` takes the first matching rule in a bucket,
+        // three of the four could never fire even had the shared pattern
+        // been a real character.
+        for (accented, plain) in ITALIAN_ACCENTED_VOWELS {
+            for name_type in [NameType::Generic, NameType::Sephardic] {
+                for rule_type in [RuleType::Approx, RuleType::Exact] {
+                    let bm = BeiderMorse::new(name_type, rule_type);
+                    let accented_word = format!("tr{accented}");
+                    let plain_word = format!("tr{plain}");
+                    let with_accent = bm
+                        .encode_language(&accented_word, "italian")
+                        .expect("italian is a language of every name type tested here");
+                    let without_accent = bm
+                        .encode_language(&plain_word, "italian")
+                        .expect("italian is a language of every name type tested here");
+                    let vowel_deleted = bm
+                        .encode_language("tr", "italian")
+                        .expect("italian is a language of every name type tested here");
+                    assert_eq!(
+                        with_accent.spellings, without_accent.spellings,
+                        "{name_type:?}/{rule_type:?}: {accented_word:?} must encode exactly as \
+                         {plain_word:?}"
+                    );
+                    assert_ne!(
+                        with_accent.spellings, vowel_deleted.spellings,
+                        "{name_type:?}/{rule_type:?}: {accented:?} contributed nothing to \
+                         {accented_word:?} -- the Rules pass matched no rule and dropped it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn italian_accented_vowels_have_hand_derived_exact_encodings() {
+        // Exact values walked by hand through the rule files, not recorded
+        // from this implementation.
+        //
+        // Rules pass (`gen_rules_italian.txt`): `t` -> `t` and `r` -> `r`
+        // (the catch-all latin-alphabet rules, no contexts), `é`/`è` -> `e`,
+        // `ó`/`ò` -> `o`. So `trè` and `tré` leave the Rules pass as `tre`,
+        // `trò` and `tró` as `tro`.
+        //
+        // Exact pass 1 (`gen_exact_common.txt`, plus the
+        // `gen_exact_approx_common.txt` it `#include`s): every `t` rule
+        // there requires a right context of `[vbgZz]`, `d` or `t`; the only
+        // `r` rule requires a following `r`; there is no `e` or `o` rule at
+        // all. None of those contexts hold in `tre`/`tro`, so with
+        // `OnUnmatched::PassThrough` every character survives unchanged.
+        //
+        // Exact pass 2 (`gen_exact_italian.txt`) is empty, so
+        // `apply_final_pass` returns its input untouched.
+        let bm = BeiderMorse::new(NameType::Generic, RuleType::Exact);
+        for (word, expected) in [
+            ("tré", "tre"),
+            ("trè", "tre"),
+            ("tró", "tro"),
+            ("trò", "tro"),
+        ] {
+            let code = bm
+                .encode_language(word, "italian")
+                .expect("italian is a Generic language");
+            assert!(!code.compound, "{word:?} is a single word, not a compound");
+            assert_eq!(code.spellings, vec![expected.to_owned()], "{word:?}");
+        }
+    }
+
+    #[test]
+    fn each_italian_accented_vowel_rule_gets_its_own_reachable_bucket() {
+        // The structural half of the defect: four rules sharing one pattern
+        // share one bucket, and `RuleTable::apply_to` stops at the first
+        // rule in a bucket that matches -- so restoring the bytes is only a
+        // fix if it also makes the four patterns distinct. Each accented
+        // vowel must key a bucket of its own, holding exactly the one rule,
+        // carrying exactly the one phoneme.
+        for name_type in [NameType::Generic, NameType::Sephardic] {
+            let data = name_type_data(name_type);
+            let compiled = data.table(name_type, PassKind::Rules, "italian");
+            for (accented, plain) in ITALIAN_ACCENTED_VOWELS {
+                let bucket = compiled
+                    .table
+                    .by_first_char
+                    .get(&accented)
+                    .unwrap_or_else(|| panic!("{name_type:?}: no bucket for {accented:?}"));
+                assert_eq!(
+                    bucket.len(),
+                    1,
+                    "{name_type:?}: {accented:?} shares its bucket with {} other rule(s), so \
+                     first-match-wins may shadow it",
+                    bucket.len() - 1
+                );
+                assert_eq!(
+                    bucket[0].pattern,
+                    accented.to_string(),
+                    "{name_type:?}: bucket {accented:?} holds the wrong rule"
+                );
+                assert_eq!(
+                    bucket[0].phonemes.len(),
+                    1,
+                    "{name_type:?}: {accented:?} should offer exactly one phoneme"
+                );
+                assert_eq!(
+                    bucket[0].phonemes[0].0,
+                    plain.to_string(),
+                    "{name_type:?}: {accented:?} must produce the phoneme {plain:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_rule_field_in_the_corpus_carries_a_replacement_character() {
+        // U+FFFD in a rule field is always corruption, never data: a
+        // pattern spelled `\u{FFFD}` matches no realistic input, and the
+        // Rules pass's `OnUnmatched::Skip` then deletes the character the
+        // rule existed to encode instead of failing. Enumerates every rule
+        // of every embedded file -- the whole point is that this class of
+        // damage can never again be present in only a couple of files and
+        // go unnoticed.
+        const REPLACEMENT: char = '\u{FFFD}';
+        let mut rules_checked = 0usize;
+        for &(filename, text) in EMBEDDED_FILES {
+            for line in meaningful_lines(text) {
+                let Some(Line::Rule(raw)) = parse_line(line) else {
+                    continue;
+                };
+                rules_checked += 1;
+                for (field_name, field) in [
+                    ("pattern", raw.pattern),
+                    ("left context", raw.left_context),
+                    ("right context", raw.right_context),
+                    ("phonetic", raw.phonetic),
+                ] {
+                    assert!(
+                        !field.contains(REPLACEMENT),
+                        "U+FFFD in the {field_name} field of {filename}: {line:?}"
+                    );
+                }
+            }
+        }
+        // A floor, so a walk that silently stops finding rules (a parser
+        // change, a renamed file list) fails here instead of passing
+        // vacuously. The corpus holds ~4,300 rules across its 127 files.
+        assert!(
+            rules_checked >= 4_000,
+            "only {rules_checked} rules walked -- the corpus scan is not covering the corpus"
+        );
+    }
+
+    /// Every `(NameType, PassKind, language-file-suffix)` triple that has a
+    /// real file behind it, derived from the embedded file list rather than
+    /// from a hand-kept list that could drift out of date.
+    fn every_rule_table() -> Vec<(NameType, PassKind, &'static str)> {
+        let mut out = Vec::new();
+        for &(filename, _) in EMBEDDED_FILES {
+            let mut parts = filename.splitn(3, '_');
+            let (Some(prefix), Some(infix), Some(suffix)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let name_type = match prefix {
+                "gen" => NameType::Generic,
+                "ash" => NameType::Ashkenazi,
+                "sep" => NameType::Sephardic,
+                _ => continue,
+            };
+            let pass = match infix {
+                "rules" => PassKind::Rules,
+                "approx" => PassKind::Refine(RuleType::Approx),
+                "exact" => PassKind::Refine(RuleType::Exact),
+                _ => continue,
+            };
+            out.push((name_type, pass, suffix));
+        }
+        out
+    }
+
+    #[test]
+    fn every_rule_is_bucketed_under_its_compiled_patterns_first_character() {
+        // `by_first_char` is an index, and the pattern a rule is *matched*
+        // by is the compiled, unescaped one -- so the key must come from
+        // that same string. Keying off the raw, still-escaped field files a
+        // `\"` rule under `\` while it only ever matches `"`, which is this
+        // migration's signature defect: an index built on the pre-transform
+        // spelling and consulted with the post-transform one.
+        //
+        // Enumerates every bucket of every table the corpus can produce,
+        // rather than checking the handful of rules known to use the
+        // escape.
+        let mut tables_checked = 0usize;
+        for (name_type, pass, suffix) in every_rule_table() {
+            let compiled = name_type_data(name_type).table(name_type, pass, suffix);
+            tables_checked += 1;
+            for (&ch, rules) in &compiled.table.by_first_char {
+                for rule in rules {
+                    assert_eq!(
+                        rule.pattern.chars().next().unwrap_or('\u{0}'),
+                        ch,
+                        "{name_type:?}/{pass:?}/{suffix}: rule {:?} is filed under {ch:?}, which \
+                         is not the first character of the pattern it matches by",
+                        rule.pattern
+                    );
+                }
+            }
+        }
+        assert!(
+            tables_checked >= 100,
+            "only {tables_checked} tables walked -- the table sweep is not covering the corpus"
+        );
+    }
+
+    /// **Enumeration, not sampling.** Every rule of every table the embedded
+    /// corpus can produce, walked for reachability — and the exact count of
+    /// dead rules asserted, because it is not zero.
+    ///
+    /// Within a bucket the *first* matching rule wins, so a rule is
+    /// definitely unreachable when an earlier rule in the same bucket has the
+    /// same pattern **and** no context conditions at all: that earlier rule
+    /// fires at every position this one could. (A rule shadowed only under
+    /// *some* contexts is not decidable from the tables alone, and is not
+    /// claimed here, so 42 is a lower bound on dead rules, not the total.)
+    ///
+    /// # What the 42 are, and why they are not repaired here
+    ///
+    /// **32 of them are one upstream copy-paste error**, in
+    /// `ash_approx_common.txt` and `gen_approx_common.txt`. Each file has a
+    /// run of nine six-line blocks, one per vowel, mapping `<v>j<v>` to `D`.
+    /// The `a`/`A` block is correct; **every later block repeats the `A`
+    /// block's last two lines verbatim** instead of using its own vowel:
+    ///
+    /// ```text
+    /// "Aja"  ""  ""  "D"      "oja"  ""  ""  "D"
+    /// "AjA"  ""  ""  "D"      "ojA"  ""  ""  "D"
+    /// "Ajo"  ""  ""  "D"      "ojo"  ""  ""  "D"
+    /// "AjO"  ""  ""  "D"      "ojO"  ""  ""  "D"
+    /// "Aju"  ""  ""  "D"      "Aju"  ""  ""  "D"   <-- should be "oju"
+    /// "AjU"  ""  ""  "D"      "AjU"  ""  ""  "D"   <-- should be "ojU"
+    /// ```
+    ///
+    /// So `"Aju"` and `"AjU"` each appear **nine** times while `oju`, `Oju`,
+    /// `eju`, `Eju`, `iju`, `Iju`, `uju`, `Uju` and their `U` variants appear
+    /// **zero** times in either file. The duplicates are harmless in
+    /// themselves — they would emit the same phoneme — but the rules they
+    /// displaced are simply absent, so those vowel-`j`-vowel sequences are not
+    /// collapsed the way the `a` block's are.
+    ///
+    /// The remaining 10 are single-rule duplicates in the Ashkenazi and
+    /// Sephardic `rules` files (`h`, `j`, `ej`, `goltz`, `ű`, `z`).
+    ///
+    /// **Verbora does not repair this.** The rule corpus is Apache-2.0 data
+    /// copied verbatim from Apache Commons Codec, and the only other
+    /// transcription of Beider and Morse's original is GPL-3.0 PHP that this
+    /// workspace may not read (see `data/beider-morse/NOTICE.md`). Writing the
+    /// eight missing rules would mean *inventing* behaviour with no citable
+    /// basis, which is exactly what this migration exists to remove. The
+    /// defect is therefore recorded, counted and pinned instead: if a future
+    /// corpus update fixes it upstream, this assertion fails and the count is
+    /// updated deliberately.
+    #[test]
+    fn the_corpus_dead_rule_count_is_exactly_what_upstream_left_behind() {
+        let mut tables = 0usize;
+        let mut rules = 0usize;
+        let mut shadowed: Vec<String> = Vec::new();
+
+        for (name_type, pass, suffix) in every_rule_table() {
+            let compiled = name_type_data(name_type).table(name_type, pass, suffix);
+            tables += 1;
+            for (first, bucket) in &compiled.table.by_first_char {
+                for (i, rule) in bucket.iter().enumerate() {
+                    rules += 1;
+                    if let Some(earlier) = bucket[..i]
+                        .iter()
+                        .position(|e| e.pattern == rule.pattern && e.is_unconditional())
+                    {
+                        shadowed.push(format!(
+                            "{name_type:?}/{suffix}/{pass:?} bucket {first:?}: rule {i} \
+                             ({:?}) is shadowed by unconditional rule {earlier}",
+                            rule.pattern
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            shadowed.len(),
+            42,
+            "the corpus's dead-rule count changed:\n{}",
+            shadowed.join("\n")
+        );
+        // The `Aju`/`AjU` duplication is the bulk of it, and is named
+        // explicitly so that a corpus fix cannot quietly rebalance the total.
+        let aju = shadowed
+            .iter()
+            .filter(|line| line.contains("\"Aju\"") || line.contains("\"AjU\""))
+            .count();
+        assert_eq!(
+            aju,
+            32,
+            "the Aju/AjU copy-paste run changed:\n{}",
+            shadowed.join("\n")
+        );
+        assert!(tables >= 100, "only {tables} rule tables were walked");
+        assert!(rules >= 4_500, "only {rules} rules were walked");
+    }
+
+    #[test]
+    fn literal_quote_rule_is_reachable_in_the_real_rule_table() {
+        // `\"` is the one escape the rule DSL defines, and the corpus uses
+        // it in four files. `rule.rs` proves in isolation that
+        // `Rule::compile` unescapes it; this proves the rule is reachable in
+        // the table it actually lives in, which is a separate claim and was
+        // the false one.
+        const FILES_USING_THE_ESCAPE: [(NameType, &str); 4] = [
+            (NameType::Generic, "russian"),
+            (NameType::Generic, "any"),
+            (NameType::Ashkenazi, "russian"),
+            (NameType::Ashkenazi, "any"),
+        ];
+
+        for (name_type, suffix) in FILES_USING_THE_ESCAPE {
+            // The corpus really does still carry the escape unexpanded at
+            // parse time -- otherwise the rest of this test would pass for
+            // the wrong reason.
+            let mut raw = Vec::new();
+            load_rule_lines(
+                &format!("{}_rules_{suffix}", name_type.file_prefix()),
+                &mut raw,
+            );
+            assert!(
+                raw.iter().any(|r| r.pattern == "\\\""),
+                "{name_type:?}/{suffix}: expected a raw `\\\"` pattern in the corpus"
+            );
+
+            let data = name_type_data(name_type);
+            let compiled = data.table(name_type, PassKind::Rules, suffix);
+            assert!(
+                !compiled.table.by_first_char.contains_key(&'\\'),
+                "{name_type:?}/{suffix}: a rule is filed under the escape character `\\`"
+            );
+            let bucket =
+                compiled.table.by_first_char.get(&'"').unwrap_or_else(|| {
+                    panic!("{name_type:?}/{suffix}: no bucket for a literal quote")
+                });
+            assert!(
+                bucket.iter().any(|r| r.pattern == "\""),
+                "{name_type:?}/{suffix}: the quote bucket holds no literal-quote rule"
+            );
+
+            // And it fires: the rule's phonetic field is empty, so a `"` in
+            // the input is consumed and contributes nothing. Read with
+            // `OnUnmatched::PassThrough` so that an unreachable rule shows
+            // up as the character surviving into the output instead of
+            // being indistinguishable from a silent skip.
+            let mut builder = PhonemeBuilder::empty(data.all_languages());
+            compiled.table.apply_to(
+                "\"",
+                &mut builder,
+                DEFAULT_MAX_PHONEMES,
+                OnUnmatched::PassThrough,
+            );
+            let candidates = builder.into_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(
+                candidates[0].text, "",
+                "{name_type:?}/{suffix}: the literal-quote rule never fired"
+            );
         }
     }
 }

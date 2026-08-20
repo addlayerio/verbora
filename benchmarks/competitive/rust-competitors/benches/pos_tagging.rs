@@ -13,7 +13,7 @@
 //!
 //! # Three different algorithm classes — never blended into one number
 //!
-//! - **Verbora** (`verbora_tagger::BrillPosTagger`) — a deterministic Brill
+//! - **Verbora** (`verbora_tagger::BrillTagger`) — a deterministic Brill
 //!   transformation-rule tagger: a lexicon lookup, then 18 hand-authored
 //!   context rules applied in sequence.
 //! - **`postagger`** (shubham0204/postagger.rs 0.0.3) — a pretrained
@@ -35,7 +35,7 @@
 //!
 //! - `pos_cold_start` — the full cost of getting each implementation from
 //!   "just started" to "ready to tag": for Verbora, constructing a
-//!   [`Lexicon`] *and* a [`RuleSet`] *and* a [`BrillPosTagger`] (the whole
+//!   [`Lexicon`] *and* a [`RuleSet`] *and* a [`BrillTagger`] (the whole
 //!   set of objects `postagger`'s and `rust-bert`'s single `::new()` call
 //!   already bundles); for `postagger`, `PerceptronTagger::new` (parses a
 //!   5.6 MB weights.json); for `rust-bert`, `POSModel::new` (loads a ~94 MB
@@ -91,7 +91,7 @@ use rust_bert::pipelines::token_classification::{
 };
 use rust_bert::resources::LocalResource;
 use tch::Device;
-use verbora_tagger::{BrillPosTagger, Language, Lexicon, RuleSet};
+use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
 
 /// The canonical short sentence: `postagger`'s own README example, and a
 /// perfectly ordinary Penn-Treebank-taggable English sentence. Nine tokens.
@@ -183,14 +183,10 @@ fn bench_cold_start(c: &mut Criterion) {
 
     g.bench_with_input(BenchmarkId::new("verbora", "cold"), &(), |b, ()| {
         b.iter(|| {
-            let lexicon = Lexicon::detached(Some("EN"), Some("NN"), Some("NNP"));
-            let rules = RuleSet::for_language(Language::English);
-            let tagger = BrillPosTagger::new(&lexicon, &rules);
-            black_box(
-                tagger
-                    .tag(black_box(tokens(SHORT_SENTENCE)))
-                    .expect("no failing predicate"),
-            )
+            let lexicon = Lexicon::bundled(Language::English);
+            let rules = RuleSet::bundled(Language::English);
+            let tagger = BrillTagger::new(&lexicon, &rules);
+            black_box(tagger.tag(black_box(tokens(SHORT_SENTENCE))))
         });
     });
 
@@ -232,9 +228,9 @@ fn bench_cold_start(c: &mut Criterion) {
 fn bench_tag_sentence(c: &mut Criterion) {
     let mut g = c.benchmark_group("pos_tag_sentence");
 
-    let en_lexicon = Lexicon::detached(Some("EN"), Some("NN"), Some("NNP"));
-    let en_rules = RuleSet::for_language(Language::English);
-    let verbora_tagger = BrillPosTagger::new(&en_lexicon, &en_rules);
+    let en_lexicon = Lexicon::bundled(Language::English);
+    let en_rules = RuleSet::bundled(Language::English);
+    let verbora_tagger = BrillTagger::new(&en_lexicon, &en_rules);
 
     let postagger_tagger = postagger_model_dir().map(|d| load_postagger(&d));
     if postagger_tagger.is_none() {
@@ -250,13 +246,7 @@ fn bench_tag_sentence(c: &mut Criterion) {
         let toks = tokens(sentence);
 
         g.bench_with_input(BenchmarkId::new("verbora", label), &toks, |b, toks| {
-            b.iter(|| {
-                black_box(
-                    verbora_tagger
-                        .tag(black_box(toks.iter().copied()))
-                        .expect("no failing predicate"),
-                )
-            });
+            b.iter(|| black_box(verbora_tagger.tag(black_box(toks.iter().copied()))));
         });
 
         if let Some(tagger) = &postagger_tagger {
@@ -285,9 +275,9 @@ fn bench_tag_sentence(c: &mut Criterion) {
 fn bench_batch(c: &mut Criterion) {
     let mut g = c.benchmark_group("pos_tag_batch");
 
-    let en_lexicon = Lexicon::detached(Some("EN"), Some("NN"), Some("NNP"));
-    let en_rules = RuleSet::for_language(Language::English);
-    let verbora_tagger = BrillPosTagger::new(&en_lexicon, &en_rules);
+    let en_lexicon = Lexicon::bundled(Language::English);
+    let en_rules = RuleSet::bundled(Language::English);
+    let verbora_tagger = BrillTagger::new(&en_lexicon, &en_rules);
     let toks = tokens(SHORT_SENTENCE);
 
     const BATCH: usize = 8;
@@ -295,11 +285,7 @@ fn bench_batch(c: &mut Criterion) {
     g.bench_with_input(BenchmarkId::new("verbora", BATCH), &toks, |b, toks| {
         b.iter(|| {
             for _ in 0..BATCH {
-                black_box(
-                    verbora_tagger
-                        .tag(black_box(toks.iter().copied()))
-                        .expect("no failing predicate"),
-                );
+                black_box(verbora_tagger.tag(black_box(toks.iter().copied())));
             }
         });
     });

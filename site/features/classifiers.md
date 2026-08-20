@@ -56,13 +56,23 @@ fn main() {
     classifier.add_document("the drive has a 2TB capacity", "other");
     classifier.train().unwrap();
 
-    assert_eq!(classifier.classify("did the tests pass?").unwrap(), "other");
+    assert_eq!(classifier.classify("the program crashed").unwrap(), "software");
+    assert_eq!(classifier.classify("the drive is full").unwrap(), "other");
 }
 ```
 
 Every string is tokenised and stemmed by the default English Porter stemmer,
 filtered against the stop-word list, then folded into a growing feature
 vocabulary. `train()` hands each new document's 0/1 feature vector to the engine.
+
+Tokenization follows UAX #29 word boundaries, so a feature is whatever
+[`WordTokenizer`](./tokenizers.md) yields after stemming: `"my unit-tests
+failed."` becomes `["unit", "test", "fail"]` — three features, because
+`U+002D HYPHEN-MINUS` is a word boundary and `"my"` is a stop word. When a
+query's evidence is split evenly between two classes their scores tie, and
+`classify` still returns one label — use
+[`get_classifications`](#classify-vs-get-classifications) when you need to see that it was a
+tie rather than a decision.
 
 ## Which classifier?
 
@@ -243,9 +253,10 @@ scheduling cost easily. Reproduce with
 same `par_iter().map(...)` pattern at your own call site.
 
 ```rust  ignore
-let texts = ["did the tests pass?", "the drive is full"];
+let texts = ["the program crashed", "the drive is full"];
 let results = classifier.par_classify_batch(&texts);
-assert_eq!(results[0].as_deref(), Ok("other"));
+assert_eq!(results[0].as_deref(), Ok("software"));
+assert_eq!(results[1].as_deref(), Ok("other"));
 ```
 
 <div class="callout callout-warn">
@@ -316,15 +327,24 @@ immediately.
 
 ### Reproducible transcendental math
 
-Rust's `f64::ln` and `f64::exp` call the platform's libm, whose results differ
-between platforms — by one ULP on 4.9% and 9.7% of inputs respectively.
-`verbora_classifiers::transcendental` provides its own `log` and `exp` instead
-(fixed polynomial coefficients and `f64::to_bits`/`from_bits`, no `unsafe`), so a
-model trains and scores identically everywhere. That matters because a one-ULP
-difference lands directly in a Bayes score that is then *sorted* — a near-tie can
-flip which class wins — and because logistic regression's descent loop stops when
-successive costs differ by less than `1e-4`, so a perturbation can change the
-*number* of iterations, and therefore the whole model.
+Rust's `f64::ln` and `f64::exp` call the platform's libm, which is not specified
+to be correctly rounded and disagrees between targets and between versions of one
+target. Over 20,000 pseudo-random arguments, two such implementations differed on
+981 logarithms (4.9%) and 1,933 exponentials (9.7%) — always by exactly one ULP.
+
+Verbora therefore computes these itself. `log`, `exp`, `pow` and `sigmoid` are
+public at the crate root (fixed polynomial coefficients and
+`f64::to_bits`/`from_bits`, no `unsafe`), so a model trains and scores
+identically everywhere. That matters because a one-ULP difference lands directly
+in a Bayes score that is then *sorted* — a near-tie can flip which class wins —
+and because logistic regression's descent loop stops when successive costs differ
+by less than `1e-4`, so a perturbation can change the *number* of iterations, and
+therefore the whole model. `pow` needs no such treatment and delegates to
+`f64::powf`: 20,000 random `(base, exponent)` pairs agreed bit-for-bit.
+
+A model is a persisted artifact. If its scores depended on the libm of the
+machine that fitted it, it would not be reproducible, and no compatibility stamp
+could describe that.
 
 Each algorithm's summation direction is fixed and observable for the same reason
 (IEEE-754 addition is not associative): Bayes sums from the highest set feature
@@ -333,14 +353,14 @@ ascending, and MaxEnt walks `sample.elements()` in insertion order **including
 duplicates**.
 
 ```rust
-use verbora_classifiers::transcendental;
+use verbora_classifiers::log;
 
 fn main() {
     // A value where the platform libm's `ln` disagrees with this crate's own
     // `log` by exactly one ULP.
     let x = 11.262_564_292_775_972_f64;
-    assert_eq!(transcendental::log(x).to_bits(), 0x4003_5f33_2d5c_29fc);
-    assert_ne!(x.ln().to_bits(), transcendental::log(x).to_bits());
+    assert_eq!(log(x).to_bits(), 0x4003_5f33_2d5c_29fc);
+    assert_ne!(x.ln().to_bits(), log(x).to_bits());
 }
 ```
 
@@ -619,17 +639,17 @@ cargo doc -p verbora-classifiers --no-deps --open
 |---|---|
 | `BayesClassifier`, `BayesEngine` | `verbora_classifiers::{BayesClassifier, BayesEngine}` |
 | `LogisticRegressionClassifier`, `LogisticEngine` | `verbora_classifiers::{LogisticRegressionClassifier, LogisticEngine}` |
-| `Classifier<E>`, `Engine`, `Observation`, `Document`, `TrainingEvent`, `Classification`, `ClassifierError`, `LoadError` | `verbora_classifiers::basic::*` (also re-exported at the crate root) |
+| `Classifier<E>`, `Engine`, `Observation`, `Document`, `TrainingEvent`, `Classification`, `ClassifierError`, `LoadError` | `verbora_classifiers::{Classifier, Engine, Observation, Document, TrainingEvent, Classification, ClassifierError, LoadError}` |
 | `Classifier::par_classify_batch` (requires `parallel`) | same path as `Classifier<E>` |
 | `MaxEntClassifier`, `RestoreError`, `MaxEntError` | `verbora_classifiers::{MaxEntClassifier, RestoreError, MaxEntError}` |
 | `Context`, `Element`, `GenerateFeatures` | `verbora_classifiers::{Context, Element, GenerateFeatures}` |
 | `Feature`, `FeatureFn`, `FeatureSet` | `verbora_classifiers::{Feature, FeatureFn, FeatureSet}` |
 | `Sample`, `Distribution`, `GISScaler`, `ScalerState` | `verbora_classifiers::{Sample, Distribution, GISScaler, ScalerState}` |
 | `SEElement`, `POSElement`, `TaggedWord`, `MESentence`, `MECorpus` | `verbora_classifiers::{SEElement, POSElement, TaggedWord, MESentence, MECorpus}` |
-| Bit-exact `log`/`exp`/`pow`/`sigmoid` | `verbora_classifiers::transcendental` |
-| array-index-first, insertion-order map | `verbora_classifiers::OrderedMap` (also `::ordmap`) |
-| JSON-like value, UTF-16-ordered stringify/parse | `verbora_classifiers::DynValue` (also `::dynval`) |
-| Tokenize-and-stem adapter | `verbora_classifiers::{Stemmer, StemmerOf, default_stemmer}` |
+| Bit-exact `log`/`exp`/`pow`/`sigmoid` | `verbora_classifiers::{log, exp, pow, sigmoid}` |
+| array-index-first, insertion-order map | `verbora_classifiers::{OrderedMap, is_array_index}` |
+| JSON-like value, UTF-16-ordered stringify/parse | `verbora_classifiers::{DynValue, ParseError, json_stringify_pretty, number_to_string, utf16_cmp}` |
+| Tokenize-and-stem adapter | `verbora_classifiers::{StemCache, Stemmer, StemmerOf, default_stemmer}` |
 
 Source: `crates/verbora-classifiers/src/`. Boundary-input suite:
 `crates/verbora-classifiers/tests/edge_cases.rs`. Benchmarks:

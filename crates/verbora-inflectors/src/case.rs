@@ -1,166 +1,167 @@
-//! `TenseInflector.restoreCase`: deciding, from the *original* token, how to
-//! re-case whatever the rules produced.
-//!
-//! The reference is four lines long and every one of them is a trap:
-//!
-//! ```text
-//! if (token[0] === token[0].toUpperCase()) {
-//!   if (token[1] && token[1] === token[1].toLowerCase()) return capitalize
-//!   else return uppercaseify
-//! } else return lowercaseify
-//! ```
-//!
-//! * `token[0]` and `token[1]` are **UTF-16 code units**, not characters. For
-//!   `"👍"` the reference sees two units — a high surrogate that is
-//!   uppercase-invariant and a low surrogate that is lowercase-invariant — and
-//!   therefore picks `capitalize`. A port that iterates `chars()` sees one
-//!   character, finds no `token[1]`, and picks `uppercaseify`: `pluralize("👍")`
-//!   becomes `"👍S"` instead of `"👍s"`.
-//! * The test is a **round-trip string comparison**, not a character-class
-//!   query. Digits, punctuation, CJK and surrogates are neither uppercase nor
-//!   lowercase, yet `c === c.toUpperCase()` is true for all of them — which is
-//!   why `pluralize("1")` is `"1S"` and `pluralize("12")` is `"12s"`. Reaching
-//!   for [`char::is_uppercase`] gets both wrong.
-//! * The mapping is the *full* one, so it can change length: `"ß".toUpperCase()`
-//!   is `"SS"`, which is not `"ß"`, so `"ß"` takes the lowercase branch and
-//!   `pluralize("ß")` is `"ßs"`.
-//!
-//! `capitalize` would throw on an empty string, but [`crate::Rule`] results are
-//! never empty (see the falsy-empty-string fallthrough in
-//! [`crate::SingularPluralInflector`]), so that path is unreachable through the
-//! public API — exactly as in the reference.
+use std::fmt;
 
-/// Which of the three case-restoration functions the reference selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How the case of an input token is carried onto its inflected form.
+///
+/// An inflector rewrites a *lowercase* form — `child` becomes `children`, `-ies`
+/// replaces `-y` — but the caller's token may be capitalised or upper-cased.
+/// [`CaseMode::of`] classifies the token, and [`CaseMode::apply`] puts that
+/// classification back onto whatever the rules produced.
+///
+/// # The text unit
+///
+/// **One Unicode scalar value is one character.** Classification iterates
+/// [`char`]s, never UTF-16 code units and never bytes, so an astral scalar such
+/// as `U+1F44D 👍` is exactly one character and the classification of `"👍"` is
+/// the classification of a single caseless character.
+///
+/// A character is **cased** when [`char::is_uppercase`] or [`char::is_lowercase`]
+/// holds — the Unicode `Uppercase` and `Lowercase` derived properties (UAX #44).
+/// Digits, punctuation, symbols, emoji and every CJK ideograph are uncased, and
+/// uncased characters are ignored entirely when choosing a mode.
+///
+/// # The classification
+///
+/// Applied to the token in order, first match winning:
+///
+/// | Condition on the token's cased characters | Mode |
+/// |---|---|
+/// | none at all | [`Preserve`](CaseMode::Preserve) |
+/// | two or more, every one uppercase | [`Upper`](CaseMode::Upper) |
+/// | the first uppercase, every later one lowercase | [`Title`](CaseMode::Title) |
+/// | anything else | [`Preserve`](CaseMode::Preserve) |
+///
+/// The "two or more" clause is why `"A"` is [`Title`](CaseMode::Title) rather
+/// than [`Upper`](CaseMode::Upper): one uppercase letter is indistinguishable
+/// from a capitalised word, and treating it as a shout would pluralise `"A"` to
+/// `"AS"`.
+///
+/// The final row is the reason the crate never silently re-cases its input:
+/// `"iPhone"`, `"McDonald"` and `"aBC"` are all [`Preserve`](CaseMode::Preserve),
+/// so their interior capitals survive.
+///
+/// ```
+/// use verbora_inflectors::CaseMode;
+///
+/// assert_eq!(CaseMode::of("word"), CaseMode::Preserve);
+/// assert_eq!(CaseMode::of("Word"), CaseMode::Title);
+/// assert_eq!(CaseMode::of("WORD"), CaseMode::Upper);
+/// assert_eq!(CaseMode::of("A"), CaseMode::Title);
+/// assert_eq!(CaseMode::of("iPhone"), CaseMode::Preserve);
+/// assert_eq!(CaseMode::of("👍"), CaseMode::Preserve);
+/// assert_eq!(CaseMode::of(""), CaseMode::Preserve);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum CaseMode {
-    /// `lowercaseify`: the token began with a lowercase-ish character.
-    Lower,
-    /// `capitalize`: uppercase-invariant first unit, lowercase-invariant second.
-    Capitalize,
-    /// `uppercaseify`: uppercase-invariant first unit, and no lowercase-ish
-    /// second unit — including the single-character case, where `token[1]` is
-    /// `undefined` and therefore falsy.
+    /// Emit the produced form exactly as the rules produced it.
+    ///
+    /// Chosen for tokens with no cased character, for tokens whose first cased
+    /// character is lowercase, and for mixed shapes such as `"McDonald"` that
+    /// neither [`Title`](CaseMode::Title) nor [`Upper`](CaseMode::Upper)
+    /// describes.
+    #[default]
+    Preserve,
+    /// Uppercase the first character of the produced form and leave the rest
+    /// alone.
+    ///
+    /// The mapping is the full Unicode uppercase mapping, so it can lengthen the
+    /// string: `"ß"` becomes `"SS"`.
+    Title,
+    /// Uppercase the whole produced form, using the full Unicode uppercase
+    /// mapping.
     Upper,
 }
 
-/// Selects the case-restoration mode for `token`.
-///
-/// Returns `None` for the empty string, which is where the reference throws
-/// `TypeError: Cannot read properties of undefined (reading 'toUpperCase')`.
-#[must_use]
-pub fn restore_case(token: &str) -> Option<CaseMode> {
-    let mut chars = token.chars();
-    let first = chars.next()?;
+impl CaseMode {
+    /// Classifies `token`.
+    ///
+    /// Total: every string, including `""`, has a mode. See the type
+    /// documentation for the classification table.
+    #[must_use]
+    pub fn of(token: &str) -> Self {
+        let mut first_cased_is_upper = None;
+        let mut cased = 0usize;
+        let mut later_upper = false;
+        let mut any_lower = false;
 
-    // A non-BMP character occupies two code units. `token[0]` is then the high
-    // surrogate, which no case mapping touches, so the first test passes.
-    let first_is_astral = first.len_utf16() == 2;
-    if !first_is_astral && !is_uppercase_invariant(first) {
-        return Some(CaseMode::Lower);
+        for c in token.chars() {
+            let upper = c.is_uppercase();
+            let lower = c.is_lowercase();
+            if !upper && !lower {
+                continue;
+            }
+            cased += 1;
+            if first_cased_is_upper.is_none() {
+                first_cased_is_upper = Some(upper);
+            } else if upper {
+                later_upper = true;
+            }
+            any_lower |= lower;
+        }
+
+        match first_cased_is_upper {
+            None => Self::Preserve,
+            Some(false) => Self::Preserve,
+            Some(true) if cased >= 2 && !any_lower => Self::Upper,
+            Some(true) if !later_upper => Self::Title,
+            Some(true) => Self::Preserve,
+        }
     }
 
-    let second_is_lowercase_invariant = if first_is_astral {
-        // `token[1]` is the low surrogate: present, and case-invariant.
-        true
-    } else {
-        match chars.next() {
-            // `token[1]` is `undefined`, which is falsy.
-            None => false,
-            // A non-BMP second character contributes its high surrogate.
-            Some(c) => c.len_utf16() == 2 || is_lowercase_invariant(c),
-        }
-    };
-
-    Some(if second_is_lowercase_invariant {
-        CaseMode::Capitalize
-    } else {
-        CaseMode::Upper
-    })
-}
-
-impl CaseMode {
-    /// Applies the restoration to `s`.
+    /// Applies the mode to `form`, returning a new [`String`].
+    ///
+    /// # Choosing between `apply` and `apply_into`
+    ///
+    /// [`apply`](CaseMode::apply) allocates one `String` per call and is the
+    /// right choice for one-off use. [`apply_into`](CaseMode::apply_into)
+    /// appends to a buffer the caller owns, which lets a loop over a corpus
+    /// allocate once instead of once per word; the cost is a buffer to manage
+    /// and a `clear()` that is a silent correctness bug when forgotten. Neither
+    /// is faster per character — they differ only in allocation.
     #[must_use]
-    pub fn apply(self, s: &str) -> String {
-        let mut out = String::with_capacity(s.len() + 2);
-        self.apply_into(s, &mut out);
+    pub fn apply(self, form: &str) -> String {
+        let mut out = String::with_capacity(form.len() + 2);
+        self.apply_into(form, &mut out);
         out
     }
 
-    /// Applies the restoration, appending to `out`.
+    /// Applies the mode to `form`, **appending** to `out`.
     ///
-    /// The buffer form exists so the inflectors can produce their result with a
-    /// single allocation even though the reference composes three functions.
-    pub fn apply_into(self, s: &str, out: &mut String) {
+    /// `out` is never cleared. See [`apply`](CaseMode::apply) for when to prefer
+    /// which.
+    pub fn apply_into(self, form: &str, out: &mut String) {
         match self {
-            Self::Lower => push_lowercase(s, out),
-            Self::Upper => push_uppercase(s, out),
-            Self::Capitalize => push_capitalized(s, out),
+            Self::Preserve => out.push_str(form),
+            Self::Upper => push_uppercase(form, out),
+            Self::Title => push_titlecase(form, out),
         }
     }
 }
 
-/// `token[0] === token[0].toUpperCase()` for a single BMP character.
-///
-/// Written as a mapping round trip because that is what the reference compares;
-/// `!c.is_lowercase()` would disagree on characters with multi-character or
-/// asymmetric mappings.
-fn is_uppercase_invariant(c: char) -> bool {
-    if c.is_ascii() {
-        return !c.is_ascii_lowercase();
-    }
-    let mut upper = c.to_uppercase();
-    upper.next() == Some(c) && upper.next().is_none()
-}
-
-/// `token[1] === token[1].toLowerCase()` for a single BMP character.
-fn is_lowercase_invariant(c: char) -> bool {
-    if c.is_ascii() {
-        return !c.is_ascii_uppercase();
-    }
-    let mut lower = c.to_lowercase();
-    lower.next() == Some(c) && lower.next().is_none()
-}
-
-/// `String.prototype.toLowerCase`, with an allocation-free ASCII path.
-///
-/// The non-ASCII path goes through [`str::to_lowercase`] rather than mapping
-/// character by character: both Rust and the reference apply the context-sensitive
-/// Greek final-sigma rule, and a per-character map would not.
-fn push_lowercase(s: &str, out: &mut String) {
-    if s.is_ascii() {
-        out.extend(s.chars().map(|c| c.to_ascii_lowercase()));
-    } else {
-        out.push_str(&s.to_lowercase());
+impl fmt::Display for CaseMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Preserve => "preserve",
+            Self::Title => "title",
+            Self::Upper => "upper",
+        })
     }
 }
 
-/// `String.prototype.toUpperCase`, with an allocation-free ASCII path.
+/// Full Unicode uppercase mapping, with an allocation-free ASCII path.
 fn push_uppercase(s: &str, out: &mut String) {
     if s.is_ascii() {
         out.extend(s.chars().map(|c| c.to_ascii_uppercase()));
     } else {
-        out.push_str(&s.to_uppercase());
+        out.extend(s.chars().flat_map(char::to_uppercase));
     }
 }
 
-/// `t[0].toUpperCase() + t.slice(1)`, where the index is a UTF-16 code unit.
-///
-/// When the string starts with a non-BMP character, `t[0]` is a lone high
-/// surrogate whose uppercase mapping is itself, so the concatenation rebuilds
-/// the original string — which is representable in Rust even though the
-/// intermediate lone surrogate is not.
-fn push_capitalized(s: &str, out: &mut String) {
+/// Uppercases the first character and copies the rest verbatim.
+fn push_titlecase(s: &str, out: &mut String) {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
-        // Unreachable through the public API: an empty rule result is discarded
-        // by the falsy-empty-string fallthrough before it reaches here.
         return;
     };
-    if first.len_utf16() == 2 {
-        out.push_str(s);
-        return;
-    }
     if first.is_ascii() {
         out.push(first.to_ascii_uppercase());
     } else {
@@ -171,73 +172,114 @@ fn push_capitalized(s: &str, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaseMode, restore_case};
+    use super::CaseMode;
 
-    fn mode(token: &str) -> CaseMode {
-        restore_case(token).expect("non-empty")
+    #[test]
+    fn empty_token_preserves() {
+        assert_eq!(CaseMode::of(""), CaseMode::Preserve);
+        assert_eq!(CaseMode::Preserve.apply(""), "");
+        assert_eq!(CaseMode::Title.apply(""), "");
+        assert_eq!(CaseMode::Upper.apply(""), "");
     }
 
     #[test]
-    fn empty_token_has_no_mode() {
-        assert_eq!(restore_case(""), None);
+    fn ascii_classification_table() {
+        assert_eq!(CaseMode::of("abc"), CaseMode::Preserve);
+        assert_eq!(CaseMode::of("Abc"), CaseMode::Title);
+        assert_eq!(CaseMode::of("ABC"), CaseMode::Upper);
+        assert_eq!(CaseMode::of("aBC"), CaseMode::Preserve);
+        assert_eq!(CaseMode::of("a"), CaseMode::Preserve);
     }
 
     #[test]
-    fn ascii_decision_table() {
-        assert_eq!(mode("abc"), CaseMode::Lower);
-        assert_eq!(mode("Abc"), CaseMode::Capitalize);
-        assert_eq!(mode("ABC"), CaseMode::Upper);
-        assert_eq!(mode("aBC"), CaseMode::Lower);
-        assert_eq!(mode("A"), CaseMode::Upper);
-        assert_eq!(mode("a"), CaseMode::Lower);
+    fn a_single_uppercase_letter_is_title_not_upper() {
+        // Two or more cased characters are required for `Upper`, so `pluralize`
+        // of a one-letter abbreviation is "As", not "AS".
+        assert_eq!(CaseMode::of("A"), CaseMode::Title);
+        assert_eq!(CaseMode::Title.apply("as"), "As");
+        // Two uppercase letters do reach `Upper`.
+        assert_eq!(CaseMode::of("AB"), CaseMode::Upper);
     }
 
     #[test]
-    fn caseless_characters_take_the_uppercase_branch() {
-        assert_eq!(mode("1"), CaseMode::Upper);
-        assert_eq!(mode("12"), CaseMode::Capitalize);
-        assert_eq!(mode("私"), CaseMode::Upper);
-        assert_eq!(mode("私たち"), CaseMode::Capitalize);
-        assert_eq!(mode("!"), CaseMode::Upper);
-        assert_eq!(mode("!!"), CaseMode::Capitalize);
+    fn interior_capitals_are_never_rewritten() {
+        for token in ["iPhone", "McDonald", "aBC", "eBay", "LaTeX"] {
+            assert_eq!(
+                CaseMode::of(token),
+                CaseMode::Preserve,
+                "{token} must keep its own case"
+            );
+            assert_eq!(CaseMode::Preserve.apply(token), token);
+        }
     }
 
     #[test]
-    fn multi_character_uppercase_mapping_takes_the_lowercase_branch() {
-        // "ß".toUpperCase() === "SS", which is not "ß".
-        assert_eq!(mode("ß"), CaseMode::Lower);
-        assert_eq!(mode("straße"), CaseMode::Lower);
+    fn uncased_characters_never_select_a_mode() {
+        for token in [
+            "1",
+            "12",
+            "!",
+            "!!",
+            "私",
+            "私たち",
+            "👍",
+            "👍👍",
+            "-",
+            "3.14",
+        ] {
+            assert_eq!(
+                CaseMode::of(token),
+                CaseMode::Preserve,
+                "{token} has no cased character"
+            );
+        }
+        // A cased character among uncased ones still decides.
+        assert_eq!(CaseMode::of("1A"), CaseMode::Title);
+        assert_eq!(CaseMode::of("1AB"), CaseMode::Upper);
     }
 
     #[test]
-    fn astral_characters_are_counted_as_two_code_units() {
-        // Both units are case-invariant, so the reference picks `capitalize`; a
-        // `chars()`-based port would pick `uppercaseify`.
-        assert_eq!(mode("👍"), CaseMode::Capitalize);
-        assert_eq!(mode("👍a"), CaseMode::Capitalize);
-        assert_eq!(mode("a👍"), CaseMode::Lower);
-        assert_eq!(mode("A👍"), CaseMode::Capitalize);
+    fn astral_scalars_count_as_one_character() {
+        // U+1F44D is one scalar and is uncased, so it cannot make a token
+        // "capitalised" the way a UTF-16 surrogate pair would.
+        assert_eq!(CaseMode::of("👍"), CaseMode::Preserve);
+        assert_eq!(CaseMode::of("👍a"), CaseMode::Preserve);
+        assert_eq!(CaseMode::of("👍A"), CaseMode::Title);
+        assert_eq!(CaseMode::of("A👍"), CaseMode::Title);
+        assert_eq!(CaseMode::of("👍AB"), CaseMode::Upper);
     }
 
     #[test]
-    fn accented_and_turkish_forms() {
-        assert_eq!(mode("İstanbul"), CaseMode::Capitalize);
-        assert_eq!(mode("Ångström"), CaseMode::Capitalize);
-        assert_eq!(mode("ÜBER"), CaseMode::Upper);
-        assert_eq!(mode("café"), CaseMode::Lower);
-        assert_eq!(mode("Œil"), CaseMode::Capitalize);
-        assert_eq!(mode("ŒIL"), CaseMode::Upper);
+    fn unicode_case_properties_decide() {
+        // U+00DF is Lowercase, so it is cased and starts a lowercase word.
+        assert_eq!(CaseMode::of("ß"), CaseMode::Preserve);
+        assert_eq!(CaseMode::of("straße"), CaseMode::Preserve);
+        assert_eq!(CaseMode::of("Straße"), CaseMode::Title);
+        assert_eq!(CaseMode::of("İstanbul"), CaseMode::Title);
+        assert_eq!(CaseMode::of("ÜBER"), CaseMode::Upper);
+        assert_eq!(CaseMode::of("café"), CaseMode::Preserve);
+        assert_eq!(CaseMode::of("Œil"), CaseMode::Title);
+        assert_eq!(CaseMode::of("ŒIL"), CaseMode::Upper);
     }
 
     #[test]
-    fn applying_a_mode_reproduces_the_reference_functions() {
-        assert_eq!(CaseMode::Lower.apply("AbC"), "abc");
+    fn applying_a_mode_uses_the_full_unicode_mapping() {
         assert_eq!(CaseMode::Upper.apply("abc"), "ABC");
-        assert_eq!(CaseMode::Capitalize.apply("abc"), "Abc");
-        assert_eq!(CaseMode::Capitalize.apply("👍as"), "👍as");
+        assert_eq!(CaseMode::Title.apply("abc"), "Abc");
+        assert_eq!(CaseMode::Preserve.apply("aBc"), "aBc");
+        // The uppercase mapping of U+00DF is two characters.
         assert_eq!(CaseMode::Upper.apply("ßs"), "SSS");
-        // Greek final sigma is context sensitive in both languages.
-        assert_eq!(CaseMode::Lower.apply("ΑΣ"), "ας");
+        assert_eq!(CaseMode::Title.apply("ßs"), "SSs");
+        // Greek final sigma: str::to_uppercase is context sensitive, and the
+        // per-character mapping used here maps both sigmas to U+03A3.
         assert_eq!(CaseMode::Upper.apply("ας"), "ΑΣ");
+    }
+
+    #[test]
+    fn apply_into_appends_and_never_clears() {
+        let mut buf = String::from("<");
+        CaseMode::Title.apply_into("child", &mut buf);
+        CaseMode::Upper.apply_into("!x", &mut buf);
+        assert_eq!(buf, "<Child!X");
     }
 }

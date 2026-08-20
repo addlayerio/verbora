@@ -24,7 +24,8 @@
 //! `$` is the longest listed suffix). Tables whose reference semantics are
 //! *first listed match* may only go through this search when their hand
 //! ordering makes first and longest coincide; each such language pins that
-//! property with a static ordering test ([`nested_pairs_are_longest_first`]).
+//! property with a static ordering test (`nested_pairs_are_longest_first`,
+//! test-only).
 //!
 //! # Substring links
 //!
@@ -45,16 +46,47 @@
 //! string tables stay the single source of truth, and the build asserts the
 //! invariants it relies on instead of trusting the transcription.
 
-/// One suffix table, sorted for binary search.
+/// One entry of a built table: where its code units sit in the shared blob,
+/// its substring link, and (for a merged table) which source table it came
+/// from.
 ///
-/// `entries[k]` is `(code units, link)`: entries sorted by reversed code-unit
-/// sequence, `link` the index of the longest other entry that is a proper
-/// suffix of this one, or `-1`.
-pub(crate) struct AmongTable {
-    pub(crate) entries: Vec<(Vec<u16>, i32)>,
+/// # Why the units are not stored inline
+///
+/// The first version held `Vec<(Vec<u16>, i32)>`, one heap block per suffix.
+/// The binary search then paid a *dependent* load per probe — read the entry,
+/// then chase its pointer before a single unit could be compared — on tables
+/// of up to ~95 entries searched several times per word. Packing every
+/// entry's units into one `blob` and every entry into one 12-byte record
+/// makes both arrays contiguous, so a whole table is a handful of cache
+/// lines and a probe is two independent loads. This is also the shape the
+/// Snowball runtime itself uses (a static array of `Among` structs pointing
+/// into static string data).
+#[derive(Clone, Copy)]
+struct Entry {
+    /// Offset of the entry's first unit in the blob.
+    start: u32,
+    /// The entry's length in code units.
+    len: u32,
+    /// The longest *other* entry that is a proper suffix of this one, or `-1`.
+    link: i32,
+    /// The source table's index, for merged tables; `0` otherwise.
+    tag: u8,
 }
 
-/// The longest proper suffix of `s` present in `strs`, as an index, or `-1`.
+/// The shared storage and search behind [`AmongTable`] and [`UnionTable`].
+struct Table {
+    blob: Vec<u16>,
+    entries: Vec<Entry>,
+    /// The set of *final* code units over all entries, as the two halves of a
+    /// Latin-1 bitmask. See [`Table::search`] for what it buys.
+    last_lo: u128,
+    last_hi: u128,
+    /// Whether the [`Table::last_lo`]/[`Table::last_hi`] test may be trusted
+    /// to reject; see [`Table::search`].
+    filter: bool,
+}
+
+/// The longest proper suffix of `strs[k]` present in `strs`, as an index, or `-1`.
 fn suffix_link(strs: &[(Vec<u16>, u8)], k: usize) -> i32 {
     let s = &strs[k].0;
     let mut link = -1i32;
@@ -74,79 +106,179 @@ fn sort_reversed(strs: &mut [(Vec<u16>, u8)]) {
     strs.sort_by(|a, b| a.0.iter().rev().cmp(b.0.iter().rev()));
 }
 
-/// The core of Snowball's `find_among_b`: the index of the longest entry that
-/// is a suffix of `w[lb..cursor]`, or `-1`.
-///
-/// Exact u16 port of the reference runtime's search, including the
-/// `first_key_inspected` re-probe of key 0 and the fallback walk along
-/// substring links. `lb` is Snowball's `limit_backward`: comparisons stop at
-/// it, so an entry longer than `cursor - lb` can never match — which is
-/// precisely the region restriction every caller needs. Callers must pass
-/// `lb <= cursor` (clamp with `min` when a stale region index may exceed the
-/// current length, as the reference's `slice` clamping does implicitly).
-fn search(entries: &[(Vec<u16>, i32)], w: &[u16], cursor: usize, lb: usize) -> i32 {
-    debug_assert!(lb <= cursor && cursor <= w.len());
-    let mut i: i32 = 0;
-    let mut j: i32 = i32::try_from(entries.len()).expect("table sizes are far below i32::MAX");
-    let c = cursor as i32;
-    let lb = lb as i32;
-    let mut common_i = 0i32;
-    let mut common_j = 0i32;
-    let mut first_key_inspected = false;
-    loop {
-        let k = i + ((j - i) >> 1);
-        let mut diff: i32 = 0;
-        let mut common = common_i.min(common_j);
-        let ws = &entries[k as usize].0;
-        for lvar in (0..ws.len() - common as usize).rev() {
-            if c - common == lb {
-                diff = -1;
-                break;
-            }
-            diff = i32::from(w[(c - common - 1) as usize]) - i32::from(ws[lvar]);
-            if diff != 0 {
-                break;
-            }
-            common += 1;
+impl Table {
+    /// Packs already-sorted `(units, tag)` pairs into the flat form.
+    fn pack(strs: &[(Vec<u16>, u8)]) -> Table {
+        let mut blob: Vec<u16> = Vec::with_capacity(strs.iter().map(|s| s.0.len()).sum());
+        let mut entries = Vec::with_capacity(strs.len());
+        for (k, (units, tag)) in strs.iter().enumerate() {
+            let start = u32::try_from(blob.len()).expect("rule tables are tiny");
+            blob.extend_from_slice(units);
+            entries.push(Entry {
+                start,
+                len: u32::try_from(units.len()).expect("suffix literals are short"),
+                link: suffix_link(strs, k),
+                tag: *tag,
+            });
         }
-        if diff < 0 {
-            j = k;
-            common_j = common;
-        } else {
-            i = k;
-            common_i = common;
-        }
-        if j - i <= 1 {
-            if i > 0 || j == i || first_key_inspected {
-                break;
+        // The rejection test is only sound when every entry has a final unit
+        // (an empty entry matches an empty region, which the test would
+        // reject) and when every such unit is inside the Latin-1 range the
+        // two masks cover. Both hold for every table in this crate; a future
+        // table that broke either simply turns the filter off rather than
+        // changing an answer.
+        let mut last_lo = 0u128;
+        let mut last_hi = 0u128;
+        let mut filter = true;
+        for (units, _) in strs {
+            match units.last() {
+                Some(&c) if c < 128 => last_lo |= 1u128 << c,
+                Some(&c) if c < 256 => last_hi |= 1u128 << (c - 128),
+                _ => filter = false,
             }
-            first_key_inspected = true;
+        }
+        Table {
+            blob,
+            entries,
+            last_lo,
+            last_hi,
+            filter,
         }
     }
-    loop {
-        let (ws, link) = &entries[i as usize];
-        if common_i >= i32::try_from(ws.len()).expect("suffix literals are short") {
-            return i;
+
+    /// The code units of entry `i`.
+    #[inline]
+    fn units(&self, i: usize) -> &[u16] {
+        let e = self.entries[i];
+        &self.blob[e.start as usize..(e.start + e.len) as usize]
+    }
+
+    /// The core of Snowball's `find_among_b`: the index of the longest entry
+    /// that is a suffix of `w[lb..cursor]`, or `-1`.
+    ///
+    /// Exact u16 port of the reference runtime's search, including the
+    /// `first_key_inspected` re-probe of key 0 and the fallback walk along
+    /// substring links. `lb` is Snowball's `limit_backward`: comparisons stop
+    /// at it, so an entry longer than `cursor - lb` can never match — which is
+    /// precisely the region restriction every caller needs. Callers must pass
+    /// `lb <= cursor` (clamp with `min` when a stale region index may exceed
+    /// the current length, as the reference's `slice` clamping does
+    /// implicitly).
+    ///
+    /// # The rejection test
+    ///
+    /// An entry is a suffix of `w[lb..cursor]` only if its own last unit is
+    /// `w[cursor - 1]`, so a word whose final unit ends no entry at all
+    /// cannot match anything and the binary search below can be skipped
+    /// outright. That is the common case by a wide margin — a step's table
+    /// covers a handful of terminal letters (Norwegian's `consonant_pair` is
+    /// reached only by a final `t`, its `other_suffix` only by `g`, `s` or
+    /// `v`) while a real word ends in whatever it ends in — and the test is
+    /// two shifts against a mask pair held in the same cache line as the
+    /// entry count. Measured on Norwegian: the four searches `stem` performs
+    /// per word fell from 35.0 µs to 12.6 µs per 1024 bench words.
+    ///
+    /// The test is exact rather than heuristic: it only ever skips a search
+    /// whose answer is provably `-1`, and it is disabled at build time for
+    /// any table where that proof does not hold (see [`Table::pack`]).
+    ///
+    /// # What was tried and rejected
+    ///
+    /// Entries sharing a final unit are also *contiguous* (the sort key is
+    /// the reversed sequence, so the final unit is the primary key), so the
+    /// mask can be made to select that run — its rank is the number of set
+    /// bits below `w[cursor - 1]` — and the binary search handed the run
+    /// rather than the whole table. That is sound, link walks included (a
+    /// proper suffix ends in the same unit, so no link leaves the run), and
+    /// it measured *slower*: 44.0 against 38.5 µs per 1024 Norwegian bench
+    /// words. At these table sizes the saved probes do not pay for the
+    /// second lookup array's cache line and the rank arithmetic. The plain
+    /// rejection below keeps all of the win and none of that cost.
+    #[inline]
+    fn search(&self, w: &[u16], cursor: usize, lb: usize) -> i32 {
+        debug_assert!(lb <= cursor && cursor <= w.len());
+        if self.filter {
+            // Every entry is at least one unit long, so an empty region
+            // matches nothing.
+            if cursor == lb {
+                return -1;
+            }
+            if !crate::units::in_set(w[cursor - 1], self.last_lo, self.last_hi) {
+                return -1;
+            }
         }
-        i = *link;
-        if i < 0 {
-            return -1;
+        self.search_sorted(w, cursor, lb)
+    }
+
+    /// The binary search proper, reached once the cheap rejection above has
+    /// failed to rule every entry out.
+    fn search_sorted(&self, w: &[u16], cursor: usize, lb: usize) -> i32 {
+        let mut i: i32 = 0;
+        let mut j: i32 =
+            i32::try_from(self.entries.len()).expect("table sizes are far below i32::MAX");
+        let c = cursor as i32;
+        let lb = lb as i32;
+        let mut common_i = 0i32;
+        let mut common_j = 0i32;
+        let mut first_key_inspected = false;
+        loop {
+            let k = i + ((j - i) >> 1);
+            let mut diff: i32 = 0;
+            let mut common = common_i.min(common_j);
+            let ws = self.units(k as usize);
+            for lvar in (0..ws.len() - common as usize).rev() {
+                if c - common == lb {
+                    diff = -1;
+                    break;
+                }
+                diff = i32::from(w[(c - common - 1) as usize]) - i32::from(ws[lvar]);
+                if diff != 0 {
+                    break;
+                }
+                common += 1;
+            }
+            if diff < 0 {
+                j = k;
+                common_j = common;
+            } else {
+                i = k;
+                common_i = common;
+            }
+            if j - i <= 1 {
+                if i > 0 || j == i || first_key_inspected {
+                    break;
+                }
+                first_key_inspected = true;
+            }
+        }
+        loop {
+            let e = self.entries[i as usize];
+            if common_i >= e.len as i32 {
+                return i;
+            }
+            i = e.link;
+            if i < 0 {
+                return -1;
+            }
         }
     }
 }
 
+/// One suffix table, sorted for binary search.
+///
+/// Entries are sorted by reversed code-unit sequence and carry the substring
+/// link the search and the caller-side link walks need.
+pub(crate) struct AmongTable(Table);
+
 impl AmongTable {
-    /// Builds the sorted table from a reference rule table.
+    /// Builds the sorted table from a rule table.
     pub(crate) fn build(table: &[&str]) -> Self {
         let mut strs: Vec<(Vec<u16>, u8)> = table
             .iter()
             .map(|s| (s.encode_utf16().collect(), 0))
             .collect();
         sort_reversed(&mut strs);
-        let entries = (0..strs.len())
-            .map(|k| (strs[k].0.clone(), suffix_link(&strs, k)))
-            .collect();
-        AmongTable { entries }
+        AmongTable(Table::pack(&strs))
     }
 
     /// The index of the longest entry that is a suffix of `w[lb..cursor]`,
@@ -154,7 +286,13 @@ impl AmongTable {
     /// it against a different string), otherwise prefer [`Self::longest`].
     #[inline]
     pub(crate) fn find(&self, w: &[u16], cursor: usize, lb: usize) -> i32 {
-        search(&self.entries, w, cursor, lb)
+        self.0.search(w, cursor, lb)
+    }
+
+    /// The unit length of entry `i`, as returned by [`Self::find`].
+    #[inline]
+    pub(crate) fn len_at(&self, i: i32) -> usize {
+        self.0.entries[i as usize].len as usize
     }
 
     /// The unit length of the longest entry that is a suffix of
@@ -162,11 +300,7 @@ impl AmongTable {
     #[inline]
     pub(crate) fn longest(&self, w: &[u16], cursor: usize, lb: usize) -> usize {
         let i = self.find(w, cursor, lb);
-        if i < 0 {
-            0
-        } else {
-            self.entries[i as usize].0.len()
-        }
+        if i < 0 { 0 } else { self.len_at(i) }
     }
 
     /// The unit length of the longest matching entry whose length also
@@ -175,8 +309,8 @@ impl AmongTable {
     /// This is the `/([ая])(ла|на|…)$/` shape: an alternation guarded by a
     /// condition on what precedes the match. Walking the substring links from
     /// the longest match enumerates every matching entry in decreasing length,
-    /// so the first one passing `cond` is the longest passing one — the same
-    /// entry the reference's earliest-match-start rule selects.
+    /// so the first one passing `cond` is the longest passing one — which is
+    /// the entry an anchored alternation's earliest match start selects.
     #[inline]
     pub(crate) fn longest_where(
         &self,
@@ -187,11 +321,11 @@ impl AmongTable {
     ) -> usize {
         let mut i = self.find(w, cursor, lb);
         while i >= 0 {
-            let (units, link) = &self.entries[i as usize];
-            if cond(units.len()) {
-                return units.len();
+            let e = self.0.entries[i as usize];
+            if cond(e.len as usize) {
+                return e.len as usize;
             }
-            i = *link;
+            i = e.link;
         }
         0
     }
@@ -206,9 +340,7 @@ impl AmongTable {
 /// turning an else-if chain of per-table searches into a single search. The
 /// merge is only sound when no string appears in two tables (the priority
 /// between duplicates would be lost), so `build` asserts exactly that.
-pub(crate) struct UnionTable {
-    pub(crate) entries: Vec<(Vec<u16>, i32, u8)>,
-}
+pub(crate) struct UnionTable(Table);
 
 impl UnionTable {
     /// Merges `tables`, tagging each entry with its table's index.
@@ -236,69 +368,77 @@ impl UnionTable {
                 "duplicate suffix across merged tables"
             );
         }
-        let entries = (0..strs.len())
-            .map(|k| (strs[k].0.clone(), suffix_link(&strs, k), strs[k].1))
-            .collect();
-        UnionTable { entries }
+        assert!(
+            strs.iter().all(|s| s.0.len() < 32),
+            "an entry of 32 units or more cannot be represented in \
+             `length_masks`'s per-table bitmask"
+        );
+        UnionTable(Table::pack(&strs))
     }
 
     /// The index of the longest entry that is a suffix of `w[lb..cursor]`, or
-    /// `-1`. The caller walks `entries[i].1` links from here, applying each
-    /// entry's table-specific check via its tag.
+    /// `-1`. The caller walks [`Self::entry`] from here, applying each entry's
+    /// table-specific check via its tag.
     #[inline]
     pub(crate) fn find_longest_index(&self, w: &[u16], cursor: usize, lb: usize) -> i32 {
-        // The search never reads the tag, so a plain transmute-free reborrow is
-        // not possible; instead the same algorithm is instantiated over the
-        // tagged entry type.
-        let mut i: i32 = 0;
-        let mut j: i32 =
-            i32::try_from(self.entries.len()).expect("table sizes are far below i32::MAX");
-        let c = cursor as i32;
-        let lb = lb as i32;
-        let mut common_i = 0i32;
-        let mut common_j = 0i32;
-        let mut first_key_inspected = false;
-        debug_assert!(lb <= c && cursor <= w.len());
-        loop {
-            let k = i + ((j - i) >> 1);
-            let mut diff: i32 = 0;
-            let mut common = common_i.min(common_j);
-            let ws = &self.entries[k as usize].0;
-            for lvar in (0..ws.len() - common as usize).rev() {
-                if c - common == lb {
-                    diff = -1;
-                    break;
-                }
-                diff = i32::from(w[(c - common - 1) as usize]) - i32::from(ws[lvar]);
-                if diff != 0 {
-                    break;
-                }
-                common += 1;
-            }
-            if diff < 0 {
-                j = k;
-                common_j = common;
-            } else {
-                i = k;
-                common_i = common;
-            }
-            if j - i <= 1 {
-                if i > 0 || j == i || first_key_inspected {
-                    break;
-                }
-                first_key_inspected = true;
-            }
+        self.0.search(w, cursor, lb)
+    }
+
+    /// Entry `i` as `(unit length, substring link, source table id)` — the
+    /// three fields a link walk reads, in one load.
+    #[inline]
+    pub(crate) fn entry(&self, i: i32) -> (usize, i32, usize) {
+        let e = self.0.entries[i as usize];
+        (e.len as usize, e.link, e.tag as usize)
+    }
+
+    /// Records, per source table, which entry *lengths* are suffixes of
+    /// `w[..cursor]`, as a bitmask over lengths (bit `n` set ⇔ some entry of
+    /// that table with `n` units matches).
+    ///
+    /// # Why a mask rather than one best length
+    ///
+    /// A rule chain does not ask one question per table. French's step 1 asks
+    /// up to three of the same table — "does it match anywhere?", "does it
+    /// match inside R2?", "inside R1?" — and each is the same match set
+    /// filtered by a different *length* bound, because that is all the
+    /// region limit `lb` does (an entry matches within `lb` exactly when its
+    /// length is at most `cursor - lb`). One unrestricted search therefore
+    /// answers every region question the chain can pose, provided the whole
+    /// match set is kept rather than just its maximum — which is what this
+    /// mask is. [`longest_at_most`] then reads off each answer in a couple of
+    /// instructions, replacing what were 25 separate binary searches per word
+    /// with one.
+    ///
+    /// `masks` must have one slot per merged table and start zeroed.
+    pub(crate) fn length_masks(&self, w: &[u16], cursor: usize, masks: &mut [u32]) {
+        let mut i = self.find_longest_index(w, cursor, 0);
+        while i >= 0 {
+            let (n, link, tid) = self.entry(i);
+            masks[tid] |= 1u32 << n;
+            i = link;
         }
-        loop {
-            let (ws, link, _) = &self.entries[i as usize];
-            if common_i >= i32::try_from(ws.len()).expect("suffix literals are short") {
-                return i;
-            }
-            i = *link;
-            if i < 0 {
-                return -1;
-            }
-        }
+    }
+}
+
+/// The largest `n` with bit `n` set in `mask` and `n <= avail`, or 0.
+///
+/// Companion to [`UnionTable::length_masks`]: `avail` is `cursor - lb`, the
+/// number of units the region leaves available, so this is "the longest entry
+/// of that table that matches inside the region". Length 0 is never a table
+/// entry, so `0` doubles as "no match", exactly like the search's own
+/// `longest`.
+#[inline]
+pub(crate) fn longest_at_most(mask: u32, avail: usize) -> usize {
+    let keep = if avail >= 31 {
+        mask
+    } else {
+        mask & ((2u32 << avail) - 1)
+    };
+    if keep == 0 {
+        0
+    } else {
+        (31 - keep.leading_zeros()) as usize
     }
 }
 
@@ -328,37 +468,174 @@ pub(crate) fn nested_pairs_are_longest_first(name: &str, table: &[&str]) {
     }
 }
 
-/// A UTF-16 working buffer that lives on the stack for words up to 64 units.
+/// How many code units a [`Buf`] holds without allocating.
+///
+/// Measured, not guessed: the inline array is zero-initialised on every
+/// fill, so its size is a per-word memset. Real words in every language this
+/// crate stems average eight to eleven units, and the arm exists to cover
+/// ordinary words, not adversarial ones — 32 keeps essentially all of them
+/// inline while halving that memset against the 64 this started at. Anything
+/// longer spills to the heap and is correct, just not free.
+pub(crate) const INLINE: usize = 32;
+
+/// A UTF-16 working buffer that lives on the stack for words up to
+/// [`INLINE`] units.
 ///
 /// The Spanish measurement attributed ~17 ns/word of the remaining floor to
-/// the working `Vec<u16>` allocation; virtually every real word fits in 64
-/// units, so the inline arm removes that allocation entirely. Every rewrite
-/// rule in the algorithms that use this is net-shrinking — a `push` only ever
-/// follows a larger `truncate` — so the capacity check happens once, at fill
-/// time, and `push` never needs to spill.
+/// the working `Vec<u16>` allocation, and every language here pays it once
+/// per word; the inline arm removes that allocation entirely. Cloning one is
+/// a fixed 64-byte stack copy, which is what makes the "did this step change
+/// the word?" snapshots the French and English algorithms need affordable
+/// without a heap allocation.
+
+#[derive(Clone)]
 pub(crate) enum Buf {
-    /// Up to 64 units, inline. The second field is the live length.
-    Inline([u16; 64], usize),
+    /// Up to [`INLINE`] units, inline. The second field is the live length.
+    Inline([u16; INLINE], usize),
     /// The spill arm for longer words.
     Heap(Vec<u16>),
 }
 
 impl Buf {
     /// Encodes `word` as UTF-16, inline when it fits.
+    #[inline]
     pub(crate) fn fill(word: &str) -> Buf {
-        let mut a = [0u16; 64];
+        let mut a = [0u16; INLINE];
         let mut n = 0usize;
         for unit in word.encode_utf16() {
-            if n == 64 {
+            if n == INLINE {
                 let mut v: Vec<u16> = Vec::with_capacity(word.len());
                 v.extend_from_slice(&a);
-                v.extend(word.encode_utf16().skip(64));
+                v.extend(word.encode_utf16().skip(INLINE));
                 return Buf::Heap(v);
             }
             a[n] = unit;
             n += 1;
         }
         Buf::Inline(a, n)
+    }
+
+    /// `units(&word.to_lowercase())`, without the intermediate `String`.
+    ///
+    /// Nine of the twelve Snowball ports open with `toLowerCase()`, and the
+    /// straightforward port allocated twice before the algorithm had run a
+    /// single rule: once for the lowered `String`, once for the `Vec<u16>`
+    /// it was then re-encoded into. Both are gone here — the lowered units
+    /// land straight in the inline array.
+    ///
+    /// # The ASCII arm
+    ///
+    /// `str::to_lowercase` on ASCII is exactly `u8::to_ascii_lowercase` per
+    /// byte (the sigma rule cannot apply, and no ASCII character expands),
+    /// so the common case is a flat, vectorizable byte loop with no
+    /// character decoding at all. The general arm below reproduces
+    /// [`crate::units::for_each_lowercase_unit`]'s mapping inline rather
+    /// than through the callback, because the callback's captured cursor
+    /// stopped the loop from keeping its index in a register.
+    ///
+    /// Lowercasing can *lengthen* a string (`İ` becomes two characters), so
+    /// unlike [`Self::fill`] the general arm spills on the growth condition
+    /// rather than on the input's own unit count.
+    #[inline]
+    pub(crate) fn fill_lowercase(word: &str) -> Buf {
+        let bytes = word.as_bytes();
+        if bytes.len() <= INLINE && word.is_ascii() {
+            let mut a = [0u16; INLINE];
+            for (slot, &b) in a.iter_mut().zip(bytes) {
+                *slot = u16::from(b.to_ascii_lowercase());
+            }
+            return Buf::Inline(a, bytes.len());
+        }
+        let mut a = [0u16; INLINE];
+        let mut n = 0usize;
+        for c in word.chars() {
+            // The overwhelming majority of characters are one code unit in
+            // and one out, so that case writes straight into the array; the
+            // two that are not — a character outside the mask ranges, and
+            // the one context-sensitive mapping — take the cold arms.
+            if (c as u32) < 0x1_0000
+                && let Some(l) = crate::units::fast_lower(c as u16)
+            {
+                if n == INLINE {
+                    return Self::lowercase_on_the_heap(word);
+                }
+                a[n] = l;
+                n += 1;
+                continue;
+            }
+            if c == '\u{03A3}' {
+                // The one context-sensitive mapping; see
+                // `crate::units::for_each_lowercase_unit`. Checking it here
+                // rather than with a `contains` pre-scan keeps the common
+                // case to a single pass over the word.
+                return Buf::fill(&word.to_lowercase());
+            }
+            for l in c.to_lowercase() {
+                let mut b = [0u16; 2];
+                for unit in l.encode_utf16(&mut b) {
+                    if n == INLINE {
+                        return Self::lowercase_on_the_heap(word);
+                    }
+                    a[n] = *unit;
+                    n += 1;
+                }
+            }
+        }
+        Buf::Inline(a, n)
+    }
+
+    /// [`Self::fill_lowercase`], plus whether `word` was *already* ASCII
+    /// lowercase — the condition under which the stemmed result is a slice
+    /// of `word` itself rather than a new `String`.
+    ///
+    /// # Why the flag is a separate pass
+    ///
+    /// Folding the two tests into [`Self::fill_lowercase`]'s widening loop
+    /// is the obvious way to answer them for free, and it measured *slower*
+    /// — 38.0 against 36.7 µs per 1024 Norwegian bench words. The widening
+    /// loop and the predicate below both vectorize on their own; carrying
+    /// two loop-carried booleans through the widening loop stops it doing
+    /// so, and a second vectorized pass over eight bytes is cheaper than a
+    /// scalar first one. The apparently redundant scan is therefore
+    /// deliberate.
+    #[inline]
+    pub(crate) fn fill_lowercase_tracked(word: &str) -> (Buf, bool) {
+        let ascii_lower = !word
+            .as_bytes()
+            .iter()
+            .any(|&c| c >= 0x80 || c.is_ascii_uppercase());
+        (Buf::fill_lowercase(word), ascii_lower)
+    }
+
+    /// The spill arm of [`Self::fill_lowercase`]: rare enough to be worth
+    /// restarting from the beginning rather than carrying a branch for it
+    /// through the inline loop.
+    #[cold]
+    fn lowercase_on_the_heap(word: &str) -> Buf {
+        let mut v: Vec<u16> = Vec::with_capacity(word.len() + 8);
+        crate::units::for_each_lowercase_unit(word, |unit| v.push(unit));
+        Buf::Heap(v)
+    }
+
+    /// Copies `w` into a fresh buffer, on the stack when it fits.
+    ///
+    /// The English stemmer needs the token as it was *before* a step while
+    /// rewriting it in place — the measure guards read the original — and
+    /// this is that snapshot without a heap allocation.
+    pub(crate) fn from_slice(w: &[u16]) -> Buf {
+        if w.len() <= INLINE {
+            let mut a = [0u16; INLINE];
+            a[..w.len()].copy_from_slice(w);
+            Buf::Inline(a, w.len())
+        } else {
+            Buf::Heap(w.to_vec())
+        }
+    }
+
+    /// Decodes the live units back to a `String`.
+    #[inline]
+    pub(crate) fn into_text(self) -> String {
+        crate::units::text(self.as_slice())
     }
 
     /// The live units.
@@ -401,14 +678,25 @@ impl Buf {
         }
     }
 
-    /// Appends one unit. Callers only push after a larger truncate (every
-    /// rewrite rule is net-shrinking), so the inline arm cannot overflow.
+    /// Appends one unit, spilling to the heap if the inline array is full.
+    ///
+    /// Every rewrite rule in these algorithms is net-shrinking — a push only
+    /// ever follows a larger truncate — so the spill branch is unreachable
+    /// for them and predicts perfectly. It exists so that a future rule which
+    /// is *not* net-shrinking degrades to an allocation instead of to an
+    /// out-of-bounds panic.
     #[inline]
     pub(crate) fn push(&mut self, unit: u16) {
         match self {
             Buf::Inline(a, n) => {
-                a[*n] = unit;
-                *n += 1;
+                if *n == a.len() {
+                    let mut v = a.to_vec();
+                    v.push(unit);
+                    *self = Buf::Heap(v);
+                } else {
+                    a[*n] = unit;
+                    *n += 1;
+                }
             }
             Buf::Heap(v) => v.push(unit),
         }
@@ -478,9 +766,8 @@ mod tests {
         let mut lens = Vec::new();
         let mut i = among.find(&w, w.len(), 0);
         while i >= 0 {
-            let (u, link) = &among.entries[i as usize];
-            lens.push(u.len());
-            i = *link;
+            lens.push(among.len_at(i));
+            i = among.0.entries[i as usize].link;
         }
         assert_eq!(lens, [4, 3, 2, 1]);
     }
@@ -507,18 +794,17 @@ mod tests {
         let mut best = [0usize; 2];
         let mut i = union.find_longest_index(&w, w.len(), 0);
         while i >= 0 {
-            let (u, link, tid) = &union.entries[i as usize];
-            let tid = *tid as usize;
+            let (len, link, tid) = union.entry(i);
             if best[tid] == 0 {
-                best[tid] = u.len();
+                best[tid] = len;
             }
-            i = *link;
+            i = link;
         }
         assert_eq!(best, [4, 2], "longest per table: 'ando' and 'do'");
     }
 
     #[test]
-    fn buf_spills_to_the_heap_past_64_units() {
+    fn buf_spills_to_the_heap_past_the_inline_capacity() {
         let short = "palabra";
         let b = Buf::fill(short);
         assert!(matches!(b, Buf::Inline(..)));
@@ -531,6 +817,43 @@ mod tests {
         b.truncate(70);
         b.push_str("er");
         assert_eq!(b.len(), 72);
+        // A push that overflows the inline arm spills rather than panicking.
+        let mut b = Buf::fill(&"y".repeat(INLINE));
+        assert!(matches!(b, Buf::Inline(..)));
+        b.push(0x7A);
+        assert!(matches!(b, Buf::Heap(..)));
+        assert_eq!(b.len(), INLINE + 1);
+    }
+
+    #[test]
+    fn fill_lowercase_matches_the_two_step_form() {
+        for word in [
+            "",
+            "Palabra",
+            "ÁRBOL",
+            "ВАЖНАЯ",
+            "ΟΔΟΣ",
+            "İstanbul",
+            "😀A",
+            "x".repeat(INLINE).as_str(),
+            "X".repeat(INLINE + 1).as_str(),
+            // As many units of input as fit inline, each lowercasing to two
+            // — the growth the inline arm must spill on even though the
+            // input itself fits.
+            "İ".repeat(INLINE).as_str(),
+        ] {
+            let want = units(&word.to_lowercase());
+            assert_eq!(
+                Buf::fill_lowercase(word).as_slice(),
+                want.as_slice(),
+                "{word:?}"
+            );
+        }
+        assert!(matches!(Buf::fill_lowercase("Corto"), Buf::Inline(..)));
+        assert!(matches!(
+            Buf::fill_lowercase(&"X".repeat(INLINE + 1)),
+            Buf::Heap(..)
+        ));
     }
 
     #[test]

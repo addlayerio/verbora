@@ -29,7 +29,10 @@ cargo run --release -- prepare --corpus-dir /path/to/corpus --data-dir /path/to/
 cargo run --release -- train --data-dir /path/to/workdir
 
 # 4. Rebuild so the *compiled* crate carries the new weights, then
-#    evaluate end to end (held-out + the repo's UDHR tier dataset):
+#    evaluate end to end (held-out + the repo's UDHR tier dataset).
+#    Both halves are optional: drop --data-dir to evaluate only the
+#    committed dataset (no 95 MB corpus required), drop --dataset for
+#    only the held-out splits.
 cargo build --release
 cargo run --release -- eval --data-dir /path/to/workdir \
   --dataset ../../benchmarks/competitive/datasets/language-accuracy/dataset.json
@@ -101,22 +104,43 @@ Galician (85.7%, thinnest corpus + heavy es/pt overlap). Full table in
 
 UDHR tier dataset (13 languages, eval-only):
 
-| tier | HashedLinearDetector | WhatlangDetector |
-|---|---|---|
-| short_word | 7/13 | 10/13 |
-| short_phrase | 12/13 | 13/13 |
-| sentence | 13/13 | 13/13 |
-| paragraph | 13/13 | 13/13 |
+| tier | HashedLinearDetector | WhatlangDetector | FallbackDetector<Hashed, Whatlang> |
+|---|---|---|---|
+| short_word | 7/13 | 10/13 | 10/13 |
+| short_phrase | 12/13 | 13/13 | 13/13 |
+| sentence | 13/13 | 13/13 | 13/13 |
+| paragraph | 13/13 | 13/13 | 13/13 |
+| **total** | **45/52** | **49/52** | **49/52** |
 
-**The short-word number is below the decomposition report's publishing
-gate** (≥ whichlang's 9/13; target: whatlang's 10/13). Accordingly, no
-short-input accuracy claim is made anywhere — not in the crate docs, not
-on the site, not in benchmark copy — and `HashedLinearDetector`'s own doc
-comment says so explicitly. The detector's short-input story is honest
-abstention plus `best_above`, not accuracy parity. Levers if the gate
-must be met before any site claim: dimension 8192 (measured +10–35%
+Reproduce with (no corpus needed — `--data-dir` is optional, and the
+dataset half is committed):
+
+```bash
+cargo run --release -- eval \
+  --dataset ../../benchmarks/competitive/datasets/language-accuracy/dataset.json
+```
+
+**The standalone short-word number is below the decomposition report's
+publishing gate** (≥ whichlang's 9/13; target: whatlang's 10/13).
+Accordingly `HashedLinearDetector` alone makes no short-input accuracy
+claim anywhere — not in the crate docs, not on the site, not in benchmark
+copy — and its own doc comment says so explicitly. Its short-input story
+is honest abstention plus `best_above`, not accuracy parity. Levers if
+the standalone gate must be met: dimension 8192 (measured +10–35%
 latency, still at/under whichlang), corpus supplements for gl/ca/eu, and
 short-fragment training augmentation.
+
+What *does* meet the gate is the composition: three of the fast model's
+six short-word misses are abstentions, and
+`FallbackDetector<HashedLinearDetector, WhatlangDetector>` (in the crate,
+behind no feature of its own) recovers exactly those, landing on
+`WhatlangDetector`'s own 49/52 total. It is not the same 49: at
+`short_word` the composition misses `fr`/`it` (the fast model's confident
+misses, which no fallback can catch) and gets `nl` (which
+`WhatlangDetector` abstains on). 52 items is enough to show the
+abstentions are recoverable, not enough to claim general parity — the
+crate's own doc comment says exactly that, and any published copy must
+too.
 
 ## Reproducibility manifest
 

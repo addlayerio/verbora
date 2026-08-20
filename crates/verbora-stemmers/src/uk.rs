@@ -33,15 +33,13 @@
 
 use std::borrow::Cow;
 
-use verbora_tokenizers::classes;
-
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::gates::gate_uk;
 use crate::ru::{
     alt_suffix, av_shi, collapse_double, is_line_terminator, or_falsy, split_at_first_vowel,
     strip_final,
 };
-use crate::stopwords::{self, Language};
+use crate::stopwords::Language;
 use crate::units::{text, units};
 
 /// The Ukrainian stemmer.
@@ -67,11 +65,11 @@ fn is_vowel(c: u16) -> bool {
 
 fn perfective_gerund(w: &[u16]) -> Option<Vec<u16>> {
     // `/[ая]в(ши|шись)$/` — identical to the Russian rule.
-    if let Some(at) = av_shi(w) {
+    if let Some(at) = av_shi(w, GERUND_AV_SHI) {
         return Some(w[..at].to_vec());
     }
     // Ukrainian drops the `ывши`/`ывшись`/`ыв` alternatives Russian carries.
-    alt_suffix(w, &["ив", "ивши", "ившись"]).map(|at| w[..at].to_vec())
+    alt_suffix(w, GERUND).map(|at| w[..at].to_vec())
 }
 
 fn adjective(w: &[u16]) -> Option<Vec<u16>> {
@@ -89,7 +87,7 @@ fn adjectival(w: &[u16]) -> Option<Vec<u16>> {
 
 /// `/(с[яьи])$/` — a character class, so three alternatives.
 fn reflexive(w: &[u16]) -> Option<Vec<u16>> {
-    alt_suffix(w, &["ся", "сь", "си"]).map(|at| w[..at].to_vec())
+    alt_suffix(w, REFLEXIVE).map(|at| w[..at].to_vec())
 }
 
 fn verb(w: &[u16]) -> Option<Vec<u16>> {
@@ -101,7 +99,7 @@ fn noun(w: &[u16]) -> Option<Vec<u16>> {
 }
 
 fn superlative(w: &[u16]) -> Option<Vec<u16>> {
-    alt_suffix(w, &["ейш", "ейше"]).map(|at| w[..at].to_vec())
+    alt_suffix(w, SUPERLATIVE).map(|at| w[..at].to_vec())
 }
 
 /// The hand-written lookbehind rule; see the module documentation.
@@ -151,12 +149,28 @@ fn derivational(w: &[u16]) -> Option<Vec<u16>> {
     None
 }
 
+/// `(ши|шись)`, the alternation inside `/[ая]в(ши|шись)$/`; scanned by
+/// [`crate::ru::av_shi`] rather than searched.
+static GERUND_AV_SHI: &[&str] = &["ши", "шись"];
+/// The unconditional perfective-gerund alternatives. Ukrainian drops the
+/// `ывши`/`ывшись`/`ыв` alternatives Russian carries.
+static GERUND: &[&str] = &["ив", "ивши", "ившись"];
+/// `/(с[яьи])$/` — a character class, so three alternatives.
+static REFLEXIVE: &[&str] = &["ся", "сь", "си"];
+static SUPERLATIVE: &[&str] = &["ейш", "ейше"];
+/// The adjectival endings.
+///
+/// Four of these tables shipped with a repeated entry — `ім` here, `ій` and
+/// `их` in [`PARTICIPLE`], `ем` and `ю` in [`NOUN`]. Every search in this
+/// module is longest-match, so the second copy of an entry can never fire
+/// whatever the input; the repeats were removed and `data::table_audit`'s
+/// `no_rule_table_lists_the_same_entry_twice` keeps them out.
 static ADJECTIVE: &[&str] = &[
     "ими", "ій", "ий", "а", "е", "ова", "ове", "ів", "є", "їй", "єє", "еє", "я", "ім", "ем", "им",
-    "ім", "их", "іх", "ою", "йми", "іми", "у", "ю", "ого", "ому", "ої",
+    "их", "іх", "ою", "йми", "іми", "у", "ю", "ого", "ому", "ої",
 ];
 static PARTICIPLE: &[&str] = &[
-    "ий", "ого", "ому", "им", "ім", "а", "ій", "у", "ою", "ій", "і", "их", "йми", "их",
+    "ий", "ого", "ому", "им", "ім", "а", "ій", "у", "ою", "і", "их", "йми",
 ];
 static VERB: &[&str] = &[
     "сь", "ся", "ив", "ать", "ять", "у", "ю", "ав", "али", "учи", "ячи", "вши", "ши", "е", "ме",
@@ -165,7 +179,7 @@ static VERB: &[&str] = &[
 static NOUN: &[&str] = &[
     "а", "ев", "ов", "е", "ями", "ами", "еи", "и", "ей", "ой", "ий", "й", "иям", "ям", "ием", "ем",
     "ам", "ом", "о", "у", "ах", "иях", "ях", "ы", "ь", "ию", "ью", "ю", "ия", "ья", "я", "і",
-    "ові", "ї", "ею", "єю", "ою", "є", "еві", "ем", "єм", "ів", "їв", "ю",
+    "ові", "ї", "ею", "єю", "ою", "є", "еві", "єм", "ів", "їв",
 ];
 
 impl PorterStemmerUk {
@@ -179,7 +193,8 @@ impl PorterStemmerUk {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
@@ -228,12 +243,8 @@ impl TokenizeAndStem for PorterStemmerUk {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Lower;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_uk(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Uk, word)
+        Language::Uk.contains(word)
     }
 
     fn gate(token: &str) -> bool {
@@ -243,6 +254,31 @@ impl TokenizeAndStem for PorterStemmerUk {
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("GERUND_AV_SHI", super::GERUND_AV_SHI),
+        ("GERUND", super::GERUND),
+        ("ADJECTIVE", super::ADJECTIVE),
+        ("PARTICIPLE", super::PARTICIPLE),
+        ("REFLEXIVE", super::REFLEXIVE),
+        ("VERB", super::VERB),
+        ("NOUN", super::NOUN),
+        ("SUPERLATIVE", super::SUPERLATIVE),
+    ];
+
+    /// The prelude `stem` runs before any table is consulted: lowercasing,
+    /// and nothing else. Ukrainian does not fold `ё`.
+    pub(crate) fn prelude(token: &str) -> String {
+        token.to_lowercase()
+    }
+
+    /// The prelude writes no marker unit.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[];
 }
 
 impl verbora_core::Stemmer for PorterStemmerUk {
@@ -271,10 +307,14 @@ mod tests {
         }
     }
 
-    /// The cross-cutting battery from `docs/PARITY.md`: empty, one character,
-    /// uppercase, accented Latin, Greek, Cyrillic, CJK, an astral pair,
-    /// punctuation, digits, a line terminator, and a very long word. Every
-    /// expectation below was read off the reference with `node`.
+    /// The cross-cutting battery every stemmer in this crate answers: empty,
+    /// one character, uppercase, accented Latin, Greek, Cyrillic, CJK, an
+    /// astral pair, punctuation, digits, a line terminator, and a very long
+    /// word.
+    ///
+    /// The expectations are the *identity* in every row but the case fold,
+    /// which is the whole point: none of these is a word of this language, so
+    /// a stemmer that changes one is reaching outside its own alphabet.
     #[test]
     fn cross_script_battery() {
         for (input, want) in [

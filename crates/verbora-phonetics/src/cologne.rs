@@ -1,93 +1,9 @@
-//! Cologne phonetics (Kölner Phonetik) — the German-language analogue of
-//! SoundEx.
-//!
-//! This is a **Verbora-native extension**: the algorithm is not in the JS
-//! reference the rest of this crate ports. Its behavior is instead pinned,
-//! byte for byte, to the `Cologne` encoder of `rphonetic` 3.0.6 (the Rust
-//! port of Apache commons-codec's `ColognePhonetic`, and the crate this
-//! encoder is benchmarked against) over rphonetic's full accepted input
-//! domain. No divergence from rphonetic was found or introduced. The
-//! algorithm itself is Hans Joachim Postel's: "Die Kölner Phonetik. Ein
-//! Verfahren zur Identifizierung von Personennamen auf der Grundlage der
-//! Gestaltanalyse", *IBM-Nachrichten* 19 (1969), pp. 925–931.
-//!
-//! Like SoundEx, the encoder maps a word to a string of digits so that
-//! similar-sounding words collide, but it is tuned to German orthography:
-//! the code is not truncated to a fixed length, vowels survive only at the
-//! very front of the code, and `C`, `D`, `T`, `P` and `X` encode differently
-//! depending on their neighbors.
-//!
-//! # The code table
-//!
-//! After uppercasing and umlaut folding, each letter contributes:
-//!
-//! | Letter | Context | Code |
-//! |---|---|---|
-//! | A, E, I, J, O, U, Y | — | `0` |
-//! | B | — | `1` |
-//! | P | not before H | `1` |
-//! | D, T | not before C, S, Z | `2` |
-//! | F, V, W | — | `3` |
-//! | P | before H | `3` |
-//! | G, K, Q | — | `4` |
-//! | C | at code start, before A, H, K, L, O, Q, R, U, X | `4` |
-//! | C | mid-word, not after S/Z, before A, H, K, O, Q, U, X | `4` |
-//! | X | not after C, K, Q | `48` |
-//! | L | — | `5` |
-//! | M, N | — | `6` |
-//! | R | — | `7` |
-//! | S, Z | — | `8` |
-//! | C | after S or Z, or in no `4` context above | `8` |
-//! | D, T | before C, S, Z | `8` |
-//! | X | after C, K, Q | `8` |
-//! | H | — | nothing |
-//!
-//! "At code start" is literally *while the output buffer is still empty* —
-//! a word-initial `H` produces nothing, so the `C` in `"hc"` still takes the
-//! initial branch. This matches rphonetic exactly.
-//!
-//! # Behavioral decisions (each pinned to rphonetic 3.0.6 by a test below)
-//!
-//! * The input is Unicode-uppercased **first**, and only then are `Ä`, `Ö`,
-//!   `Ü` folded to `A`, `O`, `U` (rphonetic uppercases the whole string and
-//!   then runs three `replace` passes; folding each uppercased character is
-//!   the same function, computed in one pass). `ß` uppercases to `SS` and
-//!   encodes as `8`; the *capital* sharp s `ẞ` (U+1E9E) uppercases to
-//!   itself, is not ASCII, and is therefore silently skipped — an rphonetic
-//!   asymmetry this port reproduces.
-//! * Only ASCII `A`–`Z` are encoded. Every other character — digits,
-//!   punctuation, whitespace, accented Latin, Cyrillic, CJK, emoji — is
-//!   skipped without panicking, but it is still *visible to the
-//!   one-character lookahead* (`"p1h"` encodes `P` as `1`, not `3`, because
-//!   the peeked character is `'1'`), and it does **not** update the
-//!   preceding-letter context used by the `C` and `X` rules (in `"c-x"` the
-//!   `X` still sees `C` as its predecessor).
-//! * At the end of input the lookahead character is `'-'` — the same
-//!   sentinel an *input* hyphen presents, so a trailing `C` and the `C` of
-//!   `"c-"` encode identically (`8`). This quirk is rphonetic's.
-//! * A vowel's `0` survives only while the output is still empty; elsewhere
-//!   it is dropped — but it still separates equal digits, so `"sas"` is
-//!   `"88"`, not `"8"`.
-//! * `H` emits nothing but resets duplicate collapsing (its ignore-marker is
-//!   recorded as the last emitted code), so `"shs"` is also `"88"`.
-//! * Adjacent equal codes collapse to one, and characters that were skipped
-//!   do not break the adjacency: `"Test test"` is `"28282"` — the two
-//!   middle `T`s merge across the space.
-//! * The encoder never errors and never panics. The empty string, and any
-//!   input with no encodable letters, encode to `""`.
-//!
-//! ```
-//! use verbora_phonetics::cologne::Cologne;
-//!
-//! let cologne = Cologne::new();
-//! assert_eq!(cologne.process("Müller"), "657");
-//! assert_eq!(cologne.process("Wikipedia"), "3412");
-//! assert!(cologne.compare("Meyer", "Mayr"));
-//! ```
+//! Cologne phonetics / Kölner Phonetik (Postel, 1969).
 
 /// The ignore-marker code. `H` emits it: nothing is appended, but it becomes
 /// the last-emitted code and thereby resets duplicate collapsing. It doubles
-/// as the end-of-input lookahead sentinel, exactly as in rphonetic.
+/// as the end-of-input lookahead sentinel: no rule looks ahead for it, so
+/// a word-final letter takes the same branch as one before a hyphen.
 const IGNORE: u8 = b'-';
 
 /// Appends `code` to `out` under the Cologne output rules, and records it as
@@ -95,8 +11,7 @@ const IGNORE: u8 = b'-';
 ///
 /// A code is appended unless it is the ignore-marker, equal to the previous
 /// code (adjacent duplicates collapse), or a `0` past the front of the code
-/// (vowels survive only while the output is still empty). This is a faithful
-/// transcription of rphonetic's `CologneOutput::push`.
+/// (vowels survive only while the output is still empty).
 #[inline]
 fn emit(out: &mut String, last: &mut u8, code: u8) {
     if code != IGNORE && *last != code && (code != b'0' || out.is_empty()) {
@@ -105,43 +20,64 @@ fn emit(out: &mut String, last: &mut u8, code: u8) {
     *last = code;
 }
 
-/// Folds the three uppercase umlauts to their base vowels.
+/// German orthography's own transliteration of the letters Postel's table
+/// does not list: the umlauts lose their diaeresis and `ß` is written `ss`.
 ///
-/// rphonetic runs `replace('Ä', "A")` (and `Ö`, `Ü`) over the whole
-/// uppercased string; since `str::to_uppercase` maps characters
-/// independently, folding each uppercased character is the identical
-/// function without the three intermediate `String`s.
+/// Applied after uppercasing, so it sees `Ä Ö Ü` and (via
+/// [`char::to_uppercase`]) the `SS` that lowercase `ß` already became. The
+/// capital sharp s `ẞ` (U+1E9E) uppercases to itself, so it is folded here
+/// explicitly rather than being silently skipped — `ß` and `ẞ` must encode
+/// alike.
 #[inline]
-const fn fold_umlaut(c: char) -> char {
+fn fold_german(c: char) -> Folded {
     match c {
-        'Ä' => 'A',
-        'Ö' => 'O',
-        'Ü' => 'U',
-        _ => c,
+        'Ä' => Folded::Many("A".chars()),
+        'Ö' => Folded::Many("O".chars()),
+        'Ü' => Folded::Many("U".chars()),
+        'ẞ' => Folded::Many("SS".chars()),
+        _ => Folded::One(Some(c)),
+    }
+}
+
+/// One character, or the several a German fold expands it into.
+enum Folded {
+    /// The character itself, unfolded.
+    One(Option<char>),
+    /// The fold's replacement text.
+    Many(std::str::Chars<'static>),
+}
+
+impl Iterator for Folded {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        match self {
+            Self::One(c) => c.take(),
+            Self::Many(chars) => chars.next(),
+        }
     }
 }
 
 /// The whole encoder, over an already uppercased-and-folded character
 /// stream.
 ///
-/// One forward pass with a single character of lookahead — the same shape as
-/// rphonetic's `peekable` loop, minus its four intermediate `String`
-/// allocations. `capacity` seeds the one `String` this call allocates.
+/// One forward pass with a single character of lookahead. `capacity` seeds
+/// the one `String` this call allocates.
 fn encode_stream(mut chars: impl Iterator<Item = char>, capacity: usize) -> String {
     let mut out = String::with_capacity(capacity);
-    // rphonetic seeds its output's last-char with '/'; any non-code byte
-    // works, it only has to differ from every real code and from IGNORE.
+    // Any non-code byte works as the "nothing emitted yet" marker; it only
+    // has to differ from every real code and from IGNORE.
     let mut last_code: u8 = b'/';
     // The previously *encoded* letter (context for the C and X rules).
-    // Skipped characters do not touch it; rphonetic starts it at '-'.
+    // Skipped characters do not touch it.
     let mut prev: char = '-';
 
     let mut cur = chars.next();
     while let Some(ch) = cur {
         let next = chars.next();
         if ch.is_ascii_uppercase() {
-            // rphonetic: `iterator.peek().unwrap_or(&CHAR_IGNORE)` — the raw
-            // next character of the normalized string, letter or not.
+            // The raw next character of the normalized string, letter or
+            // not; the end of input presents the same sentinel a hyphen does.
             let peek = next.unwrap_or('-');
             match ch {
                 'A' | 'E' | 'I' | 'J' | 'O' | 'U' | 'Y' => emit(&mut out, &mut last_code, b'0'),
@@ -202,13 +138,71 @@ fn encode_stream(mut chars: impl Iterator<Item = char>, capacity: usize) -> Stri
     out
 }
 
-/// Cologne phonetics (Kölner Phonetik) encoder.
+/// Cologne phonetics (Kölner Phonetik) — the German-language analogue of
+/// Soundex.
 ///
-/// Byte-identical to rphonetic 3.0.6's `Cologne` on every input; see the
-/// [module documentation](self) for the rules and provenance.
+/// # Publication
+///
+/// Hans Joachim Postel, "Die Kölner Phonetik. Ein Verfahren zur
+/// Identifizierung von Personennamen auf der Grundlage der Gestaltanalyse",
+/// *IBM-Nachrichten* 19 (1969), pp. 925–931.
+///
+/// Like Soundex it maps a word to digits so that similar-sounding words
+/// collide, but it is tuned to German orthography: the code is not truncated
+/// to a fixed length, vowels survive only at the very front, and `C`, `D`,
+/// `T`, `P` and `X` encode differently depending on their neighbours.
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar.** Only `A`–`Z` are encoded, with
+///   German orthography's own folds applied first: `Ä Ö Ü ä ö ü` become
+///   `A O U`, and `ß`/`ẞ` become `SS`. Every other scalar — digits,
+///   punctuation, whitespace, other accented Latin, Cyrillic, CJK, emoji — is
+///   skipped.
+/// * A skipped scalar is **visible to the one-character lookahead** but does
+///   **not** update the preceding-letter context the `C` and `X` rules read.
+///   So `"p1h"` codes its `P` as `1`, not `3` (the peeked character is `1`,
+///   not `H`), while in `"c-x"` the `X` still sees `C` as its predecessor.
+/// * A vowel's `0` survives only while the code is still empty; elsewhere it
+///   is dropped — but it still separates equal digits, so `"sas"` is `"88"`,
+///   not `"8"`. `H` emits nothing and likewise separates, so `"shs"` is
+///   `"88"` too.
+/// * Adjacent equal codes collapse, and skipped scalars do not break that
+///   adjacency: `"Test test"` is `"28282"`, the two middle `T`s merging
+///   across the space.
+/// * A token with no encodable letter encodes to `""`.
+/// * **Total**: no input panics, and there is no error type.
+///
+/// # The code table
+///
+/// | Letter | Context | Code |
+/// |---|---|---|
+/// | A, E, I, J, O, U, Y | — | `0` |
+/// | B | — | `1` |
+/// | P | not before H | `1` |
+/// | D, T | not before C, S, Z | `2` |
+/// | F, V, W | — | `3` |
+/// | P | before H | `3` |
+/// | G, K, Q | — | `4` |
+/// | C | at code start, before A, H, K, L, O, Q, R, U, X | `4` |
+/// | C | mid-word, not after S/Z, before A, H, K, O, Q, U, X | `4` |
+/// | X | not after C, K, Q | `48` |
+/// | L | — | `5` |
+/// | M, N | — | `6` |
+/// | R | — | `7` |
+/// | S, Z | — | `8` |
+/// | C | after S or Z, or in no `4` context above | `8` |
+/// | D, T | before C, S, Z | `8` |
+/// | X | after C, K, Q | `8` |
+/// | H | — | nothing |
+///
+/// "At code start" is literally *while the code is still empty* — a
+/// word-initial `H` emits nothing, so the `C` in `"hc"` still takes the
+/// initial branch. At the end of the word the lookahead is no letter at all,
+/// so a word-final `C` takes the same branch as a `C` before a hyphen.
 ///
 /// ```
-/// use verbora_phonetics::cologne::Cologne;
+/// use verbora_phonetics::Cologne;
 ///
 /// let cologne = Cologne::new();
 /// assert_eq!(cologne.process("Müller"), "657");
@@ -224,7 +218,7 @@ impl Cologne {
     /// parameters (no maximum code length — Cologne codes are unbounded).
     ///
     /// ```
-    /// use verbora_phonetics::cologne::Cologne;
+    /// use verbora_phonetics::Cologne;
     ///
     /// let cologne = Cologne::new();
     /// assert_eq!(cologne.process("schneider"), "8627");
@@ -242,7 +236,7 @@ impl Cologne {
     /// allocated per call.
     ///
     /// ```
-    /// use verbora_phonetics::cologne::Cologne;
+    /// use verbora_phonetics::Cologne;
     ///
     /// let cologne = Cologne::new();
     /// assert_eq!(cologne.process("Wikipedia"), "3412");
@@ -261,10 +255,12 @@ impl Cologne {
             )
         } else {
             // Full Unicode path: per-character uppercasing can expand
-            // (ß → "SS"), then the umlaut fold. Identical, character for
-            // character, to rphonetic's `to_uppercase()` + three `replace`s.
+            // (ß → "SS"), then the German fold.
             encode_stream(
-                token.chars().flat_map(char::to_uppercase).map(fold_umlaut),
+                token
+                    .chars()
+                    .flat_map(char::to_uppercase)
+                    .flat_map(fold_german),
                 token.len(),
             )
         }
@@ -272,11 +268,8 @@ impl Cologne {
 
     /// Whether two strings share a Cologne code.
     ///
-    /// Mirrors rphonetic's `is_encoded_equals` (code equality on
-    /// [`Self::process`]).
-    ///
     /// ```
-    /// use verbora_phonetics::cologne::Cologne;
+    /// use verbora_phonetics::Cologne;
     ///
     /// let cologne = Cologne::new();
     /// assert!(cologne.compare("Meyer", "Mayr"));
@@ -308,31 +301,31 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Fixtures ported verbatim from rphonetic 3.0.6, src/cologne.rs tests
+    // Fixtures ported verbatim from Apache Commons Codec's ColognePhonetic, src/cologne.rs tests
     // (themselves derived from commons-codec's ColognePhoneticTest).
     // ------------------------------------------------------------------
 
     #[test]
     fn aabjoe() {
-        // rphonetic `test_aabjoe`.
+        // Commons Codec `test_aabjoe`.
         assert_eq!(cologne().process("Aabjoe"), "01");
     }
 
     #[test]
     fn aaclan() {
-        // rphonetic `test_aaclan`.
+        // Commons Codec `test_aaclan`.
         assert_eq!(cologne().process("Aaclan"), "0856");
     }
 
     #[test]
     fn aychlmajr_for_codec122() {
-        // rphonetic `test_aychlmajr_for_codec122` (commons-codec CODEC-122).
+        // Commons Codec `test_aychlmajr_for_codec122` (commons-codec CODEC-122).
         assert_eq!(cologne().process("Aychlmajr"), "04567");
     }
 
     #[test]
     fn edge_cases() {
-        // rphonetic `test_edge_cases`, complete.
+        // Commons Codec `test_edge_cases`, complete.
         let data: [(&str, &str); 31] = [
             ("a", "0"),
             ("e", "0"),
@@ -373,7 +366,7 @@ mod tests {
 
     #[test]
     fn examples() {
-        // rphonetic `test_examples`, complete (includes commons-codec
+        // Commons Codec `test_examples`, complete (includes commons-codec
         // CODEC-254 "shch" and CODEC-255 "xch").
         let data: [(&str, &str); 33] = [
             ("m\u{00DC}ller", "657"), // mÜller
@@ -413,13 +406,13 @@ mod tests {
         for (input, want) in data {
             assert_eq!(cologne().process(input), want, "for {input:?}");
         }
-        // rphonetic lists "heithabu" in the same table.
+        // Commons Codec lists "heithabu" in the same table.
         assert_eq!(cologne().process("heithabu"), "021");
     }
 
     #[test]
     fn hyphenated_names() {
-        // rphonetic `test_hyphen`.
+        // Commons Codec `test_hyphen`.
         assert_eq!(cologne().process("bergisch-gladbach"), "174845214");
         assert_eq!(
             cologne().process("M\u{00FC}ller-L\u{00FC}denscheidt"),
@@ -429,7 +422,7 @@ mod tests {
 
     #[test]
     fn compare_equal_codes() {
-        // rphonetic `test_is_encode_equals`, via our `compare`.
+        // Commons Codec `test_is_encode_equals`, via our `compare`.
         let data: [(&str, &str); 8] = [
             ("Muller", "M\u{00FC}ller"), // Müller
             ("Meyer", "Mayr"),
@@ -447,7 +440,7 @@ mod tests {
 
     #[test]
     fn variations_mella() {
-        // rphonetic `test_variations_mella`.
+        // Commons Codec `test_variations_mella`.
         for input in ["mella", "milah", "moulla", "mellah", "muehle", "mule"] {
             assert_eq!(cologne().process(input), "65", "for {input:?}");
         }
@@ -455,7 +448,7 @@ mod tests {
 
     #[test]
     fn variations_meyer() {
-        // rphonetic `test_variations_meyer`.
+        // Commons Codec `test_variations_meyer`.
         for input in ["Meier", "Maier", "Mair", "Meyer", "Meyr", "Mejer", "Major"] {
             assert_eq!(cologne().process(input), "67", "for {input:?}");
         }
@@ -463,7 +456,7 @@ mod tests {
 
     #[test]
     fn special_chars_between_same_letters() {
-        // rphonetic `test_special_chars_between_same_letters`: skipped
+        // Commons Codec `test_special_chars_between_same_letters`: skipped
         // characters do not break duplicate collapsing.
         for input in [
             "Test test",
@@ -477,7 +470,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Hand-written edge cases (verified against rphonetic 3.0.6 by a
+    // Hand-written edge cases (verified against Apache Commons Codec's ColognePhonetic by a
     // differential run over these exact inputs).
     // ------------------------------------------------------------------
 
@@ -540,16 +533,20 @@ mod tests {
         assert_eq!(c.process("WIKIPEDIA"), c.process("wikipedia"));
     }
 
+    /// German writes `ß` as `ss`, so it codes as one collapsed `8` — and the
+    /// capital sharp s `ẞ` (U+1E9E), which uppercases to *itself* and would
+    /// otherwise fall through as "not an A-Z letter", is folded explicitly so
+    /// that the two cases of the same letter cannot disagree.
     #[test]
-    fn sharp_s_asymmetry() {
+    fn both_cases_of_sharp_s_fold_to_ss() {
         let c = cologne();
-        // ß uppercases to "SS" → one collapsed 8.
         assert_eq!(c.process("ß"), "8");
+        assert_eq!(c.process("ẞ"), "8");
+        assert_eq!(c.process("ß"), c.process("ss"));
+        assert_eq!(c.process("ẞ"), c.process("SS"));
         assert_eq!(c.process("Straße"), "8278");
         assert_eq!(c.process("Strasse"), "8278");
-        // Capital ẞ (U+1E9E) uppercases to itself, is not ASCII, and is
-        // skipped — rphonetic behaves identically.
-        assert_eq!(c.process("ẞ"), "");
+        assert_eq!(c.process("STRAẞE"), "8278");
         assert_eq!(c.process("ẞßẞ"), "8");
     }
 
@@ -662,7 +659,7 @@ mod tests {
 
     /// Chains where the `prev`-letter context, the lookahead, and the
     /// H-ignore marker interlock across several letters. Recorded from
-    /// rphonetic 3.0.6.
+    /// Apache Commons Codec's ColognePhonetic.
     #[test]
     fn recorded_context_chains() {
         let cases: &[(&str, &str)] = &[

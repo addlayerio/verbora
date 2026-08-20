@@ -160,16 +160,6 @@
     "rss_kb_after": 2292
   },
   {
-    "group": "jaro",
-    "size": 4,
-    "implementation": "eddie",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2292
-  },
-  {
     "group": "jaro_winkler",
     "size": 4,
     "implementation": "verbora",
@@ -193,16 +183,6 @@
     "group": "jaro_winkler",
     "size": 4,
     "implementation": "rapidfuzz",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2296
-  },
-  {
-    "group": "jaro_winkler",
-    "size": 4,
-    "implementation": "eddie",
     "allocations": 0,
     "bytes_allocated": 0,
     "deallocations": 0,
@@ -440,16 +420,6 @@
     "rss_kb_after": 2568
   },
   {
-    "group": "jaro",
-    "size": 16,
-    "implementation": "eddie",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2568
-  },
-  {
     "group": "jaro_winkler",
     "size": 16,
     "implementation": "verbora",
@@ -473,16 +443,6 @@
     "group": "jaro_winkler",
     "size": 16,
     "implementation": "rapidfuzz",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2568
-  },
-  {
-    "group": "jaro_winkler",
-    "size": 16,
-    "implementation": "eddie",
     "allocations": 0,
     "bytes_allocated": 0,
     "deallocations": 0,
@@ -720,16 +680,6 @@
     "rss_kb_after": 2632
   },
   {
-    "group": "jaro",
-    "size": 64,
-    "implementation": "eddie",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2632
-  },
-  {
     "group": "jaro_winkler",
     "size": 64,
     "implementation": "verbora",
@@ -753,16 +703,6 @@
     "group": "jaro_winkler",
     "size": 64,
     "implementation": "rapidfuzz",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2632
-  },
-  {
-    "group": "jaro_winkler",
-    "size": 64,
-    "implementation": "eddie",
     "allocations": 0,
     "bytes_allocated": 0,
     "deallocations": 0,
@@ -1000,16 +940,6 @@
     "rss_kb_after": 2716
   },
   {
-    "group": "jaro",
-    "size": 256,
-    "implementation": "eddie",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2716
-  },
-  {
     "group": "jaro_winkler",
     "size": 256,
     "implementation": "verbora",
@@ -1037,16 +967,6 @@
     "bytes_allocated": 8256,
     "deallocations": 3,
     "bytes_deallocated": 8256,
-    "rss_kb_after": 2716
-  },
-  {
-    "group": "jaro_winkler",
-    "size": 256,
-    "implementation": "eddie",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
     "rss_kb_after": 2716
   },
   {
@@ -1280,16 +1200,6 @@
     "rss_kb_after": 2736
   },
   {
-    "group": "jaro",
-    "size": 1024,
-    "implementation": "eddie",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
-    "rss_kb_after": 2736
-  },
-  {
     "group": "jaro_winkler",
     "size": 1024,
     "implementation": "verbora",
@@ -1317,16 +1227,6 @@
     "bytes_allocated": 33024,
     "deallocations": 3,
     "bytes_deallocated": 33024,
-    "rss_kb_after": 2736
-  },
-  {
-    "group": "jaro_winkler",
-    "size": 1024,
-    "implementation": "eddie",
-    "allocations": 0,
-    "bytes_allocated": 0,
-    "deallocations": 0,
-    "bytes_deallocated": 0,
     "rss_kb_after": 2736
   },
   {

@@ -151,33 +151,42 @@ every hit per the rules above.
 
 # Non-negotiable rules
 
-1. **Never publish a number you didn't just measure or can't trace to a real
-   `cargo bench`/`cargo test` run.** If a doc claims "verbora is now Nx
-   faster," find or run the benchmark that proves it. Prefer full default
-   Criterion settings (no `--sample-size`/`--measurement-time` overrides)
-   for anything that will be published — reduced settings are fine for a
-   quick internal check, not for a number that ships.
-2. **Don't run benchmarks concurrently with other CPU-heavy work** (another
-   `cargo build`/`test`/`bench`) — on a shared machine this contaminates the
-   measurement. Wait for one to finish before starting another.
-3. **When a change affects one metric, check whether it silently affects
+1. **Never publish a number you can't trace to a real `cargo bench` run.**
+   If a doc claims "verbora is now Nx faster," find the run that proves it.
+   Only full default Criterion settings count (no `--sample-size`/
+   `--measurement-time` overrides) — reduced settings never ship.
+2. **Never launch a benchmark yourself.** Benchmarks in this repo cost
+   hours, and code that is still changing invalidates them, so they are run
+   deliberately and in batches — see the benchmark section of `CLAUDE.md`.
+   If a page needs a number no existing run provides, leave the page's
+   current claim untouched, and report exactly which measurement is missing
+   so the main session can schedule it. Reporting a documentation gap is a
+   successful outcome; a stale number left in place with the gap flagged is
+   strictly better than a fresh number that cost four hours nobody asked
+   for, and far better than an estimated one.
+3. **Don't run any CPU-heavy command while a benchmark is running elsewhere**
+   (`cargo build`/`test`/`check`/`clippy`/`bench`, `npm run`) — on a shared
+   machine this contaminates the measurement silently rather than failing.
+   If your brief says a benchmark is in flight, restrict yourself to reads
+   and Markdown edits.
+4. **When a change affects one metric, check whether it silently affects
    others nearby.** A Levenshtein algorithm change can make an old
    "gap widens with length" narrative wrong, or flip which competitor is
    fastest in a summary table — reread the surrounding prose, not just the
    table cells, after updating numbers.
-4. **Cross-check docs against each other.** `docs/PERFORMANCE_GAPS.md` and
+5. **Cross-check docs against each other.** `docs/PERFORMANCE_GAPS.md` and
    `site/benchmarks/*.md` often describe the same fact from different
    angles (an entry number, a ratio, a "the least flattering comparison"
    framing) — if you update one, check whether the other now contradicts it.
    Remember they can disagree in *style* (archive vs. product doc) while
    agreeing in *fact* — don't "fix" a style difference by importing the
    archive's narrative voice into the site page.
-5. **Verify your own arithmetic.** A claimed ratio ("Nx faster") must equal
+6. **Verify your own arithmetic.** A claimed ratio ("Nx faster") must equal
    (slower time) / (faster time) computed from the actual numbers in the
    same paragraph or table, not copied from an earlier draft. If you're
    unsure whether an existing claim is still correct, compute it yourself
    before trusting it.
-6. **Preserve established structure and tone — subject to Rule #1.** These
+7. **Preserve established structure and tone — subject to the voice rules.** These
    pages already have a consistent style — tables with a `Library | Version
    | Language | Time | Throughput | Relative` header for capability
    summaries, `<div class="callout callout-warn|callout-note|callout-good">`
@@ -186,16 +195,16 @@ every hit per the rules above.
    format. But never preserve a "this round"/"Update:"/patch-note
    construction just because it was already there — Rule #1 wins that
    conflict every time.
-7. **Never silently touch files that look like they belong to an in-flight,
+8. **Never silently touch files that look like they belong to an in-flight,
    unrelated process** (e.g. a benchmark-tooling migration, a large
    find-and-replace pass someone else is running) — if a file has changed
    underneath you in a way you didn't expect, re-read it before editing
    further rather than assuming your last-known content is still there.
-8. **After editing a `.md` file with tables, verify structural sanity**
+9. **After editing a `.md` file with tables, verify structural sanity**
    (grep for duplicate headings, check every `|`-row has a consistent
    column count) — a partial `old_string` match in a find-and-replace-style
    edit can silently leave old content duplicated below the new content.
-9. **Do not implement features or fix bugs.** If you find a real
+10. **Do not implement features or fix bugs.** If you find a real
    correctness or performance issue while reading code, report it — don't
    silently patch source. Your writes are scoped to documentation and
    comments.
@@ -205,8 +214,11 @@ every hit per the rules above.
 1. Read the relevant source change (or ask what changed, if not obvious).
 2. Find every doc/site page that references the affected function, module,
    or comparison.
-3. Run the real benchmark/test needed to get current numbers — don't reuse
-   numbers from before the change.
+3. Locate the measurement that backs each number you touch. Never reuse a
+   number taken before the change it describes — but never launch a
+   benchmark to replace it either (Rule #2). If no current run covers it,
+   leave the existing claim alone and list the missing measurement in your
+   report.
 4. Update each affected page, keeping prose and numbers consistent with
    each other across all of them — and keeping `site/` pages in Rule #1's
    and Rule #2's voice regardless of how the underlying `docs/` source

@@ -10,10 +10,12 @@ is reported separately below rather than being mixed into this paired result.
 bit-parallel kernels.</strong> Plain <code>levenshtein</code> uses
 Myers'/Hyyrö's bit-vector algorithm, with flat pattern-preprocessing tables
 (no hash map) and a single-word fast path covering every operand from 1 to
-64 units. Restricted Damerau (OSA) has its own bit-parallel kernels
-(Hyyrö's 2003 transposition extension of Myers, unit costs only).
-Unrestricted-Damerau distance calls use a two-row snapshot kernel instead of
-the full cost + parent matrices. Jaro and Jaro–Winkler use bit-parallel
+64 units. <code>osa</code> (optimal string alignment, the restricted Damerau
+rule) has its own bit-parallel kernels (Hyyrö's 2003 transposition extension
+of Myers, unit costs only). <code>damerau_levenshtein</code> — the canonical
+unrestricted rule — computes its distances with Zhao–Sahni's linear-space
+algorithm at unit costs instead of the full cost + parent matrices, and falls
+back to the full matrix only for weighted costs. Jaro and Jaro–Winkler use bit-parallel
 match-flagging kernels. See
 <a href="competitive#levenshtein">the competitive benchmarks page</a> for
 the mechanisms and how parity against the scalar implementations was
@@ -36,9 +38,9 @@ compute the same values.
 | `levenshtein/ascii/1024` | 96.18 ms | 29.08 µs | **3307.4×** |
 | `levenshtein/cyrillic/16` | 12.23 µs | 266.4 ns | **45.9×** |
 | `levenshtein/cyrillic/256` | 3.69 ms | 3.97 µs | **929.5×** |
-| `levenshtein_variants/plain_2row` | 177.17 µs | 166.1 ns | **1066.6×** |
-| `levenshtein_variants/damerau_restricted_3row` | 190.07 µs | 179.4 ns | **1059.5×** |
-| `levenshtein_variants/damerau_unrestricted_matrix` | 304.11 µs | 7.75 µs | **39.2×** |
+| `levenshtein_variants/plain_myers_unit` | 177.17 µs | 166.1 ns | **1066.6×** |
+| `levenshtein_variants/osa_bit_vector` | 190.07 µs | 179.4 ns | **1059.5×** |
+| `levenshtein_variants/damerau_zhao_sahni` | 304.11 µs | 7.75 µs | **39.2×** † |
 | `levenshtein_variants/search_matrix` | 176.86 µs | 12.79 µs | **13.8×** |
 | `jaro_winkler/4` | 27.2 ns | 15.3 ns | **1.8×** |
 | `jaro_winkler/16` | 532.3 ns | 79.4 ns | **6.7×** |
@@ -55,6 +57,13 @@ compute the same values.
 | `hamming/64` | 133.5 ns | 20.5 ns | **6.5×** |
 | `hamming/256` | 599.7 ns | 72.7 ns | **8.2×** |
 | `hamming/1024` | 2.16 µs | 275.3 ns | **7.8×** |
+
+† The `damerau_zhao_sahni` row's Verbora figure — and therefore its speedup —
+was captured while unrestricted Damerau still ran the old row-snapshot kernel
+of a pinned, non-canonical recurrence, before the move to Zhao–Sahni's
+linear-space algorithm with common-affix trimming. The JavaScript side is
+unaffected. The pair is retained as the record of that run and is **pending
+re-measurement**; no replacement number has been invented for it.
 
 ## Current Levenshtein shape suite
 
@@ -83,7 +92,7 @@ cargo bench -p verbora-distance --bench distance -- 'levenshtein_shapes|levensht
 | `levenshtein_weighted/rectangular/16x1024` | substitution cost 0.5 | 39.5 µs |
 
 The unit-cost rows demonstrate exact fast paths, not a weaker distance:
-common UTF-8/UTF-16 affixes are removed before Myers runs, all-disjoint
+common prefixes and suffixes are removed before Myers runs, all-disjoint
 alphabets return directly, and a leading non-matching run initializes the
 same Myers state without scanning it twice. Weighted inputs deliberately use
 the scalar rolling-row recurrence, which preserves arbitrary option costs.
@@ -103,26 +112,26 @@ fastest data structure:
 |---|---|---|
 | distance, no Damerau, unit cost | **bit-vector** (one `u64` word per 64 units of the shorter operand) | Myers'/Hyyrö's bit-parallel algorithm computes the same answer in `O(nm/64)` bitwise operations rather than `O(nm)` scalar cell updates; the pattern-preprocessing table is a flat array on the byte path (no hashing), and the single-word path covers operands of 1–64 units — see [the competitive benchmarks page](competitive.md#levenshtein) for the full story |
 | distance, no Damerau (fallback, weighted costs) | **1 row** | each cell needs only `up`, `left`, `diag` |
-| distance, restricted Damerau, unit cost | **bit-vector** (word + block) | Hyyrö's 2003 transposition extension of Myers computes OSA in the same `O(nm/64)` bitwise style |
-| distance, restricted Damerau (fallback, weighted costs) | **3 rows** | transposition reaches row − 2 |
-| distance, unrestricted Damerau | **2 rows + per-symbol row snapshots** | transposition reaches an arbitrary earlier row, so the kernel snapshots each symbol's last matching row into an arena (integer cells: `u16` while the combined length fits, `u32` beyond) instead of materialising the cost + parent matrices |
+| distance, OSA, unit cost | **bit-vector** (word + block) | Hyyrö's 2003 transposition extension of Myers computes OSA in the same `O(nm/64)` bitwise style |
+| distance, OSA (fallback, weighted costs) | **3 rows** | transposition reaches row − 2 |
+| distance, unrestricted Damerau, unit cost | **3 rolling rows + one saved-cell row** | transposition reaches an arbitrary earlier row, but Zhao–Sahni's linear-space algorithm shows only the no-column-gap and no-row-gap candidates can win, so one remembered cell each replaces the cost + parent matrices (byte operands of at most 8 units run a table-free stack matrix instead) |
+| distance, unrestricted Damerau (fallback, weighted costs) | full matrix | a weighted transposition reaches an arbitrary earlier row at an arbitrary price |
 | search, any variant | full matrix | the match start is recovered by walking parents |
 
 The bit-parallel kernels are why `levenshtein/ascii/1024` posts **3307.4×** —
-the largest gap on this page by a wide margin. Two of the variants rows carry
-legacy names that no longer describe the code path they exercise:
-`levenshtein_variants/plain_2row` and `damerau_restricted_3row` are named for
-the row-based scalar DP they originally targeted, but at 64 characters (their
-fixed input size) both now run bit-parallel kernels instead — hence
+the largest gap on this page by a wide margin. The `levenshtein_variants` rows
+are named for the kernels they actually exercise, which is why none of them
+reads as a row count any more: `plain_myers_unit` and `osa_bit_vector` both run
+bit-parallel kernels at 64 characters (their fixed input size) — hence
 **1066.6×** and **1059.5×**, not what a literal two-row or three-row scalar
-sweep would produce.
-`damerau_unrestricted_matrix` is similarly legacy-named: distance mode never
-builds a matrix at all here — its **39.2×** comes from the two-row snapshot
-kernel described above. Only `search_matrix` is still what its name says —
-the full cost + parent matrix, required for the backtrace — and its
-**13.8×** is the structural-savings story below.
+sweep would produce. `damerau_zhao_sahni` never builds a matrix either; its
+**39.2×** predates the Zhao–Sahni kernel it is now named for and is pending
+re-measurement, as the footnote to the table above records. Only `search_matrix`
+is what its name says — the full cost + parent matrix, required for the
+backtrace — and its **13.8×** is the structural-savings story below.
 
-Where the full matrix *is* required — now only in search mode — it is stored
+Where the full matrix *is* required — search mode, and unrestricted Damerau at
+weighted costs — it is stored
 struct-of-arrays: costs in one
 flat `Vec<f64>`, parents in another. The hot cost sweep stays contiguous, and the
 parents — touched only during backtracking — never pollute a cache line during
@@ -143,15 +152,15 @@ with input size instead of falling: a scalar implementation would do the
 same quadratic work as the JavaScript library at 1024 units, while the
 bit-parallel kernels do not.
 
-**Dice (3.2×–7.5×).** Dominated by hashing. Verbora hashes `(u16, u16)` tuples
-with `FxHashMap` instead of allocating a `String` per bigram the way the
+**Dice (3.2×–7.5×).** Dominated by hashing. Verbora hashes `(char, char)` tuples
+with `FxHashSet` instead of allocating a `String` per bigram the way the
 JavaScript library does; the win grows with input size as that allocation
 pressure compounds.
 
 **Cyrillic vs ASCII.** `levenshtein/cyrillic/256` at 3.97 µs against
 `levenshtein/ascii/256` at 2.13 µs — about 86% slower. Promoting non-ASCII
-operands to `Vec<u16>` for exact UTF-16 semantics is a fixed cost, and the
-`u16` bit-vector kernel builds its pattern-preprocessing table in a hash
+operands to `Vec<char>` for exact scalar semantics is a fixed cost, and the
+`char` bit-vector kernel builds its pattern-preprocessing table in a hash
 map where the byte path uses a flat 256-entry array. The absolute
 difference is still under two microseconds — and the Cyrillic row still
 wins by **929.5×**.
@@ -164,7 +173,7 @@ a widely-used JavaScript NLP library.
 The cause was two `vec![false; len]` allocations per call, for the match flags.
 The JavaScript engine's `new Array(4)` is nearly free; `malloc` is not.
 
-Moving the match flags to a stack buffer for inputs up to 128 code units took
+Moving the match flags to a stack buffer for inputs up to 128 units took
 the benchmark from **48.6 ns to 15.3 ns** — 0.6× to 1.8× — with the test
 suite re-run and still green. Words are short by nature, so the stack path
 is the common path rather than a micro-optimisation for a rare case.

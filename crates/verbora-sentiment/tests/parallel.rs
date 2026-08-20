@@ -13,11 +13,12 @@
 //! `cargo test -p verbora-sentiment --features parallel`.
 #![cfg(feature = "parallel")]
 
-use verbora_sentiment::{SentimentAnalyzer, Stemmer};
+use verbora_sentiment::{Language, SentimentAnalyzer, Stemmer, VocabularyKind};
 use verbora_stemmers::PorterStemmer;
 
 fn afinn_en() -> SentimentAnalyzer {
-    SentimentAnalyzer::without_stemmer("English", "afinn").expect("English AFINN exists")
+    SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn)
+        .expect("English AFINN exists")
 }
 
 /// Runs both paths and asserts exact (bit-for-bit, `NaN`-including) equality.
@@ -33,11 +34,11 @@ fn assert_parity<S>(analyzer: &SentimentAnalyzer<S>, docs: &[Vec<&str>])
 where
     S: Stemmer + Sync,
 {
-    let sequential: Vec<f64> = docs.iter().map(|d| analyzer.get_sentiment(d)).collect();
+    let sequential: Vec<Option<f64>> = docs.iter().map(|d| analyzer.get_sentiment(d)).collect();
     let parallel = analyzer.par_get_sentiment_batch(docs);
     assert_eq!(sequential.len(), parallel.len());
-    let seq_bits: Vec<u64> = sequential.iter().map(|f| f.to_bits()).collect();
-    let par_bits: Vec<u64> = parallel.iter().map(|f| f.to_bits()).collect();
+    let seq_bits: Vec<Option<u64>> = sequential.iter().map(|f| f.map(f64::to_bits)).collect();
+    let par_bits: Vec<Option<u64>> = parallel.iter().map(|f| f.map(f64::to_bits)).collect();
     assert_eq!(seq_bits, par_bits, "sequential vs parallel diverged");
 }
 
@@ -52,9 +53,11 @@ fn empty_batch() {
 #[test]
 fn one_document() {
     let a = afinn_en();
-    let docs = vec![vec!["not", "good", "good"]];
+    // `not happy` is not a shipped key, so this is the sticky-negation path:
+    // -3 for each `happy`, over three units.
+    let docs = vec![vec!["not", "happy", "happy"]];
     assert_parity(&a, &docs);
-    assert_eq!(a.par_get_sentiment_batch(&docs), [-2.0]);
+    assert_eq!(a.par_get_sentiment_batch(&docs), [Some(-2.0)]);
 }
 
 #[test]
@@ -67,17 +70,18 @@ fn many_documents_preserve_order() {
             0 => vec![],
             1 => vec!["good"],
             2 => vec!["bad"],
-            3 => vec!["not", "good"],
-            _ => vec!["good", "bad", "not", "good", "terrible"],
+            3 => vec!["not", "happy"],
+            _ => vec!["good", "bad", "not", "happy", "terrible"],
         })
         .collect();
     assert_parity(&a, &docs);
 
     let scores = a.par_get_sentiment_batch(&docs);
-    assert!(scores[0].is_nan());
-    assert_eq!(scores[1], 3.0);
-    assert_eq!(scores[2], -3.0);
-    assert_eq!(scores[3], -1.5);
+    // The empty document scored nothing, so it has no mean.
+    assert_eq!(scores[0], None);
+    assert_eq!(scores[1], Some(3.0));
+    assert_eq!(scores[2], Some(-3.0));
+    assert_eq!(scores[3], Some(-1.5));
 }
 
 #[test]
@@ -85,7 +89,7 @@ fn unicode_documents() {
     // Reuses `accented_latin_cyrillic_greek_and_cjk` and
     // `astral_characters_and_emoji` from `src/analyzer.rs`'s own test suite.
     let a = afinn_en();
-    let es = SentimentAnalyzer::without_stemmer("Spanish", "afinn").unwrap();
+    let es = SentimentAnalyzer::without_stemmer(Language::Spanish, VocabularyKind::Afinn).unwrap();
 
     let docs = vec![
         vec!["Naïve"],
@@ -110,7 +114,7 @@ fn pathological_inputs_from_the_sequential_suite() {
     let long_token = "a".repeat(100_000);
     let many_good: Vec<&str> = std::iter::repeat_n("good", 10_000).collect();
     let negated_many: Vec<&str> = std::iter::once("not")
-        .chain(std::iter::repeat_n("good", 10_000))
+        .chain(std::iter::repeat_n("happy", 10_000))
         .collect();
 
     let docs: Vec<Vec<&str>> = vec![
@@ -119,6 +123,8 @@ fn pathological_inputs_from_the_sequential_suite() {
         vec!["a"],
         vec!["0"],
         vec!["NOT", "GOOD"],
+        vec!["cover", "up"],
+        vec!["son", "of", "a", "bitch"],
         vec!["no"],
         vec!["no", "good"],
         vec![
@@ -141,7 +147,12 @@ fn pathological_inputs_from_the_sequential_suite() {
 fn works_when_the_stemmer_type_parameter_is_not_the_default() {
     // `S` must be `Sync` for the batch method to exist at all; this pins that
     // it is *usable*, not just that `NoStemmer` happens to compile.
-    let a = SentimentAnalyzer::new("English", Some(PorterStemmer::new()), "afinn").unwrap();
+    let a = SentimentAnalyzer::with_stemmer(
+        Language::English,
+        VocabularyKind::Afinn,
+        PorterStemmer::new(),
+    )
+    .unwrap();
     let docs = vec![
         vec!["running", "badly"],
         vec!["nationalization"],

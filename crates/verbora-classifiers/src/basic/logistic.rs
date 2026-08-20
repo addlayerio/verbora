@@ -1,53 +1,3 @@
-//! The `apparatus` logistic-regression engine, and the `sylvester` linear
-//! algebra it is built on.
-//!
-//! This is the most numerically delicate code in the crate. `descendGradient`
-//! runs one-vs-rest gradient descent per class, iterating until successive costs
-//! differ by less than `1e-4`, so a one-ULP perturbation anywhere inside can
-//! change the *iteration count* and therefore the whole model. Five things must
-//! be reproduced literally:
-//!
-//! 1. **Accumulation direction.** Every `sylvester` contraction sums descending
-//!    over the contracted index (`while (k--)`), while `Vector.sum` — used only
-//!    by the cost function — sums ascending. An idiomatic `iter().sum()` is
-//!    wrong in one of the two places whichever way you write it.
-//! 2. **The update expression** is `theta[k] - (g[k] * (1/m)) * learningRate`,
-//!    in that parenthesisation. Folding `learningRate / m` into one constant
-//!    rounds differently.
-//! 3. **`if (last)` is a truthiness test**, not a null check, so a cost of
-//!    exactly `0` disables the convergence check for that iteration and the loop
-//!    runs to `maxIt = 500 * m` and throws.
-//! 4. **The intercept is trained and then discarded.** A ones column is
-//!    prepended, a zero appended to theta, and the optimised vector is returned
-//!    through `chomp(1)` — which drops the *first* element, the bias. Prediction
-//!    therefore applies no intercept at all.
-//! 5. **`Vector.dot` returns `null` on a length mismatch**, and
-//!    `sigmoid(null)` is exactly `0.5`. A model left stale by a post-training
-//!    `addDocument` silently reports 0.5 for every class instead of failing.
-//!
-//! Within those constraints the fit path is restructured for speed in three
-//! ways, each bit-exact (differentially verified against the dense reference
-//! form over thousands of randomized corpora — see `tests/train_parity.rs`):
-//!
-//! * **The hypothesis is computed once per iteration, not twice.** The
-//!   reference evaluates `hypothesis(theta_new)` inside `cost()` and then again
-//!   at the top of the next iteration — the same pure function of the same
-//!   unchanged inputs. Keeping the cost pass's result halves the `exp` count.
-//!   The memo also survives a learning-rate restart, because `theta` does:
-//!   the restarted loop's opening hypothesis is for the very `theta` the last
-//!   cost pass evaluated.
-//! * **The 0/1 design matrix is stored as sparse index lists** ([`SparseDesign`]),
-//!   walked in the same descending order as the dense `while (k--)` /
-//!   `while (r--)` contractions. A skipped term is `0.0 * v = ±0.0`, which can
-//!   only affect a sum through the sign of zero; that never happens here
-//!   because `sigmoid` never returns `-0.0` (so no `diff` entry, and no
-//!   partial sum with nonzero terms remaining, sits at `-0.0`) and `theta`
-//!   stays finite (a diverging learning rate fails `current < last` within two
-//!   iterations, long before overflow could make a skipped term `0.0 * ±inf`).
-//! * **The design and the scratch buffers are built once per `fit()`** and
-//!   shared across the one-vs-rest passes — the reference rebuilds nothing
-//!   between classes either; only the target column changes.
-
 use crate::basic::classifier::{
     Classification, Classifier, ClassifierError, Engine, sort_descending,
 };
@@ -69,19 +19,74 @@ use crate::transcendental;
 pub type LogisticRegressionClassifier = Classifier<LogisticEngine>;
 
 /// The logistic-regression engine: examples per class, and a theta per class.
+/// The logistic-regression engine: one-vs-rest batch gradient descent.
+///
+/// This is the most numerically delicate code in the crate. `descendGradient`
+/// runs one-vs-rest gradient descent per class, iterating until successive costs
+/// differ by less than `1e-4`, so a one-ULP perturbation anywhere inside can
+/// change the *iteration count* and therefore the whole model. Five things must
+/// be reproduced literally:
+///
+/// 1. **Accumulation direction.** Every contraction sums descending over the
+///    contracted index; the cost function sums ascending. An idiomatic
+///    `iter().sum()` is wrong in one of the two places whichever way you write
+///    it, and the difference reaches the model through the iteration count.
+/// 2. **The update expression** is `theta[k] - (g[k] * (1/m)) * learningRate`,
+///    in that parenthesisation. Folding `learningRate / m` into one constant
+///    rounds differently.
+/// 3. **`if (last)` is a truthiness test**, not a null check, so a cost of
+///    exactly `0` disables the convergence check for that iteration and the loop
+///    runs to `maxIt = 500 * m` and throws.
+/// 4. **The intercept is trained and then discarded.** A ones column is
+///    prepended, a zero appended to theta, and the optimised vector is returned
+///    through `chomp(1)` — which drops the *first* element, the bias. Prediction
+///    therefore applies no intercept at all.
+/// 5. **A weight vector narrower than the observation is a stale model, and is
+///    reported as one.** Adding a document after `train()` widens the feature
+///    vocabulary without refitting, so the learned `theta` no longer describes
+///    it. This used to answer `0.5` for every class — a sentinel that reads as
+///    a real, perfectly balanced score and sorts among the others — and now
+///    fails with [`ClassifierError::StaleModel`], which names both widths. Call
+///    `train()` again.
+///
+/// Within those constraints the fit path is restructured for speed in three
+/// ways, each bit-exact (differentially verified against the dense reference
+/// form over thousands of randomized corpora — see `tests/train_parity.rs`):
+///
+/// * **The hypothesis is computed once per iteration, not twice.** The
+///   reference evaluates `hypothesis(theta_new)` inside `cost()` and then again
+///   at the top of the next iteration — the same pure function of the same
+///   unchanged inputs. Keeping the cost pass's result halves the `exp` count.
+///   The memo also survives a learning-rate restart, because `theta` does:
+///   the restarted loop's opening hypothesis is for the very `theta` the last
+///   cost pass evaluated.
+/// * **The 0/1 design matrix is stored as sparse index lists** — for each
+///   example the columns it has a 1 in, and for each column the examples that
+///   have a 1 in it, both descending — rather than as a dense `Vec<Vec<f64>>`.
+///   They are walked in the same descending order as the dense `while (k--)` /
+///   `while (r--)` contractions. A skipped term is `0.0 * v = ±0.0`, which can
+///   only affect a sum through the sign of zero; that never happens here
+///   because `sigmoid` never returns `-0.0` (so no `diff` entry, and no
+///   partial sum with nonzero terms remaining, sits at `-0.0`) and `theta`
+///   stays finite (a diverging learning rate fails `current < last` within two
+///   iterations, long before overflow could make a skipped term `0.0 * ±inf`).
+/// * **The design and the scratch buffers are built once per `fit()`** and
+///   shared across the one-vs-rest passes; only the target column changes
+///   between classes.
+///
 #[derive(Debug, Clone, Default)]
 pub struct LogisticEngine {
-    /// Label -> observations. Enumerated with the reference object semantics when
-    /// the training matrix is assembled, which is *not* the order the labels
-    /// were first seen in.
+    /// Label -> observations. Enumerated in
+    /// [`OrderedMap`](crate::OrderedMap) order when the training matrix is
+    /// assembled, which is *not* the order the labels were first seen in.
     examples: OrderedMap<Vec<Vec<u8>>>,
     /// Labels in first-appearance order — the order `getClassifications` reads
     /// them back in. When it disagrees with the enumeration order above, the
-    /// engine mislabels every class; see the module docs of [`crate::ordmap`].
+    /// engine mislabels every class; see the module docs of [`OrderedMap`](crate::OrderedMap).
     classifications: Vec<String>,
     example_count: usize,
-    /// `undefined` until `train()`; asking for classifications before then is a
-    /// `TypeError` in the reference.
+    /// `None` until `train()`; asking for classifications before then is
+    /// [`ClassifierError::NotFitted`].
     theta: Option<Vec<Vec<f64>>>,
 }
 
@@ -203,9 +208,9 @@ fn descend_gradient(
     let n1 = x.n1;
     let max_it = 500 * m;
 
-    // `theta.augment([0])`: the reference appends a zero to the all-zero init,
-    // while the ones column goes in *front* — which is why `chomp(1)` at the
-    // end drops the bias rather than the last weight.
+    // A zero is appended to the all-zero init while the ones column goes in
+    // *front*, which is why dropping index 0 at the end removes the bias rather
+    // than the last weight.
     let mut theta = vec![0.0f64; n1];
     h.clear();
     h.resize(m, 0.0);
@@ -214,8 +219,8 @@ fn descend_gradient(
     gradient.clear();
     gradient.resize(n1, 0.0);
 
-    // Hoisting `1/m` is safe: the reference computes `(g[k] * (1/m)) * rate`
-    // with `1/m` as its own division, so one shared quotient is the same value.
+    // Hoisting `1/m` is exact: the update is `(g[k] * (1/m)) * rate` with `1/m`
+    // as its own division, so one shared quotient is bit-for-bit the same value.
     let inv_m = 1.0 / m as f64;
     let mut learning_rate = 3.0f64;
     let mut learning_rate_found = false;
@@ -248,11 +253,11 @@ fn descend_gradient(
             for k in 0..n1 {
                 theta[k] -= (gradient[k] * inv_m) * learning_rate;
             }
-            // The apparatus cost function:
+            // The cost function:
             // `(1/m) * Σ_asc [ (0 - y[k]) * log(h[k]) - (1 - y[k]) * log(1 - h[k]) ]`,
-            // summed **ascending** — `Vector.sum` maps over the elements in
-            // order, unlike every dot product in the same file. Its hypothesis
-            // is for the just-updated `theta`, so it is kept for reuse.
+            // summed **ascending**, unlike every dot product here, which
+            // contracts descending. Its hypothesis is for the just-updated
+            // `theta`, so it is kept for reuse.
             x.hypothesis_into(&theta, h);
             have_h = true;
             let mut sum = 0.0;
@@ -275,7 +280,7 @@ fn descend_gradient(
                 }
             }
             if i >= max_it {
-                return Err(ClassifierError::UnableToFindMinimum);
+                return Err(ClassifierError::NoMinimum);
             }
             last = current;
         }
@@ -349,31 +354,30 @@ impl Engine for LogisticEngine {
 
     fn classifications(&self, observation: &[u8]) -> Result<Vec<Classification>, ClassifierError> {
         let Some(theta) = &self.theta else {
-            return Err(ClassifierError::LogisticRegressionNotTrained);
+            return Err(ClassifierError::NotFitted);
         };
         let mut out: Vec<Classification> = theta
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                // `Vector.dot` returns null when the dimensions disagree, and
-                // `sigmoid(null)` is `1 / (1 + Math.exp(0))` — exactly 0.5.
-                let value = if observation.len() == t.len() {
-                    let mut sum = 0.0;
-                    let mut k = t.len();
-                    while k > 0 {
-                        k -= 1;
-                        sum += f64::from(observation[k]) * t[k];
-                    }
-                    transcendental::sigmoid(sum)
-                } else {
-                    0.5
-                };
-                Classification {
-                    label: self.classifications.get(i).cloned().unwrap_or_default(),
-                    value,
+                if observation.len() != t.len() {
+                    return Err(ClassifierError::StaleModel {
+                        weights: t.len(),
+                        observation: observation.len(),
+                    });
                 }
+                let mut sum = 0.0;
+                let mut k = t.len();
+                while k > 0 {
+                    k -= 1;
+                    sum += f64::from(observation[k]) * t[k];
+                }
+                Ok(Classification {
+                    label: self.classifications.get(i).cloned().unwrap_or_default(),
+                    value: transcendental::sigmoid(sum),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         sort_descending(&mut out);
         Ok(out)
     }
@@ -432,7 +436,7 @@ impl Engine for LogisticEngine {
                     theta
                         .iter()
                         .map(|t| {
-                            // sylvester Vectors serialise as {"elements": [...]}.
+                            // A weight vector serialises as {"elements": [...]}.
                             DynValue::Obj(vec![(
                                 "elements".to_owned(),
                                 DynValue::Arr(t.iter().copied().map(DynValue::Num).collect()),
@@ -510,26 +514,46 @@ mod tests {
         assert_eq!(c.classify(&alpha).unwrap(), "p");
     }
 
+    /// A model whose fit predates the current vocabulary is a failure, not a
+    /// score.
+    ///
+    /// It used to answer `0.5` for every class — a sentinel indistinguishable
+    /// from a genuine, perfectly balanced score, which then sorted among the
+    /// real ones and produced a confident label.
     #[test]
-    fn a_stale_model_scores_every_class_at_exactly_one_half() {
+    fn a_stale_model_reports_both_widths_instead_of_scoring() {
         let mut c = LogisticRegressionClassifier::new();
         c.add_document(&vec!["alpha".to_owned()], "p");
         c.add_document(&vec!["beta".to_owned()], "q");
         c.train().unwrap();
-        // A new token widens the feature vector without retraining, so
-        // `Vector.dot` sees mismatched lengths and returns null.
+        // A new token widens the feature vector without retraining, so the
+        // fitted weights no longer describe an observation built from it.
         c.add_document(&vec!["gamma".to_owned()], "r");
-        for score in c.get_classifications(&vec!["alpha".to_owned()]).unwrap() {
-            assert_eq!(score.value, 0.5);
-        }
+        assert_eq!(
+            c.get_classifications(&vec!["alpha".to_owned()]),
+            Err(ClassifierError::StaleModel {
+                weights: 2,
+                observation: 3,
+            })
+        );
+        assert_eq!(
+            c.classify(&vec!["alpha".to_owned()]),
+            Err(ClassifierError::StaleModel {
+                weights: 2,
+                observation: 3,
+            })
+        );
+        // …and training again makes it answerable.
+        c.train().unwrap();
+        assert!(c.classify(&vec!["alpha".to_owned()]).is_ok());
     }
 
     #[test]
-    fn untrained_reports_the_typeerror() {
+    fn asking_an_unfitted_model_is_a_distinct_failure() {
         let c = LogisticRegressionClassifier::new();
         assert_eq!(
             c.get_classifications("anything"),
-            Err(ClassifierError::LogisticRegressionNotTrained)
+            Err(ClassifierError::NotFitted)
         );
     }
 

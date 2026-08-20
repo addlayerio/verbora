@@ -1,30 +1,22 @@
-//! Errors, and what the reference implementation does instead.
-//!
-//! The reference never reports a WordNet failure. `WordNetFile#open` logs
-//! `Unable to open %s` and returns **without invoking its callback**, so the
-//! whole chain stalls and the caller waits forever; a data offset past the end of
-//! the file makes `appendLineChar` recurse indefinitely; and a malformed record
-//! throws from inside an `fs` callback, where no `try`/`catch` at the call site
-//! can see it.
-//!
-//! Every variant here therefore corresponds to a case the reference either never
-//! answers or answers by crashing the process. Returning an error instead is the
-//! crate's one deliberate, blanket divergence — see the crate-level docs.
+//! Errors.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::synset::SynsetOffset;
+
 /// The result type used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Something went wrong reading or parsing the dictionary.
+/// Something went wrong locating, reading or parsing the dictionary.
+///
+/// Every variant names the file it concerns, and the two record variants also
+/// name the exact byte position of the record that failed, so a malformed
+/// dictionary can be inspected with `dd`/`sed` without guesswork.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// A dictionary file could not be opened or read.
-    ///
-    /// Reference behaviour: `console.log('Unable to open %s')`, then the
-    /// callback is never invoked.
     Io {
         /// The file that could not be read.
         path: PathBuf,
@@ -32,83 +24,111 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// A line starting at `offset` ran to the end of the file without a `\n`.
-    ///
-    /// Reference behaviour: `appendLineChar` recurses forever — `fs.read`
-    /// returns `count = 0`, the zero-filled buffer never yields byte `0x0A`, and
-    /// the buffer doubles until the process dies.
-    UnterminatedLine {
-        /// The file being read.
-        path: PathBuf,
-        /// The byte offset the read started from.
-        offset: u64,
+    /// [`WordNet::from_env`](crate::WordNet::from_env) found no dictionary.
+    DictionaryNotFound {
+        /// Every candidate directory that was checked, in the order checked.
+        tried: Vec<PathBuf>,
     },
 
-    /// A data record contained no `'| '` gloss separator.
-    ///
-    /// Reference behaviour: `data[1]` is `undefined`, and `data[1].split('; ')`
-    /// throws `TypeError: Cannot read properties of undefined (reading 'split')`
-    /// asynchronously, from inside the `fs` callback.
-    MissingGloss {
-        /// The file being read.
+    /// A line of an `index.*` file did not match the documented format.
+    MalformedIndexEntry {
+        /// The index file being read.
         path: PathBuf,
-        /// The byte offset the record was read from.
-        offset: u64,
+        /// Byte offset at which the offending line begins.
+        line_start: u64,
+        /// What specifically was wrong.
+        kind: RecordError,
     },
 
-    /// A synset offset was not a usable file position.
-    ///
-    /// Reference behaviour: `fs.read` throws `The "position" argument must be of
-    /// type bigint or integer`, again from inside the callback. Reachable
-    /// through `getSynonyms({ synsetOffset: 0, … })`, where the falsy `0` makes
-    /// The reference substitute the record object itself for the offset.
-    InvalidOffset {
-        /// The file being read.
+    /// A record of a `data.*` file did not match the documented format.
+    MalformedSynset {
+        /// The data file being read.
         path: PathBuf,
-        /// The offset as parsed; `NaN` when the token was absent or unparsable.
-        offset: f64,
+        /// The offset the record was read from.
+        offset: SynsetOffset,
+        /// What specifically was wrong.
+        kind: RecordError,
     },
 
-    /// A part-of-speech tag outside `n`, `v`, `a`, `s`, `r`.
-    ///
-    /// Reference behaviour: `getDataFile` has no `default` clause, returns
-    /// `undefined`, and the caller throws
-    /// `TypeError: Cannot read properties of undefined (reading 'get')`
-    /// synchronously.
-    UnknownPos(String),
-
-    /// The index bisection probed a negative byte position.
-    ///
-    /// Reference behaviour: `fs.read` with a position below `-1` throws
-    /// `ERR_OUT_OF_RANGE`, so nothing is ever delivered. Verified unreachable
-    /// for all 147,580 keys the fixture exercises across all eleven dictionary
-    /// files, but the arithmetic does not forbid it, so it is reported rather
-    /// than silently clamped.
-    NegativeProbe {
-        /// The file being searched.
+    /// A synset offset lies at or beyond the end of its data file.
+    OffsetOutOfRange {
+        /// The data file being read.
         path: PathBuf,
-        /// The probe position that went negative.
-        position: i64,
+        /// The offset that was asked for.
+        offset: SynsetOffset,
+        /// The file's length in bytes, as recorded when it was opened.
+        file_len: u64,
     },
 
-    /// A parsed count would have required an absurd allocation.
-    ///
-    /// Reference behaviour: the reference loops that many times regardless — for a
-    /// mid-record offset whose `tokens[3]` parses as a large hexadecimal number,
-    /// that means pushing hundreds of millions of `undefined`s until the process
-    /// runs out of memory. See [`crate::numfmt::MAX_COUNT`].
-    CountTooLarge {
-        /// Which field produced the count (`"wCnt"` or `"p_cnt"`).
-        field: &'static str,
-        /// The parsed value.
-        value: f64,
+    /// A file is too large for [`Storage::Indexed`](crate::Storage::Indexed)'s
+    /// `u32` line-start table.
+    FileTooLarge {
+        /// The file in question.
+        path: PathBuf,
+        /// Its length in bytes.
+        len: u64,
+        /// The largest length that can be indexed.
+        limit: u64,
     },
 
     /// A prebuilt index sidecar could not be used.
     ///
-    /// Has no reference counterpart: the prebuilt index is an optimisation this
-    /// crate adds, and the dictionary text files remain the source of truth.
-    Prebuilt(String),
+    /// The dictionary text files are always the source of truth; a sidecar that
+    /// no longer describes them is refused rather than trusted.
+    Prebuilt {
+        /// The sidecar, or the dictionary file whose entry was rejected.
+        path: PathBuf,
+        /// Why it was refused.
+        reason: String,
+    },
+}
+
+/// What was wrong with one dictionary record.
+///
+/// Field names are the ones the WordNet database format documentation
+/// (`wndb(5WN)`) uses, so a message can be matched against the specification
+/// directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordError {
+    /// The record ended before a required field.
+    MissingField {
+        /// The field's name in `wndb(5WN)`.
+        field: &'static str,
+    },
+    /// A field was present but not a legal value for that field.
+    InvalidField {
+        /// The field's name in `wndb(5WN)`.
+        field: &'static str,
+        /// The text that was found there.
+        value: String,
+    },
+    /// A `data.*` record contained no `|` gloss delimiter.
+    MissingGloss,
+    /// An index line's `synset_cnt` and its redundant `sense_cnt` copy disagree.
+    ///
+    /// `wndb(5WN)` states that `sense_cnt` is "the same as `synset_cnt`",
+    /// retained only for backward compatibility. A file where they differ is
+    /// malformed, and guessing which one to believe would silently drop or
+    /// invent senses.
+    SenseCountMismatch {
+        /// The first count on the line.
+        synset_cnt: u32,
+        /// The redundant copy that should have equalled it.
+        sense_cnt: u32,
+    },
+    /// A record read at offset *X* declares its own offset to be *Y*.
+    ///
+    /// Every `data.*` record begins with its own byte offset, so this check
+    /// catches an offset that does not point at the start of a record — which
+    /// would otherwise parse into a plausible-looking synset assembled from the
+    /// middle of a real one.
+    OffsetMismatch {
+        /// The offset the record was read from.
+        requested: SynsetOffset,
+        /// The offset the record declares.
+        found: SynsetOffset,
+    },
 }
 
 impl Error {
@@ -119,39 +139,108 @@ impl Error {
             source,
         }
     }
+
+    /// Wraps a record error with the index file and line that produced it.
+    pub(crate) fn index(path: &Path, line_start: u64, kind: RecordError) -> Self {
+        Self::MalformedIndexEntry {
+            path: path.to_path_buf(),
+            line_start,
+            kind,
+        }
+    }
+
+    /// Wraps a record error with the data file and offset that produced it.
+    pub(crate) fn synset(path: &Path, offset: SynsetOffset, kind: RecordError) -> Self {
+        Self::MalformedSynset {
+            path: path.to_path_buf(),
+            offset,
+            kind,
+        }
+    }
+
+    /// Builds a sidecar rejection.
+    pub(crate) fn prebuilt(path: &Path, reason: impl Into<String>) -> Self {
+        Self::Prebuilt {
+            path: path.to_path_buf(),
+            reason: reason.into(),
+        }
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { path, source } => write!(f, "cannot read {}: {source}", path.display()),
-            Self::UnterminatedLine { path, offset } => write!(
-                f,
-                "{}: no newline after byte {offset} (the reference loops forever here)",
-                path.display()
-            ),
-            Self::MissingGloss { path, offset } => write!(
-                f,
-                "{}: record at byte {offset} has no '| ' gloss separator \
-                 (the reference throws TypeError reading 'split')",
-                path.display()
-            ),
-            Self::InvalidOffset { path, offset } => {
-                write!(f, "{}: {offset} is not a byte offset", path.display())
+            Self::DictionaryNotFound { tried } => {
+                write!(f, "no WordNet dictionary found (tried: ")?;
+                for (i, p) in tried.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", p.display())?;
+                }
+                f.write_str(
+                    "); the database is separately licensed and not shipped with this crate, \
+                     so point $WORDNET_DB_PATH at a directory holding index.noun and its \
+                     seven siblings",
+                )
             }
-            Self::UnknownPos(tag) => write!(
+            Self::MalformedIndexEntry {
+                path,
+                line_start,
+                kind,
+            } => write!(
                 f,
-                "unknown part-of-speech tag {tag:?}; expected one of n, v, a, s, r"
-            ),
-            Self::NegativeProbe { path, position } => write!(
-                f,
-                "{}: index bisection probed negative position {position}",
+                "{}: malformed index entry at byte {line_start}: {kind}",
                 path.display()
             ),
-            Self::CountTooLarge { field, value } => {
-                write!(f, "{field} = {value} exceeds the supported maximum")
+            Self::MalformedSynset { path, offset, kind } => write!(
+                f,
+                "{}: malformed synset at byte {offset}: {kind}",
+                path.display()
+            ),
+            Self::OffsetOutOfRange {
+                path,
+                offset,
+                file_len,
+            } => write!(
+                f,
+                "{}: synset offset {offset} is at or past the end of the file ({file_len} bytes)",
+                path.display()
+            ),
+            Self::FileTooLarge { path, len, limit } => write!(
+                f,
+                "{}: {len} bytes exceeds the {limit}-byte limit for an indexed file; \
+                 use Storage::Resident instead",
+                path.display()
+            ),
+            Self::Prebuilt { path, reason } => {
+                write!(f, "{}: unusable prebuilt index: {reason}", path.display())
             }
-            Self::Prebuilt(msg) => write!(f, "prebuilt index unusable: {msg}"),
+        }
+    }
+}
+
+impl fmt::Display for RecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingField { field } => write!(f, "field {field} is missing"),
+            Self::InvalidField { field, value } => {
+                write!(f, "field {field} is not valid: {value:?}")
+            }
+            Self::MissingGloss => f.write_str("no '|' gloss delimiter"),
+            Self::SenseCountMismatch {
+                synset_cnt,
+                sense_cnt,
+            } => write!(
+                f,
+                "synset_cnt is {synset_cnt} but its redundant sense_cnt copy is {sense_cnt}"
+            ),
+            Self::OffsetMismatch { requested, found } => write!(
+                f,
+                "read from byte {requested} but the record declares offset {found}; \
+                 the offset does not point at the start of a synset"
+            ),
         }
     }
 }
@@ -165,6 +254,8 @@ impl std::error::Error for Error {
     }
 }
 
+impl std::error::Error for RecordError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,19 +264,47 @@ mod tests {
     fn errors_are_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Error>();
+        assert_send_sync::<RecordError>();
     }
 
     #[test]
-    fn messages_name_the_reference_behaviour() {
-        let e = Error::MissingGloss {
-            path: PathBuf::from("/d/data.noun"),
-            offset: 0,
-        };
-        assert!(e.to_string().contains("'| '"));
-        assert!(
-            Error::UnknownPos("x".into())
-                .to_string()
-                .contains("n, v, a, s, r")
+    fn messages_name_the_file_and_the_position() {
+        let e = Error::synset(
+            Path::new("/d/data.noun"),
+            SynsetOffset::new(1740),
+            RecordError::MissingGloss,
         );
+        let s = e.to_string();
+        assert!(s.contains("/d/data.noun"), "{s}");
+        // Offsets print in the eight-digit form the files themselves use.
+        assert!(s.contains("00001740"), "{s}");
+        assert!(s.contains("gloss"), "{s}");
+    }
+
+    #[test]
+    fn a_missing_dictionary_names_every_candidate_and_how_to_get_one() {
+        let e = Error::DictionaryNotFound {
+            tried: vec![PathBuf::from("/a/dict"), PathBuf::from("dict")],
+        };
+        let s = e.to_string();
+        assert!(s.contains("/a/dict"), "{s}");
+        assert!(s.contains("dict"), "{s}");
+        assert!(s.contains("WORDNET_DB_PATH"), "{s}");
+        assert!(s.contains("separately licensed"), "{s}");
+        // An empty candidate list still produces a well-formed sentence.
+        assert!(
+            Error::DictionaryNotFound { tried: Vec::new() }
+                .to_string()
+                .contains("no WordNet dictionary found")
+        );
+    }
+
+    #[test]
+    fn a_field_error_names_the_field_from_the_format_documentation() {
+        let e = RecordError::InvalidField {
+            field: "w_cnt",
+            value: "zz".to_owned(),
+        };
+        assert_eq!(e.to_string(), "field w_cnt is not valid: \"zz\"");
     }
 }

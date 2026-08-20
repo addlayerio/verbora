@@ -26,20 +26,20 @@
 //!   name, so retraining after the sample changed evaluates the correction
 //!   against the *first* run's cached feature sums.
 //! * **Context keys come from `safe-stable-stringify`**, whose key ordering is
-//!   by UTF-16 code unit. See [`crate::dynval`].
+//!   by UTF-16 code unit. See [`DynValue`](crate::DynValue).
 //!
 //! Every one of those is recorded in `fixtures/classifiers.json`.
 
-pub mod classifier;
-pub mod context;
-pub mod distribution;
-pub mod element;
-pub mod feature;
-pub mod feature_set;
-pub mod gis_scaler;
-pub mod pos;
-pub mod sample;
-pub mod simple;
+mod classifier;
+mod context;
+mod distribution;
+mod element;
+mod feature;
+mod feature_set;
+mod gis_scaler;
+mod pos;
+mod sample;
+mod simple;
 
 pub use classifier::{MaxEntClassifier, RestoreError};
 pub use context::Context;

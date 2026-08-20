@@ -18,6 +18,12 @@
 //! [`double_metaphone_cpp`] is the one non-Rust competitor in this
 //! workspace: an FFI binding to a vendored C++11 library, compiled by
 //! `build.rs`. See that module's own doc comment.
+//!
+//! Note what is deliberately *absent* here: nothing in this library may name
+//! the `eddie` crate. It is unsound (see
+//! `tests/distance_correctness.rs`'s `eddie_slice` module) and is kept a
+//! **dev-dependency** precisely so no shared helper can reach it — only the
+//! one test module that wraps its sound slice-level API can.
 
 pub mod double_metaphone_cpp;
 pub mod language_support;

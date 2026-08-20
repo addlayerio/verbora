@@ -4,30 +4,47 @@
 //! distance candidate lookup: `verbora_spellcheck::FuzzyIndex::neighbors`
 //! vs. `fst::Set::search` composed with `fst::automaton::Levenshtein`.
 //!
-//! # Classification: NARROWED_EXACT on this file's ASCII word list, with a
-//! disclosed correctness caveat for certain non-ASCII input
+//! # Classification: PARTIAL — the two sides no longer use the same metric
 //!
-//! Both sides answer the identical question -- "which stored words are
-//! within edit distance `k` of this query?" -- under the identical metric
-//! for the domain this file's shared corpus (`benches/data/words.json`,
-//! lowercase ASCII, `a`-`z` only) actually exercises:
+//! **This was NARROWED_EXACT before the Rust-native migration and is not any
+//! more.** The two sides ask the same *shape* of question — "which stored
+//! words are within edit distance `k` of this query?" — but no longer under
+//! the same metric:
 //!
-//! * `FuzzyIndex` uses `verbora_distance::levenshtein` with
-//!   `Options::default()` (unit insert/delete/substitute cost, no
-//!   transposition -- see `crates/verbora-spellcheck/src/fuzzy_index.rs`'s
-//!   own doc comment), computed over UTF-16 code units
-//!   (`crates/verbora-distance/src/units.rs`).
+//! * `FuzzyIndex` uses **unrestricted Damerau-Levenshtein**, which counts a
+//!   transposition as one edit. `crates/verbora-spellcheck/src/
+//!   fuzzy_index.rs` states this as the crate's metric and gives the reason:
+//!   a BK-tree's pruning "is correct only under a true metric", and the
+//!   weighted variants are not metrics for arbitrary cost sets. It used to
+//!   use plain `verbora_distance::levenshtein`, which is what made the old
+//!   classification possible.
 //! * `fst::automaton::Levenshtein` computes unit-cost insert/delete/
-//!   substitute distance over Unicode scalar values (`char`s) -- its own
-//!   doc comment states this explicitly.
+//!   substitute distance and has no transposition operation at all.
 //!
-//! For any word made only of Basic-Multilingual-Plane characters (which
-//! includes every ASCII word in this corpus: one `char` is always exactly
-//! one UTF-16 code unit in the BMP), the two metrics agree exactly. Verified
-//! directly in `tests/fst_fuzzy_correctness.rs` (`BTreeSet`-equality across
-//! a spread of real-corpus queries and `max_distance` values) before any
-//! timing number below was trusted, per this workbench's own `CORRECTNESS
-//! BEFORE PERFORMANCE` rule.
+//! Both still count Unicode scalar values, so the *unit* is shared; it is the
+//! *operation set* that differs.
+//!
+//! ## What that does to the numbers below, and in which direction
+//!
+//! Unrestricted Damerau-Levenshtein is bounded above by Levenshtein for every
+//! pair, so at the same `max_distance` Verbora's result set is a **superset**
+//! of `fst`'s. `tests/fst_fuzzy_correctness.rs` pins that containment and
+//! additionally proves every extra word Verbora returns satisfies
+//! `damerau <= k < levenshtein` — i.e. is transposition-reachable and nothing
+//! else — before any timing number here is trusted.
+//!
+//! The asymmetry therefore runs **against Verbora, on both axes**: its row
+//! evaluates a strictly more expensive per-candidate metric *and* returns at
+//! least as many results, on every query. A Verbora win in this group is a
+//! win despite doing more work; a Verbora loss is partly explained by it and
+//! must not be quoted as a like-for-like defeat. Neither side can be
+//! reconfigured to close the gap — `FuzzyIndex`'s metric is a contract, not a
+//! parameter, and `fst`'s automaton has no transposition mode — which is why
+//! the group is reclassified and disclosed rather than repaired or deleted.
+//!
+//! The pre-existing narrowing below is unaffected and still applies on top:
+//! it has never been driven by the metric, but by `fst`'s own automaton
+//! defect, described next, which is a *BMP* defect.
 //!
 //! **Known, real divergence outside this file's domain** (do not extend
 //! this benchmark to non-ASCII input without re-reading this): `fst` 0.4.7's
@@ -47,8 +64,10 @@
 //! consistent with the crate's own doc comment calling its Levenshtein
 //! automaton "not speedy" and warning it "should [be] vastly improved in
 //! the future". **This file's ASCII-only corpus never exercises that bug**,
-//! which is exactly why the classification above is NARROWED_EXACT and not
-//! plain EXACT -- the domain is real and disclosed, not silently dodged.
+//! which is a second, independent reason the domain here is narrowed -- real
+//! and disclosed, not silently dodged. That reason is entirely upstream's and
+//! is unaffected by Verbora's metric change: it would have narrowed the
+//! domain even when the classification was still NARROWED_EXACT.
 //!
 //! # `fst`'s own size/memory caveat
 //!
@@ -96,7 +115,7 @@ const CORPUS_SIZES: [usize; 6] = [100, 300, 1_000, 3_000, 10_000, 20_000];
 /// the dominant real spellcheck case (a single typo) and the cheapest
 /// automaton `fst` can be asked to build; `2` is the file's original,
 /// headline configuration. Both distances sit squarely inside the
-/// NARROWED_EXACT ASCII agreement domain pinned in
+/// PARTIAL ASCII agreement domain pinned in
 /// `tests/fst_fuzzy_correctness.rs` (which sweeps distances 0–3). Higher
 /// distances are deliberately not timed: distance 3+ automata approach
 /// `fst`'s own default state limit for long queries (see the module doc

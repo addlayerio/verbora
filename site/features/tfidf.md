@@ -1,740 +1,933 @@
 # TF-IDF
 
 `verbora-tfidf` scores terms against documents. It keeps a growable in-memory
-corpus, an inverse-document-frequency cache, and five queries built on top of
-them — `tf`, `idf`, `tfidf`, `tfidfs`, `list_terms`.
+corpus, an incremental document-frequency table over it, and the statistics and
+queries built on top of them — `idf`, `tfidf`, `tfidfs`, `rank`, `list_terms`.
 
-A document is a property-keyed accumulator mapping term to count, with the
-document's own key stored under the reserved property `__key`. Enumeration order,
-reserved term names, and the dynamic values a deserialized corpus can hold are
-all part of the contract, and all documented below.
+TF-IDF is a family of weightings rather than one formula, so this crate states
+which member it computes and pins it by test. With `n` documents,
+`count(t, d)` occurrences of term `t` in document `d`, and `df(t)` documents
+containing `t`:
+
+```text
+idf(t)      = 1 + ln(n / (1 + df(t)))
+tfidf(q, d) = Σ  count(t, d) · idf(t)          summed left to right
+             t∈q
+```
+
+Term frequency is the **raw count**, not a normalised frequency: nothing is
+divided by document length, because a caller who wants that division can perform
+it with `Document::total_terms` and a caller who does not cannot undo it. The
+two `1 +` terms are the smoothing — the inner one keeps a term that appears in no
+document finite, the outer one keeps a term that appears in *every* document
+weighted rather than annihilated.
 
 <div class="callout callout-spec">
 <strong>Specification status.</strong> The full stateful surface — corpus
-construction, serialization, the idf cache, stop-word and tokenizer
-configuration, term ordering and the empty-corpus case — is documented and
-test-pinned, with no external data required.
-<code>cargo test -p verbora-tfidf</code> runs <strong>52</strong> unit tests and
-<strong>2</strong> doctests.
+construction, the analyzer, ingestion, removal, every statistic and query, both
+published orderings, serialization and the compatibility stamp, and the
+empty-corpus case — is documented and test-pinned, with no external data
+required. <code>cargo test -p verbora-tfidf --all-features</code> runs
+<strong>95</strong> tests (75 unit, 15 contract, 5 parallel-equivalence) and
+<strong>10</strong> doctests.
 </div>
 
 ## When to use it
 
 - **Ranking documents against a query, or ranking a document's own terms**, for a
-  corpus that fits comfortably in memory and is built once and queried many times.
+  corpus that fits comfortably in memory and is built once and queried many
+  times.
 - **A corpus that grows incrementally.** `add_document` and `remove_document`
-  maintain an incremental document-frequency table, so `idf` on a built corpus
-  stays O(1) as documents come and go.
-- **Ingesting a large batch of text documents in one call**, via
-  [`par_add_documents_batch`](#adding-many-documents-at-once).
-- **Exactly reproducible scores.** Term ordering, tie-breaking and the arithmetic
-  of `idf` are pinned to bit equality, so the same corpus ranks the same way on
-  every platform and every run.
+  maintain the document-frequency table as they go, so `idf` stays an array load
+  as documents come and go. There is no cache, and so no question about when one
+  is stale.
+- **Ingesting a large batch of text in one call**, via
+  [`par_add_documents`](#ingesting-a-batch-in-parallel).
+- **Exactly reproducible scores.** The logarithm, the accumulation order and both
+  sort orders are specified, so the same corpus ranks the same way on every
+  platform and every run.
 
 ## When not to use it
 
 - **You want a `terms × documents` matrix, sparse vectors, or cosine similarity
   between documents.** Nothing here builds one: a document is a
-  `Vec<(TermId, f64)>`, and the only cross-document operation is `idf`'s
-  document-frequency count. Vector search has to be written on top.
-- **You need plain hash-map semantics with no reserved keys.** `__proto__` and
-  `__key` are special, and `list_terms`'s tie-break order is the enumeration order
-  documented below rather than a lexicographic one.
+  `Vec<(TermId, u32)>`, and the only cross-document quantity is the document
+  frequency. Vector search has to be written on top.
+- **You want a normalised term frequency.** The `tf` here is the raw count.
+  Divide by `Document::total_terms` yourself if you want the ratio.
 - **You are counting term frequency for something other than ranking.** For a
   plain bag-of-words histogram, a `HashMap<&str, u32>` over your own tokenizer
   output is simpler.
+- **Your corpus outgrows memory.** Everything lives in one `TfIdf` value; there
+  is no on-disk index and no mmap path.
 
 ## Quick example
 
 ```rust
-use verbora_tfidf::{DocKey, DocumentInput, Terms, TfIdf};
+use verbora_tfidf::TfIdf;
 
 fn main() {
-    let mut tfidf = TfIdf::new();
+    let mut corpus = TfIdf::new();
     for text in [
         "this document is about rust.",
         "this document is about python.",
         "this document is about python and rust.",
         "this document is about rust. it has rust examples",
     ] {
-        tfidf
-            .add_document(DocumentInput::Text(text), DocKey::Undefined, false)
-            .unwrap();
+        corpus.add_document(text);
     }
 
     // "rust" is in three of the four documents: 1 + ln(4 / (1 + 3)) = 1.
-    assert_eq!(tfidf.idf("rust").unwrap(), 1.0 + (4.0f64 / 4.0).ln());
-    assert_eq!(tfidf.tfidfs(Terms::Text("rust")).unwrap(), [1.0, 0.0, 1.0, 2.0]);
+    assert_eq!(corpus.document_frequency("rust"), 3);
+    assert_eq!(corpus.idf("rust"), Some(1.0));
 
-    let ranked = tfidf.list_terms(3).unwrap();
-    assert_eq!(ranked[0].term, "rust");
+    // …so its idf is exactly 1, and every score is the raw count.
+    assert_eq!(corpus.tfidfs("rust"), [1.0, 0.0, 1.0, 2.0]);
+
+    // Ranked, best first.
+    let ranked = corpus.rank("rust");
+    assert_eq!((ranked[0].document, ranked[0].score), (3, 2.0));
+
+    // The terms that make one document distinctive.
+    let terms = corpus.list_terms(3).unwrap();
+    assert_eq!((terms[0].term.as_str(), terms[0].count), ("rust", 2));
 }
 ```
+
+## What a term is
+
+Everything above is defined over *terms*, and a term is whatever the corpus's
+`Analyzer` produces. The pipeline is three steps, in order:
+
+1. **Tokenize.** The text is cut into tokens. The default is
+   [`WordTokenizer`](./tokenizers.md): the [UAX #29] word segments containing at
+   least one scalar that is `Alphabetic` or has `General_Category` in
+   `{Nd, Nl, No}`. Tokens are contiguous substrings of the input, in order,
+   non-overlapping, never empty.
+2. **Fold.** Each token is case-folded according to `CaseFold` — `Lowercase` by
+   default, `None` to keep the tokenizer's own spelling.
+3. **Filter.** If the analyzer carries a stop-word list, a token whose *folded*
+   form is on it is dropped.
+
+What survives step 3 is a term. This crate does not implement word boundaries:
+it calls `verbora-tokenizers`, which owns the UAX #29 contract, so there is one
+boundary rule in the workspace and no second copy to drift from it. That matters
+concretely — `"don't"`, `"3.14"`, `"1,000"` and `"a:b"` are each one token under
+the standard, and any hand-rolled "letters and digits" scan splits all four.
+
+**Documents and queries are analyzed identically.** A query for `"The"` against a
+lowercasing corpus finds `"the"`; a query for a stop word against a filtered
+corpus finds nothing, because the *query* term was dropped too.
+
+**Stop-word filtering is off by default**, because it deletes information: a
+corpus built with a filter cannot answer a question about a filtered term and
+cannot be persuaded to later. Turning it on is one call, and it is recorded in
+every serialized artifact.
+
+```rust
+use verbora_core::{StopWordLanguage, StopWords};
+use verbora_tfidf::{Analyzer, CaseFold, TfIdf};
+
+fn main() {
+    // The default: UAX #29 words, lowercased, nothing filtered.
+    let default = Analyzer::new();
+    assert_eq!(default.terms("The Quick, brown fox"), ["the", "quick", "brown", "fox"]);
+
+    // Case-sensitive.
+    let exact = Analyzer::new().with_case_fold(CaseFold::None);
+    assert_eq!(exact.terms("The The THE rust"), ["The", "The", "THE", "rust"]);
+
+    // With a stop-word list.
+    let filtered = Analyzer::new()
+        .with_stop_words(StopWords::for_language(StopWordLanguage::En));
+    assert_eq!(filtered.terms("this document is about rust"), ["document", "rust"]);
+
+    // The analyzer belongs to the corpus and is fixed for its lifetime.
+    let corpus = TfIdf::with_analyzer(filtered);
+    assert_eq!(corpus.analyzer().case_fold(), CaseFold::Lowercase);
+    assert!(corpus.analyzer().stop_words().is_some());
+}
+```
+
+The analyzer is fixed at construction because changing how a term is derived
+halfway through would leave the documents added before the change keyed
+differently from the ones added after it, and no query could be right for both.
+
+**Nothing is global.** There is no process-global tokenizer and no process-global
+stop-word list, so two corpora in one program cannot change each other's answers
+and nothing has to be locked to read one.
+
+[UAX #29]: https://www.unicode.org/reports/tr29/
 
 ## Choosing the right API
 
-| Decision | Options | What actually differs |
-|---|---|---|
-| Building the corpus | [`TfIdf::new`](#tfidf-new-vs-tfidf-from-json) / `TfIdf::from_json` | which internal representation every document gets — count table or scanned value |
-| Feeding one document | [`DocumentInput::Text` / `::Tokens` / `::Raw`](#the-three-shapes-of-add-document) | lowercasing, stop-word filtering, and whether the slot can ever match a query |
-| After mutating the corpus | [`restore_cache: bool`](#the-idf-cache-and-restore-cache) | discard every cached idf vs. recompute every cached idf in place, now |
-| Adding many text documents | `add_document` in a loop / [`par_add_documents_batch`](#adding-many-documents-at-once) | parallel tokenizing ahead of a sequential ingest — `Text` only, modest measured win |
-| Reading a score | [`tfidf` / `tfidfs` / `list_terms`](#tfidf-vs-tfidfs-vs-list-terms) | one term × one document, one term × every document, or every term × one document, ranked |
-| Tokenizing a string document | the [process-global tokenizer](#the-process-global-tokenizer-and-stop-word-list) | affects every `TfIdf` in the process, including ones built earlier |
+Three axes, one rule each.
 
-### `TfIdf::new` vs `TfIdf::from_json`
+### Text or terms
 
-Nothing here materialises a `terms × documents` matrix. A document built through
-`add_document` is a `Vec<(TermId, f64)>` plus a hash index — `BuiltDocument` —
-and terms are interned to a `u32` `TermId` **once per corpus**, so a term repeated
-across fifty documents costs one allocation, not fifty.
+Every query comes in two forms. The plain one takes text and runs the analyzer
+on it; the `_terms` one takes strings that have already been analyzed and looks
+them up verbatim.
 
-`TfIdf::from_json` cannot use that path: a deserialized document can hold values a
-count table has no room for — a string, a literal `0`, a negative number — so a
-restored corpus keeps each document as a `RawDocument`, the original `JsonValue`
-indexed by an `FxHashMap<Box<str>, u32>` so property lookup stays O(1).
+| Call | Use when |
+|---|---|
+| `tfidf`, `tfidfs`, `rank` | you have text — a search box, a sentence, a document |
+| `tfidf_terms`, `tfidfs_terms` | your terms came from elsewhere: a stemmer, an n-gram builder, or `add_terms` |
 
-The representation is decided once, at deserialization, not per document. The two
-paths disagree about exactly one thing — the cost of an `idf` cache miss — and
-never about the answer:
-
-| Corpus | Cache-miss cost | Measured (`idf_cold`, `benches/tfidf.rs`) |
-|---|---|---|
-| Built via `TfIdf::new` + `add_document` | O(1) — an incremental document-frequency table | flat at ~18 ns from 1 document to 256 |
-| Restored via `TfIdf::from_json` | O(documents) — every document is scanned | 24 ns at 1 document, 2.6 µs at 256 |
-
-`built.idf(t)` and `TfIdf::from_json(&built.to_json()).idf(t)` agree for every
-term: `from_json` changes how the answer is found, not what it is.
-
-### The three shapes of `add_document`
-
-| Variant | Lowercased | Stop-word filtered | Tokenizer used | Can it match a query? |
-|---|:--:|:--:|---|:--:|
-| `DocumentInput::Text(&str)` | ✅ | ✅ | the process-global tokenizer | ✅ |
-| `DocumentInput::Tokens(&[&str])` | ❌ | ❌ | none — used verbatim | ✅ (exact strings only) |
-| `DocumentInput::Raw(JsonValue)` | — | — | none | ❌ — never matches, but still counts toward every `idf`'s denominator |
-
-`Raw` covers a document slot holding something other than a string or an array of
-tokens — an object, a number, even `null`. The value is stored **unchanged**, and
-a raw document gets no `__key`, so a key assigned at `add_document` time never
-matches it on removal; only `DocKey::Undefined` does.
+Use the text form unless you built the corpus with `add_terms`. The term form
+skips the analyzer entirely, so a query it is given must already be spelled the
+way the corpus stores it — that is its purpose, and its hazard.
 
 ```rust
-use verbora_tfidf::{DocKey, DocumentInput, TfIdf};
+use verbora_tfidf::TfIdf;
 
 fn main() {
-    let mut from_text = TfIdf::new();
-    from_text
-        .add_document(DocumentInput::Text("The The THE rust"), DocKey::Undefined, false)
-        .unwrap();
+    let mut corpus = TfIdf::new();
+    // `add_terms` stores what it is given, with no folding and no filtering.
+    corpus.add_terms(["Rust", "Rust", "Python"]);
+    corpus.add_terms(["Python"]);
 
-    let mut from_tokens = TfIdf::new();
-    from_tokens
-        .add_document(
-            DocumentInput::Tokens(&["The", "The", "THE", "rust"]),
-            DocKey::Undefined,
-            false,
-        )
-        .unwrap();
+    // The text form folds the query to "rust", which this corpus never stored.
+    assert_eq!(corpus.tfidf("Rust", 0), Some(0.0));
 
-    // Text: lowercased, and "the" is a default stop word, so it never lands in
-    // the document at all.
-    assert_eq!(from_text.tf_at("the", 0).unwrap().to_number(), 0.0);
-    assert_eq!(from_text.tf_at("rust", 0).unwrap().to_number(), 1.0);
+    // The term form looks it up exactly as given.
+    assert_eq!(corpus.tfidf_terms(["Rust"], 0), Some(2.0));
 
-    // Tokens: used exactly as given. Three different terms, none filtered.
-    assert_eq!(from_tokens.tf_at("The", 0).unwrap().to_number(), 2.0);
-    assert_eq!(from_tokens.tf_at("THE", 0).unwrap().to_number(), 1.0);
-    assert_eq!(from_tokens.tf_at("the", 0).unwrap().to_number(), 0.0);
+    assert_eq!(
+        corpus.document_terms(0).unwrap().collect::<Vec<_>>(),
+        [("Rust", 2), ("Python", 1)]
+    );
 }
 ```
 
-### The idf cache and `restore_cache`
+### One document or many
 
-Every `idf` result is cached by term. `add_document` and `remove_document` take a
-`restore_cache: bool` deciding what happens to that cache after the corpus
-changes:
+Resolving a query costs one analyzer pass plus one term-table lookup per term;
+scoring one document costs one hash probe per term.
 
-- **`false`** (the common case) — the cache is discarded and replaced with an
-  empty one. Every term becomes cold; the next read of each recomputes it lazily.
-- **`true`** — nothing is discarded. Every term **currently in the cache** is
-  recomputed immediately, in place, in the cache's own key order.
+| Call | Resolves the query | Use when |
+|---|---|---|
+| `tfidf(query, index)` | once per call | you want one document's score |
+| `tfidfs(query)` | once for the whole corpus | you want every score, in corpus order |
+| `rank(query)` | once for the whole corpus | you want every score, best first |
 
-Choose `true` when every cached value must be correct immediately, or when the
-corpus holds `RawDocument`s (from `from_json`), where a miss is O(documents) and
-refreshing eagerly front-loads real work. On the built-document fast path a miss
-is already O(1), so eagerly refreshing N cached terms costs roughly what N lazy
-misses would have anyway.
+`tfidfs` in a loop is not the same as `tfidf` in a loop: it resolves once. Prefer
+it whenever you are about to score more than one document. `rank` is `tfidfs`
+plus a sort into a total order — it costs the sort and saves you writing one.
 
-`restore_cache: false` also **replaces the cache's identity** — see
-[The idf cache's two forms](#the-idf-cache-s-two-forms).
+### Statistics take terms, never text
 
-### Adding many documents at once
+`idf`, `document_frequency` and `term_count` match their argument **literally**
+against the corpus's stored terms. If what you have is text, run
+`analyzer().terms(text)` first. They are the primitives the query APIs are built
+from, exposed because reproducing a score by hand is a reasonable thing to want.
 
-Behind the `parallel` Cargo feature,
-`TfIdf::par_add_documents_batch(&mut self, documents: &[(&str, DocKey)]) ->
-Result<(), TfIdfError>` adds many **text** documents in one call. Only the
-tokenizing is parallel: lowercasing and tokenizing a text document is a pure
-function of that document's own text, so it fans out across threads, and then
-interning, stop-word filtering and counting replay in the original order through
-the same sequential primitives `add_document` uses. That replay makes the method
-exactly equivalent to calling
-`add_document(DocumentInput::Text(text), key, false)` once per pair, verified by
-the sequential-vs-parallel suite in `tests/parallel.rs`.
-
-**Scope.** `DocumentInput::Text` only — `Tokens` has no tokenizing to parallelize
-and `Raw` does no processing at all; add those with sequential `add_document`.
-There is no `restore_cache` parameter: the method always behaves as `false`,
-discarding the cache once after the whole batch.
-
-**Measured**, `benches/tfidf.rs`'s `parallel_batch` group (`--features parallel`),
-on one 32-core machine:
-
-| Shape | N | Sequential | `par_add_documents_batch` | Δ |
-|---|---:|---:|---:|---:|
-| `few_large` (≈167 kB docs) | 8 | 18.4 ms | 17.5 ms | ~5% faster |
-| `few_large` | 64 | 141.1 ms | 130.9 ms | ~7% faster |
-| `few_large` | 256 | 560.5 ms | 514.4 ms | ~8% faster |
-| `many_small` (≈1.2 kB docs) | 128 | 3.46 ms | 3.69 ms | ~7% **slower** |
-| `many_small` | 1,024 | 25.6 ms | 23.5 ms | ~8% faster |
-| `many_small` | 8,192 | 211.6 ms | 183.2 ms | ~13% faster |
-
-The interner and index lookups left sequential are a real share of ingestion
-time, which caps the win at 5–13%. Below roughly a thousand small documents (or a
-few dozen large ones) the fork-join cost is not amortized and the sequential loop
-can win outright. Reach for this when ingesting a genuinely large batch in one
-call; otherwise `add_document` in a loop is simpler and at least as fast.
-
-```rust  ignore
-use verbora_tfidf::{DocKey, DocumentInput, TfIdf};
+```rust
+use verbora_tfidf::{TfIdf, natural_log};
 
 fn main() {
-    let docs = [
-        ("this document is about rust.", DocKey::Num(0.0)),
-        ("this document is about python.", DocKey::Num(1.0)),
-    ];
+    let mut corpus = TfIdf::new();
+    corpus.add_document_with_key("rust and python", "doc-1");
+    corpus.add_document_with_key("rust and rust", "doc-2");
 
-    let mut parallel = TfIdf::new();
-    parallel.par_add_documents_batch(&docs).unwrap();
+    // Present in both documents: 1 + ln(2 / (1 + 2)).
+    assert_eq!(corpus.idf("rust"), Some(1.0 + natural_log(2.0 / 3.0)));
+    assert_eq!(corpus.document_frequency("rust"), 2);
 
-    let mut sequential = TfIdf::new();
-    for (text, key) in docs {
-        sequential
-            .add_document(DocumentInput::Text(text), key, false)
-            .unwrap();
-    }
+    // `Some(0)` means "the document does not contain it"; `None` means "there
+    // is no such document". The two are never collapsed into one number.
+    assert_eq!(corpus.term_count(1, "rust"), Some(2));
+    assert_eq!(corpus.term_count(1, "perl"), Some(0));
+    assert_eq!(corpus.term_count(9, "rust"), None);
 
-    // Same corpus either way.
-    assert_eq!(parallel.to_json(), sequential.to_json());
+    // …and the score is the product, reproduced by hand.
+    let idf = 1.0 + natural_log(2.0 / 3.0);
+    assert_eq!(corpus.tfidf("rust", 1), Some(2.0 * idf));
 }
 ```
 
-### `tfidf` vs `tfidfs` vs `list_terms`
+### Ingestion
+
+| Call | Use when | Allocates |
+|---|---|---|
+| `add_document(text)` | the common case | nothing per term with the default analyzer |
+| `add_document_with_key(text, key)` | you need to map a position back to a source | one `String` for the key |
+| `add_documents(&[text])` | you have a slice and want the assigned positions | as above; **no** speed advantage over a loop |
+| `add_terms(terms)` | your terms came from another pipeline | nothing beyond the corpus growth |
+| `par_add_documents(&[text])` | a large batch, `parallel` feature | one `String` per term, plus a `Vec` per document |
+| `add_document_from_path(path)` | the document is a UTF-8 file | the file's contents |
+
+`add_document` is the right call for the large majority of programs. Each of them
+returns the position the document was given, and `add_documents` returns the
+`Range<usize>` of positions.
+
+`add_documents` is exactly equivalent to `add_document` in a loop and carries no
+performance advantage over it; it exists so that the sequential and parallel
+batch calls read the same, and so that a caller who wants the assigned positions
+does not have to collect them by hand.
+
+`add_document_from_path` is a convenience over `std::fs::read_to_string` plus
+`add_document`, and no more. **There is no encoding parameter**: this crate
+indexes text, and decoding bytes into text is a separate concern with a separate
+contract. A file that is not valid UTF-8 is an `std::io::Error` with
+`ErrorKind::InvalidData`, not a stream of replacement characters silently indexed
+as terms. Decode with a crate that owns that job, then hand the resulting `&str`
+to `add_document`.
+
+## Reading the corpus back
+
+| Call | Answers |
+|---|---|
+| `len()`, `is_empty()` | how many documents |
+| `documents()`, `document(index)` | the `Document` values themselves |
+| `document_terms(index)` | `(term, count)` pairs in first-occurrence order |
+| `find_document(key)` | the position of the first document with that key |
+| `remove_document(index)` | removes it and hands it back |
+| `distinct_terms()` | how many terms occur in at least one document |
+| `list_terms(index)` | every term of one document, scored and ranked |
+
+Keys are opaque: nothing is parsed out of them, nothing requires them to be
+unique, and `find_document` returns the first match.
+
+`remove_document` shifts every later document **down one position**, so an index
+held across a removal no longer names the document it did. Document frequencies
+are updated, so every idf and every score changes to match the smaller corpus.
+
+```rust
+use verbora_tfidf::TfIdf;
+
+fn main() {
+    let mut corpus = TfIdf::new();
+    corpus.add_document_with_key("rust and python", "doc-1");
+    corpus.add_document_with_key("rust and rust", "doc-2");
+
+    assert_eq!(corpus.find_document("doc-2"), Some(1));
+    assert_eq!(
+        corpus.document_terms(0).unwrap().collect::<Vec<_>>(),
+        [("rust", 1), ("and", 1), ("python", 1)]
+    );
+
+    let removed = corpus.remove_document(0).unwrap();
+    assert_eq!(removed.key(), Some("doc-1"));
+    assert_eq!(corpus.len(), 1);
+    assert_eq!(corpus.document_frequency("rust"), 1);
+
+    // "doc-2" is now at position 0.
+    assert_eq!(corpus.find_document("doc-2"), Some(0));
+}
+```
+
+### `tfidf` vs `tfidfs` vs `rank` vs `list_terms`
 
 | API | Answers | Shape | Terms come from |
 |---|---|---|---|
-| `tfidf(terms, d)` | one score | `f64` | your query, against document `d` |
-| `tfidfs(terms)` | one score per document | `Vec<f64>`, index = document order | your query, against every document |
-| `tfidfs_with(terms, cb)` | same, plus a callback | `cb(index, score, key)` per document, synchronously | your query, against every document |
-| `list_terms(d)` | every term of one document, ranked | `Vec<TermScore>`, descending by score | document `d`'s own keys |
+| `tfidf(q, d)` | one score | `Option<f64>` | your query, against document `d` |
+| `tfidfs(q)` | one score per document | `Vec<f64>`, index = corpus order | your query, against every document |
+| `rank(q)` | every document, best first | `Vec<DocumentScore>` | your query, against every document |
+| `list_terms(d)` | every term of one document, ranked | `Option<Vec<TermScore>>` | document `d`'s own terms |
 
-`tfidf` and `tfidfs` take a query you supply — `Terms::Text` or `Terms::Tokens`,
-the same string-vs-array distinction as `add_document`, **except that
-`Terms::Text` is never stop-word filtered**: querying `"the"` computes and caches
-an idf for a term a string-built document could never contain. `list_terms` takes
-no query; its terms are the document's own, in
-[enumeration order](#enumeration-order-in-list-terms), before being sorted by
-score. On the four-document corpus from the [quick example](#quick-example),
-`tfidf(Terms::Text("document"), 3)` is `0.776_856_448_685_790_3`, `tfidfs` of the
-same term is that value four times over (it appears in all four documents with
-the same tf), and `list_terms(3)` ranks `["rust", "examples", "document"]`.
-
-## The process-global tokenizer and stop-word list
-
-<a class="badge badge-global" href="../performance/parallelism">GLOBAL STATE</a>
-
-`verbora-tfidf` keeps its tokenizer and stop-word list in **process-global** state,
-not per-instance state. `TfIdf::set_tokenizer` and `TfIdf::set_stopwords` read as
-instance methods but write to that shared state, so calling either on *one*
-`TfIdf` changes how *every* `TfIdf` in the process tokenizes its next string
-document — including instances created before the call. This is the same
-`RwLock` + `AtomicBool` shape [Ngrams](./ngrams) explains in detail, with two
-specifics:
-
-- **Its own statics.** `verbora_tfidf::globals` owns a private
-  `RwLock<Option<Arc<dyn TfIdfTokenizer>>>` and a private
-  `RwLock<Option<Arc<StopwordSet>>>`, independent of any other crate's slot.
-- **No explicit-argument variant.** There is no `..._with` sibling for
-  `add_document`, `tfidf` or `tfidfs`. The escape hatch is
-  `DocumentInput::Tokens` / `Terms::Tokens`: tokenize outside the crate however
-  you like, hand over the `&[&str]`, and no global is read.
-
-The stop-word list has one extra layer. Until `TfIdf::set_stopwords` is called,
-`is_stopword` **aliases** `verbora_core::stopwords`'s process-global list — the
-same one every stemmer's `add_global_stopword` mutates and
-[Phonetics](./phonetics) reads. Only after `set_stopwords` does this crate switch
-to its own independent list.
+Both orderings are **total**, so they are the same on every run. `rank` sorts by
+score descending, breaking ties by corpus position ascending; `list_terms` sorts
+by `tfidf` descending, breaking ties by term ascending in Unicode scalar order.
+Documents scoring `0.0` are included in a ranking — what a threshold means is the
+caller's decision, not this crate's.
 
 ```rust
-use verbora_tfidf::{DocKey, DocumentInput, TfIdf};
-use std::sync::Arc;
+use verbora_tfidf::TfIdf;
 
 fn main() {
-    let mut a = TfIdf::new();
-    a.add_document(DocumentInput::Text("this isn't rust"), DocKey::string("a"), false)
-        .unwrap();
-    assert_eq!(a.list_terms(0).unwrap()[0].term, "isn");
+    let mut corpus = TfIdf::new();
+    corpus.add_document("rust rust python");
+    corpus.add_document("python");
 
-    // Installed through a DIFFERENT call, after `a` already exists.
-    TfIdf::set_tokenizer(Arc::new(verbora_tokenizers::TreebankWordTokenizer::new()));
+    let terms = corpus.list_terms(0).unwrap();
+    assert_eq!(terms[0].term, "rust");
+    assert_eq!(terms[0].count, 2);
+    assert!(terms[0].tfidf > terms[1].tfidf);
+    assert_eq!(terms[0].tfidf, f64::from(terms[0].count) * terms[0].idf);
 
-    // The OLD instance `a` is affected by a global installed after it was built.
-    a.add_document(DocumentInput::Text("this isn't rust"), DocKey::string("b"), false)
-        .unwrap();
-    assert_eq!(a.list_terms(1).unwrap()[0].term, "n't");
-
-    verbora_tfidf::globals::reset_tokenizer();
+    // A ranking is a total order: score descending, then position ascending.
+    let ranked = corpus.rank("python");
+    assert_eq!(ranked[0].score, ranked[1].score);
+    assert_eq!((ranked[0].document, ranked[1].document), (0, 1));
 }
 ```
 
-<div class="callout callout-warn">
-<strong>Careful.</strong> If you call <code>TfIdf::set_tokenizer</code> or
-<code>TfIdf::set_stopwords</code> from your own tests, reset them afterwards
-(<code>verbora_tfidf::globals::reset_tokenizer</code> /
-<code>reset_stopwords</code>) or isolate those tests behind a mutex, the way the
-crate's own tests do. Rust test binaries run on multiple threads in one process
-by default, so an unguarded test can observe another one's tokenizer mid-flight.
-</div>
+## Ingesting a batch in parallel
+
+Behind the `parallel` Cargo feature,
+`TfIdf::par_add_documents(&mut self, texts: &[S]) -> Range<usize>` adds many text
+documents in one call.
+
+`add_document` cannot simply be fanned out: it takes `&mut self` and every call
+mutates shared corpus state — the term table, the document-frequency table, the
+document list. Wrapping the corpus in a mutex would compile and would serialize
+exactly the work a parallel version exists to speed up. What *is* independent is
+the analyzer, and it is the dominant cost of ingesting a document. So ingestion
+splits in two:
+
+1. **Parallel** — every text is run through `Analyzer::terms`, independently, on
+   however many cores Rayon offers.
+2. **Sequential** — the resulting term lists are counted into the corpus in the
+   original order, through `add_terms`, the same counting loop `add_document`
+   ends with.
+
+Because step 2 replays step 1's output in order through the unmodified sequential
+primitive, the result is *identical* to `add_documents` on the same input — same
+positions, same counts, same term-id assignment order, same serialized bytes.
+`tests/parallel.rs` pins that.
+
+**What it costs.** One `Vec<Vec<String>>` sized to the batch, holding one
+`String` per term — the price of getting terms out of a parallel closure and into
+the sequential counter. `add_document` allocates neither, because its terms are
+borrowed from the text it was given. That is the trade: one allocation per term,
+in exchange for running the analyzer on more than one core.
+
+**When to reach for it.** The crossover point is **unmeasured** for the current
+ingestion path, and no figure is estimated in place of one. Fork-join has a fixed
+cost, so a handful of short documents will be slower this way; a large batch of
+substantial documents is what it is for. Measure your own corpus shape before
+adopting it.
+
+A panic inside a custom tokenizer propagates out of the offending Rayon worker
+under Rayon's own rules — and because that happens in the parallel phase, before
+anything is pushed, the corpus is left completely unchanged, which the sequential
+loop does not guarantee.
+
+```rust ignore
+use verbora_tfidf::TfIdf;
+
+fn main() {
+    let texts = ["this document is about rust", "this document is about python"];
+
+    let mut parallel = TfIdf::new();
+    assert_eq!(parallel.par_add_documents(&texts), 0..2);
+
+    let mut sequential = TfIdf::new();
+    sequential.add_documents(&texts);
+
+    // Same corpus either way, down to the bytes.
+    assert_eq!(parallel.to_json().unwrap(), sequential.to_json().unwrap());
+}
+```
 
 ## Concurrency
 
-`TfIdf`, `Document`, `DocKey` and `DynValue` are all `Send + Sync`, but that buys
-little: every mutating method takes `&mut self`, so a `TfIdf` is not a type you
-share behind an `Arc` and query concurrently.
-[`par_add_documents_batch`](#adding-many-documents-at-once) does not change that —
-it is one `&mut self` call from one thread whose *internal* tokenizing phase runs
-on more than one thread.
+`TfIdf`, `Analyzer` and `Document` are all `Send + Sync`, but that buys little:
+every mutating method takes `&mut self`, so a `TfIdf` is not a type you share
+behind an `Arc` and ingest into concurrently. Queries take `&self` and hold no
+interior mutability, so a finished corpus *can* be shared read-only across
+threads with no lock at all — there is no cache to invalidate and no global to
+race on.
 
-What *is* genuinely process-wide is
-[the tokenizer and stop-word globals](#the-process-global-tokenizer-and-stop-word-list):
-a thread calling `set_tokenizer` changes what every other thread's `add_document`
-does next, with no error to tell you it happened. See
-[Parallelism](../performance/parallelism).
+[`par_add_documents`](#ingesting-a-batch-in-parallel) does not change that: it is
+one `&mut self` call from one thread whose *internal* analyzer phase runs on more
+than one thread. See [Parallelism](../performance/parallelism.md).
 
-## `add_file_sync` and encoded reads
+## Persistence is version-locked
 
-`add_file_sync(path, encoding, key, restore_cache)` reads a file, decodes it using
-the named byte encoding, and feeds the resulting text through the same path as
-`DocumentInput::Text`. The encoding is not validation; it decides what text gets
-tokenized. Reading a UTF-8 file as `base64` does not fail — it tokenizes the
-**base64 text of the bytes**. A file containing
-`"this document is about rust."` read as `base64` yields the single term
-`"dghpcybkb2n1bwvudcbpcybhym91dcbydxn0lg"` — the decoded base64 string,
-lowercased and stop-worded like any other string document — while the same file
-read as `utf8` yields its own words.
+Every key a serialized corpus holds is a term, and terms come out of Unicode
+tables that move between releases — so a corpus written by one build is not
+readable by a build whose word boundaries or case mappings differ.
 
-```rust
-use verbora_tfidf::Encoding;
+`to_json` therefore writes a compatibility stamp, and `from_json` refuses any
+artifact whose stamp is absent, damaged or foreign. The shape is:
 
-fn main() {
-    assert!(Encoding::parse("BASE64").is_some()); // case-insensitive
-    assert!(Encoding::parse("raw").is_none());    // not an accepted encoding
-
-    assert_eq!(
-        Encoding::Base64.decode(b"this document is about rust."),
-        "dGhpcyBkb2N1bWVudCBpcyBhYm91dCBydXN0Lg=="
-    );
-    assert_eq!(Encoding::Hex.decode(b"rust"), "72757374");
+```json
+{
+  "_verbora": {"schema": 3, "unicode": "17.0.0", "lowercase": "0123456789abcdef"},
+  "analyzer": {"case_fold": "lowercase", "stop_words": ["a", "the"]},
+  "documents": [
+    {"key": "doc-1", "terms": [["rust", 2], ["python", 1]]},
+    {"terms": []}
+  ]
 }
 ```
 
-`Encoding::parse` accepts exactly this set, case-insensitively: `utf8`/`utf-8`,
-`ascii`, `latin1`/`binary`, `base64`, `base64url`, `hex`, and
-`ucs2`/`ucs-2`/`utf16le`/`utf-16le`. `encoding: None` (and `Some("")`) means
-`utf8`. Anything else — including `raw` and `buffer` — returns `None`, and
-`add_file_sync` with such a name returns `TfIdfError::InvalidEncoding`. `Utf8`
-decoding is lossy (malformed sequences become U+FFFD); `Utf16Le` drops a trailing
-odd byte rather than erroring. There is no encoding detection — the caller always
-names it.
+Three deliberate choices:
+
+- **Terms are an array of pairs, not an object.** An object would make term order
+  a property of the JSON parser and would leave duplicate keys with no defined
+  meaning. An array preserves first-occurrence order exactly and makes a
+  duplicate detectable, which `RestoreError::DuplicateTerm` reports rather than
+  silently resolving.
+- **The analyzer travels with the corpus.** The stop-word list decides which
+  terms exist at all and the case fold decides how they are spelled, so an
+  artifact that did not carry them could not be queried consistently after a
+  restore. `from_json` installs the *recorded* analyzer, not the default one.
+- **`key` and `stop_words` are omitted when absent** rather than written as
+  `null`. Absent and `null` both read back as absent.
+
+```rust
+use verbora_tfidf::TfIdf;
+
+fn main() {
+    let mut corpus = TfIdf::new();
+    corpus.add_document_with_key("rust and python", "doc-1");
+    corpus.add_document_with_key("rust and rust", "doc-2");
+
+    let json = corpus.to_json().unwrap();
+    let restored = TfIdf::from_json(&json).unwrap();
+
+    assert_eq!(restored.find_document("doc-1"), Some(0));
+    assert_eq!(restored.tfidfs("rust"), corpus.tfidfs("rust"));
+    assert_eq!(restored.analyzer().case_fold(), corpus.analyzer().case_fold());
+}
+```
+
+### What the stamp covers
+
+Three build facts, compared for exact equality — none with an ordering, so an
+artifact from a *newer* build is refused just as one from an older build is,
+because "newer" says nothing about whether the term partition agrees:
+
+| Fact | Why it is in the stamp |
+|---|---|
+| `SCHEMA` | A Verbora-owned counter, bumped by hand when the serialized shape or the term-derivation pipeline changes in a way that makes an older artifact wrong. It covers a change no external version number would show. |
+| The Unicode version | Read from `verbora_tokenizers::unicode_version`. Both the `Word_Break` assignments and the alphanumeric property come out of that crate's tables, so one number covers the whole of tokenization. |
+| `lowercase_fingerprint()` | A fingerprint of what `str::to_lowercase` actually does in this build. That mapping is `std`'s, so it moves with the Rust toolchain and `Cargo.lock` records nothing about it. |
+
+The lowercase fingerprint needed a fact of its own because the alternative is a
+silent mismatch. `str::to_lowercase` reads case-mapping tables that `std`
+regenerates whenever a Rust release adopts a newer UCD, and nothing in
+`Cargo.lock` names the toolchain that compiled the crate. Upgrading the toolchain
+can therefore re-key an entire corpus while leaving a schema-and-dependency stamp
+identical. The fingerprint is taken over *behaviour* rather than a version number
+for two reasons: `std` publishes no stable version number for those tables, and a
+behavioural fingerprint changes exactly when a mapping changes and never merely
+because a version string was bumped.
+
+### Telling the failures apart
+
+A corrupt file and an incompatible file need opposite responses — repair or
+re-fetch the first, re-index the second — so they are different errors, and
+`RestoreError` never collapses them into one.
+
+| Error | Means |
+|---|---|
+| `RestoreError::Parse` | The bytes are not the JSON this crate writes. Repair or re-fetch the file. |
+| `RestoreError::Stamp(StampError::Missing)` | No `_verbora` member. The build behind its terms is unrecorded and unrecoverable, so it cannot be validated. Rebuild from the source documents. |
+| `RestoreError::Stamp(StampError::Malformed)` | A `_verbora` member that is not a stamp. This is damage, not a version difference. |
+| `RestoreError::Stamp(StampError::Incompatible)` | A well-formed stamp naming a different build. Both stamps are carried so the message can name them. |
+| `RestoreError::UnknownCaseFold` | A recorded `case_fold` this build does not know. |
+| `RestoreError::ZeroCount` | A term recorded with a count of zero. A term with no occurrences is not a term of the document, and accepting it would make `document_frequency` count a document that does not contain it. |
+| `RestoreError::DuplicateTerm` | One document recorded the same term twice. Which count wins would be a property of the reader rather than of the artifact. |
+
+An unstamped artifact is the dangerous one, because it is detectable only as an
+*absence*: a well-formed JSON object with no `_verbora` member is
+indistinguishable from a hand-written object, from one produced by a different
+tool, and from one produced by a build that dropped the stamp. Accepting it would
+mean guessing a version, and a wrong guess reproduces exactly the silent mismatch
+the stamp exists to prevent — so it is refused, with its own variant so the
+message can say "rebuild this artifact" rather than "your file is damaged".
+
+### A custom tokenizer cannot be serialized
+
+`Analyzer::with_tokenizer` installs any `Tokenize` implementation. A corpus built
+that way is fully usable and **cannot be written**: the artifact would carry
+terms whose derivation it could not describe, because a custom tokenizer is code,
+not data, and no stamp can record it. Writing the file anyway would produce
+something that *looks* validated and is not, which is the exact failure the stamp
+exists to prevent — so `to_json` refuses at write time rather than producing a
+lie.
+
+```rust
+use std::sync::Arc;
+use verbora_tfidf::{Analyzer, ExportError, TfIdf, Tokenize};
+
+#[derive(Debug)]
+struct SplitOnWhitespace;
+
+impl Tokenize for SplitOnWhitespace {
+    fn tokenize_into(&self, text: &str, out: &mut Vec<String>) {
+        out.extend(text.split_whitespace().map(str::to_owned));
+    }
+}
+
+fn main() {
+    let analyzer = Analyzer::new().with_tokenizer(Arc::new(SplitOnWhitespace));
+    assert_eq!(analyzer.terms("Hello, world!"), ["hello,", "world!"]);
+
+    let mut corpus = TfIdf::with_analyzer(analyzer);
+    corpus.add_document("Hello, world!");
+    assert_eq!(corpus.tfidf("world!", 0), Some(1.0 + verbora_tfidf::natural_log(1.0 / 2.0)));
+
+    // Usable, but not writable.
+    assert!(matches!(corpus.to_json(), Err(ExportError::CustomTokenizer)));
+}
+```
+
+Serialize such a corpus's source documents instead, or rebuild it under the
+default tokenizer.
 
 ## Specified edge cases
 
-### The idf cache's two forms
+### No sentinels, no `NaN`, no infinity
 
-`TfIdf` installs one of two kinds of idf cache, depending on how the instance got
-there:
+Both of the crate's numeric hazards are closed rather than merely documented.
 
-| Cache form | Installed by | A term named `toString`, `constructor`, `hasOwnProperty`, … |
-|---|---|---|
-| Prototype-backed | `TfIdf::new()`, `add_file_sync` without `restore_cache` | resolves to the inherited member, returned as `DynValue::Function`/`Prototype` |
-| Bare | `add_document`, `remove_document` | is an ordinary term, scored numerically |
+| Situation | Answer |
+|---|---|
+| empty corpus | `idf` is `None`; every per-document query is `None`; `rank` and `tfidfs` are empty |
+| document index out of range | `None` — never a sentinel score |
+| term in no document | `df` is `0`, `idf` is `1 + ln n`, `count` is `0`, so it contributes `0.0` |
+| document with no terms | scores `0.0` for every query, and still counts towards `n` |
+| empty query | `0.0`, exactly |
 
-The cache probe is a **truthiness** test rather than an existence check, which is
-why the prototype-backed form answers with an inherited member as if it had been
-cached. `idf_cache_is_prototype_backed` reports which form is installed; `idf`
-coerces every variant through `to_number()`, while `idf_value` shows what actually
-happened.
+An out-of-range document is `None`, never a score. An empty corpus has no idf and
+says so with `None` rather than returning the `-∞` that `ln(0)` would produce.
+And **no score this crate can produce is `NaN` or infinite**: `n >= 1` and
+`0 <= df <= n` make the logarithm's argument positive and finite, so `idf` lies
+in `[1 + ln(n/(n+1)), 1 + ln n]` — strictly positive, always finite. Each term
+contributes at most `u32::MAX · (1 + ln n)`, under `1.6e11` for any corpus that
+fits in memory, so reaching `f64::MAX` would take on the order of `1e297` query
+terms.
 
 ```rust
-use verbora_tfidf::{DocKey, DocumentInput, DynValue, TfIdf};
+use verbora_tfidf::TfIdf;
 
 fn main() {
-    // A fresh TfIdf::new() starts prototype-backed.
-    let mut t = TfIdf::new();
-    assert!(t.idf_cache_is_prototype_backed());
-    assert!(matches!(
-        t.idf_value("toString", false).unwrap(),
-        DynValue::Function("toString")
-    ));
+    let empty = TfIdf::new();
+    assert_eq!(empty.idf("anything"), None);
+    assert_eq!(empty.tfidf("anything", 0), None);
+    assert!(empty.tfidfs("anything").is_empty());
+    assert!(empty.rank("anything").is_empty());
 
-    // The FIRST add_document call (without restore_cache) swaps the cache's
-    // identity to the bare form — from here on, "toString" is just a term.
-    t.add_document(DocumentInput::Text("x"), DocKey::Undefined, false)
-        .unwrap();
-    assert!(!t.idf_cache_is_prototype_backed());
-    assert!(matches!(t.idf_value("toString", false).unwrap(), DynValue::Num(_)));
+    // A document whose text yields no terms still occupies a position and
+    // still counts towards n.
+    let mut corpus = TfIdf::new();
+    corpus.add_document("   ...   ");
+    assert_eq!(corpus.len(), 1);
+    assert!(corpus.documents()[0].is_empty());
+    assert_eq!(corpus.documents()[0].total_terms(), 0);
+    assert_eq!(corpus.tfidf("anything", 0), Some(0.0));
+    assert_eq!(corpus.idf("anything"), Some(1.0));
 }
 ```
 
-### Reserved terms: `__proto__` and `__key`
+### Floating point is part of the contract
 
-Because a built document's accumulator is conceptually `{ __key: key }`, two token
-spellings are not ordinary terms:
+- **The logarithm is `natural_log`, not `f64::ln`.** `f64::ln` delegates to the
+  platform `libm`, which Rust does not specify, differs between platforms, and
+  differs between versions of the same platform's C library. Two builds of the
+  same program can therefore disagree in the last bit of every score, for reasons
+  the caller cannot see.
+- **The sum is accumulated strictly left to right** over the query's terms,
+  starting from `0.0`, and counts a term once per occurrence in the query.
+  Floating-point addition is not associative, so the order is specified rather
+  than left to the implementation.
 
-- **`__proto__`.** Assigning a number to this property is ignored, so a token
-  spelled this way is never stored.
-- **`__key`.** A token spelled this way is folded into the document's own key: a
-  string key gets `1` concatenated onto it as text, each time it occurs; an absent
-  key starts at `DocKey::Num(1.0)` and increments numerically.
-
-A third case follows from the cache forms above: a term spelling one of the
-inherited member names shadows that member on first use, so `BuiltDocument::observe`
-resets the slot to a literal `0` before counting. That reset runs unconditionally,
-ahead of the stop-word test — which is why a stop-worded `toString` leaves a
-zero-valued entry rather than no entry at all.
-
-Concretely: `"__proto__ __proto__ alpha"` stores only `alpha`, and
-`"__key __key alpha"` added under `DocKey::string("mykey")` leaves the document's
-key as `"mykey11"` — string concatenation, not arithmetic.
-
-### Enumeration order in `list_terms`
-
-A document's terms are visited in a fixed enumeration order: every key that is the
-canonical decimal spelling of an integer in `0..=2^32-2` — an *array index*,
-stricter than "parses as a number", so `"01"`, `"1.0"`, `"-1"` and `"1e3"` all
-fail the test — is hoisted to the front, sorted ascending numerically, ahead of
-every other key, which keeps insertion order. The default `WordTokenizer` keeps
-digit runs as terms, so a real corpus hits this constantly.
-
-```rust
-use verbora_tfidf::{DocKey, DocumentInput, TfIdf};
-
-fn main() {
-    let mut t = TfIdf::new();
-    t.add_document(
-        DocumentInput::Text("zeta 2020 alpha 10 beta"),
-        DocKey::Undefined,
-        false,
-    )
-    .unwrap();
-    let names: Vec<String> = t.list_terms(0).unwrap().into_iter().map(|s| s.term).collect();
-    // "10" and "2020" hoist ahead of the words, in ASCENDING NUMERIC order —
-    // not the order they appeared in the text.
-    assert_eq!(names, ["10", "2020", "zeta", "alpha", "beta"]);
-}
-```
-
-`list_terms`' descending sort by score is stable, so when scores tie this
-enumeration order is exactly what survives.
-
-### Bit-exact `idf` arithmetic
-
-The numeric content of `idf` is one line:
+`natural_log` is Sun Microsystems' `__ieee754_log` from fdlibm, implemented in
+safe Rust with no platform inputs at all — only IEEE 754 double arithmetic, which
+Rust *does* specify — so the same input yields the same 64 bits on every target.
+Its accuracy is fdlibm's documented bound, **strictly under 1 ulp**, which is not
+a claim of correct rounding, and the difference is observable at the smallest
+input this crate routinely reaches:
 
 ```text
-idf = 1 + log(total_documents / (1 + docs_with_term))
+ln 3 = 1.09861228866810969139524523692252570464749055782…
+  nearest double        1.0986122886681098   (0x3FF193EA7AAD030B)
+  natural_log(3.0)      1.0986122886681096   (0x3FF193EA7AAD030A)   1 ulp low
 ```
 
-Two hazards compound in it, and `TfIdf::idf_value` accounts for both:
+A three-document corpus with one match produces exactly `1 + ln 3`, so this is
+not a corner case. It is within the documented bound, it is identical on every
+platform, and it is pinned by a test that computes the true value independently
+from its decimal expansion rather than from anything this crate emits.
 
-1. **The division happens inside the logarithm.** The algebraically equal
-   `ln(n) - ln(1 + d)` differs in the last bit for some inputs, so the computed
-   form is `1.0 + math_log(total / (1.0 + docs_with_term))`.
-2. **The platform's `log` is not reproducible across platforms.** `math_log` is
-   this crate's own bit-exact natural logarithm, built from bit-pattern constants
-   and a fixed parenthesisation. It disagrees with `f64::ln` by one ULP on a
-   measured 5.6% of a 3,418-input fixture — including `log(3)`, exactly what a
-   three-document corpus with one match produces.
-
-`tfidf`'s accumulation is equally exact: it sums `tf * idf` **strictly left to
-right** over the query's term list. Only `+Infinity` is clamped to `0`;
-`-Infinity` — a real value, produced by `idf` over an **empty** corpus — and `NaN`
-pass through unclamped.
+`natural_log` is public, so its special values are specified too: `1.0` maps to
+`0.0` exactly, `±0.0` to `-∞`, any negative input and `NaN` to `NaN`, and `+∞`
+to `+∞`. No score this crate computes can reach any of them — every logarithm it
+evaluates has a positive, finite argument — but the function is callable, so the
+rows exist.
 
 ```rust
+use verbora_tfidf::natural_log;
+
 fn main() {
-    let a = verbora_tfidf::math_log(3.0);
-    let b = 3.0_f64.ln();
-    assert_ne!(a.to_bits(), b.to_bits());
-    assert_eq!(a.to_bits(), 1.098_612_288_668_109_6_f64.to_bits());
+    // Specified to the bit, identically on every platform.
+    assert_eq!(natural_log(3.0), 1.0986122886681096);
+    assert_eq!(natural_log(3.0).to_bits(), 0x3FF1_93EA_7AAD_030A);
+
+    assert_eq!(natural_log(1.0), 0.0);
+    assert_eq!(natural_log(0.0), f64::NEG_INFINITY);
+    assert!(natural_log(-1.0).is_nan());
+    assert_eq!(natural_log(f64::INFINITY), f64::INFINITY);
 }
 ```
 
-### Ranking stays deterministic even with `NaN` scores
+### Limits
 
-`list_terms` finishes by sorting descending. That stops being an ordinary sort the
-moment one score is `NaN` — a deserialized corpus with a non-numeric tf, or a
-`toString`-shadowing term read through a prototype-backed cache, both produce one.
-Comparing against `NaN` always reports "not less than", i.e. a **tie**, so the
-induced relation is no longer transitive and the result depends on the exact
-sorting algorithm rather than on stability in general.
+Three, all consequences of the integer widths the representation is built on.
+None is reachable by a corpus that fits in memory, and each is checked rather
+than wrapped, because a wrapped id would alias two different terms and a wrapped
+count would be a wrong answer that nothing could detect.
 
-`list_terms` therefore uses one fully specified algorithm: a TimSort with natural-
-run detection, binary insertion sort below a run length of 8, galloping merges,
-and the extra guards an inconsistent comparator requires. Two runs over the same
-corpus produce the same order every time, `NaN` scores included, and no input can
-make the sort loop or panic.
+| Limit | What happens at it |
+|---|---|
+| `u32::MAX - 1` distinct terms in one corpus | ingestion panics (over 34 GiB of term text) |
+| `u32::MAX` distinct terms in one document | ingestion panics |
+| `MAX_TERM_COUNT` occurrences of one term in one document | the count saturates |
 
 ## Performance characteristics
 
-`crates/verbora-tfidf/benches/tfidf.rs` is a Criterion suite with five groups —
-`build`, `idf_cold`, `query`, `math_log`, `documents` — run against a 167 kB real
-document, falling back to a synthetic repeat when that file is absent.
+Nothing here builds a `terms × documents` matrix.
 
-- **Interning** costs nothing for a single document (2.78 ms either way) and pays
-  off across a corpus: eight documents through one interning `TfIdf` cost ~18.1 ms
-  against ~21.8 ms for eight independent `HashMap`s, roughly 17% less. Its larger
-  payoff is indirect — `u32` `TermId` keys are what make the O(1) incremental
-  document-frequency table possible.
-- **Exactness** is priced too: `math_log` measured ~7.6 µs against ~5.1 µs for
-  `f64::ln` over 2,048 realistic ratios — roughly 1.5× for a reproducible
-  logarithm.
+- **Terms are interned once per corpus**, so a word appearing in fifty documents
+  is stored once and compared as a `u32` id rather than as text.
+- **A document is a `Vec<(TermId, u32)>` in first-occurrence order plus a hash
+  index** from id to position.
+- **The document-frequency table is a `Vec<u32>` maintained incrementally**,
+  which makes `idf` an array load behind a term-table probe rather than a scan of
+  the corpus — and removes the need for a cache, and with it every question about
+  when a cache is stale.
+- **Counting during ingestion goes through a dense slot table indexed by term
+  id**, not through the document's hash index, so a repeated term costs one array
+  load instead of one hash probe. The table is owned by the corpus and restored
+  to all-zeroes after each document by walking only the ids that document
+  touched, so the reset is O(distinct terms in the document) and never
+  O(corpus vocabulary).
 
-Reproduce with `cargo bench -p verbora-tfidf`; see
-[Benchmarks](../benchmarks/index) for workspace-wide results.
+**Timings are unmeasured.** No benchmark has been run against the current
+implementation of this crate, and no figure is estimated in place of one. The
+Criterion suite in `crates/verbora-tfidf/benches/tfidf.rs` has five groups —
+`build`, `idf`, `query`, `persistence`, `natural_log` — plus a sixth comparing
+`par_add_documents` against the sequential loop when the `parallel` feature is
+on. What each group is *for* is stated in that file. The representation facts
+above are properties of the implementation and are stated as such; no timing
+claim is made, and none should be inferred. See
+[Benchmarks](../benchmarks/index.md).
 
 ## Allocation behaviour
 
-- **Interning.** `Interner::intern` allocates one `Arc<str>` per **distinct** term
-  in the corpus, shared by every document containing it. Query terms passed to
-  `tfidf`/`tfidfs`/`idf` are deliberately **not** interned: `Interner::lookup`
-  answers without inserting, so probing with adversarial query terms cannot grow
-  the table.
-- **A built document.** One `Vec<(TermId, f64)>` in insertion order plus one
-  `FxHashMap<TermId, u32>` index. `observe` allocates per **distinct** term, never
-  per occurrence.
-- **A raw document.** One clone of the parsed `JsonValue`, plus one
-  `FxHashMap<Box<str>, u32>` own-property index built once at construction.
-- **The idf cache.** One `Vec<(Arc<str>, f64)>` plus an index; `idf_value` only
-  allocates when a **new** term is cached.
-- **`list_terms`.** One `Vec<TermScore>` sized to the document's term count, one
-  `String` clone per term name (so the result can outlive the interner), and one
-  scratch `Vec` reused across the sort's merges.
-- **Lowercasing.** `DocumentInput::Text` and `Terms::Text` scan first and only
-  allocate on finding a non-ASCII byte or an ASCII uppercase letter — prose that is
-  already lowercase ASCII borrows the input and allocates nothing. Any non-ASCII
-  byte hands the whole string to `str::to_lowercase`, so genuine Unicode special
-  cases are never approximated.
-- **The default tokenizer path.** `globals::tokenize_global` on the untouched
-  default tokenizer borrows tokens directly out of the input `&str`. Only once
-  `set_tokenizer` has installed a custom `dyn TfIdfTokenizer` does tokenizing
-  allocate one owned `String` per token, because a `dyn` boundary cannot hand back
-  a borrow tied to the caller's input.
+- **Interning.** One `Box<str>` per **distinct** term in the corpus; every
+  document that contains it stores a `u32` id instead of a second copy. Query
+  terms passed to `tfidf`/`tfidfs`/`idf` are deliberately **not** interned: the
+  lookup answers without inserting, so probing with adversarial query terms
+  cannot grow the table.
+- **A document.** One `Vec<(TermId, u32)>` in first-occurrence order plus one
+  `FxHashMap<TermId, u32>` index. Ingestion allocates per **distinct** term,
+  never per occurrence.
+- **Ingest scratch is reused.** The dense counting table and the term buffer live
+  on the corpus and are reused document to document, not reallocated per call.
+- **Case folding.** The analyzer scans a token first and only allocates on
+  finding a non-ASCII byte or an ASCII uppercase letter — prose that is already
+  lowercase ASCII borrows and allocates nothing. Any non-ASCII byte hands the
+  whole token to `str::to_lowercase`, so genuine Unicode special cases are never
+  approximated.
+- **The default tokenizer path borrows.** `WordTokenizer` yields tokens borrowed
+  directly out of the input `&str`. Only once `Analyzer::with_tokenizer` has
+  installed a `dyn Tokenize` does tokenizing allocate one owned `String` per
+  token, because a `dyn` boundary cannot hand back a borrow tied to the caller's
+  input.
+- **`Analyzer::terms`** is the convenience form and allocates one `String` per
+  term; the ingest path does not, which is why it is a convenience rather than
+  the primitive.
+- **`list_terms`.** One `Vec<TermScore>` sized to the document's term count, plus
+  one `String` per term name so the result can outlive the corpus's term table.
 
 There is no `_into` variant and no caller-supplied output buffer in this crate.
-See [Allocation](../performance/allocation) and
-[Zero-copy](../performance/zero-copy).
+See [Allocation](../performance/allocation.md) and
+[Zero-copy](../performance/zero-copy.md).
 
 ## Unicode and language notes
 
-**The default tokenizer path has no UTF-16-sensitive indexing of its own.**
-`DocumentInput::Text` and `Terms::Text` tokenize with whichever tokenizer is
-installed — by default `WordTokenizer`, splitting on `[^A-Za-zА-Яа-я0-9_]+` —
-which operates on ordinary UTF-8 `&str` and yields borrowed slices. Every
-divergence through this path comes from that tokenizer's word-character class,
-already documented on [Tokenizers](./tokenizers):
+Segmentation runs on the text **as given**; folding runs afterwards, per token.
+Folding therefore cannot move a boundary, and every term is the folded image of a
+substring of the input. Every divergence you will see through the default path is
+`WordTokenizer`'s segmentation, documented on [Tokenizers](./tokenizers.md):
 
 ```rust
-use verbora_tfidf::{DocKey, DocumentInput, TfIdf};
+use verbora_tfidf::Analyzer;
 
 fn main() {
-    for (text, expected) in [
-        ("naïve café crème brûlée", &["na", "ve", "caf", "cr", "br"][..]),
-        ("İstanbul", &["stanbul"]),           // 'İ'.to_lowercase() splits into i + combining dot
-        ("日本語 test 中文测试", &["test"]),    // CJK is outside the word class entirely
-        ("😀abc😀", &["abc"]),                 // astral characters separate words, are dropped
-    ] {
-        let mut t = TfIdf::new();
-        t.add_document(DocumentInput::Text(text), DocKey::Undefined, false).unwrap();
-        let names: Vec<String> = t.list_terms(0).unwrap().into_iter().map(|s| s.term).collect();
-        assert_eq!(names, expected, "{text:?}");
-    }
+    let analyzer = Analyzer::new();
+
+    // Accented letters are word characters; nothing is stripped.
+    assert_eq!(analyzer.terms("naïve café crème brûlée"), ["naïve", "café", "crème", "brûlée"]);
+
+    // Lowercasing 'İ' expands it to 'i' plus a combining dot above.
+    assert_eq!(analyzer.terms("İstanbul"), ["i\u{307}stanbul"]);
+
+    // UAX #29 does not segment scripts written without spaces: one token per
+    // Han scalar.
+    assert_eq!(analyzer.terms("日本語 test"), ["日", "本", "語", "test"]);
+
+    // An astral scalar is not a word, and is not replaced by anything.
+    assert_eq!(analyzer.terms("😀abc😀"), ["abc"]);
+
+    // Interior punctuation follows the standard, not a character class.
+    assert_eq!(
+        analyzer.terms("well-known and/or 3.14 snake_case"),
+        ["well", "known", "and", "or", "3.14", "snake_case"]
+    );
 }
 ```
 
-**String-shaped raw documents are
-<span class="badge badge-utf16">UTF-16</span>-sensitive.**
-`DocumentInput::Raw(JsonValue::Str(..))` stores the string unchanged (reachable
-directly, or through any corpus restored via `from_json` whose `documents` array
-holds a plain string). Reading a term from such a slot indexes the string **by
-UTF-16 code unit**, not by Rust `char` or UTF-8 byte offset — so `"café"` has four
-indexable positions, and an astral character occupies two, with a lone index
-landing on an unpaired surrogate rendered as U+FFFD.
-
-**Lookup normalisation is full Unicode lowercasing**, not
-`str::to_ascii_lowercase`. The ASCII fast path only ever *skips* the allocating
-call; it never substitutes a cheaper, wrong answer.
+**Folding is full Unicode lowercasing**, not `str::to_ascii_lowercase`. The ASCII
+fast path only ever *skips* the allocating call; it never substitutes a cheaper,
+wrong answer. That includes the mappings that change a token's length — `İ`
+becoming two scalars above — and the context-sensitive Greek final sigma rule,
+which is why the compatibility stamp fingerprints the mapping's behaviour rather
+than trusting a version number.
 
 ## Common mistakes
 
-- **Assuming `DocumentInput::Tokens` behaves like `Text` minus tokenizing.** It
-  also skips lowercasing and stop-word filtering — both, not just one.
-  `["The", "the", "THE"]` is three distinct terms.
-- **Assuming a cached `idf` stays valid, or that `restore_cache` is free.**
-  Without it, every cached idf is dropped the moment you call `add_document` or
-  `remove_document`; with it, every currently cached term is recomputed right
-  then — worth it when you need those values immediately, wasted otherwise.
-- **Treating `list_terms`'s order as arbitrary.** Ties are broken by the
-  document's own enumeration order through a fully specified sort; two runs over
-  the same corpus produce the same order every time.
-- **Expecting a `Raw` document's inner properties to be terms.** A raw object's
-  own `"text"` property is not a term named `"text"`; the slot never matches, but
-  it still counts toward every `idf`'s denominator.
+- **Assuming `tf` is a frequency.** It is the raw count. Divide by
+  `Document::total_terms` if you want the ratio — and note that `total_terms`
+  counts tokens that survived the analyzer, not tokens in the source text.
+- **Querying an `add_terms` corpus with the text APIs.** `add_terms` stores
+  exactly what it is given, so a corpus holding `"Rust"` is unreachable from
+  `tfidf("Rust", …)` on a lowercasing corpus. Use `tfidf_terms`.
+- **Passing raw text to `idf`, `document_frequency` or `term_count`.** They match
+  literally against stored terms. Run `analyzer().terms(text)` first.
+- **Confusing `Some(0)` with `None`.** `term_count` returns `Some(0)` for "the
+  document does not contain it" and `None` for "there is no such document";
+  `tfidf` returns `None` only for an out-of-range index, never as a score.
+- **Calling `tfidf` in a loop over the corpus.** It resolves the query once per
+  call. `tfidfs` resolves once for the whole corpus, and `rank` sorts the result
+  for you.
+- **Holding a document index across `remove_document`.** Every later document
+  shifts down one position.
+- **Expecting a stop-word-filtered corpus to answer about a filtered term.** The
+  filter deleted the information at ingest time; the query term is dropped too,
+  so the answer is `0.0` rather than an error.
+- **Expecting `to_json` to work with a custom tokenizer.** It refuses, on
+  purpose. Serialize the source documents instead.
 
 ## Related
 
-- [Ngrams](./ngrams) — the process-global tokenizer pattern this page's globals
-  section builds on, explained once there.
-- [Core traits](./core) — `Tokenizer`, `verbora_core::stopwords`, and the shared
-  vocabulary the rest of the site uses.
-- [Parallelism](../performance/parallelism) — every built-in `par_*` API across
-  the workspace, and the correctness hazard of the globals under concurrent use.
-- [Allocation](../performance/allocation) and
-  [Zero-copy](../performance/zero-copy).
-- [Choosing an API](../choosing/index), [Benchmarks](../benchmarks/index),
-  [Recipes](../recipes/index).
+- [Tokenizers](./tokenizers.md) — the default analyzer's tokenizer, and what it
+  cuts at.
+- [Core traits](./core.md) — `Tokenizer`, `StopWords`, and the shared vocabulary
+  the rest of the site uses.
+- [Parallelism](../performance/parallelism.md) — every built-in `par_*` API
+  across the workspace.
+- [Allocation](../performance/allocation.md) and
+  [Zero-copy](../performance/zero-copy.md).
+- [Choosing an API](../choosing/index.md), [Benchmarks](../benchmarks/index.md),
+  [Recipes](../recipes/index.md).
 
 ## API reference
 
 ```rust ignore
 // verbora_tfidf (crate root re-exports)
-pub use document::{BuiltDocument, DocKey, Document, Interner, RawDocument, TermId};
-pub use encoding::Encoding;
-pub use globals::{StopwordElement, StopwordList, TfIdfTokenizer};
-pub use value::{DynValue, JsonValue, Proto};
-pub use mathlog::math_log;
-pub use tfidf::{DocumentInput, TermScore, Terms, TfIdf, TfIdfError};
+pub use analyzer::{Analyzer, CaseFold, Tokenize};
+pub use corpus::{DocumentScore, TermScore, TfIdf};
+pub use document::{Document, MAX_TERM_COUNT};
+pub use log::natural_log;
+pub use persist::{ExportError, RestoreError};
+pub use stamp::{
+    ArtifactStamp, CONTEXT_PROBES, SCHEMA, STAMP_PROPERTY, StampError, lowercase_fingerprint,
+};
 
-pub enum DocumentInput<'a> { Text(&'a str), Tokens(&'a [&'a str]), Raw(JsonValue) }
-pub enum Terms<'a> { Text(&'a str), Tokens(&'a [&'a str]) }
-pub struct TermScore { pub term: String, pub tf: DynValue, pub idf: DynValue, pub tfidf: f64 }
-impl TermScore { pub fn tf_as_f64(&self) -> f64; pub fn idf_as_f64(&self) -> f64; }
+pub trait Tokenize: std::fmt::Debug + Send + Sync {
+    fn tokenize_into(&self, text: &str, out: &mut Vec<String>);   // appends
+}
+// Blanket: every `verbora_core::Tokenizer` that is Debug + Send + Sync is one.
+
+pub enum CaseFold { Lowercase, None }
+
+pub struct Analyzer { /* private */ }
+impl Analyzer {
+    pub fn new() -> Self;                                    // WordTokenizer, Lowercase, no stop words
+    pub fn with_case_fold(self, fold: CaseFold) -> Self;
+    pub fn with_stop_words(self, words: verbora_core::StopWords) -> Self;
+    pub fn without_stop_words(self) -> Self;
+    pub fn with_tokenizer(self, tokenizer: std::sync::Arc<dyn Tokenize>) -> Self;
+
+    pub fn case_fold(&self) -> CaseFold;
+    pub fn stop_words(&self) -> Option<&verbora_core::StopWords>;
+    pub fn uses_default_tokenizer(&self) -> bool;            // serialization requires this
+    pub fn terms(&self, text: &str) -> Vec<String>;
+}
+
+pub struct TermScore { pub term: String, pub count: u32, pub idf: f64, pub tfidf: f64 }
+pub struct DocumentScore { pub document: usize, pub score: f64 }
 
 impl TfIdf {
+    // Construction
     pub fn new() -> Self;
-    pub fn from_value(deserialized: &JsonValue) -> Self;
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error>;
+    pub fn with_analyzer(analyzer: Analyzer) -> Self;
+    pub fn analyzer(&self) -> &Analyzer;
 
-    pub fn set_tokenizer(tokenizer: std::sync::Arc<dyn TfIdfTokenizer>);
-    pub fn set_stopwords(list: &StopwordList) -> bool;
+    // Ingestion — each returns the position(s) assigned
+    pub fn add_document(&mut self, text: &str) -> usize;
+    pub fn add_document_with_key(&mut self, text: &str, key: impl Into<String>) -> usize;
+    pub fn add_terms<I, S>(&mut self, terms: I) -> usize
+    where I: IntoIterator<Item = S>, S: AsRef<str>;
+    pub fn add_terms_with_key<I, S>(&mut self, terms: I, key: impl Into<String>) -> usize
+    where I: IntoIterator<Item = S>, S: AsRef<str>;
+    pub fn add_documents<S: AsRef<str>>(&mut self, texts: &[S]) -> std::ops::Range<usize>;
+    pub fn add_document_from_path(&mut self, path: impl AsRef<std::path::Path>)
+        -> std::io::Result<usize>;
+    // requires the `parallel` Cargo feature
+    pub fn par_add_documents<S: AsRef<str> + Sync>(&mut self, texts: &[S])
+        -> std::ops::Range<usize>;
 
-    pub fn documents(&self) -> Option<&[Document]>;
-    pub fn interner(&self) -> &Interner;
-    pub fn idf_cache(&self) -> Vec<(String, f64)>;
-    pub fn idf_cache_is_prototype_backed(&self) -> bool;
+    // The corpus
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+    pub fn documents(&self) -> &[Document];
+    pub fn document(&self, index: usize) -> Option<&Document>;
+    pub fn document_terms(&self, index: usize) -> Option<impl Iterator<Item = (&str, u32)>>;
+    pub fn find_document(&self, key: &str) -> Option<usize>;
+    pub fn remove_document(&mut self, index: usize) -> Option<Document>;
 
-    pub fn tf(term: &str, document: &Document, interner: &Interner) -> Result<DynValue, TfIdfError>;
-    pub fn tf_at(&self, term: &str, d: usize) -> Result<DynValue, TfIdfError>;
+    // Statistics — arguments are matched literally against stored terms
+    pub fn distinct_terms(&self) -> usize;
+    pub fn document_frequency(&self, term: &str) -> u32;
+    pub fn term_count(&self, index: usize, term: &str) -> Option<u32>;
+    pub fn idf(&self, term: &str) -> Option<f64>;            // None on an empty corpus
 
-    pub fn idf(&mut self, term: &str) -> Result<f64, TfIdfError>;
-    pub fn idf_value(&mut self, term: &str, force: bool) -> Result<DynValue, TfIdfError>;
+    // Queries
+    pub fn tfidf(&self, query: &str, index: usize) -> Option<f64>;
+    pub fn tfidf_terms<I, S>(&self, terms: I, index: usize) -> Option<f64>
+    where I: IntoIterator<Item = S>, S: AsRef<str>;
+    pub fn tfidfs(&self, query: &str) -> Vec<f64>;
+    pub fn tfidfs_terms<I, S>(&self, terms: I) -> Vec<f64>
+    where I: IntoIterator<Item = S>, S: AsRef<str>;
+    pub fn rank(&self, query: &str) -> Vec<DocumentScore>;
+    pub fn list_terms(&self, index: usize) -> Option<Vec<TermScore>>;
 
-    pub fn add_document(&mut self, document: DocumentInput<'_>, key: DocKey, restore_cache: bool) -> Result<(), TfIdfError>;
-    pub fn add_file_sync(&mut self, path: impl AsRef<std::path::Path>, encoding: Option<&str>, key: DocKey, restore_cache: bool) -> Result<(), TfIdfError>;
-    // requires the `parallel` Cargo feature; Text only, always restore_cache: false
-    pub fn par_add_documents_batch(&mut self, documents: &[(&str, DocKey)]) -> Result<(), TfIdfError>;
-    pub fn remove_document(&mut self, key: &DocKey) -> Result<bool, TfIdfError>;
-
-    pub fn tfidf(&mut self, terms: Terms<'_>, d: usize) -> Result<f64, TfIdfError>;
-    pub fn tfidfs(&mut self, terms: Terms<'_>) -> Result<Vec<f64>, TfIdfError>;
-    pub fn tfidfs_with(&mut self, terms: Terms<'_>, callback: impl FnMut(usize, f64, DynValue)) -> Result<Vec<f64>, TfIdfError>;
-    pub fn list_terms(&mut self, d: usize) -> Result<Vec<TermScore>, TfIdfError>;
-
-    pub fn to_json(&self) -> String;
+    // Persistence
+    pub fn to_json(&self) -> Result<String, ExportError>;
+    pub fn from_json(json: &str) -> Result<Self, RestoreError>;
 }
 
-pub enum TfIdfError { UndefinedRead(String), NullRead(String), InvalidEncoding(String), Io(std::io::Error) }
-
-// document — documents, keys, the term interner
-pub type TermId = u32;
-pub const KEY_PROPERTY: &str = "__key";
-pub const PROTO_PROPERTY: &str = "__proto__";
-
-pub enum DocKey { Undefined, Null, Bool(bool), Num(f64), Str(std::sync::Arc<str>), Object(std::sync::Arc<JsonValue>) }
-impl DocKey {
-    pub fn string(s: impl AsRef<str>) -> Self;
-    pub fn object(value: JsonValue) -> Self;
-    pub fn strict_eq(&self, other: &Self) -> bool;   // strict equality, no type coercion
-    pub fn is_truthy(&self) -> bool;
-    pub fn plus_one(&self) -> Self;                  // __key accumulation
-    pub fn as_value(&self) -> DynValue;
-}
-
-pub enum Document { Built(BuiltDocument), Raw(RawDocument) }
+pub struct Document { /* private */ }
 impl Document {
-    pub fn get(&self, term: &str, interner: &Interner) -> Result<DynValue, ReadTarget>;
-    pub fn key_value(&self, interner: &Interner) -> Result<DynValue, ReadTarget>;
-    pub fn remove_key(&self) -> Result<DocKey, ReadTarget>;
-    pub fn for_in_keys(&self, interner: &Interner) -> Vec<String>;
+    pub fn key(&self) -> Option<&str>;
+    pub fn distinct_terms(&self) -> usize;
+    pub fn total_terms(&self) -> u64;                        // occurrences, after the analyzer
+    pub fn is_empty(&self) -> bool;
 }
-pub enum ReadTarget { Undefined, Null }
+pub const MAX_TERM_COUNT: u32 = u32::MAX;                    // counts saturate here
 
-// Interner, BuiltDocument, RawDocument and Slot are public too; see the rustdoc
-// for their constructors and accessors.
-
-// value — the dynamic-value semantics the document model depends on
-pub enum JsonValue { Null, Bool(bool), Num(f64), Str(String), Arr(Vec<JsonValue>), Obj(Vec<(String, JsonValue)>) }
-pub enum Proto { Object, Array, String, Number, Boolean }
-pub enum DynValue {
-    Undefined, Null, Bool(bool), Num(f64), Str(std::sync::Arc<str>),
-    Function(&'static str), Prototype(Proto), Json(std::sync::Arc<JsonValue>),
-}
-// Both carry own/is_truthy/to_number/to_text/write_json; DynValue adds
-// counts_as_present (`value && value > 0`). Deserialize for JsonValue preserves
-// object key order. Free helpers: number_to_string, string_to_number,
-// write_json_string, array_index, prototype_member, OBJECT_PROTOTYPE_METHODS.
-
-// mathlog
-pub fn math_log(x: f64) -> f64;   // bit-exact, platform-independent natural log
-
-// encoding
-pub enum Encoding { Utf8, Ascii, Latin1, Base64, Base64Url, Hex, Utf16Le }
-impl Encoding {
-    pub fn parse(name: &str) -> Option<Self>;
-    pub fn decode(self, bytes: &[u8]) -> String;
+pub enum ExportError { CustomTokenizer, Json(serde_json::Error) }
+pub enum RestoreError {
+    Parse(serde_json::Error),
+    Stamp(StampError),
+    UnknownCaseFold(String),
+    ZeroCount { document: usize, term: String },
+    DuplicateTerm { document: usize, term: String },
 }
 
-// globals — the two process-global slots
-pub trait TfIdfTokenizer: Send + Sync + std::fmt::Debug {
-    fn tokenize_into(&self, text: &str, out: &mut Vec<String>);
-    fn tokenize(&self, text: &str) -> Vec<String>;   // default: calls tokenize_into
-}
-pub fn set_tokenizer(tokenizer: std::sync::Arc<dyn TfIdfTokenizer>);
-pub fn reset_tokenizer();
-pub fn tokenizer_is_default() -> bool;
-pub fn tokenize_global(text: &str) -> GlobalTokens<'_>;
+// The compatibility stamp
+pub const SCHEMA: u32;
+pub const STAMP_PROPERTY: &str;                              // "_verbora"
+pub const CONTEXT_PROBES: [&str; 6];                         // Greek final-sigma probes
+pub fn lowercase_fingerprint() -> u64;                       // FNV-1a over str::to_lowercase
+pub struct ArtifactStamp { pub schema: u32, pub unicode: (u64, u64, u64), pub lowercase: Option<u64> }
+impl ArtifactStamp { pub fn current() -> Self; }
+pub enum StampError { Missing, Malformed, Incompatible { found: ArtifactStamp, expected: ArtifactStamp } }
 
-pub enum StopwordList { NotAnArray, Array(Vec<StopwordElement>) }
-pub enum StopwordElement { Str(String), NotAString }
-impl StopwordList { pub fn of<I: IntoIterator<Item = S>, S: Into<String>>(words: I) -> Self; }
-pub fn set_stopwords(list: &StopwordList) -> bool;
-pub fn reset_stopwords();
-pub fn stopwords() -> Option<Vec<String>>;
-pub fn is_stopword(term: &str) -> bool;
+// The specified logarithm
+pub fn natural_log(x: f64) -> f64;   // fdlibm's __ieee754_log, platform-independent
 ```
 
-No `unsafe` anywhere in this crate. `TfIdf`, `Document`, `DocKey` and `DynValue`
-are `Send + Sync`; the only *shared*, concurrency-relevant state is the
-[two process-globals](#the-process-global-tokenizer-and-stop-word-list).
-`par_add_documents_batch` is the crate's one parallel entry point, behind the
-`parallel` Cargo feature and off by default.
+No `unsafe` anywhere in this crate, and no process-global state of any kind.
+`TfIdf`, `Analyzer` and `Document` are `Send + Sync`; every mutating method takes
+`&mut self` and every query takes `&self`, so a finished corpus shares read-only
+across threads without a lock. `par_add_documents` is the crate's one parallel
+entry point, behind the `parallel` Cargo feature and off by default.

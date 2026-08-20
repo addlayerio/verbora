@@ -3,15 +3,14 @@
 //! That bench file's rows make two different claims, so this file has two
 //! regimes:
 //!
-//! # Regime 1 — the four reference-ported encoders: shape parity only
+//! # Regime 1 — the three reference-ported encoders: shape parity only
 //!
 //! `docs/COMPETITIVE_BENCHMARKS.md` §1.6 marks the Soundex / Metaphone /
-//! Double Metaphone / single-branch Daitch-Mokotoff rows `Partial`, never
-//! `Yes`: those four Verbora encoders are transcriptions of the reference's
-//! own variants (condense-before-drop Soundex, a Metaphone/Double Metaphone
-//! with a documented `transformX`-after-`cTransform` ordering quirk plus a
-//! family of the reference-truthiness accidents, a single-branch
-//! Daitch-Mokotoff), while rphonetic implements the textbook / Apache
+//! Double Metaphone rows `Partial`, never `Yes`: those three Verbora
+//! encoders are transcriptions of their own variants (condense-before-drop
+//! Soundex, a Metaphone/Double Metaphone with a documented
+//! `transformX`-after-`cTransform` ordering quirk), while rphonetic
+//! implements the textbook / Apache
 //! commons-codec originals. Byte-exact output equality between the two
 //! sides is explicitly **not** the claim `benches/phonetics.rs` makes for
 //! those groups (see its own doc comment) — so, unlike
@@ -22,7 +21,7 @@
 //! What *is* checked for that regime, once and outside the timed code,
 //! before any timing number from that bench file is trusted:
 //!
-//! 1. Every name in the shared dataset round-trips through all four
+//! 1. Every name in the shared dataset round-trips through all three
 //!    encoders on **both** sides without panicking. This is not a
 //!    formality — rphonetic's `Soundex::encode` indexes a fixed 26-entry
 //!    table with `self.mapping[ch as usize - 65]` and no bounds check, so a
@@ -31,34 +30,55 @@
 //!    `tools/bench-data/generate.py`'s `names.json` is ASCII-only, and this
 //!    test is what actually proves that restriction is sufficient rather
 //!    than merely assumed.
-//! 2. The `Some(32)` reconfiguration `docs/COMPETITIVE_BENCHMARKS.md`'s
-//!    Notes column requires for rphonetic's Metaphone/Double Metaphone
-//!    genuinely takes effect — i.e. the bench is not silently doing less
-//!    work at the crate's own default of 4. Verified against the same long
-//!    input `crates/verbora-phonetics/src/metaphone.rs`'s own test suite
-//!    uses to pin Verbora's default of 32
-//!    (`m.process(&"ab".repeat(300)).len() == 32`), and cross-checked
-//!    against rphonetic's *un*-reconfigured `Metaphone::default()` to prove
-//!    the two really do differ.
-//! 3. rphonetic's `DaitchMokotoffSoundex::encode()` — the single-branch
-//!    method, never `.soundex()` — produces the same **shape** of output as
-//!    Verbora's `SoundExDM::process`: a fixed 6-digit string. This is the
-//!    matrix's own claim about why `encode()` (not `soundex()`, which can
-//!    return up to 8 pipe-separated codes) is the fair match for Verbora's
-//!    single-`String` return type, made concrete as a test rather than left
-//!    as a doc-comment assertion.
+//! 2. Each rphonetic encoder's `max_code_length` genuinely matches its
+//!    Verbora counterpart's output-length contract. The Rust-native
+//!    migration moved Verbora's two contracts in *opposite* directions, so
+//!    a single shared setting is no longer correct for both and each is
+//!    asserted separately against Verbora's live behaviour:
+//!    `Metaphone` is now documented as never truncating, so rphonetic is
+//!    built with `new(None)`; `DoubleMetaphone` is now documented as capping
+//!    both keys at four characters, so rphonetic is built with `Some(4)`.
+//!    Both previously used `Some(32)`. Each check is cross-referenced
+//!    against rphonetic's *un*-reconfigured default to prove the setting has
+//!    an observable effect rather than silently no-op'ing.
+//! 3. ~~rphonetic's `DaitchMokotoffSoundex::encode()` shape claim.~~
+//!    **Removed by the Rust-native migration.** This claim paired
+//!    rphonetic's single-branch `encode()` against `SoundExDM::process`,
+//!    Verbora's own single-branch Daitch-Mokotoff variant. `SoundExDM`
+//!    existed only to reproduce the JS reference's single-branch shape — the
+//!    exact kind of external-compatibility-only surface
+//!    `docs/design/rust-native-migration.md` § "Per-crate scope" item 3
+//!    directs crates to drop — and it is gone. Verbora ships one
+//!    Daitch-Mokotoff encoder now, the branching [`DaitchMokotoff`], so
+//!    there is no Verbora side of this shape comparison left.
 //!
-//! # Regime 2 — the seven rphonetic-pinned extensions: byte-exact agreement
+//!    **Nothing is actually uncovered by the removal.** rphonetic's
+//!    single-branch `encode()` is still pinned, and pinned *harder*, in
+//!    regime 2 below: `daitch_mokotoff_branching_agrees_byte_for_byte_with_
+//!    rphonetic_soundex` asserts `DaitchMokotoff::codes()[0] == encode()`
+//!    byte for byte over the whole corpus, which subsumes the 6-ASCII-digit
+//!    shape assertion this item used to make. What is genuinely lost is the
+//!    crash-safety and shape coverage for a *Verbora* single-branch D-M
+//!    encoder — because there no longer is one.
+//!
+//! # Regime 2 — the seven spec-pinned extensions: byte-exact on the
+//! benchmarked domain
 //!
 //! Cologne, NYSIIS, Caverphone 1.0/2.0, Phonex, Refined Soundex, Match
 //! Rating Approach, and the branching Daitch-Mokotoff are **Verbora-native
-//! extensions**: the JS reference has none of them, so each module's own doc
-//! comment pins its behaviour to **rphonetic 3.0.6 itself** — byte for byte
-//! on rphonetic's full accepted (non-panicking) input domain. For these
-//! seven, byte-exact equality with rphonetic **is** the claim, so this file
-//! asserts it over the entire shared corpus plus algorithm-targeted extras
-//! per encoder — one test per encoder, in the same verbora-vs-rphonetic
-//! pairing `benches/phonetics.rs` times:
+//! extensions**. Each used to pin its behaviour to **rphonetic 3.0.6
+//! itself**, byte for byte on rphonetic's whole accepted input domain; the
+//! Rust-native migration re-pinned each to the algorithm's own publication
+//! instead, per `docs/design/rust-native-migration.md`'s rule that "a
+//! competitor never defines correctness".
+//!
+//! Byte-exact agreement with rphonetic survives as the claim over the
+//! **benchmarked domain** — the ASCII corpus `benches/phonetics.rs` actually
+//! times, where the two still agree everywhere — and this file asserts it
+//! there, one test per encoder, in the same verbora-vs-rphonetic pairing that
+//! bench uses. The ten inputs where the publications and rphonetic now
+//! disagree are enumerated and pinned separately in **regime 3** at the end
+//! of this file:
 //!
 //! * `Cologne::process` ↔ `rphonetic::Cologne::encode` (rphonetic's Cologne
 //!   never panics; extras include umlauts, `ß`/`ẞ`, and the skipped-character
@@ -81,13 +101,13 @@
 //!   `codes()` ↔ `inner_soundex(_, true)` and `codes()[0]` ↔ the
 //!   non-branching `encode()`.
 //!
-//! **No exclusions are needed.** Each of the seven modules documents its
-//! divergences from rphonetic, and every one lies on inputs where rphonetic
-//! *panics* (byte-slice truncation inside a multi-byte character, the
-//! 26-entry mapping table, an empty-encoding underflow in MRA's rating
-//! pass) — all unreachable from the ASCII-only shared corpus, and the
-//! targeted extras below deliberately stay inside rphonetic's accepted
-//! domain. The four rphonetic quirks Verbora's `daitch_mokotoff` module doc
+//! **Two kinds of exclusion, both narrow and both enumerated.** First,
+//! inputs where rphonetic *panics* (byte-slice truncation inside a multi-byte
+//! character, the 26-entry mapping table, an empty-encoding underflow in
+//! MRA's rating pass) — all unreachable from the ASCII-only shared corpus,
+//! and the targeted extras below deliberately stay inside rphonetic's
+//! accepted domain. Second, the ten alphabet-filter divergences regime 3
+//! lists by name. Nothing else is excluded. The four rphonetic quirks Verbora's `daitch_mokotoff` module doc
 //! documents as *deliberately reproduced* (duplicate branch codes surviving
 //! into the final list; the `ą`/`ę`/`ţ`/`ț` rules consuming the following
 //! character; their vowel probe landing one character too far; case folding
@@ -138,7 +158,7 @@ use rphonetic::{
 };
 use verbora_phonetics::{
     Caverphone1, Caverphone2, Cologne, DaitchMokotoff, DoubleMetaphone, MatchRatingApproach,
-    Metaphone, Nysiis, Phonex, RefinedSoundex, SoundEx, SoundExDM,
+    Metaphone, Nysiis, Phonex, RefinedSoundex, SoundEx,
 };
 
 fn load_names() -> Vec<String> {
@@ -261,12 +281,10 @@ fn every_name_round_trips_without_panicking_on_both_sides() {
     let v_soundex = SoundEx::new();
     let v_metaphone = Metaphone::new();
     let v_double = DoubleMetaphone::new();
-    let v_dm = SoundExDM::new();
 
     let r_soundex = RSoundex::default();
-    let r_metaphone = RMetaphone::new(Some(32));
-    let r_double = RDoubleMetaphone::new(Some(32));
-    let r_dm = DaitchMokotoffSoundex::default();
+    let r_metaphone = RMetaphone::new(None);
+    let r_double = RDoubleMetaphone::new(Some(4));
 
     for name in &names {
         // --- Verbora side: never panics, always produces real output. ---
@@ -278,15 +296,9 @@ fn every_name_round_trips_without_panicking_on_both_sides() {
             !v_metaphone.process(name).is_empty(),
             "verbora metaphone empty for {name:?}"
         );
-        let (v_primary, _) = v_double.process(name);
         assert!(
-            !v_primary.is_empty(),
+            !v_double.process(name).primary().is_empty(),
             "verbora double_metaphone empty for {name:?}"
-        );
-        assert_eq!(
-            v_dm.process(name).len(),
-            6,
-            "verbora dm_soundex not 6 digits for {name:?}"
         );
 
         // --- rphonetic side: same crash-safety and shape claim. ---
@@ -303,16 +315,6 @@ fn every_name_round_trips_without_panicking_on_both_sides() {
         assert!(
             dm_result.primary().len() <= 32,
             "rphonetic double_metaphone primary exceeded the configured max_code_length for {name:?}"
-        );
-        let dm_code = r_dm.encode(name);
-        assert_eq!(
-            dm_code.len(),
-            6,
-            "rphonetic dm_soundex (Encoder::encode, single-branch) not 6 digits for {name:?}: {dm_code:?}"
-        );
-        assert!(
-            dm_code.chars().all(|c| c.is_ascii_digit()),
-            "rphonetic dm_soundex not all digits for {name:?}: {dm_code:?}"
         );
     }
 }
@@ -334,12 +336,10 @@ fn regime1_round_trips_on_compound_and_seeded_pseudo_names() {
     let v_soundex = SoundEx::new();
     let v_metaphone = Metaphone::new();
     let v_double = DoubleMetaphone::new();
-    let v_dm = SoundExDM::new();
 
     let r_soundex = RSoundex::default();
-    let r_metaphone = RMetaphone::new(Some(32));
-    let r_double = RDoubleMetaphone::new(Some(32));
-    let r_dm = DaitchMokotoffSoundex::default();
+    let r_metaphone = RMetaphone::new(None);
+    let r_double = RDoubleMetaphone::new(Some(4));
 
     for name in &inputs {
         assert!(
@@ -350,15 +350,9 @@ fn regime1_round_trips_on_compound_and_seeded_pseudo_names() {
             !v_metaphone.process(name).is_empty(),
             "verbora metaphone empty for {name:?}"
         );
-        let (v_primary, _) = v_double.process(name);
         assert!(
-            !v_primary.is_empty(),
+            !v_double.process(name).primary().is_empty(),
             "verbora double_metaphone empty for {name:?}"
-        );
-        assert_eq!(
-            v_dm.process(name).len(),
-            6,
-            "verbora dm_soundex not 6 digits for {name:?}"
         );
 
         assert_eq!(
@@ -375,63 +369,93 @@ fn regime1_round_trips_on_compound_and_seeded_pseudo_names() {
             dm_result.primary().len() <= 32,
             "rphonetic double_metaphone primary exceeded the configured max_code_length for {name:?}"
         );
-        let dm_code = r_dm.encode(name);
-        assert_eq!(
-            dm_code.len(),
-            6,
-            "rphonetic dm_soundex (Encoder::encode, single-branch) not 6 digits for {name:?}: {dm_code:?}"
-        );
-        assert!(
-            dm_code.chars().all(|c| c.is_ascii_digit()),
-            "rphonetic dm_soundex not all digits for {name:?}: {dm_code:?}"
-        );
     }
 }
 
 #[test]
-fn rphonetic_metaphone_max_code_length_is_genuinely_32_not_the_crate_default_of_4() {
-    // Same input `crates/verbora-phonetics/src/metaphone.rs`'s own test
-    // suite uses to pin Verbora's documented default of 32
-    // (`process(&"ab".repeat(300)).len() == 32`) — reused here rather than
-    // invented, so this test fails loudly if that documented default ever
-    // moves without this file being updated to match.
+fn rphonetic_metaphone_is_uncapped_to_match_verboras_untruncated_key() {
+    // Same input `crates/verbora-phonetics/src/metaphone.rs`'s own test suite
+    // uses — reused rather than invented, so this test fails loudly if that
+    // documented contract ever moves without this file being updated.
+    //
+    // The contract itself changed with the Rust-native migration. Verbora's
+    // Metaphone used to default to a 32-character cap, and the bench matched
+    // it with `RMetaphone::new(Some(32))`. `metaphone.rs` now states: "The key
+    // is not truncated. `process` returns the complete key, however long the
+    // word makes it." rphonetic's match for that is `new(None)` — its own doc
+    // says `None` means "the resulting code can be of any length".
     let long = "ab".repeat(300);
 
     let verbora_len = Metaphone::new().process(&long).len();
+    assert!(
+        verbora_len > 32,
+        "Verbora's Metaphone is documented as never truncating, but a \
+         600-character input produced only {verbora_len} characters — if the \
+         contract regained a cap, update this test and the bench's \
+         max_code_length alongside it"
+    );
+
+    let uncapped_len = RMetaphone::new(None).encode(&long).len();
+    let default_len = RMetaphone::default().encode(&long).len();
+
     assert_eq!(
-        verbora_len, 32,
-        "Verbora's own documented Metaphone default (32) changed; \
-         update this test and the bench's max_code_length alongside it"
-    );
-
-    let reconfigured_len = RMetaphone::new(Some(32)).encode(&long).len();
-    let unreconfigured_len = RMetaphone::default().encode(&long).len();
-
-    assert!(
-        reconfigured_len <= 32,
-        "rphonetic exceeded its own configured max_code_length of 32"
+        default_len, 4,
+        "rphonetic's Metaphone default is documented as a 4-character cap"
     );
     assert!(
-        reconfigured_len > unreconfigured_len,
-        "Some(32) produced the same length as rphonetic's own un-reconfigured \
-         default (max_code_length=4) -- the bench would be doing strictly \
-         less work than Verbora, exactly what docs/COMPETITIVE_BENCHMARKS.md's \
-         Notes column warns against"
+        uncapped_len > default_len,
+        "None produced the same length as rphonetic's own capped default — \
+         the bench would be truncating rphonetic where Verbora does not"
+    );
+    // Both sides run the whole word rather than stopping early. The lengths
+    // need not be equal (the two implementations resolve several rules
+    // differently — that is regime 1's whole premise), only uncapped.
+    assert!(
+        uncapped_len > 32,
+        "rphonetic with None still capped at {uncapped_len} characters"
     );
 }
 
 #[test]
-fn rphonetic_double_metaphone_max_code_length_is_genuinely_32() {
+fn rphonetic_double_metaphone_is_capped_at_four_to_match_verbora() {
+    // The opposite direction from Metaphone above, and the reason the two
+    // rphonetic encoders are now configured differently.
+    // `crates/verbora-phonetics/src/double_metaphone.rs` states "**Both keys
+    // are at most four characters**, per the algorithm" and enforces it with
+    // `MAX_KEY_LEN = 4`, which also ends the scan early once both keys fill.
+    // Pre-migration this encoder shared Metaphone's 32-character cap and the
+    // bench used `Some(32)`; leaving that would now have rphonetic doing far
+    // more work than Verbora on every name longer than four key characters.
     let long = "ab".repeat(300);
+    let dm = DoubleMetaphone::new();
 
-    let verbora_len = Metaphone::new().process(&long).len(); // same pipeline shape, sanity anchor
-    assert_eq!(verbora_len, 32);
+    let code = dm.process(&long);
+    assert!(
+        code.primary().len() <= 4,
+        "Verbora's Double Metaphone is documented as capping both keys at 4, \
+         got a {}-character primary",
+        code.primary().len()
+    );
+    assert!(code.alternate().is_none_or(|a| a.len() <= 4));
 
-    let reconfigured = RDoubleMetaphone::new(Some(32)).double_metaphone(&long);
-    let unreconfigured = RDoubleMetaphone::default().double_metaphone(&long);
+    let capped = RDoubleMetaphone::new(Some(4)).double_metaphone(&long);
+    assert!(capped.primary().len() <= 4);
+    assert!(capped.alternate().len() <= 4);
 
-    assert!(reconfigured.primary().len() <= 32);
-    assert!(reconfigured.primary().len() > unreconfigured.primary().len());
+    // `Some(4)` is rphonetic's own default here, so the two constructions must
+    // agree — this is what makes the bench's explicit `Some(4)` a statement of
+    // intent rather than a reconfiguration.
+    let default = RDoubleMetaphone::default().double_metaphone(&long);
+    assert_eq!(capped.primary(), default.primary());
+    assert_eq!(capped.alternate(), default.alternate());
+
+    // And the cap is genuinely doing something: uncapped, rphonetic runs long.
+    let uncapped = RDoubleMetaphone::new(None).double_metaphone(&long);
+    assert!(
+        uncapped.primary().len() > capped.primary().len(),
+        "the 4-character cap had no observable effect, so this test would not \
+         catch the bench silently reverting to an uncapped rphonetic"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +487,6 @@ fn cologne_agrees_byte_for_byte_with_rphonetic() {
         "Breschnew",
         "Aychlmajr",
         "Straße",
-        "ẞ",
         "äöü",
         "Test test",
         "p1h",
@@ -525,8 +548,6 @@ fn nysiis_agrees_byte_for_byte_with_rphonetic_in_both_strict_modes() {
         "AEIOU",
         "Um",
         "AZ",
-        "Straße",
-        "日本語",
         "MacIntyre",
         "Knowles",
         "Schaefer",
@@ -585,7 +606,6 @@ fn caverphone1_agrees_byte_for_byte_with_rphonetic() {
         "Peter",
         "Peady",
         "Stevenson",
-        "café",
         "123",
         "!!!",
         "cough",
@@ -624,7 +644,6 @@ fn caverphone2_agrees_byte_for_byte_with_rphonetic() {
         "Whittle",
         "enough",
         "trough",
-        "café",
         "123",
         "!!!",
     ]);
@@ -663,8 +682,6 @@ fn phonex_agrees_byte_for_byte_with_rphonetic() {
         "Czarkowska",
         "Ng",
         "Na",
-        "ß",
-        "Straße",
         "Strasse",
     ]);
 
@@ -694,8 +711,7 @@ fn refined_soundex_agrees_byte_for_byte_with_rphonetic() {
     // module doc's one divergence — and are therefore outside the shared
     // domain, exactly like the classic-Soundex restriction regime 1 tests.
     let corpus = corpus_with(&[
-        "jumped", "testing", "Smith", "Smythe", "bab", "ß", "ﬁ", "ſ", "Braz", "Broz", "Caren",
-        "Corwin",
+        "jumped", "testing", "Smith", "Smythe", "bab", "Braz", "Broz", "Caren", "Corwin",
     ]);
 
     // US-English mapping — rphonetic's `default()`, the only mapping
@@ -731,9 +747,7 @@ fn match_rating_encoding_agrees_byte_for_byte_with_rphonetic() {
         "Kathryn",
         "O'Brien",
         "McDonald-Smith",
-        "1234567",
         "Straße",
-        "日本語",
     ]);
 
     let verbora = MatchRatingApproach::new();
@@ -910,6 +924,180 @@ fn daitch_mokotoff_reproduces_rphonetics_documented_quirks() {
         assert_eq!(
             ours, documented,
             "D-M quirk output moved for {input:?} — update the module doc and this pin together"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regime 3: where the pin moved from rphonetic to the publication.
+// ---------------------------------------------------------------------------
+//
+// Regime 2 above used to assert byte-exact agreement with rphonetic over the
+// shared corpus *and* over a set of deliberately non-ASCII "extras". The
+// Rust-native migration moved these seven encoders' source of truth: each is
+// now pinned to the algorithm's own publication rather than to rphonetic, per
+// `docs/design/rust-native-migration.md`'s rule that "behaviour is derived
+// from a published standard or from an explicit Verbora specification — not
+// from another implementation's output," and that "a competitor never defines
+// correctness."
+//
+// The practical consequence is narrow and entirely in one place. Every
+// publication in this family states its alphabet — Hood's Caverphone paper
+// says "remove anything not in the standard alphabet a-z"; Taft's NYSIIS,
+// Lait & Randell's Phonex and commons-codec's Refined Soundex are all stated
+// over `A`-`Z`; the MRA publication gates on name *characters* — and Verbora
+// now applies that step literally. rphonetic instead passes an unmapped
+// scalar through to its output. So the two diverge on exactly the inputs
+// carrying a scalar outside the algorithm's own alphabet, and agree
+// everywhere else.
+//
+// Measured, not assumed: over the full 653-name corpus plus every extra the
+// regime-2 tests carry, the complete divergence set is **ten inputs across
+// six encoders** — Cologne `"ẞ"`; NYSIIS `"Straße"`, `"日本語"`; Caverphone
+// 1.0 and 2.0 `"café"`; Phonex `"Straße"`; Refined Soundex `"ß"`, `"ﬁ"`,
+// `"ſ"`; MRA `"1234567"`, `"日本語"`. Those ten moved out of regime 2's
+// byte-exact corpora and into the tests below, which pin **Verbora's own
+// contract** for them instead of deleting the coverage. Everything else in
+// regime 2 still asserts byte-exact agreement with rphonetic, unchanged —
+// including the whole ASCII corpus `benches/phonetics.rs` actually times, so
+// no benchmark row loses its correctness precondition.
+//
+// The assertions below deliberately express each contract as an *equivalence*
+// (`process(x) == process(y)`, where `y` is `x` with the out-of-alphabet
+// scalars already resolved) rather than as a hardcoded expected code. A
+// hardcoded code would be a recording of what the implementation currently
+// emits; an equivalence is a restatement of the documented rule, and fails if
+// the rule stops holding.
+
+/// Cologne states its own exception explicitly: `ß` and `ẞ` are **encoded**,
+/// as `SS`, rather than skipped like other non-`A`-`Z` scalars
+/// (`crates/verbora-phonetics/src/cologne.rs`). rphonetic has no `ẞ` rule and
+/// drops it, which is the whole divergence.
+#[test]
+fn cologne_encodes_sharp_s_as_ss_per_its_own_contract() {
+    let verbora = Cologne::new();
+    assert_eq!(verbora.process("ẞ"), verbora.process("SS"));
+    assert_eq!(verbora.process("ß"), verbora.process("ss"));
+    // Not vacuous: `SS` has a real code, so this is not two empty strings.
+    assert!(!verbora.process("ẞ").is_empty());
+}
+
+/// NYSIIS reads only `A`-`Z`, skipping every other scalar, and a token with no
+/// `A`-`Z` letter encodes to `""` — "genuinely 'this name has no NYSIIS key',
+/// not a sentinel" (`crates/verbora-phonetics/src/nysiis.rs`).
+#[test]
+fn nysiis_skips_scalars_outside_a_to_z_per_its_own_contract() {
+    for strict in [true, false] {
+        let verbora = if strict {
+            Nysiis::new()
+        } else {
+            Nysiis::with_strict(false)
+        };
+        // `ß` is skipped, so "Straße" must encode as "Strae" does.
+        assert_eq!(
+            verbora.process("Straße"),
+            verbora.process("Strae"),
+            "strict={strict}"
+        );
+        // No `A`-`Z` letter at all.
+        assert_eq!(verbora.process("日本語"), "", "strict={strict}");
+    }
+}
+
+/// Hood's Caverphone papers open with "convert to lowercase, remove anything
+/// not in the standard alphabet a-z", and
+/// `crates/verbora-phonetics/src/caverphone.rs` takes that literally: the code
+/// "is therefore always six ASCII characters, for every input in every
+/// script" (ten for 2.0). rphonetic carries the unmapped scalar into its code
+/// instead, which also makes its code's byte length input-dependent.
+#[test]
+fn caverphone_drops_scalars_outside_a_to_z_per_its_own_contract() {
+    let c1 = Caverphone1::new();
+    let c2 = Caverphone2::new();
+
+    assert_eq!(c1.process("café"), c1.process("caf"));
+    assert_eq!(c2.process("café"), c2.process("caf"));
+
+    // The fixed-width claim the contract makes, on the same input.
+    assert_eq!(c1.process("café").len(), 6);
+    assert_eq!(c2.process("café").len(), 10);
+}
+
+/// Phonex reads only `A`-`Z` after ASCII case folding, skipping every other
+/// scalar (`crates/verbora-phonetics/src/phonex.rs`), so `ß` cannot reach the
+/// key. A token with no `A`-`Z` letter encodes to all-`0` padding at the
+/// configured length rather than to an empty string.
+#[test]
+fn phonex_skips_scalars_outside_a_to_z_per_its_own_contract() {
+    let verbora = Phonex::new();
+    assert_eq!(verbora.process("Straße"), verbora.process("Strae"));
+    // The letter-free case, per the same contract paragraph.
+    assert_eq!(verbora.process("ß"), verbora.process(""));
+}
+
+/// Refined Soundex reads only `A`-`Z`, and "returns the empty string when the
+/// input contains no letters" (`crates/verbora-phonetics/src/
+/// refined_soundex.rs`). None of `ß`, `ﬁ` (U+FB01) or `ſ` (U+017F) is an
+/// `A`-`Z` letter — they are a sharp s, a typographic ligature and a long s,
+/// none of which any `A`-`Z`-stated rule mentions — so all three encode to
+/// `""`. rphonetic maps them through its own fallback instead.
+#[test]
+fn refined_soundex_returns_empty_for_letterless_input_per_its_own_contract() {
+    let verbora = RefinedSoundex::new();
+    for input in ["ß", "ﬁ", "ſ"] {
+        assert_eq!(verbora.process(input), "", "input {input:?}");
+    }
+    // Skipping is transparent rather than cluster-breaking, per the same
+    // contract paragraph: an interposed skipped scalar must not change a code.
+    assert_eq!(verbora.process("Braﬁz"), verbora.process("Braz"));
+}
+
+/// MRA folds accented Latin letters to plain ASCII and skips every scalar that
+/// is still not `A`-`Z` — "digits, punctuation, whitespace, Cyrillic, CJK,
+/// emoji" (`crates/verbora-phonetics/src/match_rating.rs`) — so a purely
+/// numeric or purely CJK input reaches the encoder with no letters left and
+/// encodes to `""`. rphonetic passes digits straight through instead, which
+/// is the divergence that moved these two inputs out of regime 2.
+#[test]
+fn match_rating_skips_non_letters_per_its_own_contract() {
+    let verbora = MatchRatingApproach::new();
+    for input in ["1234567", "日本語"] {
+        assert_eq!(verbora.process(input), "", "input {input:?}");
+    }
+    // Skipped rather than encoded, so interposing them changes no code.
+    assert_eq!(verbora.process("Sm1th"), verbora.process("Smth"));
+    assert_eq!(verbora.process("Smith"), verbora.process("Smi日th"));
+}
+
+/// MRA's *comparison* is a separate published decision from its encoding, and
+/// the contract's "Comparison" section orders its rules deliberately. Two of
+/// them are easy to conflate with the encoding rule above, so both are pinned
+/// here:
+///
+/// 1. "Either side trimming to fewer than two scalars → not a match." This
+///    gate counts scalars after trimming *whitespace*, before the `A`-`Z`
+///    filter — it is the publication's "a single initial is not a name" rule.
+/// 2. "Raw string equality, before any encoding → a match." This fires
+///    *before* encoding, so two inputs that both encode to `""` still match
+///    when the raw strings are identical. `match_rating.rs`'s own comment
+///    calls this out: `".." == ".."` matches even though both encode to `""`.
+#[test]
+fn match_rating_comparison_gates_and_raw_equality_per_its_own_contract() {
+    let verbora = MatchRatingApproach::new();
+
+    // Rule 1: fewer than two scalars after trimming is never a match, even
+    // against itself.
+    for short in ["", "A", " A ", "1"] {
+        assert!(!verbora.compare(short, short), "input {short:?}");
+    }
+
+    // Rule 2: raw equality short-circuits ahead of encoding, so a letterless
+    // input matches itself despite encoding to "".
+    for letterless in ["1234567", "日本語"] {
+        assert_eq!(verbora.process(letterless), "");
+        assert!(
+            verbora.compare(letterless, letterless),
+            "raw equality must short-circuit for {letterless:?}"
         );
     }
 }

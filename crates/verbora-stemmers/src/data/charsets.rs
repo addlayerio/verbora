@@ -1,8 +1,11 @@
-//! Case-insensitive character sets applied per character.
+//! Case-insensitive character sets, tested one scalar at a time.
 //!
-//! Generated data; see the note in `gen-stemmer-data`.
+//! Checked-in data. The header used to point at a `gen-stemmer-data` tool for
+//! the derivation; no such tool is in the repository, so the sets are
+//! unverifiable as they stand. Grounding them in Carry's published description
+//! is an open item of the stemmers' own migration.
 
-/// Carry's vowel set, from `defaultConf.vowels`. Note `y` is NOT a vowel here.
+/// Carry's vowel set. `y` is deliberately **not** a vowel here.
 #[inline]
 pub(crate) fn is_carry_vowel(unit: u16) -> bool {
     matches!(unit,

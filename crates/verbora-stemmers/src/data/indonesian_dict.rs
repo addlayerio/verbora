@@ -1,10 +1,9 @@
-//! The Indonesian root-word dictionary, from
-//! The reference `kata-dasar.json`.
+//! The Indonesian root-word dictionary: 29,932 distinct roots, in file order.
 //!
-//! Generated data. The JSON array holds 29933 elements; the last is the empty
-//! string, which `.filter(Boolean)` drops, leaving 29932 distinct roots.
-//! The reference builds this Set TWICE (once in `stemmer_id`, once in
-//! `prefix_rules`); one shared static is enough.
+//! Checked-in data, held once and shared by every consumer in the crate.
+//! 335 of the roots are single lexemes spelled with a hyphen, which is why
+//! [`crate::TokenizeAndStem::HYPHEN_JOINS_LETTERS`] exists. Naming a published
+//! source for the word list is an open item of the stemmers' own migration.
 
 /// The dictionary in file order — what `StemmerId.dictionary` exposes.
 pub static WORDS: &[&str] = &[

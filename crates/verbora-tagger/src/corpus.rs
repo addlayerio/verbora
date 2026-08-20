@@ -1,100 +1,144 @@
-//! Annotated corpora: parsing, analysis, and lexicon induction.
+//! An annotated corpus: sentences of tokens with their gold tags.
 
-use std::borrow::Cow;
+use std::fmt;
 
-use crate::error::TaggerError;
-use crate::lexicon::Lexicon;
-use crate::ordered_object::OrderedObject;
-use crate::sentence::{Prop, Sentence, Tag, TaggedWord};
+use rustc_hash::FxHashMap;
 
-/// The string key an `undefined` tag becomes when used as an object key.
+use crate::lexicon::{Lexicon, LexiconError};
+use crate::tag::{Tag, TaggedToken};
+
+/// Why a Brown-format corpus did not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CorpusParseError {
+    /// A token carried no `_` and therefore no tag.
+    ///
+    /// A corpus is *annotated* by definition; an untagged token would have to be
+    /// given an invented tag or a missing one, and both are worse than saying so.
+    MissingTag {
+        /// One-based line number.
+        line: usize,
+        /// The offending token.
+        token: String,
+    },
+    /// The text before the final `_` was empty.
+    EmptyToken {
+        /// One-based line number.
+        line: usize,
+        /// The offending token.
+        token: String,
+    },
+    /// The text after the final `_` was empty.
+    EmptyTag {
+        /// One-based line number.
+        line: usize,
+        /// The offending token.
+        token: String,
+    },
+}
+
+impl fmt::Display for CorpusParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingTag { line, token } => {
+                write!(f, "line {line}: token {token:?} has no '_' and so no tag")
+            }
+            Self::EmptyToken { line, token } => {
+                write!(f, "line {line}: token {token:?} has an empty word")
+            }
+            Self::EmptyTag { line, token } => {
+                write!(f, "line {line}: token {token:?} has an empty tag")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CorpusParseError {}
+
+/// Sentences of gold-tagged tokens.
 ///
-/// `posTags[token.tag] = true` coerces the key, so a corpus with untagged tokens
-/// really does grow a POS tag literally spelled `"undefined"`, and
-/// `buildLexicon` can emit it as a category.
-const UNDEFINED_KEY: &str = "undefined";
-
-/// A corpus of tagged sentences.
-#[derive(Debug, Clone, Default)]
+/// Tokens borrow from the text the corpus was parsed from, so parsing copies
+/// only the tag strings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Corpus<'a> {
-    /// The sentences.
-    pub sentences: Vec<Sentence<'a>>,
-    /// Running word count. Set by the constructors and recomputed by
-    /// [`Corpus::analyse`] — but **not** by
-    /// [`Corpus::split_in_train_and_test`], which is why both halves of a split
-    /// report zero.
-    pub word_count: usize,
-    /// Set by [`Corpus::analyse`]: token → tag → frequency.
-    tag_frequencies: Option<OrderedObject<OrderedObject<u32>>>,
-    /// Set by [`Corpus::analyse`]: the set of tags used.
-    pos_tags: Option<OrderedObject<()>>,
+    sentences: Vec<Vec<TaggedToken<'a>>>,
 }
 
 impl<'a> Corpus<'a> {
-    /// An empty corpus — `new Corpus()`.
+    /// An empty corpus.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Builds a corpus from already-parsed sentences, the JSON path.
-    ///
-    /// The reference stores the caller's `taggedWords` arrays **by reference**, so
-    /// training mutates the parsed JSON in place. Rust's ownership rules make
-    /// that impossible; the values are moved here instead. Nothing observable
-    /// through this crate's API depends on the aliasing, but a caller that
-    /// inspects its own input after training will see it unchanged where
-    /// the reference would show it rewritten.
+    /// Wraps already-built sentences.
     #[must_use]
-    pub fn from_sentences(sentences: Vec<Sentence<'a>>) -> Self {
-        let word_count = sentences.iter().map(Sentence::len).sum();
-        Self {
-            sentences,
-            word_count,
-            ..Self::default()
-        }
+    pub const fn from_sentences(sentences: Vec<Vec<TaggedToken<'a>>>) -> Self {
+        Self { sentences }
     }
 
-    /// `parseBrownCorpus(data)`: one sentence per non-blank line, tokens of the
-    /// form `word_TAG`.
+    /// Parses the Brown-corpus text format: one sentence per line, tokens of the
+    /// form `word_TAG` separated by whitespace.
     ///
-    /// Splitting is on `\n` only, so a CRLF file leaves `\r` attached to the last
-    /// token of each line — except that `line.trim()` removes it before the split.
-    /// A token with no underscore gets **no tag**; `a_b_c_d` keeps only `a` and
-    /// `b`; a token starting with `_` yields an empty token string. Blank and
-    /// whitespace-only lines are skipped and do not count towards the word count.
-    #[must_use]
-    pub fn parse_brown(data: &'a str) -> Self {
-        let mut corpus = Self::new();
-        for line in data.split('\n') {
-            let trimmed = line.trim_matches(verbora_core::whitespace::is_whitespace);
-            if trimmed.is_empty() {
+    /// The split is at the **last** `_` in the token, so `node_js_NN` is the
+    /// token `node_js` tagged `NN` — nothing is discarded. Lines are split on
+    /// `\n`, and each line is trimmed, so a CRLF file parses identically to an
+    /// LF one. Blank and whitespace-only lines are skipped.
+    ///
+    /// Tokens are whitespace-delimited, which is exactly the [`Lexicon`] key
+    /// contract, so a lexicon built from a corpus is always reachable from the
+    /// same tokenization the corpus used.
+    ///
+    /// # Errors
+    ///
+    /// [`CorpusParseError`] for a token with no `_`, an empty word or an empty
+    /// tag. Nothing is silently dropped or silently retagged.
+    pub fn parse_brown(text: &'a str) -> Result<Self, CorpusParseError> {
+        let mut sentences = Vec::new();
+        for (n, line) in text.split('\n').enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
-            let mut sentence = Sentence::new();
-            for token in trimmed.split(verbora_core::whitespace::is_whitespace) {
-                if token.is_empty() {
-                    // `split(/\s+/)` on a trimmed, non-empty string never yields
-                    // an empty field, so this cannot happen; the guard keeps the
-                    // char-wise split above equivalent to the regex one.
-                    continue;
+            let mut sentence = Vec::new();
+            for token in line.split_whitespace() {
+                let Some((word, tag)) = token.rsplit_once('_') else {
+                    return Err(CorpusParseError::MissingTag {
+                        line: n + 1,
+                        token: token.to_owned(),
+                    });
+                };
+                if word.is_empty() {
+                    return Err(CorpusParseError::EmptyToken {
+                        line: n + 1,
+                        token: token.to_owned(),
+                    });
                 }
-                corpus.word_count += 1;
-                let mut parts = token.split('_');
-                let word = parts.next().unwrap_or("");
-                // The token borrows from `data`, but a `Tag` is `Cow<'static>` —
-                // tags are almost always `&'static str` from the bundled tables,
-                // and widening the alias would cost every hot path a lifetime
-                // parameter to spare this one parser an allocation per token.
-                let tag = parts.next().map(|t| Cow::Owned(t.to_string()));
-                sentence.add_tagged_word(word, tag);
+                let tag = Tag::new(tag.to_owned()).map_err(|_| CorpusParseError::EmptyTag {
+                    line: n + 1,
+                    token: token.to_owned(),
+                })?;
+                sentence.push(TaggedToken::new(word, tag));
             }
-            corpus.sentences.push(sentence);
+            sentences.push(sentence);
         }
-        corpus
+        Ok(Self { sentences })
     }
 
-    /// `nrSentences()`.
+    /// The sentences, in order.
+    #[inline]
+    #[must_use]
+    pub fn sentences(&self) -> &[Vec<TaggedToken<'a>>] {
+        &self.sentences
+    }
+
+    /// Mutable access to the sentences.
+    #[inline]
+    pub fn sentences_mut(&mut self) -> &mut Vec<Vec<TaggedToken<'a>>> {
+        &mut self.sentences
+    }
+
+    /// Number of sentences.
     #[must_use]
     pub fn len(&self) -> usize {
         self.sentences.len()
@@ -106,170 +150,98 @@ impl<'a> Corpus<'a> {
         self.sentences.is_empty()
     }
 
-    /// `nrWords()`.
+    /// Number of tokens across all sentences.
+    ///
+    /// Computed from the sentences every time it is asked for, so it can never
+    /// disagree with them.
     #[must_use]
-    pub const fn word_count(&self) -> usize {
-        self.word_count
+    pub fn token_count(&self) -> usize {
+        self.sentences.iter().map(Vec::len).sum()
     }
 
-    /// `analyse()`: recomputes the word count, the tag set and the per-token tag
-    /// frequencies.
-    ///
-    /// All three are reset first, so calling it twice is idempotent.
-    pub fn analyse(&mut self) {
-        let mut tag_frequencies: OrderedObject<OrderedObject<u32>> = OrderedObject::new();
-        let mut pos_tags: OrderedObject<()> = OrderedObject::new();
-        let mut word_count = 0;
+    /// The distinct tags used, in first-appearance order.
+    #[must_use]
+    pub fn tags(&self) -> Vec<&Tag> {
+        let mut seen: Vec<&Tag> = Vec::new();
         for sentence in &self.sentences {
-            for token in &sentence.tagged_words {
-                word_count += 1;
-                let tag_key = token.tag().unwrap_or(UNDEFINED_KEY);
-                pos_tags.insert(tag_key, ());
-                let per_token = tag_frequencies.entry_or_insert(&token.token, OrderedObject::new());
-                *per_token.entry_or_insert(tag_key, 0) += 1;
+            for w in sentence {
+                if !seen.contains(&&w.tag) {
+                    seen.push(&w.tag);
+                }
             }
         }
-        self.word_count = word_count;
-        self.tag_frequencies = Some(tag_frequencies);
-        self.pos_tags = Some(pos_tags);
+        seen
     }
 
-    /// `getTags()`: the tags seen, in `Object.keys` order.
+    /// Builds a [`Lexicon`] from the corpus vocabulary alone.
+    ///
+    /// Each token maps to the tags it was annotated with, **most frequent
+    /// first**, which is what makes [`Lexicon::primary_tag`] the most-likely-tag
+    /// annotator. Ties keep first-appearance order, so the result is
+    /// deterministic for a given corpus.
+    ///
+    /// The returned lexicon contains nothing but this corpus: no bundled
+    /// entries, no shared state, and no tokens the corpus did not contain.
     ///
     /// # Errors
     ///
-    /// Before [`Corpus::analyse`] has run, `posTags` is `undefined` and
-    /// `Object.keys` throws.
-    pub fn get_tags(&self) -> Result<Vec<&str>, TaggerError> {
-        self.pos_tags
-            .as_ref()
-            .map(OrderedObject::keys)
-            .ok_or(TaggerError::ObjectKeysOfUndefined)
-    }
-
-    /// The per-token tag frequencies, once [`Corpus::analyse`] has run.
-    #[must_use]
-    pub fn tag_frequencies(&self) -> Option<&OrderedObject<OrderedObject<u32>>> {
-        self.tag_frequencies.as_ref()
-    }
-
-    /// `tag(lexicon)`: writes each token's `testTag` from the lexicon.
-    ///
-    /// The gold `tag` is untouched. `testTag` becomes `undefined` where the
-    /// lexicon returns an empty category list.
-    pub fn tag(&mut self, lexicon: &Lexicon) {
-        for sentence in &mut self.sentences {
-            for token in &mut sentence.tagged_words {
-                token.test_tag = Prop::assigned(lexicon.first_category(&token.token));
+    /// [`LexiconError`] when a corpus token is not a conforming lexicon key —
+    /// empty, or containing whitespace. [`Corpus::parse_brown`] cannot produce
+    /// one; [`Corpus::from_sentences`] can.
+    pub fn build_lexicon(&self, default_tag: Tag) -> Result<Lexicon, LexiconError> {
+        let mut counts: FxHashMap<&str, Vec<(Tag, usize)>> = FxHashMap::default();
+        for sentence in &self.sentences {
+            for w in sentence {
+                let entry = counts.entry(w.token()).or_default();
+                match entry.iter_mut().find(|(t, _)| *t == w.tag) {
+                    Some((_, n)) => *n += 1,
+                    None => entry.push((w.tag.clone(), 1)),
+                }
             }
         }
-    }
-
-    /// `buildLexicon()`: the most frequent tag of each token, most frequent first.
-    ///
-    /// # This does not return an empty lexicon
-    ///
-    /// The reference calls `new Lexicon()` **with no arguments**, and `Lexicon`'s
-    /// language switch defaults to **Dutch** — so the returned "corpus lexicon"
-    /// carries all 11,699 Dutch words, has no default category, and *is* the
-    /// process-global Dutch dictionary, which this call permanently pollutes with
-    /// the corpus vocabulary. Tagging an English corpus with it therefore falls
-    /// back on Dutch entries for words the corpus never contained.
-    ///
-    /// That is almost certainly an upstream bug — every plausible reading of the
-    /// method says it should build a lexicon *from the corpus* — but it changes
-    /// `nrEntries()`, the tags of out-of-vocabulary words, and every downstream
-    /// training and testing score, so it is reproduced rather than corrected. Use
-    /// [`Corpus::build_lexicon_detached`] for the behaviour the name implies.
-    pub fn build_lexicon(&mut self) -> Lexicon {
-        self.build_lexicon_into(Lexicon::new(None, None, None))
-    }
-
-    /// [`Corpus::build_lexicon`] without the Dutch dictionary or the global
-    /// mutation: a lexicon containing exactly the corpus vocabulary.
-    ///
-    /// No the reference equivalent. Provided because the reference's behaviour is a
-    /// bug that callers should be able to opt out of without giving up parity
-    /// elsewhere.
-    pub fn build_lexicon_detached(&mut self) -> Lexicon {
-        self.build_lexicon_into(Lexicon::empty())
-    }
-
-    fn build_lexicon_into(&mut self, mut lexicon: Lexicon) -> Lexicon {
-        self.analyse();
-        let frequencies = self
-            .tag_frequencies
-            .as_ref()
-            .expect("analyse just ran")
-            .in_key_order();
-        // Collected first so the borrow of `self` ends before `add_word`.
-        let mut updates: Vec<(String, Vec<Tag>)> = Vec::with_capacity(frequencies.len());
-        for (token, per_tag) in frequencies {
-            let mut cats: Vec<(&str, u32)> = per_tag
-                .in_key_order()
-                .into_iter()
-                .map(|(t, n)| (t, *n))
-                .collect();
-            // The reference engine's sort is stable and the comparator returns 0 for ties, so
-            // equal-frequency tags keep their first-seen order. Stable, never
-            // `sort_unstable_by_key`.
-            cats.sort_by_key(|c| std::cmp::Reverse(c.1));
-            updates.push((
-                token.to_string(),
-                cats.into_iter()
-                    .map(|(t, _)| Cow::Owned(t.to_string()))
-                    .collect(),
-            ));
+        let mut lexicon = Lexicon::new(default_tag);
+        for (token, mut tags) in counts {
+            // Stable, so equal counts keep first-appearance order.
+            tags.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+            lexicon.insert(token, tags.into_iter().map(|(t, _)| t).collect())?;
         }
-        for (token, cats) in updates {
-            lexicon.add_word(&token, cats);
-        }
-        lexicon
+        Ok(lexicon)
     }
 
-    /// `splitInTrainAndTest(percentageTrain)`.
+    /// Splits the corpus in two by a caller-supplied predicate.
     ///
-    /// `next_random` stands in for `Math.random()`; the reference uses the
-    /// unseeded global generator, which makes the split non-reproducible. Two
-    /// things about the result are deterministic and are preserved: the
-    /// sentences are conserved, and **`wordCount` is never updated**, so both
-    /// halves report `word_count() == 0`.
-    pub fn split_in_train_and_test(
+    /// The predicate receives each sentence's index and contents and returns
+    /// `true` to put it in the first half. Verbora supplies no randomness: a
+    /// library that reached for a global generator would make the split
+    /// irreproducible, so the choice — round-robin, a seeded generator, a
+    /// document boundary — stays with the caller.
+    ///
+    /// ```
+    /// use verbora_tagger::Corpus;
+    ///
+    /// let corpus = Corpus::parse_brown("a_A\nb_B\nc_C\nd_D")?;
+    /// let (train, test) = corpus.partition(|i, _| i % 4 != 3);
+    /// assert_eq!(train.len(), 3);
+    /// assert_eq!(test.len(), 1);
+    /// assert_eq!(train.token_count() + test.token_count(), corpus.token_count());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn partition(
         &self,
-        percentage_train: f64,
-        mut next_random: impl FnMut() -> f64,
-    ) -> (Corpus<'a>, Corpus<'a>) {
-        let p = percentage_train / 100.0;
-        let mut train = Corpus::new();
-        let mut test = Corpus::new();
-        for sentence in &self.sentences {
-            if next_random() < p {
-                train.sentences.push(sentence.clone());
+        mut first: impl FnMut(usize, &[TaggedToken<'a>]) -> bool,
+    ) -> (Self, Self) {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for (i, sentence) in self.sentences.iter().enumerate() {
+            if first(i, sentence) {
+                a.push(sentence.clone());
             } else {
-                test.sentences.push(sentence.clone());
+                b.push(sentence.clone());
             }
         }
-        (train, test)
+        (Self { sentences: a }, Self { sentences: b })
     }
-
-    /// `generateFeatures()`.
-    ///
-    /// # Errors
-    ///
-    /// Always. The reference calls `sentence.generateFeatures(features)`, and
-    /// `Sentence` has no such method, so this method cannot succeed for any
-    /// non-empty corpus. It is reproduced because a caller reaching for it needs
-    /// to learn that, not to receive an empty list.
-    pub fn generate_features(&self) -> Result<Vec<String>, TaggerError> {
-        if self.sentences.is_empty() {
-            return Ok(Vec::new());
-        }
-        Err(TaggerError::GenerateFeaturesMissing)
-    }
-
-    /// `prettyPrint()`: The reference's body is entirely commented out, so this
-    /// produces nothing. Kept so the surface matches.
-    pub const fn pretty_print(&self) {}
 
     /// Detaches every token from the text it borrows.
     #[must_use]
@@ -278,133 +250,125 @@ impl<'a> Corpus<'a> {
             sentences: self
                 .sentences
                 .into_iter()
-                .map(Sentence::into_owned)
+                .map(|s| s.into_iter().map(TaggedToken::into_owned).collect())
                 .collect(),
-            word_count: self.word_count,
-            tag_frequencies: None,
-            pos_tags: None,
         }
     }
 }
 
-impl<'a> FromIterator<Sentence<'a>> for Corpus<'a> {
-    fn from_iter<T: IntoIterator<Item = Sentence<'a>>>(iter: T) -> Self {
+impl<'a> FromIterator<Vec<TaggedToken<'a>>> for Corpus<'a> {
+    fn from_iter<T: IntoIterator<Item = Vec<TaggedToken<'a>>>>(iter: T) -> Self {
         Self::from_sentences(iter.into_iter().collect())
     }
-}
-
-/// Convenience for building a sentence from `(token, tag)` pairs.
-#[must_use]
-pub fn sentence_from_pairs<'a>(pairs: &[(&'a str, Option<&'a str>)]) -> Sentence<'a> {
-    Sentence::from_words(
-        pairs
-            .iter()
-            .map(|(t, g)| TaggedWord::new(*t, g.map(|s| Cow::Owned(s.to_string()))))
-            .collect(),
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn brown_parsing_shapes() {
-        let c = Corpus::parse_brown(
-            "The_AT dog_NN runs_VBZ\n\n  \n Bad_JJ token_NN\nnoTag oneMore_XX\na_b_c_d\n",
-        );
-        assert_eq!(c.len(), 4);
-        assert_eq!(c.word_count(), 8);
-        // No underscore: no tag at all.
-        assert_eq!(c.sentences[2].tagged_words[0].tag(), None);
-        // Extra segments are discarded.
-        assert_eq!(c.sentences[3].tagged_words[0].token, "a");
-        assert_eq!(c.sentences[3].tagged_words[0].tag(), Some("b"));
+    fn tag(s: &'static str) -> Tag {
+        Tag::new(s).unwrap()
     }
 
     #[test]
-    fn brown_parsing_edge_inputs() {
-        for input in ["", "\n", "   \n\t\n"] {
-            let c = Corpus::parse_brown(input);
-            assert!(c.is_empty(), "{input:?}");
-            assert_eq!(c.word_count(), 0);
-        }
-        let c = Corpus::parse_brown("_leading NN_\n");
-        assert_eq!(c.sentences[0].tagged_words[0].token, "");
-        assert_eq!(c.sentences[0].tagged_words[1].tag(), Some(""));
+    fn brown_parsing() {
+        let c = Corpus::parse_brown("The_AT dog_NN runs_VBZ\n\n  \nBad_JJ token_NN\n").unwrap();
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.token_count(), 5);
+        assert_eq!(c.sentences()[0][0].token(), "The");
+        assert_eq!(c.sentences()[0][0].tag(), &tag("AT"));
+    }
+
+    /// The split is at the last `_`, so nothing is discarded.
+    #[test]
+    fn multi_underscore_tokens_keep_their_word() {
+        let c = Corpus::parse_brown("node_js_NN a_b_c_d").unwrap();
+        assert_eq!(c.sentences()[0][0].token(), "node_js");
+        assert_eq!(c.sentences()[0][0].tag(), &tag("NN"));
+        assert_eq!(c.sentences()[0][1].token(), "a_b_c");
+        assert_eq!(c.sentences()[0][1].tag(), &tag("d"));
     }
 
     #[test]
-    fn analyse_hoists_numeric_token_keys() {
-        let mut c = Corpus::from_sentences(vec![sentence_from_pairs(&[
-            ("2", Some("CD")),
-            ("a", Some("NN")),
-            ("a", Some("JJ")),
-            ("a", Some("NN")),
-            ("1", Some("CD")),
-        ])]);
-        c.analyse();
-        assert_eq!(c.tag_frequencies().unwrap().keys(), ["1", "2", "a"]);
-        assert_eq!(c.get_tags().unwrap(), ["CD", "NN", "JJ"]);
-        assert_eq!(c.word_count(), 5);
-    }
-
-    #[test]
-    fn undefined_tags_become_a_literal_key() {
-        let mut c =
-            Corpus::from_sentences(vec![sentence_from_pairs(&[("x", None), ("y", Some("NN"))])]);
-        c.analyse();
-        assert_eq!(c.get_tags().unwrap(), ["undefined", "NN"]);
-    }
-
-    #[test]
-    fn get_tags_requires_analyse() {
-        let c = Corpus::from_sentences(vec![sentence_from_pairs(&[("x", Some("NN"))])]);
-        assert_eq!(c.get_tags(), Err(TaggerError::ObjectKeysOfUndefined));
-    }
-
-    #[test]
-    fn generate_features_always_fails() {
-        let c = Corpus::from_sentences(vec![sentence_from_pairs(&[("x", Some("NN"))])]);
+    fn malformed_tokens_are_reported_not_dropped() {
         assert_eq!(
-            c.generate_features(),
-            Err(TaggerError::GenerateFeaturesMissing)
+            Corpus::parse_brown("The_AT noTag"),
+            Err(CorpusParseError::MissingTag {
+                line: 1,
+                token: "noTag".to_owned()
+            })
+        );
+        assert_eq!(
+            Corpus::parse_brown("a_A\n_leading"),
+            Err(CorpusParseError::EmptyToken {
+                line: 2,
+                token: "_leading".to_owned()
+            })
+        );
+        assert_eq!(
+            Corpus::parse_brown("NN_"),
+            Err(CorpusParseError::EmptyTag {
+                line: 1,
+                token: "NN_".to_owned()
+            })
         );
     }
 
     #[test]
-    fn split_conserves_sentences_but_not_the_word_count() {
-        let c = Corpus::from_sentences(vec![
-            sentence_from_pairs(&[("a", Some("NN"))]),
-            sentence_from_pairs(&[("b", Some("NN"))]),
-            sentence_from_pairs(&[("c", Some("NN"))]),
-        ]);
-        let mut seq = [0.1_f64, 0.9, 0.2].into_iter().cycle();
-        let (train, test) = c.split_in_train_and_test(60.0, || seq.next().expect("cycles"));
-        assert_eq!(train.len() + test.len(), c.len());
-        assert_eq!(train.word_count(), 0);
-        assert_eq!(test.word_count(), 0);
-        assert_eq!(c.word_count(), 3);
+    fn empty_inputs() {
+        for input in ["", "\n", "   \n\t\n", "\r\n"] {
+            let c = Corpus::parse_brown(input).unwrap();
+            assert!(c.is_empty(), "{input:?}");
+            assert_eq!(c.token_count(), 0);
+        }
     }
 
     #[test]
-    fn build_lexicon_orders_categories_by_frequency() {
-        let mut c = Corpus::from_sentences(vec![sentence_from_pairs(&[
-            ("run", Some("VB")),
-            ("run", Some("NN")),
-            ("run", Some("VB")),
-        ])]);
-        let lex = c.build_lexicon_detached();
-        assert_eq!(lex.tag_word("run").to_vec(), [Some("VB"), Some("NN")]);
+    fn crlf_parses_like_lf() {
+        let a = Corpus::parse_brown("a_A b_B\nc_C d_D\n").unwrap();
+        let b = Corpus::parse_brown("a_A b_B\r\nc_C d_D\r\n").unwrap();
+        assert_eq!(a, b);
     }
 
     #[test]
-    fn build_lexicon_keeps_ties_in_first_seen_order() {
-        let mut c = Corpus::from_sentences(vec![sentence_from_pairs(&[
-            ("x", Some("BB")),
-            ("x", Some("AA")),
-        ])]);
-        let lex = c.build_lexicon_detached();
-        assert_eq!(lex.tag_word("x").to_vec(), [Some("BB"), Some("AA")]);
+    fn build_lexicon_orders_by_frequency_then_first_appearance() {
+        let c = Corpus::parse_brown("run_VB run_NN run_VB\nx_BB x_AA").unwrap();
+        let lex = c.build_lexicon(tag("NN")).unwrap();
+        assert_eq!(
+            lex.tags("run").unwrap().collect::<Vec<_>>(),
+            [tag("VB"), tag("NN")]
+        );
+        assert_eq!(
+            lex.tags("x").unwrap().collect::<Vec<_>>(),
+            [tag("BB"), tag("AA")],
+            "equal counts keep first-appearance order"
+        );
+        assert_eq!(lex.len(), 2, "only the corpus vocabulary");
+        assert!(!lex.contains("dog"), "no bundled entries leaked in");
+    }
+
+    #[test]
+    fn build_lexicon_rejects_non_conforming_tokens() {
+        let c = Corpus::from_sentences(vec![vec![TaggedToken::new("a b", tag("NN"))]]);
+        assert!(c.build_lexicon(tag("NN")).is_err());
+    }
+
+    #[test]
+    fn partition_conserves_everything() {
+        let c = Corpus::parse_brown("a_A\nb_B\nc_C\nd_D").unwrap();
+        let (train, test) = c.partition(|i, _| i % 2 == 0);
+        assert_eq!(train.len(), 2);
+        assert_eq!(test.len(), 2);
+        assert_eq!(train.token_count() + test.token_count(), c.token_count());
+        assert_eq!(c.token_count(), 4, "the source is untouched");
+    }
+
+    #[test]
+    fn tags_are_in_first_appearance_order() {
+        let c = Corpus::parse_brown("x_CD a_NN a_JJ a_NN y_CD").unwrap();
+        assert_eq!(
+            c.tags().into_iter().cloned().collect::<Vec<_>>(),
+            [tag("CD"), tag("NN"), tag("JJ")]
+        );
     }
 }

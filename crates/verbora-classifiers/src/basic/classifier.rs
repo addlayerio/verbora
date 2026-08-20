@@ -1,27 +1,11 @@
-//! The reference `Classifier` shell shared by Bayes and logistic regression.
-//!
-//! Everything here is stateful and order-dependent, and three of the behaviours
-//! look like bugs a port would want to fix. They are not optional:
-//!
-//! * **The feature vector's layout is a reference object's enumeration order.**
-//!   `textToFeatures` walks `for (const feature in this.features)`, so adding a
-//!   token that *looks like an integer* hoists it to slot 0 and shifts every
-//!   previously learned index. See [`crate::ordmap`].
-//! * **`removeDocument` deletes feature entries rather than decrementing them**,
-//!   removes the *last* of several matching documents, and leaves `lastAdded`
-//!   untouched — so a subsequent `train()` silently skips documents and only
-//!   `retrain()` recovers.
-//! * **A document that tokenises to nothing is dropped in silence**, including
-//!   `""` and any all-stop-word string.
+use std::sync::{Arc, Mutex, PoisonError};
 
-use std::sync::Arc;
-
-use rustc_hash::{FxHashMap, FxHashSet};
-use verbora_core::whitespace::is_whitespace;
+use crate::whitespace::is_whitespace;
 
 use crate::dynval::DynValue;
 use crate::ordmap::OrderedMap;
-use crate::stemmer::{Stemmer, default_stemmer};
+use crate::stamp::{ArtifactStamp, StampError};
+use crate::stemmer::{StemCache, Stemmer, default_stemmer};
 
 /// One scored class, as `getClassifications` returns it.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,59 +66,96 @@ impl<'a> From<&'a Vec<String>> for Observation<'a> {
 
 /// Emitted during [`Classifier::train_with`].
 ///
-/// The reference emits these synchronously through `EventEmitter`, and the stream
-/// differs between the two classifiers: Bayes trains incrementally from
-/// `lastAdded`, whereas logistic regression discards its engine and re-emits
-/// every document on every call.
+/// Emitted synchronously, and the stream differs between the two classifiers:
+/// Bayes trains incrementally from `last_added`, whereas logistic regression
+/// discards its engine and re-emits every document on every call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingEvent {
     /// One document was handed to the engine.
     TrainedWithDocument {
         /// Index of the document in `docs`.
         index: usize,
-        /// `docs.length` as captured at the start of this `train()` call.
+        /// The document count captured at the start of this `train()` call.
         total: usize,
     },
-    /// The engine's own `train()` returned. Carries the literal `true` the
-    /// the reference emits.
+    /// The engine's own fit returned.
     DoneTraining,
 }
 
-/// What the `apparatus` engines throw.
+/// Why a classifier could not answer.
 ///
-/// Two of these are bare the reference strings rather than `Error` objects — code
-/// in the wild catches them by value — and the rest are `TypeError`s raised by
-/// dereferencing state that training would have created.
+/// Each variant is a distinct thing that is wrong and calls for a distinct
+/// response, which is why none of them is folded into another:
+///
+/// | Variant | What happened | What to do |
+/// |---|---|---|
+/// | [`NotTrained`](Self::NotTrained) | no class has ever been scored into the engine | add documents, then `train()` |
+/// | [`NotFitted`](Self::NotFitted) | documents were added but `train()` has not run since | call `train()` |
+/// | [`NoExamples`](Self::NoExamples) | `train()` was called with nothing to fit | add documents first |
+/// | [`StaleModel`](Self::StaleModel) | the vocabulary grew after the last fit | call `train()` again |
+/// | [`NoMinimum`](Self::NoMinimum) | gradient descent exhausted its iteration budget | the corpus is degenerate — inspect it |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassifierError {
-    /// `throw "Not Trained"` — `getClassifications` returned nothing.
+    /// The engine holds no classes at all, so there is nothing to rank.
+    ///
+    /// Reached by classifying against a classifier that has never been trained,
+    /// or one every document of which tokenised to nothing.
     NotTrained,
-    /// `TypeError: Cannot read properties of undefined (reading 'length')`,
-    /// from asking an untrained logistic regression for classifications.
-    LogisticRegressionNotTrained,
-    /// `TypeError: Cannot read properties of undefined (reading '0')`, from
-    /// `$M([])` when logistic regression is trained with no examples at all.
+    /// Examples were recorded but no parameters have been fitted to them.
+    ///
+    /// Logistic regression fits in `train()`; asking it for classifications
+    /// before then has no answer, as distinct from having an empty one.
+    NotFitted,
+    /// `train()` was asked to fit a model with no examples.
     NoExamples,
-    /// `throw 'unable to find minimum'` from `descendGradient`.
-    UnableToFindMinimum,
+    /// The fitted parameters and the feature vocabulary have different widths.
+    ///
+    /// A document added after `train()` extends the vocabulary without
+    /// refitting, so the learned weight vector no longer describes an
+    /// observation built from it. Both widths are carried because the
+    /// difference is the diagnosis.
+    StaleModel {
+        /// How many weights the fitted model holds.
+        weights: usize,
+        /// How many features the vocabulary now has.
+        observation: usize,
+    },
+    /// Gradient descent ran its whole iteration budget without the cost
+    /// decreasing, at every learning rate it tried.
+    NoMinimum,
 }
 
 impl std::fmt::Display for ClassifierError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::NotTrained => "Not Trained",
-            Self::LogisticRegressionNotTrained => {
-                "Cannot read properties of undefined (reading 'length')"
+        match self {
+            Self::NotTrained => f.write_str(
+                "classifier holds no classes; add documents and call train() before classifying",
+            ),
+            Self::NotFitted => f.write_str(
+                "classifier has examples but no fitted parameters; call train() before classifying",
+            ),
+            Self::NoExamples => {
+                f.write_str("train() was called with no examples; add documents first")
             }
-            Self::NoExamples => "Cannot read properties of undefined (reading '0')",
-            Self::UnableToFindMinimum => "unable to find minimum",
-        })
+            Self::StaleModel {
+                weights,
+                observation,
+            } => write!(
+                f,
+                "model was fitted over {weights} features but the vocabulary now has \
+                 {observation}; a document was added after the last train(), so call train() again"
+            ),
+            Self::NoMinimum => f.write_str(
+                "gradient descent found no decreasing cost at any learning rate within its \
+                 iteration budget",
+            ),
+        }
     }
 }
 
 impl std::error::Error for ClassifierError {}
 
-/// The `apparatus` engine behind a [`Classifier`].
+/// The learning algorithm behind a [`Classifier`].
 pub trait Engine: Default + Clone {
     /// Whether `train()` throws the engine away and starts over.
     ///
@@ -161,19 +182,42 @@ pub trait Engine: Default + Clone {
 
 /// `String.prototype.trim`.
 ///
-/// Trims the reference's `WhiteSpace | LineTerminator` set, which is not Rust's
+/// Trims a class label.
+///
+/// The trimmed set is [`crate::whitespace::is_whitespace`], which is not Rust's
 /// `char::is_whitespace`: `U+FEFF` is trimmed and `U+0085` is not.
 fn trim_units(s: &str) -> &str {
     s.trim_matches(is_whitespace)
 }
 
 /// Why a saved classifier could not be read back.
+///
+/// The three variants are three different things that can be wrong, and they
+/// call for three different responses:
+///
+/// * [`Self::Io`] — the bytes never arrived. Only [`Classifier::load`] produces
+///   this; [`Classifier::restore`] is handed the bytes and shares the type
+///   rather than duplicating it, the same way [`crate::RestoreError`] does for
+///   maximum entropy.
+/// * [`Self::Parse`] — the bytes are not JSON. The file is damaged or is not a
+///   saved classifier; repair or re-fetch it.
+/// * [`Self::Stamp`] — the bytes parsed, but the model was not trained by this
+///   build (or by any build that recorded which one it was). The file is
+///   intact; its *features* are the problem, and the fix is to retrain. See
+///   [`StampError`].
+///
+/// Collapsing the last two would leave a caller unable to tell a corrupt
+/// download from a model that merely needs retraining, which is why they are
+/// separate.
 #[derive(Debug)]
 pub enum LoadError {
     /// The file could not be read.
     Io(std::io::Error),
     /// The file was not valid JSON.
     Parse(crate::dynval::ParseError),
+    /// The model carries no usable compatibility stamp, or one from another
+    /// build.
+    Stamp(StampError),
 }
 
 impl std::fmt::Display for LoadError {
@@ -181,6 +225,7 @@ impl std::fmt::Display for LoadError {
         match self {
             Self::Io(e) => write!(f, "{e}"),
             Self::Parse(e) => write!(f, "{e}"),
+            Self::Stamp(e) => write!(f, "{e}"),
         }
     }
 }
@@ -190,11 +235,34 @@ impl std::error::Error for LoadError {
         match self {
             Self::Io(e) => Some(e),
             Self::Parse(e) => Some(e),
+            Self::Stamp(e) => Some(e),
         }
     }
 }
 
+impl From<StampError> for LoadError {
+    fn from(e: StampError) -> Self {
+        Self::Stamp(e)
+    }
+}
+
 /// A document classifier: vocabulary, documents, and an engine.
+///
+/// The shell shared by Bayes and logistic regression.
+///
+/// Everything here is stateful and order-dependent, and three of the behaviours
+/// look like bugs a port would want to fix. They are not optional:
+///
+/// * **The feature vector's layout is a reference object's enumeration order.**
+///   `textToFeatures` walks `for (const feature in this.features)`, so adding a
+///   token that *looks like an integer* hoists it to slot 0 and shifts every
+///   previously learned index. See [`OrderedMap`](crate::OrderedMap).
+/// * **`removeDocument` deletes feature entries rather than decrementing them**,
+///   removes the *last* of several matching documents, and leaves `lastAdded`
+///   untouched — so a subsequent `train()` silently skips documents and only
+///   `retrain()` recovers.
+/// * **A document that tokenises to nothing is dropped in silence**, including
+///   `""` and any all-stop-word string.
 ///
 /// The two concrete classifiers are the type aliases
 /// [`BayesClassifier`](crate::BayesClassifier) and
@@ -208,7 +276,30 @@ pub struct Classifier<E: Engine> {
     /// `None` until `setOptions` is called — the property genuinely does not
     /// exist before then, and its absence is visible in the serialised JSON.
     keep_stops: Option<bool>,
+    /// `token → stem`, filled by whichever calls happen to run.
+    ///
+    /// Not part of the classifier's state in any observable sense: it changes
+    /// no answer (see [`StemCache`]), is never serialised, and starts empty in
+    /// a `restore`d classifier. The `Mutex` exists only because `classify`
+    /// takes `&self` — the training entry points reach the map through
+    /// `get_mut` and never lock at all — and it is only ever *tried*, never
+    /// waited on, so a caller that finds it busy re-stems rather than blocking
+    /// on it (`par_classify_batch` sidesteps the question entirely by giving
+    /// each worker a memo of its own).
+    stem_cache: Mutex<StemCache>,
 }
+
+/// How many distinct tokens a classifier's [`StemCache`] may hold before it is
+/// emptied and refilled.
+///
+/// A bound is needed because `classify` may be fed unbounded vocabulary for
+/// the life of a long-running process, and dropping the whole map is the
+/// cheapest eviction that cannot get the answer wrong. The number is high
+/// enough that a realistic corpus never reaches it (a 1 000-document corpus
+/// interns a few thousand distinct tokens) and small enough that the memo
+/// stays far below what `docs` already costs — that field stores every token
+/// of every training document, so the memo is never the dominant allocation.
+const STEM_CACHE_CAP: usize = 1 << 16;
 
 impl<E: Engine> std::fmt::Debug for Classifier<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -242,15 +333,14 @@ impl<E: Engine> Classifier<E> {
             stemmer,
             last_added: 0,
             keep_stops: None,
+            stem_cache: Mutex::new(StemCache::new()),
         }
     }
 
     /// `setOptions({ keepStops })`.
     ///
-    /// The reference is `this.keepStops = !!(options.keepStops)`, so any truthy
-    /// value becomes `true`. It affects string documents and string observations
-    /// only — token slices bypass the stemmer, and therefore the stop-word list,
-    /// entirely.
+    /// Affects [`Observation::Text`] only — an [`Observation::Tokens`] slice
+    /// bypasses the stemmer, and therefore the stop-word list, entirely.
     pub fn set_keep_stops(&mut self, keep_stops: bool) {
         self.keep_stops = Some(keep_stops);
     }
@@ -293,17 +383,25 @@ impl<E: Engine> Classifier<E> {
 
     /// Tokenises an observation, or takes its tokens verbatim.
     ///
-    /// TODO(perf): stem memoization — a per-classifier token→stem cache used by
-    /// `add_document`/`remove_document` — is the single largest remaining win
-    /// for `bayes_train` (Porter stemming is ~65% of it on repeated-vocabulary
-    /// corpora, and `stem_token` is pure for the default English stemmer). It
-    /// waits on a cached tokenize-and-stem entry point in `verbora-stemmers`;
-    /// the `classify` path must stay uncached because it takes `&self`.
-    fn resolve(&self, observation: Observation<'_>) -> Vec<String> {
+    /// Takes `&mut self` purely to reach the stem memo without locking: every
+    /// caller (`add_document`, `remove_document`) already holds the classifier
+    /// mutably. Porter stemming is around 65% of training time on a
+    /// repeated-vocabulary corpus, and each distinct token's stem is the same
+    /// every time, so the memo is where that 65% goes.
+    fn resolve(&mut self, observation: Observation<'_>) -> Vec<String> {
         match observation {
-            Observation::Text(s) => self
-                .stemmer
-                .tokenize_and_stem(s, self.keep_stops.unwrap_or(false)),
+            Observation::Text(s) => {
+                let keep_stops = self.keep_stops.unwrap_or(false);
+                let cache = self
+                    .stem_cache
+                    .get_mut()
+                    .unwrap_or_else(PoisonError::into_inner);
+                let out = self.stemmer.tokenize_and_stem_cached(s, keep_stops, cache);
+                if cache.len() > STEM_CACHE_CAP {
+                    cache.clear();
+                }
+                out
+            }
             Observation::Tokens(t) => t.to_vec(),
         }
     }
@@ -322,13 +420,22 @@ impl<E: Engine> Classifier<E> {
         for token in &text {
             // `(this.features[token] || 0) + 1`: a truthiness test, so a count
             // that somehow reached 0 would restart at 1 rather than at 1 + 1.
-            let previous = self
-                .features
-                .get(token)
-                .copied()
-                .filter(|v| *v != 0.0 && !v.is_nan())
-                .unwrap_or(0.0);
-            self.features.insert(token.clone(), previous + 1.0);
+            //
+            // A token already in the vocabulary is updated in place: assigning
+            // to an existing key keeps its position, so this is the same
+            // `insert` minus the key clone and the second hash lookup — and,
+            // because the key set does not change, minus the enumeration
+            // memo's invalidation, which matters on corpora where almost every
+            // token is a repeat.
+            if let Some(count) = self.features.get_mut(token) {
+                *count = if *count != 0.0 && !count.is_nan() {
+                    *count + 1.0
+                } else {
+                    1.0
+                };
+            } else {
+                self.features.insert(token.clone(), 1.0);
+            }
         }
         self.docs.push(Document { label, text });
     }
@@ -354,41 +461,67 @@ impl<E: Engine> Classifier<E> {
         for token in &text {
             self.features.remove(token);
         }
-        // `lastAdded` is deliberately left alone, matching the reference.
+        // `last_added` is deliberately left alone: a later `train()` therefore
+        // skips documents, and only `retrain()` recovers. Inherited behaviour
+        // this migration has not yet redefined.
     }
 
     /// `textToFeatures(observation)`: a 0/1 vector, one slot per known feature.
     ///
-    /// The slot order is [`OrderedMap::enumeration_order`], recomputed on every call — which
-    /// is exactly why adding an integer-like token invalidates a trained model.
+    /// The slot order is [`OrderedMap::enumeration_order`] as it stands *now* —
+    /// which is exactly why adding an integer-like token invalidates a trained
+    /// model, and why the memo behind that order is thrown away by every
+    /// mutation that could reshuffle it.
     ///
     /// An `Observation::Tokens` input is already an owned `&[String]` the
-    /// caller holds; going through [`Self::resolve`] would `.to_vec()` it
-    /// (cloning every token) just to borrow `&str`s back out a line later. This
-    /// builds the presence set straight from the borrow instead — `resolve`
-    /// still owns the `Observation::Text` path, which genuinely needs the
-    /// stemmer's fresh `Vec<String>`.
+    /// caller holds; going through the crate-internal `resolve` step that
+    /// [`Self::add_document`] uses would `.to_vec()` it (cloning every token)
+    /// just to borrow `&str`s back out a line later. This builds the presence
+    /// set straight from the borrow instead — `resolve` still owns the
+    /// `Observation::Text` path, which genuinely needs the stemmer's fresh
+    /// `Vec<String>`, and the memo that makes that path cheap is
+    /// [`StemCache`].
     pub fn text_to_features<'a>(&self, observation: impl Into<Observation<'a>>) -> Vec<u8> {
         match observation.into() {
-            Observation::Text(s) => {
-                let tokens = self
-                    .stemmer
-                    .tokenize_and_stem(s, self.keep_stops.unwrap_or(false));
-                self.features_for(tokens.iter().map(String::as_str))
-            }
+            // The classifier's own memo is *tried*, never waited on: a
+            // blocking lock here would make a parallel fan-out serialise on
+            // the one thing every one of its tasks does. A caller that finds
+            // it busy re-stems instead, which costs time and changes nothing
+            // else — the memo holds nothing but stems the stemmer itself
+            // produced.
+            Observation::Text(s) => match self.stem_cache.try_lock() {
+                Ok(mut cache) => self.features_from_text(s, &mut cache),
+                Err(_) => {
+                    let tokens = self
+                        .stemmer
+                        .tokenize_and_stem(s, self.keep_stops.unwrap_or(false));
+                    self.features_for(tokens.iter().map(String::as_str))
+                }
+            },
             Observation::Tokens(t) => self.features_for(t.iter().map(String::as_str)),
         }
     }
 
     /// The shared tail of [`Self::text_to_features`]: a 0/1 vector over
     /// [`OrderedMap::enumeration_order`], one slot per known feature.
+    ///
+    /// Driven by the *tokens*, not by the features. "Slot `s` is 1 iff some
+    /// token equals the feature enumerated at `s`" reads equally well from
+    /// either end, but a probe holds a dozen tokens where a trained
+    /// vocabulary holds hundreds, so asking [`OrderedMap::slot_of`] once per
+    /// token replaces one hash probe per *feature* — and drops the
+    /// `enumeration_order` vector the per-feature form had to materialise.
+    /// A token outside the vocabulary has no slot and contributes nothing,
+    /// exactly as it failed the per-feature membership test; a token repeated
+    /// in the document sets the same slot twice, which is still 1.
     fn features_for<'b>(&self, tokens: impl Iterator<Item = &'b str>) -> Vec<u8> {
-        let present: FxHashSet<&str> = tokens.collect();
-        self.features
-            .enumeration_order()
-            .into_iter()
-            .map(|f| u8::from(present.contains(f)))
-            .collect()
+        let mut out = vec![0u8; self.features.len()];
+        for token in tokens {
+            if let Some(slot) = self.features.slot_of(token) {
+                out[slot] = 1;
+            }
+        }
+        out
     }
 
     /// `train()`, discarding the events.
@@ -411,29 +544,24 @@ impl<E: Engine> Classifier<E> {
         }
         let total = self.docs.len();
         if self.last_added < total {
-            // The reference calls `textToFeatures` per document, which recomputes
-            // the enumeration order — an O(vocabulary) allocation and sort — for
+            // Calling `text_to_features` per document would recompute the
+            // enumeration order — an O(vocabulary) allocation and sort — for
             // every document in the loop. But nothing inside the loop touches
             // `features` (only `addDocument`/`removeDocument` do), so the order,
-            // and with it the whole token→slot layout, is loop-invariant.
-            // Computing both once and marking each document's tokens into a
-            // reused buffer produces byte-identical observations: a slot is 1
-            // exactly when the document contains that feature, which is the same
+            // and with it the whole token→slot layout, is loop-invariant: the
+            // memo behind `slot_of` is filled by the first token and answers
+            // every later one. Marking each document's tokens into a reused
+            // buffer produces byte-identical observations: a slot is 1 exactly
+            // when the document contains that feature, which is the same
             // membership test `text_to_features` runs per slot.
-            let order = self.features.enumeration_order();
-            let slot_of: FxHashMap<&str, usize> = order
-                .iter()
-                .enumerate()
-                .map(|(slot, &feature)| (feature, slot))
-                .collect();
-            let mut observation = vec![0u8; order.len()];
+            let mut observation = vec![0u8; self.features.len()];
             for i in self.last_added..total {
                 observation.fill(0);
                 for token in &self.docs[i].text {
                     // A token absent from the vocabulary (never added, or
                     // deleted by `removeDocument`) contributes nothing, exactly
                     // as it fails `text_to_features`'s presence test.
-                    if let Some(&slot) = slot_of.get(token.as_str()) {
+                    if let Some(slot) = self.features.slot_of(token.as_str()) {
                         observation[slot] = 1;
                     }
                 }
@@ -478,8 +606,9 @@ impl<E: Engine> Classifier<E> {
     ///
     /// # Errors
     ///
-    /// [`ClassifierError::NotTrained`] when there are no classes to score —
-    /// `apparatus` throws the bare string `"Not Trained"` here.
+    /// [`ClassifierError::NotTrained`] when there are no classes to score, and
+    /// whatever the engine reports otherwise — [`ClassifierError::NotFitted`]
+    /// or [`ClassifierError::StaleModel`] for logistic regression.
     pub fn classify<'a>(
         &self,
         observation: impl Into<Observation<'a>>,
@@ -504,37 +633,50 @@ impl<E: Engine> Classifier<E> {
     /// exactly this reason) is `Send + Sync`. Classifying many independent
     /// texts against the same trained classifier is therefore embarrassingly
     /// parallel with zero coordination cost between calls. This function is
-    /// exactly `texts.par_iter().map(|t| self.classify(*t)).collect()` — a
-    /// thin fan-out over the existing sequential primitive, not a second
-    /// implementation of it. `get_classifications` and `text_to_features` are
-    /// untouched; if you need those shapes in parallel, apply the same
-    /// `par_iter().map(...)` pattern at your own call site (see
-    /// `site/performance/parallelism.md`).
+    /// `texts.par_iter().map(|t| self.classify(*t)).collect()` with one
+    /// difference that is invisible in the output — each worker thread keeps
+    /// its own stem memo, see below — not a second implementation of the
+    /// scoring. `get_classifications` and `text_to_features` are untouched; if
+    /// you need those shapes in parallel, apply the same `par_iter().map(...)`
+    /// pattern at your own call site (see `site/performance/parallelism.md`).
+    ///
+    /// # Why each task gets its own stem memo
+    ///
+    /// A sequential `classify` answers from the classifier's own
+    /// [`StemCache`], which it reaches through a `Mutex` it only ever *tries*
+    /// — so a fan-out that shared it would find it busy, fall back to
+    /// re-stemming, and pay the full Porter cost on every token of every text.
+    /// Instead each `rayon` worker initialises an empty memo once and warms it
+    /// over the texts it happens to be handed, which needs no synchronisation
+    /// at all. The tokens are identical either way (a memo holds nothing but
+    /// stems the stemmer itself produced), so this changes throughput, never
+    /// an answer.
     ///
     /// # When to reach for it vs. the sequential loop
     ///
     /// Reach for this only when the *batch*, not the single classification, is
     /// the unit of work — for example, labelling every document in a large
-    /// corpus offline. A single `classify` call costs on the order of 13 µs
-    /// for a Bayes classifier trained on a few dozen documents (this crate's
-    /// own `bayes/predict/classify` benchmark), and a `rayon` task costs on
-    /// the order of a microsecond to schedule, so a handful of texts is close
-    /// to the break-even point — measure before reaching for this on small
+    /// corpus offline. A single `classify` call costs on the order of 2 µs for
+    /// a Bayes classifier trained on a few dozen documents (this crate's own
+    /// `bayes/predict/classify` benchmark), and a `rayon` task costs on the
+    /// order of a microsecond to schedule, so a handful of texts is well below
+    /// the break-even point — measure before reaching for this on small
     /// batches, and prefer a plain `texts.iter().map(Classifier::classify)`
-    /// loop there. Batches in the thousands amortise the scheduling cost
-    /// easily; see this crate's `bayes/predict_batch` benchmark for measured
-    /// crossover numbers.
+    /// loop there. Batches in the thousands amortise both the scheduling cost
+    /// and each worker's memo warm-up easily; see this crate's
+    /// `bayes/predict_batch` benchmark for measured crossover numbers.
     ///
     /// # Allocation behaviour
     ///
     /// One `Vec<Result<String, ClassifierError>>` sized to `texts.len()` for
-    /// the output, plus whatever [`Classifier::classify`] itself allocates per
-    /// text (a fresh token `Vec<String>` from the stemmer, a 0/1 feature
-    /// vector, and the engine's own per-call scoring allocations). No
-    /// additional buffering, no locking, no per-call thread-pool construction
-    /// — this uses whichever global `rayon` pool is already installed (or
-    /// `rayon`'s default one), so pool configuration remains the caller's
-    /// responsibility, not this crate's.
+    /// the output, one [`StemCache`] per participating worker thread, plus
+    /// whatever [`Classifier::classify`] itself allocates per text (a fresh
+    /// token `Vec<String>` from the stemmer, a 0/1 feature vector, and the
+    /// engine's own per-call scoring allocations). No further buffering, no
+    /// locking, no per-call thread-pool construction — this uses whichever
+    /// global `rayon` pool is already installed (or `rayon`'s default one), so
+    /// pool configuration remains the caller's responsibility, not this
+    /// crate's.
     ///
     /// # Order and errors
     ///
@@ -549,16 +691,53 @@ impl<E: Engine> Classifier<E> {
         E: Sync,
     {
         use rayon::prelude::*;
-        texts.par_iter().map(|text| self.classify(*text)).collect()
+        texts
+            .par_iter()
+            .map_init(StemCache::new, |cache, text| {
+                let observation = self.features_from_text(text, cache);
+                self.engine
+                    .classifications(&observation)?
+                    .into_iter()
+                    .next()
+                    .map(|c| c.label)
+                    .ok_or(ClassifierError::NotTrained)
+            })
+            .collect()
     }
 
-    /// The classifier as `JSON.stringify` would serialise it.
+    /// The `Observation::Text` half of [`Self::text_to_features`], against a
+    /// memo the caller owns rather than the classifier's own.
     ///
-    /// The key order, the presence of the `EventEmitter` internals, the empty
-    /// `stemmer` object and the `Threads: null` sentinel are all part of the
-    /// recorded shape that the reference's own `load()` reads back.
+    /// Identical work to the shared-memo path — same stemmer call, same
+    /// token→slot marking — so which memo answers a token is unobservable.
+    fn features_from_text(&self, text: &str, cache: &mut StemCache) -> Vec<u8> {
+        let tokens =
+            self.stemmer
+                .tokenize_and_stem_cached(text, self.keep_stops.unwrap_or(false), cache);
+        if cache.len() > STEM_CACHE_CAP {
+            cache.clear();
+        }
+        self.features_for(tokens.iter().map(String::as_str))
+    }
+
+    /// The classifier as [`Self::from_value`] reads it back.
+    ///
+    /// The object opens with the compatibility stamp — see [`ArtifactStamp`](crate::ArtifactStamp) for
+    /// what it covers and why loading without one is refused — and the rest is
+    /// the recorded shape: the key order, the `EventEmitter` internals, the
+    /// empty `stemmer` object and the `Threads: null` sentinel.
+    ///
+    /// The stamp is written here rather than by an opt-in wrapper because an
+    /// unstamped model is unvalidatable for the whole of its life: the
+    /// boundaries its features were derived under are not recoverable after the
+    /// fact, so a path that could produce one would be a path that produces
+    /// files nobody can ever safely load.
     pub fn to_value(&self) -> DynValue {
         let mut fields = vec![
+            (
+                crate::stamp::STAMP_PROPERTY.to_owned(),
+                ArtifactStamp::for_stemmer(&*self.stemmer).to_value(),
+            ),
             ("_events".to_owned(), DynValue::Obj(vec![])),
             ("_eventsCount".to_owned(), DynValue::Num(0.0)),
             ("classifier".to_owned(), self.engine.to_value()),
@@ -616,25 +795,48 @@ impl<E: Engine> Classifier<E> {
 
     /// `restore(JSON.parse(data))`: rebuilds a classifier from saved bytes.
     ///
-    /// Uses the default stemmer, matching `stemmer || PorterStemmer`. Note that
-    /// The reference's restored object permanently loses its parallel-training
-    /// methods (they are functions, which JSON drops); the Rust port has no such
-    /// methods to lose.
+    /// Rebuilds with [`default_stemmer`]. A model trained through
+    /// [`Self::with_stemmer`] carries a different stemmer fingerprint in its
+    /// stamp and is **refused** here rather than silently rekeyed; read it back
+    /// with [`Self::restore_with`].
     ///
     /// # Errors
     ///
-    /// Returns the parse error if `json` is not valid JSON. Fields that are
-    /// missing or of the wrong type fall back to their empty values, exactly as
-    /// the reference does by leaving them `undefined`.
-    pub fn restore(json: &str) -> Result<Self, crate::dynval::ParseError> {
-        Ok(Self::from_value(&DynValue::parse(json)?))
+    /// [`LoadError::Parse`] if `json` is not valid JSON, and [`LoadError::Stamp`]
+    /// if it is valid JSON that this build must not read: a model saved before
+    /// stamping existed, one whose stamp is damaged, or one from a build whose
+    /// word boundaries differ from this one's. The two are separate because a
+    /// damaged file and a stale model need different fixes; see [`LoadError`].
+    /// [`LoadError::Io`] cannot occur here — the type is shared with
+    /// [`Self::load`].
+    ///
+    /// Past the stamp, fields that are missing or of the wrong type fall back
+    /// to their empty values rather than failing: the stamp is what decides
+    /// whether an artifact may be read at all.
+    pub fn restore(json: &str) -> Result<Self, LoadError> {
+        Self::restore_with(json, default_stemmer())
     }
 
-    /// `save(filename)`: writes [`Self::to_json`] to `path` as UTF-8.
+    /// [`Self::restore`], rebuilding with a stemmer you name.
     ///
-    /// The reference's `save` is asynchronous and reports through a callback,
-    /// and swallows the error entirely when no callback is given; this returns
-    /// it instead.
+    /// Use this whenever the model was trained through
+    /// [`Self::with_stemmer`]. The stamp records which stemmer keyed the
+    /// features, so passing the wrong one is refused rather than silently
+    /// mispredicting — but naming the right one is still the caller's job,
+    /// because only the caller knows it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::restore`].
+    pub fn restore_with(
+        json: &str,
+        stemmer: Arc<dyn Stemmer + Send + Sync>,
+    ) -> Result<Self, LoadError> {
+        let value = DynValue::parse(json).map_err(LoadError::Parse)?;
+        Ok(Self::from_value_with(&value, stemmer)?)
+    }
+
+    /// Writes [`Self::to_json`] to `path` as UTF-8.
     ///
     /// # Errors
     ///
@@ -647,17 +849,50 @@ impl<E: Engine> Classifier<E> {
     ///
     /// # Errors
     ///
-    /// [`LoadError::Io`] if the file cannot be read, [`LoadError::Parse`] if it
-    /// is not valid JSON. The reference does not catch the parse failure at all
-    /// — it surfaces as an uncaught throw inside the `fs` callback.
+    /// [`LoadError::Io`] if the file cannot be read, and whatever
+    /// [`Self::restore`] reports otherwise.
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, LoadError> {
-        let body = std::fs::read_to_string(path).map_err(LoadError::Io)?;
-        Self::restore(&body).map_err(LoadError::Parse)
+        Self::load_with(path, default_stemmer())
     }
 
-    /// Rebuilds a classifier from an already-parsed serialised shape.
-    pub fn from_value(value: &DynValue) -> Self {
-        let mut out = Self::new();
+    /// [`Self::load`], rebuilding with a stemmer you name.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load`].
+    pub fn load_with(
+        path: impl AsRef<std::path::Path>,
+        stemmer: Arc<dyn Stemmer + Send + Sync>,
+    ) -> Result<Self, LoadError> {
+        let body = std::fs::read_to_string(path).map_err(LoadError::Io)?;
+        Self::restore_with(&body, stemmer)
+    }
+
+    /// Rebuilds a classifier from an already-parsed saved shape.
+    ///
+    /// # Errors
+    ///
+    /// [`StampError`] when `value` does not carry this build's compatibility
+    /// stamp. This entry point is checked for the same reason [`Self::restore`]
+    /// is — it restores persisted feature keys, and a checked file reader in
+    /// front of an unchecked value reader would leave the hazard exactly where
+    /// it was.
+    pub fn from_value(value: &DynValue) -> Result<Self, StampError> {
+        Self::from_value_with(value, default_stemmer())
+    }
+
+    /// [`Self::from_value`], rebuilding with a stemmer you name.
+    ///
+    /// # Errors
+    ///
+    /// [`StampError`] when `value` was not keyed by `stemmer` under this
+    /// build's word boundaries and case fold.
+    pub fn from_value_with(
+        value: &DynValue,
+        stemmer: Arc<dyn Stemmer + Send + Sync>,
+    ) -> Result<Self, StampError> {
+        crate::stamp::verify_stamp_against(value, ArtifactStamp::for_stemmer(&*stemmer))?;
+        let mut out = Self::with_stemmer(stemmer);
         if let Some(engine) = value.get("classifier") {
             out.engine = E::from_value(engine);
         }
@@ -683,18 +918,18 @@ impl<E: Engine> Classifier<E> {
         if let Some(DynValue::Bool(b)) = value.get("keepStops") {
             out.keep_stops = Some(*b);
         }
-        out
+        Ok(out)
     }
 }
 
-/// Sorts scores descending by value, the way the reference engine's `sort` does.
+/// Sorts scores descending by value.
 ///
 /// Two details are load-bearing. The sort must be **stable**, so exact ties come
-/// back in the engine's own enumeration order — three classes all scoring 0.5
-/// are recorded as `['2','10','x']`, which is that order and not any sorted one.
-/// And the comparator must treat a `NaN` difference as "equal": the reference engine reads a `NaN`
-/// comparator result as "not greater than zero" and leaves the pair alone, while
-/// `partial_cmp().unwrap()` would panic.
+/// back in the engine's own enumeration order rather than in some order the sort
+/// happened to produce. And the comparator must treat a `NaN` difference as
+/// "equal" rather than panicking: `partial_cmp().unwrap()` would abort a whole
+/// ranking over one unorderable score, which a caller-restored model can
+/// contain.
 pub(crate) fn sort_descending(scores: &mut [Classification]) {
     scores.sort_by(|x, y| {
         let d = y.value - x.value;
@@ -718,7 +953,7 @@ mod tests {
         assert_eq!(trim_units("  padded  "), "padded");
         assert_eq!(trim_units("\t\n padded \r\n"), "padded");
         assert_eq!(trim_units("\u{feff}padded\u{feff}"), "padded");
-        // U+0085 NEXT LINE is not the reference whitespace.
+        // U+0085 NEXT LINE is not in the trimmed set.
         assert_eq!(trim_units("\u{85}x\u{85}"), "\u{85}x\u{85}");
         assert_eq!(trim_units("   "), "");
     }
@@ -808,5 +1043,145 @@ mod tests {
         sort_descending(&mut scores);
         let labels: Vec<&str> = scores.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, vec!["a", "c", "b"]);
+    }
+
+    // -- the compatibility stamp --------------------------------------------
+
+    /// A trained model to serialize and then tamper with.
+    fn saved() -> String {
+        let mut c = BayesClassifier::new();
+        c.add_document("my unit-tests failed.", "software");
+        c.add_document("tomorrow we will do standard tests", "other");
+        c.train().expect("two labelled documents train");
+        c.to_json()
+    }
+
+    /// Where the stamp member ends in a saved model: `to_value` writes it
+    /// first, so everything from `,"_events"` onwards is the model proper.
+    fn body_start(json: &str) -> usize {
+        assert!(json.starts_with(r#"{"_verbora":"#), "{json}");
+        json.find(r#","_events""#)
+            .expect("the stamp is followed by _events")
+    }
+
+    /// Replaces the `_verbora` member of a saved model with `replacement`,
+    /// leaving every other byte alone.
+    fn with_stamp(json: &str, replacement: &str) -> String {
+        format!(r#"{{"_verbora":{replacement}{}"#, &json[body_start(json)..])
+    }
+
+    /// A model trained under different word boundaries is refused, rather than
+    /// classifying against a feature index that no longer describes its
+    /// vocabulary.
+    #[test]
+    fn a_model_from_another_unicode_version_is_refused() {
+        let current = ArtifactStamp::for_stemmer(&*default_stemmer());
+        let (major, minor, update) = current.unicode;
+        let json = with_stamp(
+            &saved(),
+            &format!(
+                r#"{{"schema":{},"unicode":"{}.{minor}.{update}","lowercase":"{:016x}","stemmer":"{:016x}"}}"#,
+                current.schema,
+                major + 1,
+                current.lowercase.expect("this build stamps a fingerprint"),
+                current
+                    .stemmer
+                    .expect("a classifier stamp names its stemmer")
+            ),
+        );
+        let Err(LoadError::Stamp(StampError::Incompatible(mismatch))) =
+            BayesClassifier::restore(&json)
+        else {
+            panic!("a foreign Unicode version must be refused");
+        };
+        assert_eq!(mismatch.found.unicode, (major + 1, minor, update));
+        assert_eq!(mismatch.expected, current);
+    }
+
+    /// A schema bump refuses older models even when the UCD has not moved — the
+    /// case a Unicode version alone cannot see.
+    #[test]
+    fn a_model_from_another_schema_is_refused() {
+        let current = ArtifactStamp::for_stemmer(&*default_stemmer());
+        let (major, minor, update) = current.unicode;
+        let json = with_stamp(
+            &saved(),
+            &format!(
+                r#"{{"schema":{},"unicode":"{major}.{minor}.{update}","lowercase":"{:016x}","stemmer":"{:016x}"}}"#,
+                current.schema + 1,
+                current.lowercase.expect("this build stamps a fingerprint"),
+                current
+                    .stemmer
+                    .expect("a classifier stamp names its stemmer")
+            ),
+        );
+        let Err(LoadError::Stamp(StampError::Incompatible(mismatch))) =
+            BayesClassifier::restore(&json)
+        else {
+            panic!("a foreign schema must be refused");
+        };
+        assert_eq!(mismatch.found.schema, current.schema + 1);
+        assert_eq!(mismatch.expected, current);
+    }
+
+    /// The dangerous artifact: a model saved before stamping existed. It parses,
+    /// it looks exactly like a model, and nothing in it records the boundaries
+    /// its features were derived under — so it is refused, under its own
+    /// variant.
+    #[test]
+    fn a_model_saved_before_stamping_is_refused_as_unstamped() {
+        let saved = saved();
+        let pre_stamp = format!("{{{}", &saved[body_start(&saved) + 1..]);
+        assert!(matches!(
+            BayesClassifier::restore(&pre_stamp),
+            Err(LoadError::Stamp(StampError::Missing))
+        ));
+        // The same value handed to the in-memory constructor is refused
+        // identically: a checked file reader in front of an unchecked value
+        // reader would not be a refusal at all.
+        let value = DynValue::parse(&pre_stamp).expect("valid JSON");
+        assert_eq!(
+            BayesClassifier::from_value(&value).err(),
+            Some(StampError::Missing)
+        );
+    }
+
+    /// A damaged file and a stale one are different problems and are reported as
+    /// different errors.
+    #[test]
+    fn a_corrupt_file_is_distinguishable_from_an_incompatible_one() {
+        assert!(matches!(
+            BayesClassifier::restore("{not json"),
+            Err(LoadError::Parse(_))
+        ));
+        let damaged = with_stamp(&saved(), r#""17.0.0""#);
+        assert!(matches!(
+            BayesClassifier::restore(&damaged),
+            Err(LoadError::Stamp(StampError::Malformed))
+        ));
+    }
+
+    /// What `to_json` writes is what `restore` accepts, and the stamp is the
+    /// first thing in it.
+    #[test]
+    fn a_saved_model_carries_this_builds_stamp() {
+        let json = saved();
+        let stamp = ArtifactStamp::for_stemmer(&*default_stemmer());
+        let (major, minor, update) = stamp.unicode;
+        let lowercase = stamp
+            .lowercase
+            .expect("this build's stamp always carries a fingerprint");
+        let stemmer = stamp
+            .stemmer
+            .expect("a classifier's stamp always names its stemmer");
+        assert!(
+            json.starts_with(&format!(
+                r#"{{"_verbora":{{"schema":{},"unicode":"{major}.{minor}.{update}","lowercase":"{lowercase:016x}","stemmer":"{stemmer:016x}"}},"#,
+                stamp.schema
+            )),
+            "{json}"
+        );
+        let revived = BayesClassifier::restore(&json).expect("its own output round-trips");
+        assert_eq!(revived.to_json(), json);
     }
 }

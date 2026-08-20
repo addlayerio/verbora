@@ -38,13 +38,11 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use verbora_tokenizers::classes;
-
 use crate::among::{AmongTable, Buf, UnionTable};
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::charsets::is_es_vowel;
 use crate::data::gates::gate_es;
-use crate::stopwords::{self, Language};
+use crate::stopwords::Language;
 use crate::units::{ends_with, longest_suffix, slen, text, units};
 
 /// The Spanish Snowball stemmer.
@@ -187,7 +185,8 @@ impl PorterStemmerEs {
     /// regions.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn is_vowel(&self, c: &str) -> bool {
         c.encode_utf16().any(is_vowel)
@@ -196,7 +195,8 @@ impl PorterStemmerEs {
     /// The index of the next vowel at or after `start`, or the length.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn next_vowel_position(&self, word: &str, start: usize) -> usize {
         let w = units(word);
@@ -208,7 +208,8 @@ impl PorterStemmerEs {
     /// The index of the next consonant at or after `start`, or the length.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn next_consonant_position(&self, word: &str, start: usize) -> usize {
         let w = units(word);
@@ -220,7 +221,8 @@ impl PorterStemmerEs {
     /// Whether `word` ends with `suffix`, guarding on length as the reference does.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn ends_in(&self, word: &str, suffix: &str) -> bool {
         slen(word) >= slen(suffix) && ends_with(&units(word), suffix)
@@ -232,7 +234,8 @@ impl PorterStemmerEs {
     /// in array order instead. The two policies are not interchangeable.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn ends_in_arr<'s>(&self, word: &str, suffixes: &[&'s str]) -> &'s str {
         longest_suffix(&units(word), suffixes).unwrap_or("")
@@ -242,7 +245,8 @@ impl PorterStemmerEs {
     /// á é í ó ú.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn remove_accent<'a>(&self, word: &'a str) -> Cow<'a, str> {
         if !word
@@ -266,7 +270,8 @@ impl PorterStemmerEs {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[expect(
         clippy::too_many_lines,
@@ -296,13 +301,13 @@ impl PorterStemmerEs {
             let mut have_plain = false;
             let mut idx = t.pre.find_longest_index(b.as_slice(), head_end, start);
             while idx >= 0 {
-                let (_, link, tid) = &t.pre.entries[idx as usize];
-                if *tid == 0 {
+                let (_, link, tid) = t.pre.entry(idx);
+                if tid == 0 {
                     have_accented = true;
                 } else {
                     have_plain = true;
                 }
-                idx = *link;
+                idx = link;
             }
             if have_accented {
                 b.truncate(length - n);
@@ -332,13 +337,12 @@ impl PorterStemmerEs {
             let mut best: [usize; 10] = [0; 10];
             let mut idx = t.step1.find_longest_index(b.as_slice(), len1, 0);
             while idx >= 0 {
-                let (units, link, tid) = &t.step1.entries[idx as usize];
-                let tid = *tid as usize;
+                let (n, link, tid) = t.step1.entry(idx);
                 let lb = if tid == 6 { lb1 } else { lb2 };
-                if units.len() <= len1 - lb && best[tid] == 0 {
-                    best[tid] = units.len();
+                if n <= len1 - lb && best[tid] == 0 {
+                    best[tid] = n;
                 }
-                idx = *link;
+                idx = link;
             }
             for (tid, &m) in best.iter().enumerate() {
                 if m == 0 {
@@ -374,11 +378,11 @@ impl PorterStemmerEs {
                 let mut best: [usize; 2] = [0; 2];
                 let mut idx = t.step2b.find_longest_index(b.as_slice(), len, lbv);
                 while idx >= 0 {
-                    let (units, link, tid) = &t.step2b.entries[idx as usize];
-                    if best[*tid as usize] == 0 {
-                        best[*tid as usize] = units.len();
+                    let (n, link, tid) = t.step2b.entry(idx);
+                    if best[tid] == 0 {
+                        best[tid] = n;
                     }
-                    idx = *link;
+                    idx = link;
                 }
                 if best[0] > 0 {
                     b.truncate(len - best[0]);
@@ -399,11 +403,11 @@ impl PorterStemmerEs {
             let mut best: [usize; 2] = [0; 2];
             let mut idx = t.step3.find_longest_index(b.as_slice(), len, lbv);
             while idx >= 0 {
-                let (units, link, tid) = &t.step3.entries[idx as usize];
-                if best[*tid as usize] == 0 {
-                    best[*tid as usize] = units.len();
+                let (n, link, tid) = t.step3.entry(idx);
+                if best[tid] == 0 {
+                    best[tid] = n;
                 }
-                idx = *link;
+                idx = link;
             }
             if best[0] > 0 {
                 b.truncate(len - best[0]);
@@ -481,7 +485,16 @@ static STEP1_IVA: &[&str] = &[
 static STEP2A: &[&str] = &[
     "ya", "ye", "yan", "yen", "yeron", "yendo", "yo", "yó", "yas", "yes", "yais", "yamos",
 ];
-/// The step-2b verb list. `"  aseis"` really does carry two leading spaces.
+/// The step-2b verb list: the finite verb endings deleted in RV.
+///
+/// `"aseis"` was shipped as `"  aseis"`, with two leading spaces. No token
+/// can contain a space, so the rule never fired for any input at all, and the
+/// `-ar` imperfect subjunctive was left with four of its five endings — `ase`,
+/// `ases`, `ásemos` and `asen` are all below, and only the second-person
+/// plural was missing. `hablaseis` came back unstemmed while `hablasteis`
+/// stemmed to `habl`. `data::table_audit` now walks every entry of this table
+/// through the pipeline that searches it, so a space cannot reappear here
+/// unnoticed.
 static STEP2B: &[&str] = &[
     "arían", "arías", "arán", "arás", "aríais", "aría", "aréis", "aríamos", "aremos", "ará", "aré",
     "erían", "erías", "erán", "erás", "eríais", "ería", "eréis", "eríamos", "eremos", "erá", "eré",
@@ -489,7 +502,7 @@ static STEP2B: &[&str] = &[
     "aba", "ada", "ida", "ía", "ara", "iera", "ad", "ed", "id", "ase", "iese", "aste", "iste",
     "an", "aban", "ían", "aran", "ieran", "asen", "iesen", "aron", "ieron", "ado", "ido", "ando",
     "iendo", "ió", "ar", "er", "ir", "as", "abas", "adas", "idas", "ías", "aras", "ieras", "ases",
-    "ieses", "ís", "áis", "abais", "íais", "arais", "ierais", "  aseis", "ieseis", "asteis",
+    "ieses", "ís", "áis", "abais", "íais", "arais", "ierais", "aseis", "ieseis", "asteis",
     "isteis", "ados", "idos", "amos", "ábamos", "íamos", "imos", "áramos", "iéramos", "iésemos",
     "ásemos",
 ];
@@ -501,12 +514,8 @@ impl TokenizeAndStem for PorterStemmerEs {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Lower;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_es(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Es, word)
+        Language::Es.contains(word)
     }
 
     fn gate(token: &str) -> bool {
@@ -516,6 +525,42 @@ impl TokenizeAndStem for PorterStemmerEs {
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("PRONOUN", super::PRONOUN),
+        ("PRONOUN_PRE1", super::PRONOUN_PRE1),
+        ("PRONOUN_PRE2", super::PRONOUN_PRE2),
+        ("STEP1_A", super::STEP1_A),
+        ("STEP1_B", super::STEP1_B),
+        ("STEP1_LOGIA", super::STEP1_LOGIA),
+        ("STEP1_UCION", super::STEP1_UCION),
+        ("STEP1_ENCIA", super::STEP1_ENCIA),
+        ("STEP1_MENTE2", super::STEP1_MENTE2),
+        ("STEP1_AMENTE", super::STEP1_AMENTE),
+        ("STEP1_MENTE", super::STEP1_MENTE),
+        ("STEP1_IDAD", super::STEP1_IDAD),
+        ("STEP1_IVA", super::STEP1_IVA),
+        ("STEP2A", super::STEP2A),
+        ("STEP2B", super::STEP2B),
+        ("STEP2B_EN", super::STEP2B_EN),
+        ("STEP3_A", super::STEP3_A),
+        ("STEP3_E", super::STEP3_E),
+    ];
+
+    /// Spanish has no prelude: `stem` marks its regions on the token as it
+    /// arrives. Accent removal is a *postlude*, so the accented spellings the
+    /// tables carry are exactly what the tables are searched against.
+    pub(crate) fn prelude(token: &str) -> String {
+        token.to_owned()
+    }
+
+    /// No marker unit is written before the tables are searched.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[];
 }
 
 impl verbora_core::Stemmer for PorterStemmerEs {
@@ -530,6 +575,21 @@ mod tests {
 
     fn s(t: &str) -> String {
         PorterStemmerEs::new().stem(t).into_owned()
+    }
+
+    /// The `-aseis` ending: the `-ar` imperfect subjunctive, second person
+    /// plural.
+    #[test]
+    fn the_imperfect_subjunctive_paradigm_is_complete() {
+        for (input, want) in [
+            ("hablase", "habl"),
+            ("hablases", "habl"),
+            ("hablásemos", "habl"),
+            ("hablaseis", "habl"),
+            ("hablasen", "habl"),
+        ] {
+            assert_eq!(s(input), want, "stem({input})");
+        }
     }
 
     #[test]

@@ -1,55 +1,109 @@
-//! Rule and lookup tables, transcribed verbatim from the reference.
+//! The built-in rule tables, and the sources that define them.
 //!
-//! Machine-derived from the reference's own live objects (`inst.ambiguous`,
-//! `inst.pluralForms.regularForms`, …) rather than retyped. The French `ambiguous` list alone is 744 accented, hyphenated and
-//! occasionally space-containing entries; a hand transcription would be wrong,
-//! and wrong in a way no reviewer would catch. `src/data_check.rs` re-checks
-//! every table against the same tables recorded in `fixtures/inflectors.json`,
-//! so a future edit cannot quietly drift from the reference either.
+//! Every table here is one of three kinds, and each kind has a different burden
+//! of proof:
 //!
-//! Pattern `source` strings are the reference `RegExp.source` text, kept
-//! verbatim and translated at load time by [`crate::pattern`]; they are *not*
-//! Rust regex syntax. All of them carry `/i` and none carry `/g`.
+//! * **A rule** states a productive pattern of the language. It cites the
+//!   grammar that describes the pattern, and it carries a *witness*: a token
+//!   that must reach this rule and no earlier one. `tests` in
+//!   [`crate::engine`] walks every rule of every table, checks that its witness
+//!   is not claimed by an earlier rule, and checks that the rule produces the
+//!   recorded form. A rule with no reachable witness is dead and is deleted, not
+//!   documented.
+//! * **A lexical list** enumerates words a rule cannot derive — English zero
+//!   plurals, French singulars that already end in `-s`, Japanese words that
+//!   merely look like `-たち` plurals. A list is never exhaustive and never
+//!   claims to be; what it must be is *checkable*, so each list has a stated
+//!   membership criterion and a test that enforces it.
+//! * **An irregular pair** is a single suppletive or mutated form, listed
+//!   because no rule generates it.
+//!
+//! Sources, once, for the whole module:
+//!
+//! * **English** — Quirk, Greenbaum, Leech & Svartvik, *A Comprehensive Grammar
+//!   of the English Language* (Longman, 1985), ch. 5, on the number of nouns:
+//!   regular `-s`/`-es`, the `-y → -ies` spelling rule, fricative voicing
+//!   (`-f`/`-fe → -ves`), nouns in `-o`, mutation plurals (`foot`/`feet`),
+//!   `-en` plurals (`ox`/`oxen`, `child`/`children`), zero plurals, and the
+//!   Latin and Greek plurals of loan words. Huddleston & Pullum, *The Cambridge
+//!   Grammar of the English Language* (CUP, 2002), ch. 18, covers the same
+//!   inflection from a different angle and is the cross-check used where the two
+//!   descriptions could differ.
+//! * **French** — Grevisse & Goosse, *Le Bon Usage*, on *le pluriel des noms*:
+//!   the general `-s`, the invariance of singulars already ending in `-s`, `-x`
+//!   or `-z`, `-al → -aux`, `-ail → -aux` for a closed list, `-au`/`-eau`/`-eu`
+//!   → `-x`, and the `-ou → -oux` seven. Individual lexical entries follow the
+//!   *Dictionnaire de l'Académie française*, 9th edition.
+//! * **Japanese** — Martin, *A Reference Grammar of Japanese* (Yale UP, 1975)
+//!   and Shibatani, *The Languages of Japan* (CUP, 1990), on the plural and
+//!   associative suffixes 〜たち, 〜達, 〜等, 〜共/〜ども and 〜方/〜がた, and on
+//!   the fact that Japanese does not mark number obligatorily. The iteration
+//!   mark 々 (U+3005) is the conventional spelling of a reduplicated noun.
 
-/// A rule exactly as the reference declares it: a reference pattern plus what
-/// to substitute for its first match.
+/// One entry of an ordered rule table.
 pub(crate) struct RawRule {
-    /// The reference `RegExp.source` text.
-    pub(crate) source: &'static str,
-    /// What replaces the match.
-    pub(crate) replacement: RawReplacement,
+    /// A `regex`-crate pattern. Case-insensitive rules spell `(?i)` themselves.
+    pub(crate) pattern: &'static str,
+    /// The replacement template, or `None` for a guard that matches and stops.
+    pub(crate) replacement: Option<&'static str>,
+    /// A lowercase token that must reach this rule and no earlier one.
+    ///
+    /// Read only by the reachability enumeration in [`crate::engine`]'s tests;
+    /// it is the proof obligation attached to the rule, not runtime data.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) witness: &'static str,
+    /// What the whole table must turn [`Self::witness`] into.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) expected: &'static str,
 }
 
-/// The two shapes a reference replacement takes.
-pub(crate) enum RawReplacement {
-    /// A reference substitution template (`$1`, `$&`, …).
-    Template(&'static str),
-    /// The three Japanese rules whose replacement is a *function*: it re-appends
-    /// `suffix` when the captured stem is in `exceptions` (leaving the word
-    /// unchanged), and otherwise strips the suffix.
-    KeepIfListed {
-        /// Stems that must keep their suffix.
-        exceptions: &'static [&'static str],
-        /// The suffix the pattern matched, re-appended for exceptions.
-        suffix: &'static str,
-    },
+/// Shorthand for a rewriting rule.
+const fn rule(
+    pattern: &'static str,
+    replacement: &'static str,
+    witness: &'static str,
+    expected: &'static str,
+) -> RawRule {
+    RawRule {
+        pattern,
+        replacement: Some(replacement),
+        witness,
+        expected,
+    }
 }
 
-/// English noun tables — the reference `noun_inflector`.
+/// Shorthand for a guard: matches, and the token is its own answer.
+const fn guard(pattern: &'static str, witness: &'static str) -> RawRule {
+    RawRule {
+        pattern,
+        replacement: None,
+        witness,
+        expected: witness,
+    }
+}
+
+/// English nouns.
 pub(crate) mod en {
-    use super::{RawReplacement, RawRule};
+    use super::{RawRule, guard, rule};
 
-    /// `this.ambiguous`: words that inflect to themselves. Sorted here so the
-    /// membership test is a binary search rather tha reference's linear
-    /// `Array.indexOf`; order is not observable because only membership is.
-    pub(crate) static AMBIGUOUS: &[&str] = &[
+    /// Nouns with no distinct plural: zero plurals (chiefly animals taken
+    /// collectively), non-count nouns, and singulars that already end in `-s`.
+    ///
+    /// Membership criterion: the word has one form for both numbers in standard
+    /// English. The list is lexical and deliberately not exhaustive — a noun
+    /// absent from it takes the regular plural.
+    pub(crate) static INVARIANT: &[&str] = &[
+        "aircraft",
+        "barracks",
+        "billiards",
         "bison",
         "bream",
         "carp",
         "chassis",
-        "christmas",
         "cod",
         "corps",
+        "crossroads",
+        "darts",
         "debris",
         "deer",
         "diabetes",
@@ -59,16 +113,23 @@ pub(crate) mod en {
         "flounder",
         "gallows",
         "graffiti",
+        "grouse",
         "headquarters",
         "herpes",
-        "highjinks",
         "homework",
         "information",
+        "innings",
         "mackerel",
+        "means",
+        "measles",
         "mews",
         "money",
+        "moose",
+        "mumps",
         "news",
+        "offspring",
         "rabies",
+        "reindeer",
         "rice",
         "salmon",
         "series",
@@ -83,937 +144,214 @@ pub(crate) mod en {
         "wildebeest",
     ];
 
-    /// `pluralForms.irregularForms`: singular -> plural, after the
-    /// last-write-wins collapse `addForm` performs. Sorted by key.
+    /// Singular → plural for forms no rule derives: `-en` plurals, mutation
+    /// plurals, one suppletion (`person`/`people`) and one Greek `-is/-ides`.
     pub(crate) static PLURAL_IRREGULAR: &[(&str, &str)] = &[
-        ("calf", "calves"),
         ("child", "children"),
-        ("cloth", "clothes"),
         ("ephemeris", "ephemerides"),
         ("foot", "feet"),
         ("goose", "geese"),
-        ("half", "halves"),
-        ("hero", "heroes"),
-        ("knife", "knives"),
-        ("leaf", "leaves"),
-        ("life", "lives"),
-        ("loaf", "loaves"),
-        ("man", "men"),
+        ("louse", "lice"),
         ("mouse", "mice"),
         ("ox", "oxen"),
         ("person", "people"),
-        ("sex", "sexes"),
-        ("shelf", "shelves"),
-        ("thief", "thieves"),
         ("tooth", "teeth"),
-        ("torso", "torsi"),
-        ("wife", "wives"),
-        ("wolf", "wolves"),
-        ("yourself", "yourselves"),
     ];
 
-    /// `singularForms.irregularForms`: plural -> singular, likewise collapsed.
+    /// The same pairs, keyed by the plural.
     pub(crate) static SINGULAR_IRREGULAR: &[(&str, &str)] = &[
-        ("calves", "calf"),
         ("children", "child"),
-        ("clothes", "cloth"),
         ("ephemerides", "ephemeris"),
         ("feet", "foot"),
         ("geese", "goose"),
-        ("halves", "half"),
-        ("heroes", "hero"),
-        ("knives", "knife"),
-        ("leaves", "leaf"),
-        ("lives", "life"),
-        ("loaves", "loaf"),
-        ("men", "man"),
+        ("lice", "louse"),
         ("mice", "mouse"),
         ("oxen", "ox"),
         ("people", "person"),
-        ("sexes", "sex"),
-        ("shelves", "shelf"),
         ("teeth", "tooth"),
-        ("thieves", "thief"),
-        ("torsi", "torso"),
-        ("wives", "wife"),
-        ("wolves", "wolf"),
-        ("yourselves", "yourself"),
     ];
 
-    /// `pluralForms.regularForms` in source order. First match wins.
+    /// Singular → plural. First match wins.
     pub(crate) static PLURAL_REGULAR: &[RawRule] = &[
-        RawRule {
-            source: "([aeiou]y)$",
-            replacement: RawReplacement::Template("$1s"),
-        },
-        RawRule {
-            source: "y$",
-            replacement: RawReplacement::Template("ies"),
-        },
-        RawRule {
-            source: "ife$",
-            replacement: RawReplacement::Template("ives"),
-        },
-        RawRule {
-            source: "(antenn|formul|nebul|vertebr|vit)a$",
-            replacement: RawReplacement::Template("$1ae"),
-        },
-        RawRule {
-            source: "(octop|vir|radi|nucle|fung|cact|stimul|alumn|calcul|hippopotam|macrofung|phoet|syllab|troph)us$",
-            replacement: RawReplacement::Template("$1i"),
-        },
-        RawRule {
-            source: "(buffal|tomat|tornad)o$",
-            replacement: RawReplacement::Template("$1oes"),
-        },
-        RawRule {
-            source: "(sis)$",
-            replacement: RawReplacement::Template("ses"),
-        },
-        RawRule {
-            source: "(matr|vert|ind|cort)(ix|ex)$",
-            replacement: RawReplacement::Template("$1ices"),
-        },
-        RawRule {
-            source: "sses$",
-            replacement: RawReplacement::Template("sses"),
-        },
-        RawRule {
-            source: "(x|ch|ss|sh|s|z)$",
-            replacement: RawReplacement::Template("$1es"),
-        },
-        RawRule {
-            source: "^(?!talis|.*hu)(.*)man$",
-            replacement: RawReplacement::Template("$1men"),
-        },
-        RawRule {
-            source: "(.*)",
-            replacement: RawReplacement::Template("$1s"),
-        },
+        // A token already in the `-es` plural shape is left alone; without this
+        // the sibilant rule below would make `dresses` into `dresseses`.
+        guard("(?i)(ses|xes|zes|ches|shes)$", "dresses"),
+        // -y after a vowel is a plain -s; after a consonant it is -ies.
+        rule("(?i)([aeiou])y$", "${1}ys", "day", "days"),
+        rule("(?i)y$", "ies", "party", "parties"),
+        // Fricative voicing. Both stem lists are closed: a word ending in these
+        // letters but built on another morpheme (`fife`, `gulf`) is regular.
+        rule("(?i)(kni|li|wi)fe$", "${1}ves", "knife", "knives"),
+        // `dwar` is absent here and present in the singular table on purpose:
+        // both `dwarfs` and `dwarves` are attested, so Verbora emits the one
+        // dictionaries lead with and accepts the other on the way back.
+        rule(
+            "(?i)(cal|el|hal|hoo|lea|loa|scar|sel|shea|shel|thie|wol)f$",
+            "${1}ves",
+            "wolf",
+            "wolves",
+        ),
+        // Latin and Greek plurals of loan words, each on a closed stem list.
+        rule(
+            "(?i)(alumn|antenn|formul|larv|nebul|vertebr|vit)a$",
+            "${1}ae",
+            "formula",
+            "formulae",
+        ),
+        rule(
+            "(?i)(alumn|bacill|cact|calcul|foc|fung|hippopotam|nucle|octop|radi|stimul|syllab)us$",
+            "${1}i",
+            "cactus",
+            "cacti",
+        ),
+        rule(
+            "(?i)(buffal|domin|ech|embarg|her|mosquit|potat|tomat|tornad|torped|vet|volcan)o$",
+            "${1}oes",
+            "tomato",
+            "tomatoes",
+        ),
+        // -sis is productive across the -osis/-esis/-ysis families.
+        rule("(?i)sis$", "ses", "basis", "bases"),
+        rule("(?i)(ax|test)is$", "${1}es", "axis", "axes"),
+        rule(
+            "(?i)(bacteri|curricul|dat|errat|medi|memorand|ov|strat|symposi)um$",
+            "${1}a",
+            "curriculum",
+            "curricula",
+        ),
+        rule(
+            "(?i)(criteri|phenomen)on$",
+            "${1}a",
+            "criterion",
+            "criteria",
+        ),
+        rule(
+            "(?i)(append|cort|ind|matr|vert)(?:ix|ex)$",
+            "${1}ices",
+            "matrix",
+            "matrices",
+        ),
+        // `-man` is the noun *man* only in compounds of it. These nouns end in
+        // the same three letters for unrelated reasons and are regular, so they
+        // claim the token before the mutation rule can.
+        rule(
+            "(?i)(caiman|cayman|desman|dolman|dragoman|firman|german|human|leman|liman|norman|ottoman|pullman|roman|shaman|talisman)$",
+            "${1}s",
+            "human",
+            "humans",
+        ),
+        rule("(?i)man$", "men", "workman", "workmen"),
+        // A monosyllable in a single vowel plus `z` doubles the `z`.
+        rule("(?i)^(fez|quiz|whiz)$", "${1}zes", "quiz", "quizzes"),
+        // A stem ending in a sibilant takes -es.
+        rule("(?i)(s|x|z|ch|sh)$", "${1}es", "church", "churches"),
+        // Everything else takes -s.
+        rule("$", "s", "hacker", "hackers"),
     ];
 
-    /// `singularForms.regularForms` in source order. First match wins.
+    /// Plural → singular. First match wins.
     pub(crate) static SINGULAR_REGULAR: &[RawRule] = &[
-        RawRule {
-            source: "(.*)ves$",
-            replacement: RawReplacement::Template("$1f"),
-        },
-        RawRule {
-            source: "(.*)nses$",
-            replacement: RawReplacement::Template("$1nse"),
-        },
-        RawRule {
-            source: "([^v])ies$",
-            replacement: RawReplacement::Template("$1y"),
-        },
-        RawRule {
-            source: "ives$",
-            replacement: RawReplacement::Template("ife"),
-        },
-        RawRule {
-            source: "(antenn|formul|nebul|vertebr|vit)ae$",
-            replacement: RawReplacement::Template("$1a"),
-        },
-        RawRule {
-            source: "(octop|vir|radi|nucle|fung|cact|stimul|alumn|calcul|hippopotam|macrofung|phoet|syllab|troph)(i)$",
-            replacement: RawReplacement::Template("$1us"),
-        },
-        RawRule {
-            source: "(buffal|tomat|tornad)(oes)$",
-            replacement: RawReplacement::Template("$1o"),
-        },
-        RawRule {
-            source: "(analy|naly|synop|parenthe|diagno|the)ses$",
-            replacement: RawReplacement::Template("$1sis"),
-        },
-        RawRule {
-            source: "(vert|ind|cort)(ices)$",
-            replacement: RawReplacement::Template("$1ex"),
-        },
-        RawRule {
-            source: "(matr|append)(ices)$",
-            replacement: RawReplacement::Template("$1ix"),
-        },
-        RawRule {
-            source: "(x|ch|ss|sh|s|z)es$",
-            replacement: RawReplacement::Template("$1"),
-        },
-        RawRule {
-            source: "men$",
-            replacement: RawReplacement::Template("man"),
-        },
-        RawRule {
-            source: "ss$",
-            replacement: RawReplacement::Template("ss"),
-        },
-        RawRule {
-            source: "s$",
-            replacement: RawReplacement::Template(""),
-        },
+        // Nouns that end in `-men` without being plurals of anything.
+        guard(
+            "(?i)^(?:abdomen|acumen|albumen|bitumen|catechumen|cerumen|cyclamen|hymen|lumen|omen|regimen|rumen|semen|specimen|stamen)$",
+            "specimen",
+        ),
+        // The voicing rules, inverted. `-lives` needs the guard against a
+        // preceding vowel so that `olives` is not read as a compound of `life`.
+        rule("(?i)knives$", "knife", "jackknives", "jackknife"),
+        rule("(?i)wives$", "wife", "housewives", "housewife"),
+        rule("(?i)(^|[^aeiou])lives$", "${1}life", "lives", "life"),
+        rule(
+            "(?i)(cal|dwar|el|hal|hoo|lea|loa|scar|sel|shea|shel|thie|wol)ves$",
+            "${1}f",
+            "wolves",
+            "wolf",
+        ),
+        // `-ies → -y`, except after `v`, where the singular ends in `-ie`
+        // (`movies`, `stevies`) and the final `-s` alone comes off.
+        rule("(?i)([^v])ies$", "${1}y", "parties", "party"),
+        rule(
+            "(?i)(alumn|antenn|formul|larv|nebul|vertebr|vit)ae$",
+            "${1}a",
+            "formulae",
+            "formula",
+        ),
+        rule(
+            "(?i)(alumn|bacill|cact|calcul|foc|fung|hippopotam|nucle|octop|radi|stimul|syllab)i$",
+            "${1}us",
+            "cacti",
+            "cactus",
+        ),
+        rule(
+            "(?i)(buffal|domin|ech|embarg|her|mosquit|potat|tomat|tornad|torped|vet|volcan)oes$",
+            "${1}o",
+            "tomatoes",
+            "tomato",
+        ),
+        // Anchored, unlike its plural counterpart: `-ses` is only a `-sis`
+        // plural for these whole words, and leaving it open would turn
+        // `databases` into `databasis`.
+        rule(
+            "(?i)^(analy|cri|diagno|ellip|empha|hypothe|metamorpho|neuro|oa|paraly|parenthe|progno|psycho|synop|the)ses$",
+            "${1}sis",
+            "parentheses",
+            "parenthesis",
+        ),
+        rule(
+            "(?i)(bacteri|curricul|dat|errat|medi|memorand|ov|strat|symposi)a$",
+            "${1}um",
+            "curricula",
+            "curriculum",
+        ),
+        rule(
+            "(?i)(criteri|phenomen)a$",
+            "${1}on",
+            "criteria",
+            "criterion",
+        ),
+        rule("(?i)(append|matr)ices$", "${1}ix", "matrices", "matrix"),
+        rule("(?i)(cort|ind|vert)ices$", "${1}ex", "vertices", "vertex"),
+        rule("(?i)^(fez|quiz|whiz)zes$", "${1}", "quizzes", "quiz"),
+        // Nouns whose singular already ends in `-s` and whose plural therefore
+        // adds `-es`. Without the list, `buses` would lose only its final `s`.
+        rule(
+            "(?i)^(atlas|bias|bonus|bus|campus|canvas|circus|gas|iris|lens|plus|status|surplus|virus)es$",
+            "${1}",
+            "buses",
+            "bus",
+        ),
+        // Bare `s` is deliberately absent from this class: `-ses` is far more
+        // often the plural of a noun in `-se` (`database`, `house`, `case`) than
+        // of one in `-s`, and those are handled by the final rule.
+        rule("(?i)(ch|sh|ss|x|z)es$", "${1}", "churches", "church"),
+        rule("(?i)men$", "man", "workmen", "workman"),
+        // Singulars in `-ss`, `-us` and `-is`. No English plural ends in any of
+        // the three, so these three shapes are safe to protect wholesale.
+        guard("(?i)(?:ss|us|is)$", "dress"),
+        // Singulars in `-as` and `-os` have to be listed: `-as` and `-os` are
+        // both common plural endings (`cameras`, `photos`).
+        guard(
+            "(?i)^(?:alias|atlas|bias|canvas|chaos|cosmos|gas|lens|pathos|rhinoceros)$",
+            "gas",
+        ),
+        rule("(?i)s$", "", "cats", "cat"),
     ];
 }
 
-/// French noun tables — the reference `noun_inflector`.
+/// French nouns.
 pub(crate) mod fr {
-    use super::{RawReplacement, RawRule};
+    use super::{RawRule, guard, rule};
 
-    /// `this.ambiguous`: words that inflect to themselves. Sorted here so the
-    /// membership test is a binary search rather tha reference's linear
-    /// `Array.indexOf`; order is not observable because only membership is.
-    pub(crate) static AMBIGUOUS: &[&str] = &[
-        "abat-voix",
-        "abattis",
-        "abcès",
-        "abois",
-        "abribus",
-        "abus",
-        "accès",
-        "acquis",
-        "adonis",
-        "ados",
-        "adénovirus",
-        "afflux",
-        "agrès",
-        "aguets",
-        "ailleurs",
-        "ais",
-        "albatros",
-        "albinos",
-        "alias",
-        "allume-gaz",
-        "aloès",
-        "alpax",
-        "amaryllis",
-        "amas",
-        "ampélopsis",
-        "ananas",
-        "anchois",
-        "angélus",
-        "anis",
-        "anthrax",
-        "anticorps",
-        "antihéros",
-        "antirides",
-        "anus",
-        "apex",
-        "appas",
-        "appentis",
-        "appui-bras",
-        "appuie-bras",
-        "aptéryx",
-        "arcanes",
-        "archéoptéryx",
-        "argus",
-        "arrière-faix",
-        "arrière-pays",
-        "arrérages",
-        "as",
-        "ascaris",
-        "asparagus",
-        "assez",
-        "atlas",
-        "atours",
-        "aurochs",
-        "autobus",
-        "autofocus",
-        "avant-bras",
-        "avant-corps",
-        "avant-propos",
-        "avers",
-        "avis",
-        "axis",
-        "barbouillis",
-        "bas",
-        "beaujolais",
-        "beaux-arts",
-        "biais",
-        "bibliobus",
-        "biceps",
-        "bicross",
-        "bien-fonds",
-        "biogaz",
-        "bloc-notes",
-        "blockhaus",
-        "blocus",
-        "blues",
-        "bois",
-        "bombyx",
-        "bonus",
-        "borax",
-        "bordeaux",
-        "bouseux",
-        "bout-dehors",
-        "bouts-rimés",
-        "box",
-        "branle-bas",
-        "bras",
-        "brebis",
-        "bris",
-        "brise-lames",
-        "brise-mottes",
-        "brûlis",
-        "buis",
-        "burnous",
-        "bus",
-        "business",
-        "cabas",
-        "cacatois",
-        "cacatoès",
-        "cache-nez",
-        "cactus",
-        "cadenas",
-        "cafouillis",
-        "caillebotis",
-        "calvados",
-        "cambouis",
-        "camping-gaz",
-        "campus",
-        "canevas",
-        "cannabis",
-        "carex",
-        "carquois",
-        "cas",
-        "casse-noisettes",
-        "casse-noix",
-        "casse-pieds",
-        "cassis",
-        "caucus",
-        "cedex",
-        "cens",
-        "cervelas",
-        "chablis",
-        "chamois",
-        "chaos",
-        "chas",
-        "chasselas",
-        "chatouillis",
-        "chauffe-assiettes",
-        "chauve-souris",
-        "chaux",
-        "chez",
-        "chintz",
-        "choix",
-        "chorus",
-        "choucas",
-        "châssis",
-        "circoncis",
-        "cirrus",
-        "clafoutis",
-        "clapotis",
-        "cliquetis",
-        "clos",
-        "coccyx",
-        "cochylis",
-        "codex",
-        "colis",
-        "coloris",
-        "commis",
-        "compas",
-        "compromis",
-        "compte-chèques",
-        "compte-gouttes",
-        "compte-tours",
-        "concours",
-        "confins",
-        "congrès",
-        "consensus",
-        "contrepoids",
-        "contresens",
-        "contretemps",
-        "contumax",
-        "coqueleux",
-        "corn flakes",
-        "corps",
-        "corps-à-corps",
-        "corpus",
-        "cortex",
-        "cosinus",
-        "cosmos",
-        "coulis",
-        "coupe-ongles",
-        "courroux",
-        "cours",
-        "court-jus",
-        "couscous",
-        "coutelas",
-        "crocus",
-        "croix",
-        "croquis",
-        "cross",
-        "crucifix",
-        "cubitus",
-        "culex",
-        "cumulus",
-        "cure-dents",
-        "cure-ongles",
-        "cure-pipes",
-        "cursus",
-        "cyclo-cross",
-        "cyprès",
-        "céphalothorax",
-        "cérambyx",
-        "dais",
-        "damas",
-        "dedans",
-        "dehors",
-        "delirium tremens",
-        "demi-gros",
-        "demodex",
-        "dessous",
-        "dessus",
-        "deux-mâts",
-        "deux-pièces",
-        "deux-points",
-        "deux-roues",
-        "deux-temps",
-        "devis",
-        "diplodocus",
-        "discours",
-        "dos",
-        "duplex",
-        "débarras",
-        "débours",
-        "débris",
-        "décès",
-        "dépens",
-        "détritus",
-        "dévers",
-        "edelweiss",
-        "embarras",
-        "empois",
-        "en-cas",
-        "encens",
-        "enclos",
-        "endos",
-        "engrais",
-        "entre-deux",
-        "entrelacs",
-        "entremets",
-        "envers",
-        "ers",
-        "ersatz",
-        "espace-temps",
-        "essuie-mains",
-        "eucalyptus",
-        "eux",
-        "ex",
-        "ex-libris",
-        "excès",
-        "express",
-        "extrados",
-        "faciès",
-        "fait-divers",
-        "faix",
-        "fatras",
-        "faucheux",
-        "faux",
-        "faux-sens",
-        "favoris",
-        "fax",
-        "ferreux",
-        "fez",
-        "ficus",
-        "fier-à-bras",
-        "finnois",
-        "florès",
-        "flux",
-        "focus",
-        "fois",
-        "forceps",
-        "fouillis",
-        "fox",
-        "fracas",
-        "frais",
-        "franglais",
-        "français",
-        "free-jazz",
-        "freux",
-        "frimas",
-        "friselis",
-        "frisottis",
-        "fritz",
-        "froncis",
-        "frottis",
-        "fucus",
-        "furax",
-        "fœtus",
-        "galetas",
-        "galimatias",
-        "garde-corps",
-        "garde-à-vous",
-        "gargouillis",
-        "gars",
-        "gaz",
-        "gazouillis",
-        "gibus",
-        "gin-fizz",
-        "glacis",
-        "glas",
-        "gneiss",
-        "gobe-mouches",
-        "gribouillis",
-        "grès",
-        "guet-apens",
-        "gâchis",
-        "gâte-bois",
-        "génois",
-        "habeas corpus",
-        "hachis",
-        "hapax",
-        "haras",
-        "hardes",
-        "harengueux",
-        "harnais",
-        "haut-le-corps",
-        "hautbois",
-        "herbe-aux-chats",
-        "herpès",
-        "hertz",
-        "hiatus",
-        "hibiscus",
-        "hors-concours",
-        "hors-pistes",
-        "horse-pox",
-        "hourdis",
-        "houx",
-        "huis-clos",
-        "humus",
-        "humérus",
-        "hélix",
-        "héros",
-        "ibis",
-        "iléus",
-        "index",
-        "indique-fuites",
-        "infarctus",
-        "influx",
-        "inlandsis",
-        "inox",
-        "insuccès",
-        "intercours",
-        "intrados",
-        "intrus",
-        "iris",
-        "isatis",
-        "jais",
-        "jars",
-        "jazz",
-        "jeans",
-        "jerez",
-        "jeuconcours",
-        "judas",
-        "juke-box",
-        "juliénas",
-        "jus",
-        "justaucorps",
-        "kakatoès",
-        "kermès",
-        "kibboutz",
-        "kilohertz",
-        "kleenex",
-        "kolkhoz",
-        "kriss",
-        "kronprinz",
-        "lacis",
-        "lagothrix",
-        "lambris",
-        "lapiaz",
-        "lapis",
-        "laps",
-        "lapsus",
-        "laquais",
-        "larynx",
-        "las",
-        "lastex",
-        "latex",
-        "lattis",
-        "lave-mains",
-        "lavis",
-        "laïus",
-        "legs",
-        "lez",
-        "lias",
-        "lilas",
-        "lis",
-        "liégeois",
-        "logis",
-        "loris",
-        "lotus",
-        "louis",
-        "lupus",
-        "lux",
-        "lynx",
-        "lys",
-        "lèche-bottes",
-        "lèche-vitrines",
-        "lœss",
-        "macareux",
-        "madras",
-        "malappris",
-        "malus",
-        "maquis",
-        "marais",
-        "maroilles",
-        "marquis",
-        "mas",
-        "mass-médias",
-        "matelas",
-        "matois",
-        "max",
-        "maïs",
-        "merguez",
-        "mess",
-        "mets",
-        "mi-bas",
-        "mi-voix",
-        "micro-ondes",
-        "mille-pattes",
-        "millepertuis",
-        "minibus",
-        "minois",
-        "minus",
-        "mirabilis",
-        "mirepoix",
-        "mois",
-        "monocorps",
-        "monte-plats",
-        "mors",
-        "motocross",
-        "mots-croisés",
-        "motteux",
-        "motus",
-        "mouchetis",
-        "mucus",
-        "multiplex",
-        "murex",
-        "myosotis",
-        "mâchicoulis",
-        "mânes",
-        "médius",
-        "mégahertz",
-        "mépris",
-        "mérinos",
-        "mésothorax",
-        "narthex",
-        "nez",
-        "niais",
-        "nimbo-stratus",
-        "nimbus",
-        "noix",
-        "norois",
-        "nounours",
-        "nu-pieds",
-        "nævus",
-        "négus",
-        "oasis",
-        "obus",
-        "olibrius",
-        "omnibus",
-        "onyx",
-        "opopanax",
-        "opus",
-        "oropharynx",
-        "os",
-        "ours",
-        "ouvre-bouteilles",
-        "ouvre-boîtes",
-        "paix",
-        "palais",
-        "palis",
-        "palmarès",
-        "palus",
-        "panais",
-        "panaris",
-        "panax",
-        "pancréas",
-        "papyrus",
-        "par-dehors",
-        "paradis",
-        "parcours",
-        "pardessus",
-        "pare-balles",
-        "pare-chocs",
-        "parvis",
-        "pas",
-        "passe-temps",
-        "pataquès",
-        "pathos",
-        "patois",
-        "pavois",
-        "pays",
-        "perdrix",
-        "permis",
-        "petit-bourgeois",
-        "petit-gris",
-        "petit-pois",
-        "phallus",
-        "pharynx",
-        "phimosis",
-        "phlox",
-        "phoenix",
-        "phénix",
-        "pickles",
-        "pilotis",
-        "pince-nez",
-        "pique-fleurs",
-        "pis",
-        "pithiviers",
-        "pityriasis",
-        "plateau-repas",
-        "plein-temps",
-        "plexiglas",
-        "plexus",
-        "plus",
-        "plâtras",
-        "pneumothorax",
-        "poids",
-        "pois",
-        "poix",
-        "pont-levis",
-        "porte-avions",
-        "porte-bagages",
-        "porte-billets",
-        "porte-bouteilles",
-        "porte-clés",
-        "porte-hélicoptères",
-        "porte-jarretelles",
-        "porte-revues",
-        "portefaix",
-        "pouls",
-        "pousse-cailloux",
-        "presse-fruits",
-        "presse-papiers",
-        "preux",
-        "princeps",
-        "printemps",
-        "prix",
-        "processus",
-        "procès",
-        "progrès",
-        "propos",
-        "prospectus",
-        "prothorax",
-        "protège-dents",
-        "préavis",
-        "psoriasis",
-        "pubis",
-        "pucheux",
-        "puits",
-        "pus",
-        "putois",
-        "pyrex",
-        "pyroligneux",
-        "quadruplex",
-        "quartz",
-        "quatre-feuilles",
-        "quatre-heures",
-        "quatre-mâts",
-        "quatre-quarts",
-        "quatre-temps",
-        "quatre-épices",
-        "queux",
-        "quitus",
-        "quiz",
-        "rabais",
-        "rachis",
-        "radis",
-        "radius",
-        "ramassis",
-        "ranz",
-        "raz",
-        "raïs",
-        "recez",
-        "reclus",
-        "recours",
-        "redoux",
-        "reflex",
-        "reflux",
-        "refus",
-        "relais",
-        "relax",
-        "remords",
-        "remous",
-        "remue-méninges",
-        "rendez-vous",
-        "repas",
-        "repos",
-        "repris",
-        "reps",
-        "revers",
-        "rez",
-        "rhinocéros",
-        "rhinopharynx",
-        "rictus",
-        "rince-doigts",
-        "ris",
-        "riz",
-        "rollmops",
-        "rose-croix",
-        "rosé-des-prés",
-        "roulis",
-        "rouvieux",
-        "roux",
-        "rubis",
-        "rumex",
-        "ruolz",
-        "rébus",
-        "rémiz",
-        "répons",
-        "rétrovirus",
-        "saindoux",
-        "salmigondis",
-        "salsifis",
-        "sans-logis",
-        "sardonyx",
-        "sas",
-        "sassafras",
-        "sauternes",
-        "schnaps",
-        "schuss",
-        "scolex",
-        "secours",
-        "seltz",
-        "semis",
-        "sens",
-        "serre-fils",
-        "serre-livres",
-        "serre-nez",
-        "silex",
-        "simplex",
-        "sinus",
-        "sioux",
-        "sirex",
-        "skunks",
-        "smilax",
-        "solex",
-        "songe-creux",
-        "souris",
-        "sournois",
-        "sous-bois",
-        "spalax",
-        "sphex",
-        "sphinx",
-        "storax",
-        "stradivarius",
-        "stras",
-        "strass",
-        "strato-cumulus",
-        "stratus",
-        "stress",
-        "strix",
-        "styrax",
-        "succès",
-        "surdos",
-        "surfaix",
-        "surplus",
-        "surpoids",
-        "sursis",
-        "surtaux",
-        "suspens",
-        "synopsis",
-        "syphilis",
-        "syrinx",
-        "sèche-cheveux",
-        "sévices",
-        "taffetas",
-        "taillis",
-        "talus",
-        "tamaris",
-        "tamarix",
-        "tamis",
-        "tapis",
-        "tas",
-        "taudis",
-        "taux",
-        "temps",
-        "tennis",
-        "terminus",
-        "terre-neuvas",
-        "thalamus",
-        "thermos",
-        "thesaurus",
-        "thorax",
-        "thymus",
-        "thésaurus",
-        "tire-fesses",
-        "tonus",
-        "torchis",
-        "tord-boyaux",
-        "torticolis",
-        "tournedos",
-        "tournevis",
-        "tournis",
-        "toux",
-        "tracas",
-        "travers",
-        "traîne-savates",
-        "treillis",
-        "trias",
-        "triceps",
-        "trichomonas",
-        "trionyx",
-        "tripoux",
-        "trois-mâts",
-        "trois-quarts",
-        "trois-étoiles",
-        "trolleybus",
-        "tréfonds",
-        "trépas",
-        "tubifex",
-        "tumulus",
-        "typhus",
-        "télex",
-        "tétanos",
-        "tétras",
-        "univers",
-        "us",
-        "utérus",
-        "vasistas",
-        "velours",
-        "verglas",
-        "verjus",
-        "vernis",
-        "vers",
-        "vert-de-gris",
-        "vertex",
-        "vide-ordures",
-        "vide-poches",
-        "vidéotex",
-        "vielleux",
-        "vieux",
-        "villageois",
-        "violoneux",
-        "virus",
-        "vis-à-vis",
-        "voix",
-        "volubilis",
-        "volvox",
-        "vortex",
-        "vulgum pecus",
-        "vélocross",
-        "waters",
-        "williams",
-        "xérès",
-        "à-peu-près",
-        "à-propos",
-        "ébats",
-        "éboulis",
-        "échalas",
-        "élaeis",
-        "éleis",
-        "éléphantiasis",
-        "épluche-légumes",
-        "époux",
-        "équivaux",
-    ];
+    include!("data_fr_invariant.rs");
 
-    /// `pluralForms.irregularForms`: singular -> plural, after the
-    /// last-write-wins collapse `addForm` performs. Sorted by key.
+    /// Singular → plural for forms no rule derives.
     pub(crate) static PLURAL_IRREGULAR: &[(&str, &str)] = &[
         ("ail", "aulx"),
         ("bonhomme", "bonshommes"),
         ("bétail", "bestiaux"),
         ("ciel", "cieux"),
+        ("madame", "mesdames"),
+        ("mademoiselle", "mesdemoiselles"),
         ("mafioso", "mafiosi"),
         ("monsieur", "messieurs"),
         ("putto", "putti"),
@@ -1021,112 +359,100 @@ pub(crate) mod fr {
         ("œil", "yeux"),
     ];
 
-    /// `singularForms.irregularForms`: plural -> singular, likewise collapsed.
+    /// The same pairs, keyed by the plural.
     pub(crate) static SINGULAR_IRREGULAR: &[(&str, &str)] = &[
         ("aulx", "ail"),
         ("bestiaux", "bétail"),
         ("bonshommes", "bonhomme"),
         ("cieux", "ciel"),
         ("mafiosi", "mafioso"),
+        ("mesdames", "madame"),
+        ("mesdemoiselles", "mademoiselle"),
         ("messieurs", "monsieur"),
         ("putti", "putto"),
         ("touareg", "targui"),
         ("yeux", "œil"),
     ];
 
-    /// `pluralForms.regularForms` in source order. First match wins.
+    /// Singular → plural. First match wins.
     pub(crate) static PLURAL_REGULAR: &[RawRule] = &[
-        RawRule {
-            source: "^(av|b|c|carnav|cérémoni|chac|corr|emment|emmenth|festiv|fut|gavi|gra|narv|p|récit|rég|rit|rorqu|st)al$",
-            replacement: RawReplacement::Template("$1als"),
-        },
-        RawRule {
-            source: "^(aspir|b|cor|ém|ferm|gemm|soupir|trav|vant|vent|vitr)ail$",
-            replacement: RawReplacement::Template("$1aux"),
-        },
-        RawRule {
-            source: "^(bij|caill|ch|gen|hib|jouj|p|rip|chouch)ou$",
-            replacement: RawReplacement::Template("$1oux"),
-        },
-        RawRule {
-            source: "^(gr|berimb|don|karb|land|pil|rest|sarr|un)au$",
-            replacement: RawReplacement::Template("$1aus"),
-        },
-        RawRule {
-            source: "^(bl|ém|enf|pn)eu$",
-            replacement: RawReplacement::Template("$1eus"),
-        },
-        RawRule {
-            source: "(au|eau|eu|œu)$",
-            replacement: RawReplacement::Template("$1x"),
-        },
-        RawRule {
-            source: "al$",
-            replacement: RawReplacement::Template("aux"),
-        },
-        RawRule {
-            source: "(s|x)$",
-            replacement: RawReplacement::Template("$1"),
-        },
-        RawRule {
-            source: "(.*)$",
-            replacement: RawReplacement::Template("$1s"),
-        },
+        // The nouns in `-al` that keep the regular `-s`.
+        rule(
+            "(?i)^(av|b|c|carnav|cérémoni|chac|corr|emment|emmenth|festiv|fut|gavi|gra|narv|p|récit|rég|rit|rorqu|st)al$",
+            "${1}als",
+            "carnaval",
+            "carnavals",
+        ),
+        // The seven-plus nouns in `-ail` that take `-aux`.
+        rule(
+            "(?i)^(aspir|b|cor|ém|ferm|gemm|soupir|trav|vant|vent|vitr)ail$",
+            "${1}aux",
+            "travail",
+            "travaux",
+        ),
+        // The nouns in `-ou` that take `-oux`.
+        rule(
+            "(?i)^(bij|caill|ch|gen|hib|jouj|p|rip|chouch)ou$",
+            "${1}oux",
+            "bijou",
+            "bijoux",
+        ),
+        // The nouns in `-au` and `-eu` that keep the regular `-s`.
+        rule(
+            "(?i)^(gr|berimb|don|karb|land|pil|rest|sarr|un)au$",
+            "${1}aus",
+            "landau",
+            "landaus",
+        ),
+        rule("(?i)^(bl|ém|enf|pn)eu$", "${1}eus", "pneu", "pneus"),
+        // Otherwise `-au`, `-eau`, `-eu` and `-œu` take `-x`.
+        rule("(?i)(au|eau|eu|œu)$", "${1}x", "cadeau", "cadeaux"),
+        rule("(?i)al$", "aux", "cheval", "chevaux"),
+        // A singular already ending in `-s`, `-x` or `-z` is invariant. The
+        // lexical list above only matters for the singular direction; here the
+        // rule is enough, and it covers `-z`, which no list needs to enumerate.
+        guard("(?i)(s|x|z)$", "blitz"),
+        rule("$", "s", "orange", "oranges"),
     ];
 
-    /// `singularForms.regularForms` in source order. First match wins.
+    /// Plural → singular. First match wins.
     pub(crate) static SINGULAR_REGULAR: &[RawRule] = &[
-        RawRule {
-            source: "^(aspir|b|cor|ém|ferm|gemm|soupir|trav|vant|vent|vitr)aux$",
-            replacement: RawReplacement::Template("$1ail"),
-        },
-        RawRule {
-            source: "^(aloy|b|bouc|boy|burg|conoy|coy|cr|esquim|ét|fabli|flé|flûti|glu|gr|gru|hoy|joy|kérab|matéri|nobli|noy|pré|sen|sén|t|touch|tuss|tuy|v|ypré)aux$",
-            replacement: RawReplacement::Template("$1au"),
-        },
-        RawRule {
-            source: "^(bij|caill|ch|gen|hib|jouj|p|rip|chouch)oux$",
-            replacement: RawReplacement::Template("$1ou"),
-        },
-        RawRule {
-            source: "^(bis)?aïeux$",
-            replacement: RawReplacement::Template("$1aïeul"),
-        },
-        RawRule {
-            source: "^apparaux$",
-            replacement: RawReplacement::Template("appareil"),
-        },
-        RawRule {
-            source: "^ciels$",
-            replacement: RawReplacement::Template("ciel"),
-        },
-        RawRule {
-            source: "^œils$",
-            replacement: RawReplacement::Template("œil"),
-        },
-        RawRule {
-            source: "(eau|eu|œu)x$",
-            replacement: RawReplacement::Template("$1"),
-        },
-        RawRule {
-            source: "aux$",
-            replacement: RawReplacement::Template("al"),
-        },
-        RawRule {
-            source: "(.*)s$",
-            replacement: RawReplacement::Template("$1"),
-        },
+        rule(
+            "(?i)^(aspir|b|cor|ém|ferm|gemm|soupir|trav|vant|vent|vitr)aux$",
+            "${1}ail",
+            "travaux",
+            "travail",
+        ),
+        // `b` is absent here on purpose: `baux` is the plural of `bail`, which
+        // the rule above already claims, so a `b` alternative would be dead.
+        rule(
+            "(?i)^(aloy|bouc|boy|burg|conoy|coy|cr|esquim|ét|fabli|flé|flûti|glu|gr|gru|hoy|joy|kérab|matéri|nobli|noy|pré|sen|sén|t|touch|tuss|tuy|v|ypré)aux$",
+            "${1}au",
+            "tuyaux",
+            "tuyau",
+        ),
+        rule(
+            "(?i)^(bij|caill|ch|gen|hib|jouj|p|rip|chouch)oux$",
+            "${1}ou",
+            "bijoux",
+            "bijou",
+        ),
+        rule("(?i)^(bis)?aïeux$", "${1}aïeul", "aïeux", "aïeul"),
+        rule("(?i)^apparaux$", "appareil", "apparaux", "appareil"),
+        rule("(?i)^ciels$", "ciel", "ciels", "ciel"),
+        rule("(?i)^œils$", "œil", "œils", "œil"),
+        rule("(?i)(eau|eu|œu)x$", "${1}", "cadeaux", "cadeau"),
+        rule("(?i)aux$", "al", "chevaux", "cheval"),
+        rule("(?i)s$", "", "chats", "chat"),
     ];
 }
 
-/// Japanese noun tables — the reference `noun_inflector`.
+/// Japanese nouns.
 pub(crate) mod ja {
-    use super::{RawReplacement, RawRule};
+    use super::{RawRule, rule};
 
-    /// `this.ambiguous`: words that inflect to themselves. Sorted here so the
-    /// membership test is a binary search rather tha reference's linear
-    /// `Array.indexOf`; order is not observable because only membership is.
-    pub(crate) static AMBIGUOUS: &[&str] = &[
+    /// Words that already denote a group and take no further suffix.
+    pub(crate) static PLURAL_INVARIANT: &[&str] = &[
         "ともだち",
         "友だち",
         "友達",
@@ -1140,154 +466,164 @@ pub(crate) mod ja {
         "飲み友達",
     ];
 
-    /// `pluralForms.irregularForms`: singular -> plural, after the
-    /// last-write-wins collapse `addForm` performs. Sorted by key.
-    pub(crate) static PLURAL_IRREGULAR: &[(&str, &str)] = &[
-        ("人", "人人"),
-        ("国", "国国"),
-        ("山", "山山"),
-        ("島", "島島"),
-        ("年", "年年"),
-        ("我", "我我"),
-        ("所", "所所"),
-        ("日", "日日"),
-        ("星", "星星"),
-        ("月", "月月"),
-        ("神", "神神"),
-        ("隅", "隅隅"),
+    /// Words that end in 〜たち, 〜達 or 〜等 without being suffixed plurals.
+    ///
+    /// Membership criterion: the word is a single lexeme whose final characters
+    /// coincide with a plural suffix — かたち "shape", 配達 "delivery", 平等
+    /// "equality" — so stripping the suffix would produce a non-word.
+    pub(crate) static SINGULAR_INVARIANT: &[&str] = &[
+        "いたち",
+        "いでたち",
+        "おいたち",
+        "かおかたち",
+        "かたち",
+        "からたち",
+        "ついたち",
+        "なりかたち",
+        "なりたち",
+        "はたち",
+        "一等",
+        "三等",
+        "上意下達",
+        "上達",
+        "下意上達",
+        "下等",
+        "不平等",
+        "不等",
+        "中等",
+        "二等",
+        "二親等",
+        "伊達",
+        "伝達",
+        "何等",
+        "優等",
+        "先達",
+        "初等",
+        "到達",
+        "劣等",
+        "勲等",
+        "即日速達",
+        "友達",
+        "同等",
+        "品等",
+        "四通八達",
+        "均等",
+        "女友達",
+        "学校友達",
+        "宮内庁御用達",
+        "対等",
+        "平等",
+        "幼友達",
+        "御用達",
+        "悪平等",
+        "数等",
+        "新聞配達",
+        "書留速達",
+        "未発達",
+        "栄達",
+        "無料配達",
+        "熟達",
+        "牛乳配達",
+        "特等",
+        "男友達",
+        "男女平等",
+        "発達",
+        "練達",
+        "茶飲み友達",
+        "親等",
+        "調達",
+        "送達",
+        "通達",
+        "速達",
+        "遊び友達",
+        "配達",
+        "酒飲み友達",
+        "闊達",
+        "飲み友達",
+        "高等",
     ];
 
-    /// `singularForms.irregularForms`: plural -> singular, likewise collapsed.
+    /// Reduplicated plurals, written with the iteration mark 々.
+    pub(crate) static PLURAL_IRREGULAR: &[(&str, &str)] = &[
+        ("人", "人々"),
+        ("国", "国々"),
+        ("山", "山々"),
+        ("島", "島々"),
+        ("年", "年々"),
+        ("我", "我々"),
+        ("所", "所々"),
+        ("日", "日々"),
+        ("星", "星々"),
+        ("月", "月々"),
+        ("神", "神々"),
+        ("隅", "隅々"),
+    ];
+
+    /// The same pairs keyed by the plural, in both the 々 spelling and the
+    /// fully written-out one, since both occur in running text.
     pub(crate) static SINGULAR_IRREGULAR: &[(&str, &str)] = &[
+        ("人々", "人"),
         ("人人", "人"),
+        ("国々", "国"),
         ("国国", "国"),
+        ("山々", "山"),
         ("山山", "山"),
+        ("島々", "島"),
         ("島島", "島"),
+        ("年々", "年"),
         ("年年", "年"),
+        ("我々", "我"),
         ("我我", "我"),
+        ("所々", "所"),
         ("所所", "所"),
+        ("日々", "日"),
         ("日日", "日"),
+        ("星々", "星"),
         ("星星", "星"),
+        ("月々", "月"),
         ("月月", "月"),
+        ("神々", "神"),
         ("神神", "神"),
+        ("隅々", "隅"),
         ("隅隅", "隅"),
     ];
 
-    /// `pluralForms.regularForms` in source order. First match wins.
-    pub(crate) static PLURAL_REGULAR: &[RawRule] = &[RawRule {
-        source: "^(.+)$",
-        replacement: RawReplacement::Template("$1たち"),
-    }];
+    /// Suffixation with 〜たち, which is what "pluralising" a Japanese noun
+    /// means here. No case restoration applies: Japanese script has no case.
+    pub(crate) static PLURAL_REGULAR: &[RawRule] = &[rule("$", "たち", "私", "私たち")];
 
-    /// `singularForms.regularForms` in source order. First match wins.
+    /// Removal of a plural or associative suffix.
     pub(crate) static SINGULAR_REGULAR: &[RawRule] = &[
-        RawRule {
-            source: "^(.+)たち$",
-            replacement: RawReplacement::KeepIfListed {
-                exceptions: &[
-                    "い",
-                    "おい",
-                    "つい",
-                    "か",
-                    "かおか",
-                    "なりか",
-                    "いで",
-                    "は",
-                    "から",
-                    "なり",
-                ],
-                suffix: "たち",
-            },
-        },
-        RawRule {
-            source: "^(.+)達$",
-            replacement: RawReplacement::KeepIfListed {
-                exceptions: &[
-                    "伊",
-                    "伊",
-                    "栄",
-                    "上意下",
-                    "熟",
-                    "上",
-                    "下意上",
-                    "先",
-                    "送",
-                    "速",
-                    "即日速",
-                    "書留速",
-                    "調",
-                    "通",
-                    "伝",
-                    "到",
-                    "配",
-                    "牛乳配",
-                    "新聞配",
-                    "無料配",
-                    "四通八",
-                    "発",
-                    "未発",
-                    "御用",
-                    "宮内庁御用",
-                    "練",
-                    "闊",
-                ],
-                suffix: "達",
-            },
-        },
-        RawRule {
-            source: "^(.+)等$",
-            replacement: RawReplacement::KeepIfListed {
-                exceptions: &[
-                    "一",
-                    "下",
-                    "何",
-                    "均",
-                    "勲",
-                    "高",
-                    "三",
-                    "初",
-                    "親",
-                    "二親",
-                    "数",
-                    "対",
-                    "中",
-                    "同",
-                    "特",
-                    "二",
-                    "品",
-                    "不",
-                    "平",
-                    "悪平",
-                    "男女平",
-                    "不平",
-                    "優",
-                    "劣",
-                ],
-                suffix: "等",
-            },
-        },
-        RawRule {
-            source: "^(人間|わたくし|私|てまえ|手前|野郎|やろう|勇者|がき|ガキ|餓鬼|あくとう|悪党|猫|家来)(共|ども)$",
-            replacement: RawReplacement::Template("$1"),
-        },
-        RawRule {
-            source: "^(神様|先生|あなた|大名|女中|奥様)(方|がた)$",
-            replacement: RawReplacement::Template("$1"),
-        },
+        rule("^(.+)たち$", "${1}", "人たち", "人"),
+        rule("^(.+)達$", "${1}", "私達", "私"),
+        rule("^(.+)等$", "${1}", "私等", "私"),
+        rule(
+            "^(人間|わたくし|私|てまえ|手前|野郎|やろう|勇者|がき|ガキ|餓鬼|あくとう|悪党|猫|家来)(?:共|ども)$",
+            "${1}",
+            "野郎共",
+            "野郎",
+        ),
+        rule(
+            "^(神様|先生|あなた|大名|女中|奥様)(?:方|がた)$",
+            "${1}",
+            "先生方",
+            "先生",
+        ),
     ];
 }
 
-/// Present-tense verb tables — the reference `present_verb_inflector`.
+/// English verbs, inflected for number agreement.
 pub(crate) mod verb {
-    use super::{RawReplacement, RawRule};
+    use super::{RawRule, guard, rule};
 
-    /// `this.ambiguous`: words that inflect to themselves. Sorted here so the
-    /// membership test is a binary search rather tha reference's linear
-    /// `Array.indexOf`; order is not observable because only membership is.
-    pub(crate) static AMBIGUOUS: &[&str] = &["will"];
+    /// The modal auxiliaries, which have no third-person singular form.
+    pub(crate) static INVARIANT: &[&str] = &["can", "may", "must", "ought", "shall", "will"];
 
-    /// `pluralForms.irregularForms`: singular -> plural, after the
-    /// last-write-wins collapse `addForm` performs. Sorted by key.
+    /// Third-person singular → plain form.
+    ///
+    /// `am` is first-person singular and `is` third; both pair with `are`.
+    /// `was`/`were` are past-tense forms and are here because *be* is the only
+    /// English verb that marks number outside the present tense.
     pub(crate) static PLURAL_IRREGULAR: &[(&str, &str)] = &[
         ("am", "are"),
         ("has", "have"),
@@ -1295,71 +631,51 @@ pub(crate) mod verb {
         ("was", "were"),
     ];
 
-    /// `singularForms.irregularForms`: plural -> singular, likewise collapsed.
-    pub(crate) static SINGULAR_IRREGULAR: &[(&str, &str)] =
-        &[("are", "is"), ("have", "has"), ("were", "was")];
-
-    /// `pluralForms.regularForms` in source order. First match wins.
-    pub(crate) static PLURAL_REGULAR: &[RawRule] = &[
-        RawRule {
-            source: "sses$",
-            replacement: RawReplacement::Template("ss"),
-        },
-        RawRule {
-            source: "xes$",
-            replacement: RawReplacement::Template("x"),
-        },
-        RawRule {
-            source: "([cs])hes$",
-            replacement: RawReplacement::Template("$1h"),
-        },
-        RawRule {
-            source: "zzes$",
-            replacement: RawReplacement::Template("zz"),
-        },
-        RawRule {
-            source: "([^h|z|o|i])es$",
-            replacement: RawReplacement::Template("$1e"),
-        },
-        RawRule {
-            source: "ies$",
-            replacement: RawReplacement::Template("y"),
-        },
-        RawRule {
-            source: "e?s$",
-            replacement: RawReplacement::Template(""),
-        },
+    /// Plain form → third-person singular. `are` maps back to `is`, the
+    /// third-person member of the pair, not to the first-person `am`.
+    pub(crate) static SINGULAR_IRREGULAR: &[(&str, &str)] = &[
+        ("are", "is"),
+        // The plain present of *be* is `are`; `be` itself is the plain form of
+        // the lexeme, and its third-person singular present is `is`.
+        ("be", "is"),
+        ("have", "has"),
+        ("were", "was"),
     ];
 
-    /// `singularForms.regularForms` in source order. First match wins.
+    /// Third-person singular → plain form. First match wins.
+    pub(crate) static PLURAL_REGULAR: &[RawRule] = &[
+        rule("(?i)sses$", "ss", "passes", "pass"),
+        rule("(?i)xes$", "x", "annexes", "annex"),
+        rule("(?i)([cs])hes$", "${1}h", "catches", "catch"),
+        rule("(?i)zzes$", "zz", "buzzes", "buzz"),
+        rule("(?i)([^hzoi])es$", "${1}e", "makes", "make"),
+        // The four verbs whose plain form ends in `-ie`.
+        rule("(?i)^([dltv])ies$", "${1}ie", "dies", "die"),
+        rule("(?i)ies$", "y", "flies", "fly"),
+        rule("(?i)e?s$", "", "runs", "run"),
+    ];
+
+    /// Plain form → third-person singular. First match wins.
     pub(crate) static SINGULAR_REGULAR: &[RawRule] = &[
-        RawRule {
-            source: "ed$",
-            replacement: RawReplacement::Template("ed"),
-        },
-        RawRule {
-            source: "ss$",
-            replacement: RawReplacement::Template("sses"),
-        },
-        RawRule {
-            source: "x$",
-            replacement: RawReplacement::Template("xes"),
-        },
-        RawRule {
-            source: "(h|z|o)$",
-            replacement: RawReplacement::Template("$1es"),
-        },
-        RawRule {
-            source: "$zz",
-            replacement: RawReplacement::Template("zzes"),
-        },
-        RawRule {
-            source: "([^a|e|i|o|u])y$",
-            replacement: RawReplacement::Template("$1ies"),
-        },
-        RawRule {
-            source: "$",
-            replacement: RawReplacement::Template("s"),
-        },
+        // Forms that are already third-person singular. `am` is first person
+        // and has no third-person singular of its own, so it is left as it is
+        // rather than given one.
+        guard("(?i)^(?:am|is|has|was)$", "am"),
+        // Verbs whose plain form ends in `-ed`, which the guard below would
+        // otherwise mistake for a past form.
+        rule(
+            "(?i)(bleed|breed|embed|exceed|feed|heed|lead|need|plead|proceed|read|seed|shed|shred|speed|spread|succeed|wed|weed)$",
+            "${1}s",
+            "need",
+            "needs",
+        ),
+        // A past form has no third-person singular present, so it is left alone
+        // rather than given one.
+        guard("(?i)ed$", "watched"),
+        rule("(?i)ss$", "sses", "pass", "passes"),
+        rule("(?i)x$", "xes", "annex", "annexes"),
+        rule("(?i)(h|z|o)$", "${1}es", "catch", "catches"),
+        rule("(?i)([^aeiou])y$", "${1}ies", "fly", "flies"),
+        rule("$", "s", "run", "runs"),
     ];
 }

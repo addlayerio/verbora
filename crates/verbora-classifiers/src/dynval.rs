@@ -1,35 +1,35 @@
-//! A reference value, its `Number::toString`, and the two serialisers the
-//! classifiers depend on.
-//!
-//! Two apparently-cosmetic pieces of the reference reach directly into the numbers
-//! this crate computes:
-//!
-//! * `Context.toString()` calls **`safe-stable-stringify`**, and the resulting
-//!   string is the *hash key* under which every frequency, weight and
-//!   normalisation constant is stored. Change one byte of it — sort keys by
-//!   Unicode scalar value instead of UTF-16 code unit, print `1e21` as
-//!   `1000000000000000000000` — and two contexts that the reference keeps apart
-//!   collide, or two that it merges stay separate. The trained model changes.
-//! * `save()` calls `JSON.stringify`, and the reference's own spec files read
-//!   the bytes back. Key order there is the reference's own-property order, which
-//!   is *not* the sorted order `safe-stable-stringify` uses.
-//!
-//! Both need the reference's `Number::toString`, which differs from Rust's `{}` in
-//! exactly the region where the exponent form kicks in:
-//!
-//! | value | Rust `{}` | the reference |
-//! |---|---|---|
-//! | `1e21` | `1000000000000000000000` | `1e+21` |
-//! | `1e-7` | `0.0000001` | `1e-7` |
-//! | `-0.0` | `-0` | `0` |
-//!
-//! [`number_to_string`] implements the ECMA-262 algorithm on top of Rust's
-//! shortest-round-trip digits, so the digits themselves come from a correctly
-//! rounded formatter and only the *layout* is reimplemented.
-
 use std::fmt;
 
 /// A reference value, as far as this crate needs one.
+///
+/// A reference value, its `Number::toString`, and the two serialisers the
+/// classifiers depend on.
+///
+/// Two apparently-cosmetic pieces of the reference reach directly into the numbers
+/// this crate computes:
+///
+/// * `Context.toString()` calls **`safe-stable-stringify`**, and the resulting
+///   string is the *hash key* under which every frequency, weight and
+///   normalisation constant is stored. Change one byte of it — sort keys by
+///   Unicode scalar value instead of UTF-16 code unit, print `1e21` as
+///   `1000000000000000000000` — and two contexts that the reference keeps apart
+///   collide, or two that it merges stay separate. The trained model changes.
+/// * `save()` calls `JSON.stringify`, and the reference's own spec files read
+///   the bytes back. Key order there is the reference's own-property order, which
+///   is *not* the sorted order `safe-stable-stringify` uses.
+///
+/// Both need the reference's `Number::toString`, which differs from Rust's `{}` in
+/// exactly the region where the exponent form kicks in:
+///
+/// | value | Rust `{}` | the reference |
+/// |---|---|---|
+/// | `1e21` | `1000000000000000000000` | `1e+21` |
+/// | `1e-7` | `0.0000001` | `1e-7` |
+/// | `-0.0` | `-0` | `0` |
+///
+/// [`number_to_string`] implements the ECMA-262 algorithm on top of Rust's
+/// shortest-round-trip digits, so the digits themselves come from a correctly
+/// rounded formatter and only the *layout* is reimplemented.
 ///
 /// `serde_json::Value` cannot stand in: it has no `undefined`, cannot hold
 /// `NaN`/`Infinity` (all three occur in maxent contexts and alpha vectors), and

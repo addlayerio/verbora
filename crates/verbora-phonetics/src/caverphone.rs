@@ -1,102 +1,50 @@
-//! Caverphone 1.0 and 2.0, David Hood's New Zealand English matchers.
-//!
-//! # Provenance
-//!
-//! Caverphone was created by David Hood at the University of Otago for the
-//! Caversham Project, to match spelling variants of names in historical
-//! Dunedin electoral rolls:
-//!
-//! * **Caverphone 1.0** — "Caverphone: Phonetic Matching Algorithm",
-//!   Technical Paper CTP060902, University of Otago, 2002. Codes are **six**
-//!   characters.
-//! * **Caverphone 2.0** — "Caverphone Revisited", Technical Paper CTP150804,
-//!   University of Otago, 2004. Codes are **ten** characters, final `e` is
-//!   dropped, and `y`, word-final `w`/`r`/`l` and trailing vowels are handled
-//!   differently.
-//!
-//! Both papers were implemented by Apache commons-codec, which is in turn the
-//! source of the [rphonetic](https://docs.rs/rphonetic) Rust port. This
-//! algorithm is **not** part of the JS reference the rest of this crate ports;
-//! following the crate's convention for such extensions ([`BeiderMorse`]
-//! [`crate::BeiderMorse`] is the precedent), its behaviour is pinned to one
-//! canonical implementation: **rphonetic 3.0.6** (`src/caverphone.rs`), byte
-//! for byte, on every input rphonetic accepts. The single divergence — inputs
-//! on which rphonetic *panics* — is documented below.
-//!
-//! # The algorithm
-//!
-//! Both versions are one long **ordered** cascade of rewrites over a
-//! normalized word: lowercase it, drop non-letters, then apply several dozen
-//! substitutions in a fixed sequence (`c`→`k`, `dg`→`2g`, vowels→`3`, …).
-//! The digits are markers, not output: `2` means "delete", `3` means "vowel".
-//! Runs of `s t p k f m n` compact to one uppercase letter; `w r l y h` are
-//! kept only where a vowel follows (uppercased) and deleted otherwise. At the
-//! end all `2`s are removed, all `3`s are removed (Caverphone 2.0 first turns
-//! a *trailing* `3` into `A`), and the result is padded with `1`s and cut to
-//! the fixed code length. **The ordering of the cascade is load-bearing** —
-//! e.g. `tch`→`2ch` must precede `c`→`k`, and the `w3`→`W3` marking must
-//! follow the `stpkfmn` compaction — so [`Caverphone1::process`] and
-//! [`Caverphone2::process`] reproduce rphonetic's exact sequence, step for
-//! step, in a single reused buffer instead of rphonetic's one freshly
-//! allocated `String` per step.
-//!
-//! # Behavioural decisions (all pinned to rphonetic 3.0.6)
-//!
-//! * **Normalization keeps every Unicode-lowercase character, not just
-//!   `a`–`z`.** rphonetic lowercases with `str::to_lowercase` and then keeps
-//!   the characters for which `char::is_lowercase` is true. Accented and
-//!   non-Latin *cased* letters (`é`, `ß`, `м`, …) therefore survive
-//!   normalization, pass through the cascade untouched, and appear verbatim
-//!   in the code, while digits, punctuation, whitespace, and uncased scripts
-//!   (CJK, emoji) are dropped. `process("Москва")` really is `"мос"` + no
-//!   room for padding — see the next point.
-//! * **The code length is measured in bytes.** rphonetic appends the padding
-//!   (`"111111"` / `"1111111111"`) and then slices `&txt[0..6]` /
-//!   `&txt[0..10]` — a *byte* slice. A surviving multi-byte character counts
-//!   as more than one position: `Caverphone1` maps `"café"` to `"KF\u{e9}11"`,
-//!   six bytes but five characters. Every code this module returns is exactly
-//!   6 (v1) or 10 (v2) bytes.
-//! * **Divergence — the one place we do not copy rphonetic:** when that byte
-//!   slice would split a multi-byte character (the character straddles byte
-//!   index 6/10 of the padded rewrite result), rphonetic **panics** ("byte
-//!   index is not a char boundary"). A text library must not panic on
-//!   punctuation-adjacent input, so this module instead drops the straddling
-//!   character and pads with `1`s to the exact code length:
-//!   `Caverphone1::process("péééé")` is `"P\u{e9}\u{e9}1"` where rphonetic
-//!   aborts. Affected inputs are exactly those whose *rewrite result* places
-//!   a multi-byte (necessarily non-ASCII, Unicode-lowercase) character across
-//!   the 6- or 10-byte boundary; they are excluded from the benchmark domain
-//!   per the crate's fairness pattern. ASCII input can never reach this path.
-//! * **Empty and letter-free input yields the all-`1` code** (`"111111"` /
-//!   `"1111111111"`). rphonetic special-cases `""`; input that merely
-//!   *normalizes* to empty (digits, spaces, emoji) falls through its cascade
-//!   to the same value, so one uniform path here is exact.
-//! * **Final sigma:** normalization is `str::to_lowercase`, not per-`char`
-//!   lowercasing, so `"ΑΣ"` keeps Unicode's final form `ς` exactly as
-//!   rphonetic does.
-//!
-//! ```
-//! use verbora_phonetics::caverphone::{Caverphone1, Caverphone2};
-//!
-//! assert_eq!(Caverphone1::new().process("Thompson"), "TMPSN1");
-//! assert_eq!(Caverphone2::new().process("Thompson"), "TMPSN11111");
-//! // The 2004 revision keeps a trailing vowel (as `A`) that 1.0 discards:
-//! assert_eq!(Caverphone1::new().process("ready"), "RT1111");
-//! assert_eq!(Caverphone2::new().process("ready"), "RTA1111111");
-//! ```
+//! Caverphone 1.0 and 2.0 (Hood 2002 / 2004).
 
 /// Code length of Caverphone 1.0, in bytes.
 const LEN_V1: usize = 6;
 /// Code length of Caverphone 2.0, in bytes.
 const LEN_V2: usize = 10;
 
-/// Caverphone 1.0 (Hood 2002); six-byte codes.
+/// Caverphone 1.0 — six-character codes.
 ///
-/// Pinned byte-for-byte to rphonetic 3.0.6 — see the [module docs](self) for
-/// the algorithm, the normalization rules, and the single divergence.
+/// # Publication
+///
+/// David Hood, "Caverphone: Phonetic Matching Algorithm", Technical Paper
+/// CTP060902, University of Otago, 2002. Written for the Caversham Project, to
+/// match spelling variants of names in historical Dunedin electoral rolls, so
+/// it is tuned to New Zealand English rather than to names generally.
+///
+/// [`Caverphone2`] implements the 2004 revision and should be preferred for
+/// new work; 1.0 is here because published Caversham data is keyed with it.
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar**, and the paper's own first step —
+///   "convert to lowercase, remove anything not in the standard alphabet
+///   a–z" — is taken literally: every scalar outside `a`–`z` (after simple
+///   ASCII case folding) is dropped. The code is therefore always six ASCII
+///   characters, for every input in every script.
+/// * A token with no `a`–`z` letter encodes to `"111111"`, the all-padding
+///   code, because the cascade has nothing to rewrite. That is the same value
+///   the algorithm gives a word whose every sound is deleted, so it is a real
+///   code rather than a sentinel.
+/// * **Total**: no input panics, and there is no error type.
+///
+/// # The algorithm
+///
+/// One **ordered** cascade of rewrites over the normalized word: several dozen
+/// substitutions in a fixed sequence (`c`→`k`, `dg`→`2g`, vowels→`3`, …). The
+/// digits are markers, not output: `2` means "delete", `3` means "vowel". Runs
+/// of `s t p k f m n` compact to one uppercase letter; `w r l y h` are kept
+/// only where a vowel follows (uppercased) and deleted otherwise. At the end
+/// all `2`s and `3`s are removed and the result is padded with `1`s and cut to
+/// six characters. **The ordering is load-bearing** — `tch`→`2ch` must precede
+/// `c`→`k`, and the `w3`→`W3` marking must follow the `stpkfmn` compaction —
+/// so the implementation runs the paper's sequence step for step, in a single
+/// reused buffer.
 ///
 /// ```
-/// use verbora_phonetics::caverphone::Caverphone1;
+/// use verbora_phonetics::Caverphone1;
 ///
 /// let caverphone = Caverphone1::new();
 /// assert_eq!(caverphone.process("Thompson"), "TMPSN1");
@@ -106,13 +54,25 @@ const LEN_V2: usize = 10;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Caverphone1;
 
-/// Caverphone 2.0 (Hood 2004, "Caverphone Revisited"); ten-byte codes.
+/// Caverphone 2.0 — ten-character codes.
 ///
-/// Pinned byte-for-byte to rphonetic 3.0.6 — see the [module docs](self) for
-/// the algorithm, the normalization rules, and the single divergence.
+/// # Publication
+///
+/// David Hood, "Caverphone Revisited", Technical Paper CTP150804, University
+/// of Otago, 2004. The revision lengthens the code to ten characters, drops a
+/// final `e`, and changes the handling of `y`, of word-final `w`/`r`/`l`, and
+/// of trailing vowels (which become `A` rather than vanishing).
+///
+/// Prefer this over [`Caverphone1`] unless you are matching against data
+/// already keyed with the 2002 code.
+///
+/// # The contract
+///
+/// As [`Caverphone1`], with a ten-character code: one Unicode scalar per unit,
+/// only `a`–`z` read, always ten ASCII characters out, total.
 ///
 /// ```
-/// use verbora_phonetics::caverphone::Caverphone2;
+/// use verbora_phonetics::Caverphone2;
 ///
 /// let caverphone = Caverphone2::new();
 /// assert_eq!(caverphone.process("Thompson"), "TMPSN11111");
@@ -124,7 +84,7 @@ pub struct Caverphone2;
 
 impl Caverphone1 {
     /// Creates a Caverphone 1.0 encoder. It holds no state; the type exists
-    /// to mirror rphonetic's `Caverphone1`.
+    /// so that call sites read as `caverphone.process(word)`.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -133,7 +93,7 @@ impl Caverphone1 {
     /// Encodes `token` as a six-byte Caverphone 1.0 code.
     ///
     /// ```
-    /// use verbora_phonetics::caverphone::Caverphone1;
+    /// use verbora_phonetics::Caverphone1;
     ///
     /// let caverphone = Caverphone1::new();
     /// assert_eq!(caverphone.process("David"), "TFT111");
@@ -148,7 +108,7 @@ impl Caverphone1 {
     /// Whether two words share a Caverphone 1.0 code.
     ///
     /// ```
-    /// use verbora_phonetics::caverphone::Caverphone1;
+    /// use verbora_phonetics::Caverphone1;
     ///
     /// let caverphone = Caverphone1::new();
     /// assert!(caverphone.compare("Peter", "Peady"));
@@ -162,7 +122,7 @@ impl Caverphone1 {
 
 impl Caverphone2 {
     /// Creates a Caverphone 2.0 encoder. It holds no state; the type exists
-    /// to mirror rphonetic's `Caverphone2`.
+    /// so that call sites read as `caverphone.process(word)`.
     #[must_use]
     pub const fn new() -> Self {
         Self
@@ -171,7 +131,7 @@ impl Caverphone2 {
     /// Encodes `token` as a ten-byte Caverphone 2.0 code.
     ///
     /// ```
-    /// use verbora_phonetics::caverphone::Caverphone2;
+    /// use verbora_phonetics::Caverphone2;
     ///
     /// let caverphone = Caverphone2::new();
     /// assert_eq!(caverphone.process("Stevenson"), "STFNSN1111");
@@ -186,7 +146,7 @@ impl Caverphone2 {
     /// Whether two words share a Caverphone 2.0 code.
     ///
     /// ```
-    /// use verbora_phonetics::caverphone::Caverphone2;
+    /// use verbora_phonetics::Caverphone2;
     ///
     /// let caverphone = Caverphone2::new();
     /// assert!(caverphone.compare("Peter", "Peady"));
@@ -220,16 +180,17 @@ impl verbora_core::Phonetic for Caverphone2 {
 
 /// Which cascade to run. The two versions share most of their steps but
 /// interleave their differences, so one ordered function with version guards
-/// keeps the load-bearing sequence in a single place, in rphonetic's order.
+/// keeps the load-bearing sequence in a single place, in the papers' order.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Version {
     V1,
     V2,
 }
 
-/// The whole cascade, in rphonetic's exact step order.
+/// The whole cascade, in the papers' step order.
 ///
-/// rphonetic allocates a fresh `String` for every one of its ~40 steps. Every
+/// A literal reading of the papers allocates a fresh string for every one of
+/// the ~40 steps. Every
 /// step here except normalization, compaction, marker removal, and padding is
 /// **length-preserving**, so the entire cascade runs in place in one buffer:
 /// the shrinking steps use a read/write cursor, and padding reuses the spare
@@ -246,7 +207,7 @@ fn encode(token: &str, version: Version) -> String {
         buf.pop();
     }
 
-    // Leading irregularities. Each rphonetic step is `starts_with` guarded
+    // Leading irregularities. Each step is `starts_with` guarded
     // `replacen(pat, rep, 1)`, i.e. a prefix rewrite; all are length-preserving.
     replace_prefix(&mut buf, b"cough", b"cou2f");
     replace_prefix(&mut buf, b"rough", b"rou2f");
@@ -282,7 +243,7 @@ fn encode(token: &str, version: Version) -> String {
     replace_pair(&mut buf, b"sh", b"s2");
     map_byte(&mut buf, b'z', b's');
 
-    // Initial vowel → `A`, every other vowel → `3`. rphonetic runs two
+    // Initial vowel → `A`, every other vowel → `3`. The papers run two
     // char-map passes; fused here, first byte special-cased. A multi-byte
     // first character has a lead byte >= 0x80, which no vowel test matches,
     // exactly as `helper::is_vowel` rejects any non-ASCII char.
@@ -318,7 +279,7 @@ fn encode(token: &str, version: Version) -> String {
     compact_stpkfmn(&mut buf);
 
     // `w`, `h`, `r`, `l` (and, in v1, `y`) survive as uppercase only before a
-    // vowel; otherwise they become deletion markers. Order is rphonetic's.
+    // vowel; otherwise they become deletion markers. Order is the papers'.
     replace_pair(&mut buf, b"w3", b"W3");
     if !v2 {
         replace_pair(&mut buf, b"wy", b"Wy");
@@ -375,53 +336,37 @@ fn encode(token: &str, version: Version) -> String {
     }
     remove_byte(&mut buf, b'3');
 
-    // Pad with `1`s and cut to the fixed BYTE length, as rphonetic's
-    // `(txt + "111111")[0..6]` does. Where that byte slice would split a
-    // multi-byte character rphonetic panics; we drop the straddling character
-    // and let the padding fill back to exactly `target` bytes (the module
-    // docs call out this sole divergence).
-    if buf.len() > target {
-        let mut cut = target;
-        while cut > 0 && buf[cut] & 0xC0 == 0x80 {
-            cut -= 1;
-        }
-        buf.truncate(cut);
-    }
+    // Pad with `1`s and cut to the fixed length. `normalize` admits only
+    // `a`-`z`, and every cascade rule maps ASCII to ASCII, so the buffer is
+    // ASCII here and a byte cut is a character cut.
+    buf.truncate(target);
     buf.resize(target, b'1');
 
     debug_assert_eq!(buf.len(), target);
-    String::from_utf8(buf).expect("cascade edits are ASCII-for-ASCII on valid UTF-8")
+    debug_assert!(buf.is_ascii());
+    String::from_utf8(buf).expect("the cascade is ASCII-in, ASCII-out")
 }
 
-/// Lowercases `token` and keeps only its Unicode-lowercase characters, as
-/// rphonetic's `to_lowercase()` + `helper::remove_all_non_letter` do.
+/// Lowercases `token` and keeps only its `a`-`z` letters.
 ///
-/// ASCII input — the overwhelmingly common case — runs byte-wise with no
-/// intermediate allocation. Non-ASCII input takes `str::to_lowercase` (whose
-/// word-final-sigma rule is observable in the output, so a per-`char`
-/// lowercase would be wrong) and then the same `char::is_lowercase` filter.
+/// This is Hood's own first step ("convert to lowercase, remove anything not
+/// in the standard alphabet a-z"), taken literally. Keeping accented or
+/// non-Latin letters instead would put characters into the code that no rule
+/// in either paper mentions, and would make the code length depend on the
+/// input's script.
 fn normalize(token: &str, target: usize) -> Vec<u8> {
     // The buffer only ever shrinks until padding, so `max(len, target)`
     // capacity guarantees zero reallocation for the whole cascade.
     let mut buf = Vec::with_capacity(token.len().max(target));
-    if token.is_ascii() {
-        for &b in token.as_bytes() {
-            if b.is_ascii_alphabetic() {
-                buf.push(b | 0x20);
-            }
-        }
-    } else {
-        for c in token.to_lowercase().chars() {
-            if c.is_lowercase() {
-                let mut utf8 = [0u8; 4];
-                buf.extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
-            }
+    for c in token.chars() {
+        if c.is_ascii_alphabetic() {
+            buf.push((c as u8) | 0x20);
         }
     }
     buf
 }
 
-/// `[aeiou]`, lowercase ASCII only — rphonetic's `helper::is_vowel(_, false)`.
+/// `[aeiou]`, lowercase ASCII only.
 #[inline]
 const fn is_vowel(b: u8) -> bool {
     matches!(b, b'a' | b'e' | b'i' | b'o' | b'u')
@@ -493,7 +438,7 @@ fn replace_pair(buf: &mut [u8], pat: &[u8; 2], rep: &[u8; 2]) {
     }
 }
 
-/// rphonetic's `helper::replace_compact_all_to_uppercase(txt, [s,t,p,k,f,m,n])`:
+/// the reference suite's `helper::replace_compact_all_to_uppercase(txt, [s,t,p,k,f,m,n])`:
 /// each maximal run of one of those letters collapses to a single uppercase
 /// copy; any other character (multi-byte ones included, byte by byte) passes
 /// through and breaks the run. Shrinking, so read/write cursors in place.
@@ -542,10 +487,10 @@ mod tests {
         Caverphone2::new().process(token)
     }
 
-    // -- ports of rphonetic 3.0.6's caverphone.rs test suite (which is in
+    // -- ports of Apache Commons Codec's caverphone.rs test suite (which is in
     //    turn commons-codec's CaverphoneTest/Caverphone2Test) ---------------
 
-    /// rphonetic `test_caverphone1_revisited_common_code_at1111`.
+    /// the reference suite `test_caverphone1_revisited_common_code_at1111`.
     #[test]
     fn caverphone1_common_code_at1111() {
         for input in [
@@ -556,14 +501,14 @@ mod tests {
         }
     }
 
-    /// rphonetic `test_end_mb_caverphone1`.
+    /// the reference suite `test_end_mb_caverphone1`.
     #[test]
     fn caverphone1_end_mb() {
         assert_eq!(v1("mb"), "M11111");
         assert_eq!(v1("mbmb"), "MPM111");
     }
 
-    /// rphonetic `test_is_caverphone1_equals`.
+    /// the reference suite `test_is_caverphone1_equals`.
     #[test]
     fn caverphone1_compare() {
         let caverphone = Caverphone1::new();
@@ -571,21 +516,21 @@ mod tests {
         assert!(caverphone.compare("Peter", "Peady"));
     }
 
-    /// rphonetic `test_specification_v1examples`.
+    /// the reference suite `test_specification_v1examples`.
     #[test]
     fn caverphone1_specification_examples() {
         assert_eq!(v1("David"), "TFT111");
         assert_eq!(v1("Whittle"), "WTL111");
     }
 
-    /// rphonetic `test_wikipedia_examples`.
+    /// the reference suite `test_wikipedia_examples`.
     #[test]
     fn caverphone1_wikipedia_examples() {
         assert_eq!(v1("Lee"), "L11111");
         assert_eq!(v1("Thompson"), "TMPSN1");
     }
 
-    /// rphonetic `test_caverphone_revisited_common_code_at11111111`.
+    /// the reference suite `test_caverphone_revisited_common_code_at11111111`.
     #[test]
     fn caverphone2_common_code_at11111111() {
         for input in [
@@ -596,14 +541,14 @@ mod tests {
         }
     }
 
-    /// rphonetic `test_caverphone_revisited_examples`.
+    /// the reference suite `test_caverphone_revisited_examples`.
     #[test]
     fn caverphone2_revisited_examples() {
         assert_eq!(v2("Stevenson"), "STFNSN1111");
         assert_eq!(v2("Peter"), "PTA1111111");
     }
 
-    /// rphonetic `test_caverphone_revisited_random_name_kln1111111`.
+    /// the reference suite `test_caverphone_revisited_random_name_kln1111111`.
     #[test]
     fn caverphone2_names_encoding_to_kln1111111() {
         let names = [
@@ -624,7 +569,7 @@ mod tests {
         }
     }
 
-    /// rphonetic `test_caverphone_revisited_random_name_tn11111111`.
+    /// the reference suite `test_caverphone_revisited_random_name_tn11111111`.
     #[test]
     fn caverphone2_names_encoding_to_tn11111111() {
         let names = [
@@ -642,7 +587,7 @@ mod tests {
         }
     }
 
-    /// rphonetic `test_caverphone_revisited_random_name_tta1111111`.
+    /// the reference suite `test_caverphone_revisited_random_name_tta1111111`.
     #[test]
     fn caverphone2_names_encoding_to_tta1111111() {
         let names = [
@@ -660,7 +605,7 @@ mod tests {
         }
     }
 
-    /// rphonetic `test_caverphone_revisited_random_words`.
+    /// the reference suite `test_caverphone_revisited_random_words`.
     #[test]
     fn caverphone2_random_words() {
         assert_eq!(v2("rather"), "RTA1111111");
@@ -671,14 +616,14 @@ mod tests {
         assert_eq!(v2("appear"), "APA1111111");
     }
 
-    /// rphonetic `test_end_mb_caverphone2`.
+    /// the reference suite `test_end_mb_caverphone2`.
     #[test]
     fn caverphone2_end_mb() {
         assert_eq!(v2("mb"), "M111111111");
         assert_eq!(v2("mbmb"), "MPM1111111");
     }
 
-    /// rphonetic `test_is_caverphone2_equals`.
+    /// the reference suite `test_is_caverphone2_equals`.
     #[test]
     fn caverphone2_compare() {
         let caverphone = Caverphone2::new();
@@ -686,7 +631,7 @@ mod tests {
         assert!(caverphone.compare("Peter", "Peady"));
     }
 
-    /// rphonetic `test_specification_examples` (the 2.0 paper's own vectors).
+    /// the reference suite `test_specification_examples` (the 2.0 paper's own vectors).
     #[test]
     fn caverphone2_specification_examples() {
         assert_eq!(v2("Peter"), "PTA1111111");
@@ -698,7 +643,7 @@ mod tests {
         assert_eq!(v2("Dyun"), "TN11111111");
     }
 
-    // -- hand-written edge cases, all verified against rphonetic 3.0.6 ------
+    // -- hand-written edge cases, all verified against Apache Commons Codec ------
 
     #[test]
     fn empty_input_is_all_ones() {
@@ -708,7 +653,7 @@ mod tests {
 
     #[test]
     fn input_that_normalizes_to_empty_is_all_ones() {
-        // rphonetic short-circuits only `""`; these fall through its cascade
+        // the reference suite short-circuits only `""`; these fall through its cascade
         // to the identical all-padding code.
         for input in [
             "12345",
@@ -843,77 +788,47 @@ mod tests {
         assert_eq!(v2("zyxwvutsrqponmlkjihgfedcba"), "SKFTSKPNMK");
     }
 
-    // -- non-ASCII behaviour, pinned to rphonetic (see module docs) ---------
+    // -- the text unit -----------------------------------------------------
 
+    /// Hood's first step is "convert to lowercase, remove anything not in the
+    /// standard alphabet a-z", so a scalar outside `a`-`z` is *removed*, not
+    /// carried into the code. Enumerated over one scalar of every class,
+    /// because an implementation that instead kept every Unicode-lowercase
+    /// character would put bytes into the code that no rule in either paper
+    /// mentions -- and would make the code's length depend on the script.
     #[test]
-    fn unicode_lowercase_letters_survive_into_the_code() {
-        // rphonetic keeps every Unicode-lowercase char, and slices BYTES.
-        assert_eq!(v1("é"), "é1111"); // 6 bytes, 5 chars
-        assert_eq!(v2("é"), "é11111111");
-        assert_eq!(v1("café"), "KFé11");
-        assert_eq!(v2("café"), "KFé111111");
-        assert_eq!(v1("ß"), "ß1111");
-        assert_eq!(v1("straße"), "STRß1");
-        assert_eq!(v2("straße"), "STRß11111");
-        // Uppercase non-ASCII is lowercased first, then kept.
-        assert_eq!(v1("É"), "é1111");
-        // Cyrillic is cased, so it passes straight through; the 2-byte chars
-        // fill the whole 6-/10-byte code, leaving no room for padding.
-        assert_eq!(v1("Москва"), "мос");
-        assert_eq!(v2("Москва"), "москв");
-        assert_eq!(v1("пятница"), "пят");
-        // Word-final sigma follows str::to_lowercase, like rphonetic. Note
-        // Greek alpha is not ASCII `a`, so it is not treated as a vowel.
-        assert_eq!(v1("ΑΣ"), "ας11");
-        assert_eq!(v2("ΑΣ"), "ας111111");
-    }
+    fn only_ascii_letters_reach_the_cascade() {
+        // Nothing in the standard alphabet: the cascade has nothing to
+        // rewrite, so the code is all padding.
+        for input in ["", " ", "12345", "...", "日本語", "😀", "Москва", "\u{301}"] {
+            assert_eq!(v1(input), "111111", "v1 for {input:?}");
+            assert_eq!(v2(input), "1111111111", "v2 for {input:?}");
+        }
 
-    #[test]
-    fn char_straddling_the_cut_is_dropped_not_panicked() {
-        // DOCUMENTED DIVERGENCE: rphonetic panics on these ("byte index 6/10
-        // is not a char boundary"); we drop the straddling char and pad back
-        // to the exact byte length. `p` compacts to `P` and the four/eight
-        // `é`s pass through, so the third/fifth `é` straddles the cut.
-        assert_eq!(v1("péééé"), "Péé1");
-        assert_eq!(v1("péééé").len(), LEN_V1);
-        assert_eq!(v2("péééééééé"), "Péééé1");
-        assert_eq!(v2("péééééééé").len(), LEN_V2);
-        // Four-byte mathematical-script letters: `𝓢` has no lowercase
-        // mapping and is dropped; the Ll ones survive and straddle both cuts.
-        assert_eq!(v1("𝓢𝓶𝓲𝓽𝓱"), "𝓶11");
-        assert_eq!(v1("𝓢𝓶𝓲𝓽𝓱").len(), LEN_V1);
-        assert_eq!(v2("𝓢𝓶𝓲𝓽𝓱"), "𝓶𝓲11");
-        assert_eq!(v2("𝓢𝓶𝓲𝓽𝓱").len(), LEN_V2);
-        // Where the boundary happens to fall cleanly, rphonetic accepts the
-        // input and we match it exactly (see the previous test).
-        assert_eq!(v2("péééé"), "Péééé1");
-    }
+        // An accented letter is removed, so the word codes as its
+        // unaccented-letters-only spelling.
+        assert_eq!(v1("caf\u{e9}"), v1("caf"));
+        assert_eq!(v2("caf\u{e9}"), v2("caf"));
+        assert_eq!(v1("stra\u{df}e"), v1("strae"));
+        assert_eq!(v1("na\u{ef}ve"), v1("nave"));
+        // ... and does not act as a separator either.
+        assert_eq!(v1("p\u{e9}ter"), v1("peter"));
 
-    /// A four-byte character sitting *across* one cut but cleanly *inside*
-    /// the other: the truncation backoff must step over several continuation
-    /// bytes, and each version must diverge (drop + re-pad) exactly where
-    /// rphonetic panics while matching it byte-for-byte where it does not.
-    #[test]
-    fn four_byte_char_backoff_at_each_cut() {
-        // "stp" compacts to "STP" (3 bytes); 𝓶 (U+1D4F6, 4 bytes) then spans
-        // bytes 3..7. v1's cut at 6 lands on 𝓶's last byte — rphonetic
-        // panics; we back off three continuation bytes and re-pad.
-        assert_eq!(v1("stp𝓶"), "STP111");
-        assert_eq!(v1("stp𝓶").len(), LEN_V1);
-        // v2's cut at 10 is beyond the 7-byte result: no divergence, and the
-        // recorded rphonetic 3.0.6 output matches exactly.
-        assert_eq!(v2("stp𝓶"), "STP𝓶111");
-        // "stpkfmn" compacts to "STPKFMN" (7 bytes): now v1's cut at byte 6
-        // falls between N and 𝓶 — clean, recorded from rphonetic — while
-        // v2's cut at 10 splits 𝓶 and diverges.
-        assert_eq!(v1("stpkfmn𝓶"), "STPKFM"); // recorded from rphonetic 3.0.6
-        assert_eq!(v2("stpkfmn𝓶"), "STPKFMN111");
-        assert_eq!(v2("stpkfmn𝓶").len(), LEN_V2);
+        // Case folding is simple ASCII folding.
+        assert_eq!(v1("THOMPSON"), v1("Thompson"));
+
+        // Every code is exactly the published length, in ASCII characters,
+        // for every input above and for a long non-ASCII repeat.
+        for input in ["", "caf\u{e9}", "\u{1F600}".repeat(50).as_str(), "Thompson"] {
+            assert_eq!(v1(input).len(), LEN_V1, "v1 for {input:?}");
+            assert_eq!(v2(input).len(), LEN_V2, "v2 for {input:?}");
+            assert!(v1(input).is_ascii() && v2(input).is_ascii());
+        }
     }
 
     /// Mid-word `wy`/`why` clusters: kept as `W` in v1 (its `wy`→`Wy`,
     /// `why`→`Why` rules), while v2 reaches the same letters through its
-    /// y-as-vowel path. Recorded from rphonetic 3.0.6.
+    /// y-as-vowel path. Recorded from Apache Commons Codec.
     #[test]
     fn wy_and_why_clusters_mid_word() {
         assert_eq!(v1("wywywy"), "WWW111");

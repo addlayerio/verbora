@@ -7,22 +7,27 @@
 //! the two are compared on genuinely equivalent output, not just a
 //! similarly-named operation.
 //!
-//! Both sides pad with `arity - 1` space characters on each side (Verbora's
-//! `ngrams(&chars, arity, Some(' '), Some(' '))`, `ngrammatic`'s default
-//! `Pad::Auto`) and slide a window of size `arity` across the padded
-//! sequence — the same algorithm, independently arrived at. They are
-//! expected to diverge only on inputs shorter than `arity - 1`, where
-//! Verbora's padding follows the reference's own negative-slice
-//! re-anchoring quirk (see `crates/verbora-ngrams/src/engine.rs`'s
-//! `clamp_slice_start` doc comment) and `ngrammatic` does not — no word in
-//! `benches/data/words.json` is that short (the generator's own minimum is
-//! 3 characters), so that divergence is disclosed here rather than
-//! silently avoided by the input, and is not exercised by this test.
+//! Both sides pad with `arity - 1` copies of a space on each side — Verbora's
+//! `Padded::new(&chars, arity, Some(&' '), Some(&' '))`, `ngrammatic`'s
+//! default `Pad::Auto` — and slide a window of size `arity` across the padded
+//! sequence. The two definitions are now literally the same one: `ngrammatic`
+//! builds `" ".repeat(arity - 1) + text + " ".repeat(arity - 1)` and calls
+//! `chars_padded.windows(arity)` (`ngrammatic-0.7.0/src/ngram.rs:205-217`),
+//! which is `docs/design/text-shaping-contract.md` §3.3's padding rule
+//! spelled out.
+//!
+//! The divergence this file used to disclose — short inputs, where Verbora's
+//! right padding re-anchored a negative slice start and produced tuples
+//! shorter than `arity` — is gone with that implementation. Under the current
+//! contract every window is exactly `arity` elements for every input length,
+//! including `len == 0`, so short inputs are now checked for *agreement*
+//! rather than pinned as a difference.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 use ngrammatic::{NgramBuilder, Pad};
-use verbora_ngrams::ngrams;
+use verbora_ngrams::Padded;
 
 fn load_words() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -50,9 +55,11 @@ fn load_words() -> Vec<String> {
 /// usize>` built by folding [`ngrams`]'s output) is the fair comparison
 /// point against `ngrammatic::Ngram::grams`.
 fn verbora_char_grams(word: &str, arity: usize) -> HashMap<String, usize> {
+    let arity = NonZeroUsize::new(arity).expect("arity is non-zero");
     let chars: Vec<char> = word.chars().collect();
+    let padded = Padded::new(&chars, arity, Some(&' '), Some(&' '));
     let mut map: HashMap<String, usize> = HashMap::new();
-    for gram in ngrams(&chars, arity, Some(' '), Some(' ')) {
+    for gram in padded.ngrams() {
         *map.entry(gram.iter().collect()).or_insert(0) += 1;
     }
     map
@@ -97,19 +104,35 @@ fn agrees_on_every_word_arity_3() {
     }
 }
 
-/// The one documented divergence: inputs shorter than `arity - 1` hit
-/// Verbora's negative-slice re-anchoring quirk (ported from the reference),
-/// which `ngrammatic` has no equivalent of. Recorded as a real, disclosed
-/// difference — not exercised by `benches/ngrams.rs`, whose input (real
-/// words, minimum length 3) never reaches it.
+/// Inputs shorter than `arity - 1`, which the previous implementation got
+/// wrong on both counts — short tuples and out-of-order emission — and which
+/// `benches/ngrams.rs` never reaches, since the shortest word in the shared
+/// list is three characters. Checked here so the benchmark's equivalence
+/// claim does not rest on the input happening to avoid the hard case.
 #[test]
-fn diverges_on_inputs_shorter_than_arity_minus_one() {
-    // "a" has length 1, arity 3 needs 2 pad positions per side: Verbora's
-    // right-padding re-anchors past the start of the sequence.
-    let verbora = verbora_char_grams("a", 3);
-    let ngrammatic = ngrammatic_char_grams("a", 3);
-    assert_ne!(
-        verbora, ngrammatic,
-        "expected a real divergence on a short input, per this file's module doc comment"
-    );
+fn agrees_on_inputs_shorter_than_arity() {
+    for arity in 2..=4usize {
+        for word in ["", "a", "ab"] {
+            let verbora = verbora_char_grams(word, arity);
+            let ngrammatic = ngrammatic_char_grams(word, arity);
+            assert_eq!(
+                verbora, ngrammatic,
+                "mismatch for {word:?} at arity {arity}: \
+                 verbora={verbora:?} ngrammatic={ngrammatic:?}"
+            );
+        }
+    }
+}
+
+/// Verbora's own answer for a short input, derived from
+/// `docs/design/text-shaping-contract.md` §3.3 rather than from `ngrammatic`:
+/// `"a"` at arity 3 pads to `[' ', ' ', 'a', ' ', ' ']`, which holds
+/// `5 - 3 + 1 = 3` windows, each of exactly three characters.
+#[test]
+fn short_inputs_are_padded_symmetrically() {
+    let grams = verbora_char_grams("a", 3);
+    assert_eq!(grams.len(), 3);
+    assert_eq!(grams.get("  a"), Some(&1));
+    assert_eq!(grams.get(" a "), Some(&1));
+    assert_eq!(grams.get("a  "), Some(&1));
 }

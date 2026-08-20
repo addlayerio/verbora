@@ -1,114 +1,110 @@
-//! Verbora vs. a real, pinned third-party Rust competitor — normalizers.
+//! Verbora vs. real, pinned third-party Rust competitors — normalizers.
 //!
-//! See `docs/COMPETITIVE_BENCHMARKS.md` §1.4 for the research dossier. Of the
-//! six Rust candidates that research found for `remove_diacritics`, only one
-//! is benchmarked here:
+//! See `docs/COMPETITIVE_BENCHMARKS.md` §1.4 for the research dossier, and
+//! `docs/design/text-shaping-contract.md` §3.2 for the contract this file was
+//! re-pointed at.
 //!
-//! * **`diacritics` 0.2.2 (YesSeri)** — the matrix's own pick as the closest
-//!   semantic match: case-preserving, no forced lowercasing, a direct
-//!   per-character table lookup (not NFD decomposition). Verified below (see
-//!   `../tests/normalizers_correctness.rs`) to agree with Verbora on ASCII
-//!   rejection, precomposed accented Latin, the `œ`/`Œ` ligature fold, the
-//!   `ß`→`s`/`ẞ`→`S` fold, the documented `ſ`→`l` bug, the `İ`/`ı` Turkish
-//!   dotted/dotless-I fold, and Cyrillic rejection — an unusually close match
-//!   for two independently-written tables, which is unsurprising once you
-//!   notice both plainly descend from the same long-circulated
-//!   "remove-accents" reference table lineage that the reference's own
-//!   `removeDiacritics` also descends from.
-//! * **`unaccent` 0.1.1** — matrix: `Selected cases`/Partial, but
-//!   deliberately not pinned here. It works by NFD-decomposing input and
-//!   stripping combining marks, a different mechanism from Verbora's
-//!   non-decomposing table lookup (see `remove_diacritics`'s own doc comment
-//!   for why that distinction is not cosmetic: precomposed `é` and `e` +
-//!   U+0301 fold identically under NFD-then-strip but differently under
-//!   Verbora's direct lookup). Its crates.io license field is also flagged
-//!   "non-standard" by the matrix — not worth the extra verification burden
-//!   when a strictly closer-matching candidate (`diacritics`) already exists.
-//! * **`secular` 1.0.1`** — matrix: `No`. Forces lowercasing as part of its
-//!   only public API, so it does categorically different/additional work
-//!   than Verbora's case-preserving function. Not benchmarked.
-//! * **`deunicode`/`any_ascii`/`unidecode`, `unicode-normalization`** —
-//!   matrix: `No` for both (full Unicode-to-ASCII transliterators, or a
-//!   decomposition primitive that is not itself a diacritic-folder). Not
-//!   benchmarked.
+//! # What the text-shaping migration did to this file
 //!
-//! # A real, narrow divergence — and why the benchmarked domain sidesteps it
+//! `verbora-normalizers` now exposes six functions — `nfd`, `nfc`, `nfkd`,
+//! `nfkc`, `remove_diacritics`, `par_remove_diacritics_batch` — and nothing
+//! else. Three of this file's five groups measured APIs that no longer exist,
+//! and they were **not** re-pointed at a lookalike so the group could keep its
+//! shape:
 //!
-//! `diacritics` silently *drops* standalone Unicode combining marks (the
-//! U+0300–U+036F "Combining Diacritical Marks" block and two extension
-//! blocks): `remove_diacritics("e\u{0301}")` is `"e"` there and `"e\u{0301}"`
-//! (unchanged — Verbora never decomposes) on Verbora's side. This is checked
-//! explicitly, not just asserted in prose, in
-//! `../tests/normalizers_correctness.rs`.
+//! * `ja_hiragana_to_katakana` / `ja_katakana_to_hiragana` — **deleted**.
+//!   `verbora_normalizers::ja::converters` is gone in full, and hiragana ↔
+//!   katakana conversion is not a Unicode normalization: the contract (§3.2,
+//!   "Cut: the Japanese normalizers") records it as a *transliteration* that
+//!   belongs to `verbora-transliterators`, which today ships only kana →
+//!   romaji (`transliterate_ja`). There is no Verbora side left to time, so
+//!   timing `unicode-jp`'s `hira2kata`/`kata2hira` alone would measure
+//!   nothing about Verbora. The `unicode-jp` dependency went with the groups.
+//! * `ja_katakana_halfwidth_to_fullwidth` — **re-pointed**, not deleted. The
+//!   capability genuinely survives: NFKC's compatibility decomposition maps
+//!   halfwidth katakana to its fullwidth form and decomposes the halfwidth
+//!   voiced sound mark `U+FF9E` to the combining `U+3099`, which canonical
+//!   composition then recombines, so `nfkc("ｶﾞ") == "ガ"` — the same
+//!   user-visible operation `katakana_hf` performed. See
+//!   [`bench_nfkc_halfwidth_katakana`] for the comparability limit this
+//!   creates and how the input domain is narrowed to respect it.
 //!
-//! Both benchmark groups below use only precomposed Latin text (`é`, not `e`
-//! + U+0301) — the same `ascii_prose`/`accented_prose` generators
-//!   `crates/verbora-normalizers/benches/normalizers.rs` already uses — so
-//!   this divergence never
-//!   triggers on the actual benchmarked input. This mirrors `distance.rs`'s own
-//!   "kept to ASCII only... sidesteps that distinction entirely" pattern: a
-//!   documented, narrowed, genuinely-fair input domain, not silence about the
-//!   difference.
+//! Every published figure for the two deleted groups, and for the re-pointed
+//! one, measures code that no longer exists. `results/raw/normalizers-ja_*`
+//! and the `normalizers` rows of `results/results.json` are stale for that
+//! reason and must not be republished — per `CLAUDE.md`, a number whose code
+//! has changed is stale, not approximately right.
 //!
-//! # `normalize_ja` — zero competitors until this pass
+//! # `remove_diacritics` — same function, opposite mechanism
 //!
-//! `docs/COMPETITIVE_BENCHMARKS.md` §1.4 selects two candidates for
-//! `normalize_ja` (Japanese width/kana/symbol normalization, 17 individual
-//! conversions plus the composed pipeline), both matrix `Selected cases`, and
-//! neither had a bench group here until this pass — confirmed by grepping
-//! this file for `normalize_ja`/`hiragana`/`katakana` before writing it, per
-//! this round's own instruction to verify the gap rather than assume it:
+//! `remove_diacritics` survives under the same name, but its definition
+//! changed from a 820-entry precomposed-scalar table to (contract §3.2):
 //!
-//! * **`unicode-jp` 0.4.0 (gemmarx)** — covers only 2 of the 17 conversions:
-//!   `kana::hira2kata`/`kata2hira` (its published package name is
-//!   `unicode-jp`, but its own `[lib] name = "kana"` — see its Cargo.toml —
-//!   so Rust code below imports it as `kana::`). Reading
-//!   `unicode-jp-0.4.0/src/kana.rs` directly: both are a bare `char` codepoint
-//!   shift over a fixed range (`0x3041..=0x3096` / `0x30A1..=0x30F6`), with
-//!   none of Verbora's `hiragana_to_katakana`/`katakana_to_hiragana` extra
-//!   stages — halfwidth-katakana folding and the small-tsu-before-n-row /
-//!   standalone-voiced-mark phonetic fixes (`fix_fullwidth_kana`). Narrowed
-//!   to pure hiragana/katakana input with neither halfwidth characters nor a
-//!   small tsu before an n-row consonant — real Japanese text (the Iroha
-//!   pangram, いろは歌, all 47 base characters with no repeats) rather than a
-//!   synthetic string, verified byte-exact on that domain in
-//!   `../tests/normalizers_correctness.rs`, which also verifies the excluded
-//!   divergence explicitly (`"まっなか"` and halfwidth input both produce
-//!   different output on the two sides).
-//! * **`kana-converter` 0.1.2** — narrower still, a single-purpose
-//!   halfwidth-kana/ASCII-to-fullwidth converter with no reverse direction at
-//!   all. Its `to_double_byte(_, KanaOnly)` composes halfwidth katakana with a
-//!   following voiced/semi-voiced mark by adding a raw `+1`/`+2` codepoint
-//!   offset to the mapped base character — no table of which pairs are real,
-//!   unlike Verbora's `katakana_hf` (a literal two-character-key lookup, see
-//!   `crates/verbora-normalizers/src/ja/tables.rs`'s `HF_KATAKANA.two`). That
-//!   offset happens to land correctly for the ordinary gojuon rows (Unicode
-//!   groups them adjacently in the katakana block) but not for `ｦ`/`ﾜ`
-//!   (whose real voiced forms `ヺ`/`ヷ` were added later, non-adjacently) or
-//!   for an orphan mark with no valid preceding base — all three verified as
-//!   real, reproducible divergences in `../tests/normalizers_correctness.rs`,
-//!   along with a fourth (`KanaOnly` also folds halfwidth CJK punctuation and
-//!   space, a job Verbora keeps in the separate `pure_punctuation_hf`).
-//!   Narrowed to halfwidth katakana using only the standard voiced/
-//!   semi-voiced pairs, no punctuation, no space, no orphan marks, no
-//!   `ｦ`/`ﾜ` + dakuten.
+//! > `s` under Canonical Decomposition (NFD), with every scalar whose
+//! > `Canonical_Combining_Class` is non-zero removed, under Canonical
+//! > Composition (NFC).
+//!
+//! That inverts the reasoning the previous revision of this comment used to
+//! pick a competitor, and the inversion is recorded rather than quietly
+//! dropped:
+//!
+//! * **`diacritics` 0.2.2 (YesSeri)** — still the pinned competitor, still a
+//!   case-preserving direct per-character table lookup. It is now the
+//!   *mechanically opposite* implementation of the same user-facing task
+//!   (fold the accents off Latin text), which is a perfectly fair thing to
+//!   benchmark — but it is no longer the "closest semantic match", and the
+//!   two now disagree on far more of Unicode than they did (105 codepoints in
+//!   `U+00C0..=U+024F` alone, up from 7). `../tests/normalizers_correctness.rs`
+//!   characterises that divergence set by rule instead of by list, and proves
+//!   the two still agree byte-for-byte on everything the two groups below
+//!   actually feed them.
+//! * **`unaccent` 0.1.1** — matrix `Selected cases`/Partial. Previously
+//!   rejected *because* it decomposes and Verbora did not; that objection is
+//!   now void, and `unaccent` has become the mechanism-matched competitor.
+//!   It is still not pinned here: the matrix's other objection (crates.io
+//!   flags its license field "non-standard") is unresolved, and adding a
+//!   dependency needs the licence review `AGENTS.md` § Licensing requires.
+//!   Recorded as an open follow-up, not silently skipped.
+//! * **`secular` 1.0.1** — matrix `No`. Forces lowercasing in its only public
+//!   API, so it does categorically different work. Unchanged verdict.
+//! * **`deunicode`/`any_ascii`/`unidecode`** — matrix `No` (full
+//!   Unicode-to-ASCII transliterators). Unchanged verdict.
+//! * **`unicode-normalization`** — no longer classifiable as a competitor at
+//!   all: it is now the crate `verbora-normalizers` is *implemented on*.
+//!   Benchmarking Verbora against it would be a wrapper-overhead measurement,
+//!   not a rival-implementation one, and this file does not pretend otherwise
+//!   by including it.
+//!
+//! # The divergence that used to be here is gone; a much larger one replaced it
+//!
+//! The previous revision documented one narrow divergence — `diacritics`
+//! strips standalone combining marks and Verbora did not — and narrowed both
+//! groups to precomposed Latin to sidestep it. Verbora now decomposes first,
+//! so *that* divergence no longer exists: both sides fold `"e\u{0301}"` to
+//! `"e"`. What replaced it is broader and runs the other way: Verbora leaves
+//! every letter whose "accent" is part of its identity untouched (`ø`, `æ`,
+//! `ß`, `đ`, `ł`, `ſ`, `ı` — no canonical decomposition, so nothing to
+//! remove), where `diacritics`' table folds each to a bare ASCII letter.
+//!
+//! Both groups below are still built from `ascii_prose`/`accented_prose`, the
+//! same generators `crates/verbora-normalizers/benches/normalizers.rs` uses,
+//! and every character they produce is either plain ASCII or a precomposed
+//! Latin letter that canonically decomposes to an ASCII base plus marks —
+//! squarely inside the verified-agreeing domain. This is the same
+//! documented-narrowing discipline `distance.rs` applies, not silence about
+//! the difference.
 //!
 //! # Shape
 //!
-//! Five groups — `remove_diacritics_ascii` (rejection: nothing to fold) and
-//! `remove_diacritics_accented` (work: every fourth character folds), plus
-//! `ja_hiragana_to_katakana`, `ja_katakana_to_hiragana` and
-//! `ja_katakana_halfwidth_to_fullwidth` — each with
-//! `BenchmarkId::new(competitor, repeats)` for `repeats` in [`SIZES`],
-//! throughput in bytes. Every call's input and output is wrapped in
-//! `black_box`.
+//! Three groups — `remove_diacritics_ascii` (rejection: nothing to fold),
+//! `remove_diacritics_accented` (work: every fourth character folds), and
+//! `nfkc_halfwidth_katakana` — each with `BenchmarkId::new(competitor,
+//! repeats)` for `repeats` in [`SIZES`], throughput in bytes. Every call's
+//! input and output is wrapped in `black_box`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-use verbora_normalizers::ja::converters::{
-    hiragana_to_katakana, katakana_hf, katakana_to_hiragana,
-};
-use verbora_normalizers::remove_diacritics;
+use verbora_normalizers::{nfkc, remove_diacritics};
 
 /// Repeat counts for the prose generators below (not byte lengths — see the
 /// module doc comment). Matches `distance.rs`'s `SIZES` so
@@ -160,22 +156,6 @@ fn bench_accented(c: &mut Criterion) {
     g.finish();
 }
 
-/// The Iroha pangram (いろは歌): all 47 base hiragana, no repeats,
-/// historically used as a Japanese font/encoding test string for exactly the
-/// property this benchmark needs — entirely inside U+3041..=U+3096, no
-/// iteration marks, no small tsu, no halfwidth. Repeated for larger sizes,
-/// identical to `../tests/normalizers_correctness.rs`'s own `IROHA_HIRAGANA`.
-fn iroha_hiragana(repeats: usize) -> String {
-    "いろはにほへとちりぬるをわかよたれそつねならむうゐのおくやまけふこえてあさきゆめみしゑひもせす"
-        .repeat(repeats)
-}
-
-/// The same pangram in katakana — entirely inside U+30A1..=U+30F6.
-fn iroha_katakana(repeats: usize) -> String {
-    "イロハニホヘトチリヌルヲワカヨタレソツネナラムウヰノオクヤマケフコエテアサキユメミシヱヒモセス"
-        .repeat(repeats)
-}
-
 /// Halfwidth katakana using only the voiced/semi-voiced pairs both sides
 /// agree on (no punctuation, no space, no orphan marks, no `ｦ`/`ﾜ` +
 /// dakuten) — identical to `../tests/normalizers_correctness.rs`'s own
@@ -184,43 +164,41 @@ fn halfwidth_katakana(repeats: usize) -> String {
     "ｼﾝｸﾞﾙﾊﾞｲﾄｶﾅｶﾀｶﾅｶﾞｷﾞｸﾞｹﾞｺﾞｻﾞｼﾞｽﾞｾﾞｿﾞﾀﾞﾁﾞﾂﾞﾃﾞﾄﾞﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ".repeat(repeats)
 }
 
-fn bench_ja_hiragana_to_katakana(c: &mut Criterion) {
-    let mut g = c.benchmark_group("ja_hiragana_to_katakana");
-    for n in SIZES {
-        let s = iroha_hiragana(n);
-        g.throughput(Throughput::Bytes(s.len() as u64));
-        g.bench_with_input(BenchmarkId::new("verbora", n), &s, |bch, s| {
-            bch.iter(|| black_box(hiragana_to_katakana(black_box(s))));
-        });
-        g.bench_with_input(BenchmarkId::new("unicode-jp", n), &s, |bch, s| {
-            bch.iter(|| black_box(kana::hira2kata(black_box(s))));
-        });
-    }
-    g.finish();
-}
-
-fn bench_ja_katakana_to_hiragana(c: &mut Criterion) {
-    let mut g = c.benchmark_group("ja_katakana_to_hiragana");
-    for n in SIZES {
-        let s = iroha_katakana(n);
-        g.throughput(Throughput::Bytes(s.len() as u64));
-        g.bench_with_input(BenchmarkId::new("verbora", n), &s, |bch, s| {
-            bch.iter(|| black_box(katakana_to_hiragana(black_box(s))));
-        });
-        g.bench_with_input(BenchmarkId::new("unicode-jp", n), &s, |bch, s| {
-            bch.iter(|| black_box(kana::kata2hira(black_box(s))));
-        });
-    }
-    g.finish();
-}
-
-fn bench_ja_katakana_halfwidth_to_fullwidth(c: &mut Criterion) {
-    let mut g = c.benchmark_group("ja_katakana_halfwidth_to_fullwidth");
+/// The re-pointed halfwidth-katakana group: `verbora_normalizers::nfkc`
+/// against `kana_converter::to_double_byte(_, KanaOnly)`.
+///
+/// # The comparability limit, stated rather than assumed
+///
+/// `AGENTS.md` § Cross-Implementation Benchmark Fairness requires both sides
+/// to do the same work, and here they do not do *exactly* the same work:
+/// `nfkc` is the general UAX #15 Normalization Form KC over arbitrary Unicode
+/// — it must consult compatibility decompositions, canonical combining
+/// classes and composition exclusions for every scalar it sees — while
+/// `kana-converter`'s `KanaOnly` mode is a purpose-built halfwidth-kana table
+/// plus `+1`/`+2` codepoint arithmetic that knows about nothing else. On this
+/// input they produce byte-identical output (proved per character over the
+/// whole of `U+FF66..=U+FF9D`, and over both fixtures, in
+/// `../tests/normalizers_correctness.rs`), so the comparison is fair *for
+/// this workload*; a reader must not generalise it into "NFKC costs X" or
+/// "kana-converter is X faster at normalization", because the two are not
+/// substitutable outside the narrowed domain.
+///
+/// The domain is narrowed exactly as it was for `katakana_hf`, and for the
+/// same reasons — no halfwidth punctuation or ideographic space (which
+/// `KanaOnly` folds and which NFKC also folds, but to *different* targets:
+/// `U+FF9F`-adjacent punctuation aside, `kana-converter` maps halfwidth space
+/// to `U+3000` where NFKC maps it to `U+0020`), no orphan voiced marks, and
+/// no `ｦﾞ`/`ﾜﾞ` (where NFKC correctly composes `ヺ`/`ヷ` and `kana-converter`'s
+/// blind offset arithmetic lands on the unrelated `ン`/`ヰ`). Each of those
+/// exclusions is asserted as a real, reproduced divergence in the correctness
+/// test rather than described in prose alone.
+fn bench_nfkc_halfwidth_katakana(c: &mut Criterion) {
+    let mut g = c.benchmark_group("nfkc_halfwidth_katakana");
     for n in SIZES {
         let s = halfwidth_katakana(n);
         g.throughput(Throughput::Bytes(s.len() as u64));
         g.bench_with_input(BenchmarkId::new("verbora", n), &s, |bch, s| {
-            bch.iter(|| black_box(katakana_hf(black_box(s))));
+            bch.iter(|| black_box(nfkc(black_box(s))));
         });
         g.bench_with_input(BenchmarkId::new("kana-converter", n), &s, |bch, s| {
             bch.iter(|| {
@@ -238,8 +216,6 @@ criterion_group!(
     benches,
     bench_ascii,
     bench_accented,
-    bench_ja_hiragana_to_katakana,
-    bench_ja_katakana_to_hiragana,
-    bench_ja_katakana_halfwidth_to_fullwidth,
+    bench_nfkc_halfwidth_katakana,
 );
 criterion_main!(benches);

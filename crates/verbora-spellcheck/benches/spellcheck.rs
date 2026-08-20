@@ -5,60 +5,50 @@
 
 //! Criterion benchmarks for the spellchecker.
 //!
-//! Five things are measured, because they answer five different questions:
+//! Four things are measured, because they answer four different questions:
 //!
-//! * **Construction** — building the trie and the frequency table over corpora
-//!   spanning three orders of magnitude. This is paid once per instance and is
-//!   linear in the corpus, so it is reported as throughput.
-//! * **`is_correct`** — the trie walk, on hits and on misses. Misses matter more
-//!   than hits: the correction search performs tens of thousands of them and
-//!   almost all of them fail, and a near miss (a long shared prefix) costs far
-//!   more than one that dies on the first character.
-//! * **`get_corrections`** — the whole pipeline, at distance 1 and 2, over
-//!   corpora of different sizes. Distance 2 examines several hundred times more
-//!   candidates than distance 1, and the point of measuring both is that the
-//!   *ratio* is what decides whether a caller can afford it.
-//! * **The edit generator's API shape** — `next_edit` (borrowing), `Iterator`
-//!   (owning `Vec<u16>`), and [`edits`] (owning `String`) on identical input.
-//!   This is the crate's central design claim: the convenience forms are built
-//!   on the lazy primitive, so the primitive must be the cheapest of the three.
-//! * **The sort** — [`sort_by_frequency`], the port of the reference engine's `Array#sort`, across
-//!   lengths that select the short-array path, a single merge and a deep merge
-//!   stack, with and without the NaN frequencies the port exists for. NaN is not
-//!   a curiosity here: it makes the comparison non-transitive, which changes
-//!   which branches of the merge are taken.
-//! * **`par_get_corrections_batch` vs. a sequential loop** (`parallel` feature
-//!   only) — the same `get_corrections` calls, at the same distance and over
-//!   the same corpus, run through `Spellcheck::par_get_corrections_batch`
-//!   instead of a `.iter().map(...)` loop, at a few batch sizes. This is what
-//!   answers whether the `rayon` fan-out is worth its scheduling overhead at a
-//!   given batch size, not just that it compiles.
+//! * **Construction** — building the word table and the frequency counts over
+//!   corpora spanning three orders of magnitude. This is paid once per instance
+//!   and is linear in the corpus, so it is reported as throughput. The
+//!   near-distance retrieval structure is built lazily on the first
+//!   `corrections` call, so it is deliberately *not* in this group.
+//! * **`is_correct`** — one hash lookup, on hits and on two shapes of miss.
+//! * **`corrections`** — the whole pipeline, on both sides of the internal
+//!   dispatch boundary: distance 1 and 2 go through the lazily built
+//!   symmetric-delete index, distance 3 falls back to a corpus scan. Measuring
+//!   both is what tells a caller what crossing that boundary costs.
+//! * **`par_corrections_batch` vs. a sequential loop** (`parallel` feature
+//!   only) — the same `corrections` calls, at the same distance and over the
+//!   same corpus, at a few batch sizes. This is what answers whether the
+//!   `rayon` fan-out is worth its scheduling overhead at a given batch size,
+//!   not just that it compiles.
 //!
 //! ASCII and Cyrillic corpora are benchmarked side by side. They are the same
-//! shape and size — the transliteration is a bijection on `a`–`z`, so the tries
-//! branch identically — and the difference between them is therefore exactly the
-//! cost of leaving the `&[u8]` fast path for `Vec<u16>`, where every dictionary
-//! probe has to decode into a scratch `String` instead of borrowing out of the
-//! candidate buffer.
+//! shape and size — the transliteration is a bijection on `a`–`z` — so the
+//! difference between them is the cost of the wider scalars alone, now that the
+//! crate has one unit (the Unicode scalar) and no ASCII-only alphabet.
 //!
 //! Inputs come from `benches/data/words.json`, the shared word list every
 //! spellcheck harness in the repo reads. Every input is derived from it by a
 //! stated rule (first word of a given length, first 4,000 words, …) rather than
 //! by an index into a shuffled list, so each harness is provably measuring the
 //! same work.
+//!
+//! **No result of this suite has been recorded since the crate's contract
+//! changed.** Every figure that used to appear in these comments described the
+//! previous candidate-generation design and is gone rather than adjusted.
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
-use verbora_spellcheck::{Edits, Spellcheck, edits, edits_utf16, sort_by_frequency};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use verbora_spellcheck::Spellcheck;
 
-/// Corpus sizes, in words. The corpus decides both the trie's depth and how
-/// often a candidate is a hit, so it is the parameter that matters most.
+/// Corpus sizes, in words. The corpus decides both how many words share a
+/// deletion sequence with a query and how often a candidate is a real match,
+/// so it is the parameter that matters most.
 const CORPUS_SIZES: [usize; 4] = [100, 1_000, 10_000, 20_000];
 
 /// How many probes each membership benchmark walks.
 ///
-/// One `is_correct` call is ~15 ns, which is below the resolution the reference
+/// One `is_correct` call is far below the resolution a per-call timing
 /// baseline's timer can resolve honestly. Both sides therefore measure a fixed
 /// batch, and the throughput annotation divides it back out.
 const PROBE_COUNT: usize = 4_000;
@@ -113,7 +103,7 @@ fn cyrillic(words: &[String]) -> Vec<String> {
 
 /// The first word of exactly `len` characters.
 ///
-/// A rule rather than an index, so the reference baseline can reproduce the
+/// A rule rather than an index, so any sibling harness can reproduce the
 /// choice without either side having to hard-code a string.
 fn word_of_length(words: &[String], len: usize) -> String {
     words
@@ -123,11 +113,10 @@ fn word_of_length(words: &[String], len: usize) -> String {
         .clone()
 }
 
-/// A misspelling of `word`: the middle character deleted.
+/// A misspelling of `word`: the middle scalar deleted.
 ///
-/// A realistic probe. Feeding `get_corrections` a word that is already correct
-/// measures something else (the dictionary hits it immediately), and feeding it
-/// noise measures the empty case.
+/// A realistic probe. Feeding `corrections` a word that is already correct
+/// measures something else, and feeding it noise measures the empty case.
 fn typo(word: &str) -> String {
     let mut chars: Vec<char> = word.chars().collect();
     if chars.len() > 1 {
@@ -179,41 +168,70 @@ fn bench_is_correct(c: &mut Criterion) {
     g.finish();
 }
 
-fn bench_get_corrections(c: &mut Criterion) {
+fn bench_corrections(c: &mut Criterion) {
     let ascii = words();
     let ru = cyrillic(&ascii);
-    // Length is the dominant cost — the candidate count is 26 + 54n per level —
-    // so the probes are pinned to a length rather than to a position.
+    // Length is a dominant cost on both paths — it drives the deletion
+    // neighbourhood's size on the indexed path and the metric's inner loop on
+    // the scan — so the probes are pinned to a length rather than a position.
     let probe = typo(&word_of_length(&ascii, 8));
     let ru_probe = typo(&word_of_length(&ru, 8));
 
-    let mut g = c.benchmark_group("spellcheck_get_corrections_d1");
+    let mut g = c.benchmark_group("spellcheck_corrections_d1");
     for (tag, corpus, probe) in [("ascii", &ascii, &probe), ("cyrillic", &ru, &ru_probe)] {
         for n in CORPUS_SIZES {
             let sc = Spellcheck::new(&corpus[..n]);
+            // The retrieval structure is lazy; warm it so the group measures
+            // querying rather than one-time construction.
+            let _ = sc.corrections(probe, 1);
             g.bench_with_input(BenchmarkId::new(tag, n), &n, |b, _| {
-                b.iter(|| sc.get_corrections(black_box(probe), 1));
+                b.iter(|| sc.corrections(black_box(probe), 1));
             });
         }
     }
     g.finish();
 
-    // Distance 2 squares the candidate count, so it gets its own group, a
-    // deliberately short probe, and only the two corpus sizes a caller might
-    // plausibly pay for. A five-character probe is ~87,000 candidates; the
-    // eight-character one used above would be ~380,000, which is past the point
-    // where the reference baseline can be measured in reasonable time.
+    // Distance 2 widens the deletion neighbourhood quadratically in the
+    // probe's length, so it gets its own group and a shorter probe.
     let probe = typo(&word_of_length(&ascii, 6));
     let ru_probe = typo(&word_of_length(&ru, 6));
-    let mut g = c.benchmark_group("spellcheck_get_corrections_d2");
+    let mut g = c.benchmark_group("spellcheck_corrections_d2");
+    for (tag, corpus, probe) in [("ascii", &ascii, &probe), ("cyrillic", &ru, &ru_probe)] {
+        for n in [1_000usize, 20_000] {
+            let sc = Spellcheck::new(&corpus[..n]);
+            let _ = sc.corrections(probe, 2);
+            g.bench_with_input(BenchmarkId::new(tag, n), &n, |b, _| {
+                b.iter(|| sc.corrections(black_box(probe), 2));
+            });
+        }
+    }
+    g.finish();
+
+    // Distance 3 is the other side of the dispatch boundary: no index, a scan
+    // of the corpus with a scalar-length lower bound pruning it. Benchmarked
+    // against the same probes so the two paths are directly comparable.
+    let mut g = c.benchmark_group("spellcheck_corrections_d3_scan");
     g.sample_size(20);
     for (tag, corpus, probe) in [("ascii", &ascii, &probe), ("cyrillic", &ru, &ru_probe)] {
         for n in [1_000usize, 20_000] {
             let sc = Spellcheck::new(&corpus[..n]);
             g.bench_with_input(BenchmarkId::new(tag, n), &n, |b, _| {
-                b.iter(|| sc.get_corrections(black_box(probe), 2));
+                b.iter(|| sc.corrections(black_box(probe), 3));
             });
         }
+    }
+    g.finish();
+
+    // `best_correction` does the same retrieval and skips the sort. Whether
+    // that is worth a separate entry point is exactly what this group answers.
+    let probe = typo(&word_of_length(&ascii, 8));
+    let mut g = c.benchmark_group("spellcheck_best_correction_d2");
+    for n in [1_000usize, 20_000] {
+        let sc = Spellcheck::new(&ascii[..n]);
+        let _ = sc.best_correction(&probe, 2);
+        g.bench_with_input(BenchmarkId::new("ascii", n), &n, |b, _| {
+            b.iter(|| sc.best_correction(black_box(&probe), 2));
+        });
     }
     g.finish();
 }
@@ -226,18 +244,21 @@ fn bench_get_corrections(c: &mut Criterion) {
 /// repeated, so the batch mixes short and long inputs the way a real document
 /// would, instead of measuring `n` copies of a single cost.
 #[cfg(feature = "parallel")]
-fn bench_par_get_corrections_batch(c: &mut Criterion) {
+fn bench_par_corrections_batch(c: &mut Criterion) {
     let ascii = words();
     let sc = Spellcheck::new(&ascii[..20_000]);
     let typos: Vec<String> = ascii[..512].iter().map(|w| typo(w)).collect();
     let probes: Vec<&str> = typos.iter().map(String::as_str).collect();
 
-    // Distance 2, matching `bench_get_corrections`'s d2 group: this is the
-    // expensive case (3.9-5.5 ms/call on a single word, see that group's
-    // results) where a batch fan-out has something to amortise. Sample size
-    // is lowered for the same reason it is there.
-    let mut g = c.benchmark_group("spellcheck_par_get_corrections_batch_d2");
+    // Distance 2, matching `bench_corrections`'s d2 group, so the per-word
+    // cost the fan-out is amortising is measured in that group and this one
+    // measures only what batching changes. No ratio is quoted here: the
+    // crate's contract changed and nothing has been re-measured since.
+    let mut g = c.benchmark_group("spellcheck_par_corrections_batch_d2");
     g.sample_size(10);
+    // The retrieval structure is lazy; warm it outside the timing loop so
+    // neither arm pays a one-time build the other does not.
+    let _ = sc.corrections(probes[0], 2);
     for n in [8usize, 64, 512] {
         let batch = &probes[..n];
         g.throughput(Throughput::Elements(n as u64));
@@ -245,99 +266,13 @@ fn bench_par_get_corrections_batch(c: &mut Criterion) {
             b.iter(|| {
                 batch
                     .iter()
-                    .map(|w| sc.get_corrections(black_box(w), 2))
+                    .map(|w| sc.corrections(black_box(w), 2))
                     .collect::<Vec<_>>()
             });
         });
         g.bench_with_input(BenchmarkId::new("parallel", n), &n, |b, _| {
-            b.iter(|| sc.par_get_corrections_batch(black_box(batch), 2));
+            b.iter(|| sc.par_corrections_batch(black_box(batch), 2));
         });
-    }
-    g.finish();
-}
-
-fn bench_edits(c: &mut Criterion) {
-    let mut g = c.benchmark_group("spellcheck_edits");
-    for word in ["ab", "cat", "something", "abcdefghijklmnop"] {
-        let units: Vec<u16> = word.encode_utf16().collect();
-        // 26 + 54n raw candidates before dedup: the honest denominator for a
-        // per-candidate cost.
-        g.throughput(Throughput::Elements((26 + 54 * word.len()) as u64));
-
-        // The lazy primitive: nothing is copied out per candidate.
-        g.bench_with_input(BenchmarkId::new("next_edit", word), word, |b, _| {
-            b.iter(|| {
-                let mut it = Edits::new(black_box(word.as_bytes()));
-                let mut n = 0usize;
-                while let Some(e) = it.next_edit() {
-                    n += e.len();
-                }
-                n
-            });
-        });
-        // The owning iterator, one `Vec<u16>` per candidate.
-        g.bench_with_input(BenchmarkId::new("collect_utf16", word), word, |b, _| {
-            b.iter(|| Edits::new(black_box(units.as_slice())).count());
-        });
-        // The convenience API, one `String` per candidate — the shape the
-        // reference always pays for.
-        g.bench_with_input(BenchmarkId::new("edits_string", word), word, |b, _| {
-            b.iter(|| edits(black_box(word)).len());
-        });
-    }
-
-    // Non-ASCII, where the generator cannot use `&[u8]` at all.
-    for word in ["café", "Москва", "a😀b"] {
-        g.throughput(Throughput::Elements(
-            (26 + 54 * word.encode_utf16().count()) as u64,
-        ));
-        g.bench_with_input(BenchmarkId::new("utf16", word), word, |b, _| {
-            b.iter(|| edits_utf16(black_box(word)).len());
-        });
-    }
-    g.finish();
-}
-
-fn bench_sort(c: &mut Criterion) {
-    /// A deterministic PRNG, so every run sorts the same permutation. The
-    /// the reference baseline uses the same recurrence and the same seed.
-    fn xorshift(state: &mut u64) -> u64 {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        *state
-    }
-
-    let mut g = c.benchmark_group("spellcheck_sort_by_frequency");
-    // 4 takes the short-array path, 64 the first TimSort length, 500 a single
-    // merge, 20000 a deep merge stack with galloping.
-    for n in [4usize, 64, 500, 20_000] {
-        let mut state = 0x2545_F491_4F6C_DD1D_u64;
-        let finite: Vec<(u32, f64)> = (0..n)
-            .map(|i| {
-                (
-                    u32::try_from(i).expect("index fits in u32"),
-                    (xorshift(&mut state) % 64) as f64,
-                )
-            })
-            .collect();
-        // One frequency in eight is NaN — the shape a corpus containing
-        // `'constructor'` or `'toString'` exactly once actually produces.
-        let with_nan: Vec<(u32, f64)> = finite
-            .iter()
-            .map(|&(i, f)| if i % 8 == 0 { (i, f64::NAN) } else { (i, f) })
-            .collect();
-
-        g.throughput(Throughput::Elements(n as u64));
-        for (tag, data) in [("finite", &finite), ("with_nan", &with_nan)] {
-            g.bench_with_input(BenchmarkId::new(tag, n), &n, |b, _| {
-                b.iter_batched_ref(
-                    || data.clone(),
-                    |v| sort_by_frequency(black_box(v), |p| p.1),
-                    BatchSize::SmallInput,
-                );
-            });
-        }
     }
     g.finish();
 }
@@ -346,13 +281,11 @@ criterion_group!(
     benches,
     bench_construction,
     bench_is_correct,
-    bench_get_corrections,
-    bench_edits,
-    bench_sort
+    bench_corrections
 );
 
 #[cfg(feature = "parallel")]
-criterion_group!(parallel_benches, bench_par_get_corrections_batch);
+criterion_group!(parallel_benches, bench_par_corrections_batch);
 
 #[cfg(feature = "parallel")]
 criterion_main!(benches, parallel_benches);

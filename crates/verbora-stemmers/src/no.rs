@@ -38,13 +38,12 @@
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use verbora_normalizers::normalize_no;
-use verbora_tokenizers::classes;
-
-use crate::among::AmongTable;
+use crate::among::{AmongTable, Buf, UnionTable};
 use crate::base::{Casing, TokenizeAndStem};
-use crate::stopwords::{self, Language};
-use crate::units::{ends_with, push_str, slen, text, units};
+use crate::stopwords::Language;
+use crate::units::{
+    borrowed_prefix, ends_with, in_set, push_str, set_hi, set_lo, slen, text, units,
+};
 
 /// The Norwegian stemmer.
 ///
@@ -55,25 +54,79 @@ use crate::units::{ends_with, push_str, slen, text, units};
 /// assert_eq!(s.stem("havnevirksomhetene"), "havnevirksom");
 /// assert_eq!(s.stem("hinder"), "hind");
 /// ```
+///
+/// # `æ`, `ø` and `å` are letters, so nothing is folded
+///
+/// [`TokenizeAndStem::prepare`] is the identity for Norwegian: text reaches
+/// the tokenizer, the stop-word list and [`Self::stem`] spelled exactly as it
+/// was written. No diacritic fold, no case fold, no rewrite of any kind.
+/// Three independent reasons, and each on its own is decisive:
+///
+/// 1. **They are distinct letters, not accents.** Norwegian has twenty-nine
+///    letters; `æ`, `ø` and `å` are the last three and collate *after* `z`,
+///    not next to `a` and `o`. Folding `å` merges words that are not the same
+///    word: `hår` ("hair") becomes `har` ("has"), and `måte` ("way") becomes
+///    `mate` ("to feed"). Only `å` was ever at risk — `æ` and `ø` have no
+///    canonical decomposition and so survived any fold by accident, which is
+///    exactly the kind of reason that does not survive the next Unicode
+///    revision.
+/// 2. **Every rule below is stated over the un-folded alphabet.** The vowel
+///    class is `[aeiouyæåø]` and R1's character class is
+///    `[A-Za-z0-9_æøåÆØÅäÄöÖüÜ]`. A fold that rewrote `å` to `a` but left `æ`
+///    and `ø` standing would hand the steps a half-folded alphabet that
+///    matches neither the rules as written nor plain ASCII.
+/// 3. **It deleted stop words.** Nine of the 129 Norwegian stop words are
+///    spelled with `å`, and eight of them fold to strings that are not
+///    themselves on the list, so a document-level fold silently removed them:
+///    `på`, `så`, `nå`, `når`, `å`, `sånn`, `både` and `også` stopped being
+///    stop words while `is_stop_word` still answered `true` for them. Only
+///    `vår` survived, and only by the accident that `var` is also on the list.
+///
+/// The German and Swedish letters `ä ö ü` that appear in Norwegian text
+/// (mostly in names) are admitted by R1's class and are likewise left alone,
+/// as are foreign accents in loanwords. A caller who wants an
+/// accent-insensitive index should fold with
+/// `verbora_normalizers::remove_diacritics` *around* this stemmer, where the
+/// choice is theirs and visible.
+///
+/// One stop-word entry is unreachable through this pipeline for an unrelated
+/// reason: the list contains `"_"`, and a lone `U+005F` is `ExtendNumLet` with
+/// no letter or digit, so [`verbora_tokenizers::WordTokenizer`] never emits it
+/// as a token. [`TokenizeAndStem::is_stop_word`] still answers `true` for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerNo;
 
 /// `[aeiouyæåø]` — lowercase only; the regexes carry no `/i` flag.
+static VOWELS: &[u16] = &[0x61, 0x65, 0x69, 0x6F, 0x75, 0x79, 0xE6, 0xE5, 0xF8];
+const VOWEL_LO: u128 = set_lo(VOWELS);
+const VOWEL_HI: u128 = set_hi(VOWELS);
+
 #[inline]
 fn is_vowel(c: u16) -> bool {
-    matches!(
-        c,
-        0x61 | 0x65 | 0x69 | 0x6F | 0x75 | 0x79 | 0xE6 | 0xE5 | 0xF8
-    )
+    in_set(c, VOWEL_LO, VOWEL_HI)
 }
 
 /// `[A-Za-z0-9_æøåÆØÅäÄöÖüÜ]`, the class R1's captured run is drawn from.
+///
+/// Region marking tests this once per character, and as a `matches!` it was
+/// sixteen comparisons deep; as a mask it is a shift and an and. See
+/// [`crate::units::in_set`], and `character_classes_match_the_literal_sets`
+/// for the exhaustive equivalence check.
+static R1_CHARS: &[u16] = &[
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, // 0-9
+    0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F, 0x50,
+    0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, // A-Z
+    0x5F, // _
+    0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x6F, 0x70,
+    0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, // a-z
+    0xE6, 0xF8, 0xE5, 0xC6, 0xD8, 0xC5, 0xE4, 0xC4, 0xF6, 0xD6, 0xFC, 0xDC,
+];
+const R1_LO: u128 = set_lo(R1_CHARS);
+const R1_HI: u128 = set_hi(R1_CHARS);
+
 #[inline]
 fn is_r1_char(c: u16) -> bool {
-    matches!(c,
-        0x30..=0x39 | 0x41..=0x5A | 0x5F | 0x61..=0x7A
-        | 0xE6 | 0xF8 | 0xE5 | 0xC6 | 0xD8 | 0xC5
-        | 0xE4 | 0xC4 | 0xF6 | 0xD6 | 0xFC | 0xDC)
+    in_set(c, R1_LO, R1_HI)
 }
 
 /// The longest suffix of `w` that appears in `alternatives`, or `None`.
@@ -109,17 +162,79 @@ fn strip(w: &[u16], suffix: &str) -> Vec<u16> {
 /// stop before the end), and the search takes it as `(lb, cursor)` limits
 /// instead of a slice, which is the same bytes without an intermediate borrow.
 fn r1_range(t: &[u16]) -> Option<(usize, usize)> {
-    let index = (0..t.len().saturating_sub(2))
-        .find(|&i| is_vowel(t[i]) && !is_vowel(t[i + 1]) && is_r1_char(t[i + 2]))?;
-    if index == 0 {
-        // `preR1Length = index + 2` is 2, which is `< 3`, so the reference
-        // substitutes `token.slice(3)` — the empty string for a 3-unit token.
-        return Some((3, t.len()));
+    R1Scan::of(t).at_len(t.len())
+}
+
+/// A scan of `getR1`'s match, kept so the later steps can re-derive R1 after
+/// a truncation instead of rescanning the word.
+///
+/// # Why this is exact
+///
+/// The reference calls `getR1(token)` afresh in every step, and steps 2 and 3
+/// only ever *truncate* — so the question is what a rescan of a prefix would
+/// return. The match position is the first `i` with
+/// `vowel(t[i]) && !vowel(t[i+1]) && r1char(t[i+2])`; truncating to `len'`
+/// changes none of those three units for any `i` with `i + 2 < len'`, and
+/// removes exactly the positions with `i + 2 >= len'` from consideration. So
+/// the same `i` is still the first match when `i + 2 < len'`, and there is no
+/// match at all otherwise. The captured run's end is the first non-R1
+/// character at or after `i + 2`, or the length; over a prefix that is the
+/// same index when it lies inside the prefix and the prefix's own length when
+/// it does not — which is `min(end, len')` in both cases, including the
+/// `index == 0` branch whose end is the length by construction.
+///
+/// Any step that *rewrites* rather than truncates (step 1c appends `er`)
+/// invalidates this and rescans; `stem` marks those sites.
+#[derive(Clone, Copy)]
+struct R1Scan {
+    /// The match position, or `None` for the reference's `null`.
+    index: Option<usize>,
+    /// R1's start, already carrying the `index == 0` special case.
+    start: usize,
+    /// The captured run's end in the *scanned* word.
+    end: usize,
+}
+
+impl R1Scan {
+    fn of(t: &[u16]) -> R1Scan {
+        let Some(index) = (0..t.len().saturating_sub(2))
+            .find(|&i| is_vowel(t[i]) && !is_vowel(t[i + 1]) && is_r1_char(t[i + 2]))
+        else {
+            return R1Scan {
+                index: None,
+                start: 0,
+                end: 0,
+            };
+        };
+        if index == 0 {
+            // `preR1Length = index + 2` is 2, which is `< 3`, so the reference
+            // substitutes `token.slice(3)` — the empty string for a 3-unit
+            // token.
+            return R1Scan {
+                index: Some(0),
+                start: 3,
+                end: t.len(),
+            };
+        }
+        let end = (index + 2..t.len())
+            .find(|&i| !is_r1_char(t[i]))
+            .unwrap_or(t.len());
+        R1Scan {
+            index: Some(index),
+            start: index + 2,
+            end,
+        }
     }
-    let end = (index + 2..t.len())
-        .find(|&i| !is_r1_char(t[i]))
-        .unwrap_or(t.len());
-    Some((index + 2, end))
+
+    /// What `getR1` would return for the same word truncated to `len` units.
+    #[inline]
+    fn at_len(self, len: usize) -> Option<(usize, usize)> {
+        let index = self.index?;
+        if index + 2 >= len {
+            return None;
+        }
+        Some((self.start, self.end.min(len)))
+    }
 }
 
 /// `getR1` over code units. `None` is the reference's `null`.
@@ -145,22 +260,56 @@ fn falsy(r1: Option<&[u16]>) -> bool {
 /// reference-shaped API and the test oracle — while `stem` routes the same
 /// tables through the `find_among` binary search
 /// (`docs/PERFORMANCE_GAPS.md` entry 34).
+///
+/// # Why only two tables for four alternations
+///
+/// Steps 1a and 1c interrogate the *same* region of the *same* word — the
+/// reference recomputes R1 for each, but both run on step 1's untouched
+/// input — so their tables are merged and one search answers both, the link
+/// walk recovering each alternation's own longest match (see
+/// [`crate::among::UnionTable`]). Steps 2 and 3 run after step 1 has already
+/// truncated, so they cannot join that search; step 2's `(dt|vt)` is instead
+/// two unit comparisons written out in [`ends_dt_vt`], which beats any table
+/// lookup at that size.
 struct NoTables {
-    step1a: AmongTable,
-    /// `(erte|ert)` — step 1c's alternation, searched in R1 and re-matched
-    /// against the whole token.
-    ert: AmongTable,
-    /// `(dt|vt)` — step 2's alternation.
-    dt_vt: AmongTable,
+    /// 0 = [`STEP1A`], 1 = [`ERT`] — step 1a's and step 1c's alternations,
+    /// searched together over step 1's R1.
+    step1: UnionTable,
     step3: AmongTable,
 }
 
 static TABLES: LazyLock<NoTables> = LazyLock::new(|| NoTables {
-    step1a: AmongTable::build(STEP1A),
-    ert: AmongTable::build(&["erte", "ert"]),
-    dt_vt: AmongTable::build(&["dt", "vt"]),
+    step1: UnionTable::build(&[STEP1A, ERT]),
     step3: AmongTable::build(STEP3),
 });
+
+/// Whether `w[lb..cursor]` ends in `dt` or `vt` — step 2's alternation.
+///
+/// Both alternatives are two units ending in `t`, so the whole `find_among`
+/// apparatus collapses to the comparisons below.
+#[inline]
+fn ends_dt_vt(w: &[u16], cursor: usize, lb: usize) -> bool {
+    cursor >= lb + 2 && w[cursor - 1] == 0x74 && matches!(w[cursor - 2], 0x64 | 0x76)
+}
+
+/// The length of the longest of `erte`/`ert` that is a suffix of `w`, or 0.
+///
+/// Step 1c matches its alternation against the **token**, not the region it
+/// was gated on, so this takes no limit.
+#[inline]
+fn ert_suffix_len(w: &[u16]) -> usize {
+    let n = w.len();
+    // The two alternatives end in different units (`e` and `t`), so at most
+    // one of them can match any word and "longest match" has nothing to
+    // choose between: the order of these two arms is not load-bearing.
+    if n >= 4 && w[n - 4..] == [0x65, 0x72, 0x74, 0x65] {
+        4
+    } else if n >= 3 && w[n - 3..] == [0x65, 0x72, 0x74] {
+        3
+    } else {
+        0
+    }
+}
 
 impl PorterStemmerNo {
     /// Creates the stemmer. It is stateless and zero-sized.
@@ -176,7 +325,8 @@ impl PorterStemmerNo {
     /// matching at index 0 on a token shorter than four units.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn get_r1(&self, token: &str) -> Option<String> {
@@ -224,7 +374,8 @@ impl PorterStemmerNo {
     /// Runs one step over the code units of `token`, borrowing when unchanged.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     fn run<'a>(&self, token: &'a str, step: fn(&[u16]) -> Vec<u16>) -> Cow<'a, str> {
         let t = units(token);
@@ -245,13 +396,19 @@ impl PorterStemmerNo {
     /// allocating five intermediate `Vec`s.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let lower = token.to_lowercase();
-        let mut t = units(&lower);
+        // The lowered units land straight in a stack buffer: no `String` for
+        // `toLowerCase`'s result, no `Vec<u16>` for the working copy.
+        let (mut b, ascii_lower) = Buf::fill_lowercase_tracked(token);
+        let t = b.as_slice();
+        // One scan of `getR1`'s match serves all three steps; see `R1Scan`
+        // for why re-deriving it after a truncation is exact.
+        let mut scan = R1Scan::of(t);
 
         // --- Step 1: 1a, 1b and 1c from the SAME input; the shortest result
         // wins and a tie goes to the later step (strict `<`, see module docs).
@@ -261,17 +418,33 @@ impl PorterStemmerNo {
         let mut len_a = len;
         let mut len_b = len;
         let mut cut_c: Option<usize> = None; // truncate here, then append "er"
-        if let Some((r1s, r1e)) = r1_range(&t)
+        if let Some((r1s, r1e)) = scan.at_len(len)
             && r1e > r1s
         {
+            // One search over R1 answers both 1a and 1c: the link walk visits
+            // every matching entry longest-first, so the first hit per table
+            // id is that table's own longest match.
+            let mut best_a = 0usize;
+            let mut best_ert = 0usize;
+            let mut i = tb.step1.find_longest_index(t, r1e, r1s);
+            while i >= 0 {
+                let (n, link, tid) = tb.step1.entry(i);
+                if tid == 0 {
+                    if best_a == 0 {
+                        best_a = n;
+                    }
+                } else if best_ert == 0 {
+                    best_ert = n;
+                }
+                i = link;
+            }
             // 1a: remove the longest listed suffix of R1 — from the TOKEN,
             // which does nothing when R1's end and the token's end disagree.
-            let i = tb.step1a.find(&t, r1e, r1s);
-            if i >= 0 {
-                let entry = &tb.step1a.entries[i as usize].0;
-                if t.ends_with(entry) {
-                    len_a = len - entry.len();
-                }
+            // A matched entry *is* `t[r1e - n..r1e]`, so the token can be
+            // tested against that slice of itself rather than against the
+            // table's copy of it.
+            if best_a > 0 && t[len - best_a..] == t[r1e - best_a..r1e] {
+                len_a = len - best_a;
             }
             // 1b: `/(b|c|d|f|g|h|j|l|m|n|o|p|r|t|v|y|z)s$/`, then `/([^V]k)s$/`
             // — two rules with the same one-unit removal, so one `||`.
@@ -303,56 +476,61 @@ impl PorterStemmerNo {
             }
             // 1c: gated on R1 containing `erte`/`ert`, applied by re-matching
             // the TOKEN (the two can disagree; see `erte_becomes_er` below).
-            if tb.ert.find(&t, r1e, r1s) >= 0 {
-                let j = tb.ert.find(&t, len, 0);
-                if j >= 0 {
-                    cut_c = Some(len - tb.ert.entries[j as usize].0.len());
+            if best_ert > 0 {
+                let n = ert_suffix_len(t);
+                if n > 0 {
+                    cut_c = Some(len - n);
                 }
             }
         }
+        let mut rewrote = false;
         let len_c = cut_c.map_or(len, |k| k + 2);
-        let apply_c = |t: &mut Vec<u16>| {
-            if let Some(k) = cut_c {
-                t.truncate(k);
-                push_str(t, "er");
-            }
-        };
-        if len_a < len_b {
-            if len_a < len_c {
-                t.truncate(len_a);
-            } else {
-                apply_c(&mut t);
-            }
-        } else if len_b < len_c {
-            t.truncate(len_b);
-        } else {
-            apply_c(&mut t);
+        if len_a < len_b && len_a < len_c {
+            b.truncate(len_a);
+        } else if len_a >= len_b && len_b < len_c {
+            b.truncate(len_b);
+        } else if let Some(k) = cut_c {
+            b.truncate(k);
+            b.push_str("er");
+            // 1c rewrites the tail rather than only shortening it, so the
+            // cached scan no longer describes the word — and the result is
+            // no longer a prefix of the input, so it cannot be borrowed.
+            scan = R1Scan::of(b.as_slice());
+            rewrote = true;
         }
 
         // --- Step 2: drop a final unit when R1 ends in `dt`/`vt` -----------
-        if let Some((r1s, r1e)) = r1_range(&t)
+        let t = b.as_slice();
+        if let Some((r1s, r1e)) = scan.at_len(t.len())
             && r1e > r1s
-            && tb.dt_vt.find(&t, r1e, r1s) >= 0
+            && ends_dt_vt(t, r1e, r1s)
         {
             let keep = t.len().saturating_sub(1);
-            t.truncate(keep);
+            b.truncate(keep);
         }
 
         // --- Step 3: remove a listed derivational suffix found in R1 -------
-        if let Some((r1s, r1e)) = r1_range(&t)
+        let t = b.as_slice();
+        if let Some((r1s, r1e)) = scan.at_len(t.len())
             && r1e > r1s
         {
-            let i = tb.step3.find(&t, r1e, r1s);
-            if i >= 0 {
-                let entry = &tb.step3.entries[i as usize].0;
-                if t.ends_with(entry) {
-                    let keep = t.len() - entry.len();
-                    t.truncate(keep);
-                }
+            let n = tb.step3.longest(t, r1e, r1s);
+            // As in 1a, the matched entry is `t[r1e - n..r1e]`, so the
+            // "is it also a suffix of the token" test compares the word
+            // against itself.
+            if n > 0 && t[t.len() - n..] == t[r1e - n..r1e] {
+                let keep = t.len() - n;
+                b.truncate(keep);
             }
         }
 
-        Cow::Owned(text(&t))
+        // Steps 1a/1b, 2 and 3 only truncate, so unless 1c rewrote the tail
+        // the answer is a prefix of the caller's own string. See
+        // `crate::units::borrowed_prefix`.
+        if let Some(prefix) = borrowed_prefix(token, b.len(), ascii_lower, rewrote) {
+            return Cow::Borrowed(prefix);
+        }
+        Cow::Owned(b.into_text())
     }
 }
 
@@ -408,12 +586,12 @@ fn step1c(t: &[u16]) -> Vec<u16> {
     if falsy(r1) {
         return t.to_vec();
     }
-    if longest_listed_suffix(r1.unwrap_or(&[]), &["erte", "ert"]).is_none() {
+    if longest_listed_suffix(r1.unwrap_or(&[]), ERT).is_none() {
         return t.to_vec();
     }
     // The replacement runs against the TOKEN, and re-matches: R1 ending in
     // `erte` does not guarantee the token does.
-    match longest_listed_suffix(t, &["erte", "ert"]) {
+    match longest_listed_suffix(t, ERT) {
         Some(s) => {
             let mut out = strip(t, s);
             push_str(&mut out, "er");
@@ -442,7 +620,7 @@ fn step2(t: &[u16]) -> Vec<u16> {
     if falsy(r1) {
         return t.to_vec();
     }
-    if longest_listed_suffix(r1.unwrap_or(&[]), &["dt", "vt"]).is_some() {
+    if longest_listed_suffix(r1.unwrap_or(&[]), STEP2).is_some() {
         return t[..t.len().saturating_sub(1)].to_vec();
     }
     t.to_vec()
@@ -463,6 +641,12 @@ static STEP1A: &[&str] = &[
     "ast",
 ];
 
+/// Step 2's alternation, in source order.
+static STEP2: &[&str] = &["dt", "vt"];
+
+/// Step 1c's alternation, in source order.
+static ERT: &[&str] = &["erte", "ert"];
+
 /// The step-3 alternation, in source order.
 static STEP3: &[&str] = &[
     "leg", "eleg", "ig", "eig", "lig", "elig", "els", "lov", "elov", "slov", "hetslov",
@@ -472,23 +656,39 @@ impl TokenizeAndStem for PorterStemmerNo {
     const FILTER_ON: Casing = Casing::Lower;
     const STEM_ON: Casing = Casing::Raw;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_no(c)
-    }
-
-    /// `AggressiveTokenizerNo` folds diacritics before splitting, and the folder
-    /// rewrites only the **first** occurrence of each accented letter.
-    fn prepare(text: &str) -> Cow<'_, str> {
-        normalize_no(text)
-    }
+    // `prepare` is deliberately *not* overridden: the trait's identity default
+    // is the specified behaviour. See `PorterStemmerNo`'s own documentation,
+    // "`æ`, `ø` and `å` are letters, so nothing is folded", for the reasoning
+    // and for the 8 stop words a fold here used to delete.
 
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::No, word)
+        Language::No.contains(word)
     }
 
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("STEP1A", super::STEP1A),
+        ("ERT", super::ERT),
+        ("STEP2", super::STEP2),
+        ("STEP3", super::STEP3),
+    ];
+
+    /// The prelude `stem` runs before any table is consulted: lowercasing,
+    /// and nothing else. `æ`, `ø` and `å` are letters and are not folded.
+    pub(crate) fn prelude(token: &str) -> String {
+        token.to_lowercase()
+    }
+
+    /// The prelude writes no marker unit.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[];
 }
 
 impl verbora_core::Stemmer for PorterStemmerNo {
@@ -503,7 +703,7 @@ impl PorterStemmerNo {
     /// `stemmer_no` exposes `addStopWord` and `addStopWords` but no remover;
     /// the missing methods are missing here too.
     pub fn add_stop_word(&self, word: impl Into<String>) {
-        stopwords::add(Language::No, word);
+        Language::No.add(word);
     }
 
     /// Appends several stop words to the process-global Norwegian list.
@@ -512,7 +712,7 @@ impl PorterStemmerNo {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        stopwords::add_all(Language::No, words);
+        Language::No.add_all(words);
     }
 }
 
@@ -522,6 +722,54 @@ mod tests {
 
     fn s(t: &str) -> String {
         PorterStemmerNo::new().stem(t).into_owned()
+    }
+
+    /// **Every** entry of the Norwegian stop-word list must still be recognised
+    /// through the documented pipeline, not a spot check of a few.
+    ///
+    /// A whole-document diacritic fold in `prepare` rewrote `på` to `pa`
+    /// before `is_stop_word` ever saw it, so 8 of the 129 entries — every one
+    /// spelled with `å` whose folded form is not itself on the list — silently
+    /// stopped being stop words. A handful of ASCII spot checks passes that
+    /// unchanged, which is why this enumerates the list.
+    ///
+    /// The single exception is spelled out rather than skipped quietly: `"_"`
+    /// is on the list and a lone `U+005F` is `ExtendNumLet` carrying no letter
+    /// or digit, so [`verbora_tokenizers::WordTokenizer`] never emits it as a
+    /// token and no `prepare` could change that. `is_stop_word("_")` is still
+    /// `true`; only the tokenizing pipeline cannot reach it.
+    #[test]
+    fn every_stop_word_is_filtered_by_the_pipeline() {
+        let st = PorterStemmerNo::new();
+        let defaults = Language::No.defaults();
+        let mut unreachable = Vec::new();
+        let mut not_a_token = Vec::new();
+        for word in defaults {
+            // The entry must be one word to the tokenizer, or no `prepare`
+            // could ever present it to `is_stop_word` in the first place.
+            if st.tokenize_and_stem(word, true).len() != 1 {
+                not_a_token.push(*word);
+                assert!(
+                    PorterStemmerNo::is_stop_word(word),
+                    "{word:?} is not even on the list it came from"
+                );
+                continue;
+            }
+            if !st.tokenize_and_stem(word, false).is_empty() {
+                unreachable.push(*word);
+            }
+        }
+        assert!(
+            unreachable.is_empty(),
+            "{} of {} Norwegian stop words are unreachable through the pipeline: {unreachable:?}",
+            unreachable.len(),
+            defaults.len()
+        );
+        assert_eq!(
+            not_a_token,
+            ["_"],
+            "the set of entries UAX #29 never produces as a token changed"
+        );
     }
 
     #[test]
@@ -556,10 +804,14 @@ mod tests {
         assert_eq!(st.get_r1("forebygger"), Some("ebygger".to_owned()));
     }
 
-    /// The cross-cutting battery from `docs/PARITY.md`: empty, one character,
-    /// uppercase, accented Latin, Greek, Cyrillic, CJK, an astral pair,
-    /// punctuation, digits, a line terminator, and a very long word. Every
-    /// expectation below was read off the reference with `node`.
+    /// The cross-cutting battery every stemmer in this crate answers: empty,
+    /// one character, uppercase, accented Latin, Greek, Cyrillic, CJK, an
+    /// astral pair, punctuation, digits, a line terminator, and a very long
+    /// word.
+    ///
+    /// The expectations are the *identity* in every row but the case fold,
+    /// which is the whole point: none of these is a word of this language, so
+    /// a stemmer that changes one is reaching outside its own alphabet.
     #[test]
     fn cross_script_battery() {
         for (input, want) in [
@@ -583,9 +835,150 @@ mod tests {
         assert_eq!(s(&"x".repeat(1000)).len(), 1000);
     }
 
+    /// The bitmask forms of the two character classes must agree with the
+    /// literal sets they replaced, for every code unit — a mask built from
+    /// the wrong list would only show up as a wrong region on some rare
+    /// letter.
+    /// `R1Scan::at_len` must agree with a fresh `getR1` of the truncated
+    /// word at every truncation point, which is what lets `stem` scan once.
+    #[test]
+    fn a_cached_scan_matches_a_rescan_of_every_prefix() {
+        let mut rng = Rng(0x5EED_0DDB_1A5E_5BAD);
+        for _ in 0..20_000 {
+            let word = random_word(&mut rng).to_lowercase();
+            let t = units(&word);
+            let scan = R1Scan::of(&t);
+            for len in 0..=t.len() {
+                assert_eq!(
+                    scan.at_len(len),
+                    r1_range(&t[..len]),
+                    "{word:?} truncated to {len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn character_classes_match_the_literal_sets() {
+        for c in 0..=u16::MAX {
+            let vowel = matches!(
+                c,
+                0x61 | 0x65 | 0x69 | 0x6F | 0x75 | 0x79 | 0xE6 | 0xE5 | 0xF8
+            );
+            assert_eq!(is_vowel(c), vowel, "vowel U+{c:04X}");
+            let r1 = matches!(c,
+                0x30..=0x39 | 0x41..=0x5A | 0x5F | 0x61..=0x7A
+                | 0xE6 | 0xF8 | 0xE5 | 0xC6 | 0xD8 | 0xC5
+                | 0xE4 | 0xC4 | 0xF6 | 0xD6 | 0xFC | 0xDC);
+            assert_eq!(is_r1_char(c), r1, "r1 class U+{c:04X}");
+        }
+    }
+
+    /// The two hand-written matchers `stem` uses in place of a table search
+    /// must answer exactly what searching that table would, over every
+    /// region and every pair of Latin-1 code units — otherwise the tables
+    /// they replaced would still be the specification.
+    #[test]
+    fn the_hand_written_matchers_agree_with_their_tables() {
+        let dt_vt = AmongTable::build(&["dt", "vt"]);
+        for a in 0..=0xFFu16 {
+            for b in 0..=0xFFu16 {
+                let w = [0x78, a, b];
+                for lb in 0..=3usize {
+                    for cursor in lb..=3usize {
+                        assert_eq!(
+                            ends_dt_vt(&w, cursor, lb),
+                            dt_vt.longest(&w, cursor, lb) > 0,
+                            "dt/vt: units {a:#06X},{b:#06X} region {lb}..{cursor}"
+                        );
+                    }
+                }
+            }
+        }
+        // `ert_suffix_len` takes no limit — step 1c matches the whole token —
+        // so it is checked against the unrestricted longest-suffix helper.
+        let mut rng = Rng(0xA5A5_1234_DEAD_BEEF);
+        for _ in 0..20_000 {
+            let word = random_word(&mut rng).to_lowercase();
+            let t = units(&word);
+            let want = longest_listed_suffix(&t, ERT).map_or(0, slen);
+            assert_eq!(ert_suffix_len(&t), want, "ert/erte: {word:?}");
+        }
+        for word in ["ert", "erte", "aerte", "xert", "er", "erter", "", "t"] {
+            let t = units(word);
+            assert_eq!(
+                ert_suffix_len(&t),
+                longest_listed_suffix(&t, ERT).map_or(0, slen),
+                "ert/erte: {word:?}"
+            );
+        }
+    }
+
+    /// The result is a slice of the caller's own string whenever lowercasing
+    /// was a no-op and only truncation happened — the allocation-free path
+    /// `crate::units::borrowed_prefix` exists for. Uppercase input, non-ASCII
+    /// input and step 1c's rewrite must all still return owned data.
+    #[test]
+    fn an_unrewritten_ascii_word_is_returned_borrowed() {
+        let st = PorterStemmerNo::new();
+        assert!(matches!(st.stem("forebygger"), Cow::Borrowed("forebygg")));
+        assert!(matches!(st.stem("hinder"), Cow::Borrowed("hind")));
+        // Unchanged words borrow too.
+        assert!(matches!(st.stem("xyz"), Cow::Borrowed("xyz")));
+        // Lowercasing changed the word, so there is nothing to borrow from.
+        assert!(matches!(st.stem("FOREBYGGER"), Cow::Owned(_)));
+        // Step 1c rewrites the tail rather than truncating.
+        assert!(matches!(st.stem("akkumulerte"), Cow::Owned(_)));
+        // Non-ASCII: a code-unit length is not a byte index.
+        assert!(matches!(st.stem("æøå"), Cow::Owned(_)));
+        // Whatever the variant, the content is what it always was.
+        assert_eq!(st.stem("FOREBYGGER"), "forebygg");
+        assert_eq!(st.stem("akkumulerte"), "akkumuler");
+    }
+
     #[test]
     fn norwegian_specifics() {
         assert_eq!(s("Æ Ø Å"), "æ ø å");
+    }
+
+    /// `prepare` rewrites nothing and borrows everything.
+    ///
+    /// This is the decision recorded on [`PorterStemmerNo`]: `æ`, `ø` and `å`
+    /// are letters of the Norwegian alphabet, so a diacritic fold here merges
+    /// distinct words, half-folds the alphabet the rules are written over
+    /// (`å` decomposes, `æ` and `ø` do not), and deletes 8 stop words.
+    #[test]
+    fn prepare_is_the_identity_and_never_allocates() {
+        for text in [
+            "blåbærsyltetøy",
+            "à la façon",
+            "ààà",
+            "forebygger",
+            "Æ Ø Å",
+            "",
+        ] {
+            assert!(
+                matches!(PorterStemmerNo::prepare(text), Cow::Borrowed(t) if t == text),
+                "prepare rewrote {text:?}"
+            );
+        }
+    }
+
+    /// The alphabet argument, at the level a caller sees it: folding `å` would
+    /// collapse pairs that Norwegian spells differently because they *are*
+    /// different words.
+    #[test]
+    fn folding_would_merge_distinct_words() {
+        let st = PorterStemmerNo::new();
+        // `hår` ("hair") vs `har` ("has"); `måte` ("way") vs `mate` ("feed").
+        assert_ne!(
+            st.tokenize_and_stem("hår", true),
+            st.tokenize_and_stem("har", true)
+        );
+        assert_ne!(
+            st.tokenize_and_stem("måte", true),
+            st.tokenize_and_stem("mate", true)
+        );
     }
 
     #[test]

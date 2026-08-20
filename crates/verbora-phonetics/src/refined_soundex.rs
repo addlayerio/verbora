@@ -1,87 +1,59 @@
-//! Refined Soundex, pinned to rphonetic 3.0.6 / Apache commons-codec.
-//!
-//! **This is a Verbora-native extension, not a port of the JS reference** —
-//! the reference `phonetics` module has no Refined Soundex. Per the crate's
-//! extension pattern, behaviour is pinned to a canonical specification
-//! instead: the [`RefinedSoundex`] encoder of **rphonetic 3.0.6** (the Rust
-//! port of Apache commons-codec), which in turn transcribes commons-codec's
-//! `org.apache.commons.codec.language.RefinedSoundex`. The lineage of the
-//! algorithm itself is the Russell/Odell Soundex (Margaret K. Odell and
-//! Robert C. Russell, U.S. patents 1,261,167 and 1,435,663), refined for
-//! spell-checking by splitting the classic six consonant groups into ten and
-//! removing the fixed four-character cap.
-//!
-//! # The algorithm
-//!
-//! 1. **Clean**: keep only the alphabetic characters of the input and
-//!    uppercase them (full Unicode uppercasing, so `ß` becomes `SS`).
-//! 2. **Emit**: the code is the first cleaned letter, followed by the group
-//!    digit of *every* cleaned letter — the first letter included — with
-//!    adjacent duplicate digits collapsed to one.
-//! 3. There is **no truncation and no zero-padding**: the code grows with
-//!    the word, and an input with no letters encodes to the empty string.
-//!
-//! The ten groups (digit → letters) of the US-English mapping:
-//!
-//! | digit | letters | | digit | letters |
-//! |---|---|---|---|---|
-//! | `0` | A E H I O U W Y | | `5` | Q X Z |
-//! | `1` | B P | | `6` | D T |
-//! | `2` | F V | | `7` | L |
-//! | `3` | C K S | | `8` | M N |
-//! | `4` | G J | | `9` | R |
-//!
-//! Unlike classic Soundex, vowels are not dropped — they encode as `0` and
-//! therefore *separate* consonant runs: `bab` is `B101`, not `B11`.
-//!
-//! # Behavioural decisions
-//!
-//! * **US-English mapping only.** rphonetic offers `FromStr`/`TryFrom`
-//!   constructors for custom 26-letter mappings; those are API affordances of
-//!   that crate, not part of the algorithm, and commons-codec's shipped
-//!   `US_ENGLISH` instance uses exactly the table above
-//!   (`"01360240043788015936020505"`). This encoder pins that table.
-//! * **`difference` is part of the surface.** commons-codec's
-//!   `SoundexUtils.difference` (rphonetic's `SoundexCommons::difference`) is
-//!   the standard similarity measure for this code — see
-//!   [`RefinedSoundex::difference`].
-//!
-//! # Divergence from rphonetic (documented, deliberate)
-//!
-//! rphonetic's cleaning step keeps every `char::is_alphabetic()` character
-//! and then indexes `mapping[ch as usize - 65]`, so any alphabetic character
-//! whose Unicode uppercase form is not entirely `A`–`Z` sends it out of
-//! bounds and **panics**. The exact input shapes affected: tokens containing
-//! at least one alphabetic character `c` such that `c.to_uppercase()` yields
-//! any character outside `A`–`Z` — e.g. `é` (→ `É`), `ñ`, Cyrillic
-//! (`Москва`), CJK (`日本語`), `İ` (U+0130), `ʼn` (U+0149, → `ʼN`), or the
-//! Kelvin sign (U+212A). This library must not panic on arbitrary text, so
-//! such characters are instead **dropped as if absent from the input**
-//! (they do not break a duplicate-digit run: `aéa` → `A0`). Inputs of these
-//! shapes lie outside rphonetic's accepted domain and are excluded from the
-//! benchmark comparison, per the crate's fairness pattern. Every input
-//! rphonetic accepts without panicking encodes byte-identically here —
-//! including uppercase expansions that stay inside `A`–`Z` (`ß` → `SS` →
-//! `S3`, `ﬁ` → `FI`, `ſ` → `S`) and non-alphabetic Unicode such as emoji,
-//! which both implementations simply filter out.
+//! Refined Soundex (Apache Commons Codec's US-English mapping).
 
 /// Group digit for each letter, indexed by `letter - b'A'`.
 ///
-/// This is commons-codec's `US_ENGLISH_MAPPING_STRING`
-/// (`"01360240043788015936020505"`), byte-for-byte the `ENGLISH_MAPPING`
-/// table in rphonetic 3.0.6's `refined_soundex.rs`.
+/// Apache Commons Codec's `US_ENGLISH_MAPPING_STRING`,
+/// `"01360240043788015936020505"` — see [`RefinedSoundex`] on why that
+/// distribution, rather than a paper, is this encoder's citable basis.
 const MAPPING: [u8; 26] = *b"01360240043788015936020505";
 
-/// Refined Soundex encoder (commons-codec variant, US-English mapping).
+/// Refined Soundex — ten consonant groups, no truncation.
 ///
-/// Codes retain the initial letter, use ten consonant groups, collapse
-/// adjacent duplicate digits, and are never truncated or padded. Byte-network
-/// identical to rphonetic 3.0.6's `RefinedSoundex::default()` on every input
-/// that crate accepts (see the module docs for the one divergence, on inputs
-/// where rphonetic panics).
+/// # Basis, and why it is not a publication
+///
+/// Refined Soundex has no paper. It is a variant distributed with **Apache
+/// Commons Codec** as `org.apache.commons.codec.language.RefinedSoundex`,
+/// which splits Russell and Odell's six consonant groups (U.S. patents
+/// 1,261,167 and 1,435,663) into ten and drops the fixed four-character cap,
+/// for spell-checking rather than census indexing. Verbora states the mapping
+/// table and the emission rule below and treats *that* as the specification;
+/// the Commons Codec distribution is cited as the origin of the table, not as
+/// an oracle for behaviour.
+///
+/// Prefer [`SoundEx`](crate::SoundEx) when you need the standard,
+/// four-character census code; prefer this when you want a finer key that
+/// grows with the word.
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar**, and only the twenty-six letters
+///   `A`–`Z` are read, after simple ASCII case folding. Every other scalar is
+///   skipped, and skipping is transparent: a skipped scalar does not break a
+///   duplicate-digit run, so `"a\u{e9}a"` and `"aa"` both encode `"A0"`.
+/// * **No truncation and no padding**: the code grows with the word.
+/// * A token with no `A`–`Z` letter encodes to `""`.
+/// * **Total**: no input panics, and there is no error type.
+///
+/// # The algorithm
+///
+/// The code is the first letter, followed by the group digit of *every*
+/// letter — the first included — with adjacent equal digits collapsed to one.
+/// Unlike classic Soundex, vowels are not dropped: they encode as `0` and
+/// therefore *separate* consonant runs, so `bab` is `B101`, not `B11`.
+///
+/// | digit | letters | | digit | letters |
+/// |---|---|---|---|---|
+/// | `0` | A E H I O U W Y | | `5` | Q X Z |
+/// | `1` | B P | | `6` | D T |
+/// | `2` | F V | | `7` | L |
+/// | `3` | C K S | | `8` | M N |
+/// | `4` | G J | | `9` | R |
+///
+/// [`RefinedSoundex::difference`] is Commons Codec's companion similarity
+/// measure for this code.
 ///
 /// ```
-/// use verbora_phonetics::refined_soundex::RefinedSoundex;
+/// use verbora_phonetics::RefinedSoundex;
 ///
 /// let refined = RefinedSoundex::new();
 /// assert_eq!(refined.process("jumped"), "J408106");
@@ -96,7 +68,7 @@ impl RefinedSoundex {
     /// the crate's other encoders.
     ///
     /// ```
-    /// use verbora_phonetics::refined_soundex::RefinedSoundex;
+    /// use verbora_phonetics::RefinedSoundex;
     ///
     /// assert_eq!(RefinedSoundex::new(), RefinedSoundex::default());
     /// ```
@@ -107,11 +79,11 @@ impl RefinedSoundex {
 
     /// Encodes `token` into its Refined Soundex code.
     ///
-    /// Returns the empty string when the input contains no letters (rphonetic
+    /// Returns the empty string when the input contains no letters (the
     /// does the same: `""`, `" "`, `"123"` and `"😀"` all encode to `""`).
     ///
     /// ```
-    /// use verbora_phonetics::refined_soundex::RefinedSoundex;
+    /// use verbora_phonetics::RefinedSoundex;
     ///
     /// let refined = RefinedSoundex::new();
     /// assert_eq!(refined.process("brown"), "B1908");
@@ -127,45 +99,14 @@ impl RefinedSoundex {
         // Digits are `b'0'..=b'9'`, so 0 is a safe "no previous digit" value.
         let mut previous: u8 = 0;
 
-        if token.is_ascii() {
-            // Fast path: one forward scan over bytes, no intermediate
-            // cleaned string (rphonetic allocates one and iterates chars).
-            for &b in token.as_bytes() {
-                if !(b | 0x20).is_ascii_lowercase() {
-                    continue; // not a letter: cleaned away
-                }
-                let upper = b & !0x20;
-                if out.is_empty() {
-                    out.push(char::from(upper));
-                }
-                let code = MAPPING[(upper - b'A') as usize];
-                if code != previous {
-                    out.push(char::from(code));
-                    previous = code;
-                }
+        for letter in crate::letters::Letters::new(token) {
+            if out.is_empty() {
+                out.push(char::from(letter));
             }
-        } else {
-            // Slow path, still a single forward scan. Mirrors rphonetic's
-            // clean (filter `is_alphabetic`, full uppercase) exactly, except
-            // that uppercase characters outside A–Z are dropped where
-            // rphonetic would panic — see the module docs.
-            for c in token.chars() {
-                if !c.is_alphabetic() {
-                    continue;
-                }
-                for u in c.to_uppercase() {
-                    if !u.is_ascii_uppercase() {
-                        continue; // out of rphonetic's accepted domain
-                    }
-                    if out.is_empty() {
-                        out.push(u);
-                    }
-                    let code = MAPPING[(u as u8 - b'A') as usize];
-                    if code != previous {
-                        out.push(char::from(code));
-                        previous = code;
-                    }
-                }
+            let code = MAPPING[usize::from(letter - b'A')];
+            if code != previous {
+                out.push(char::from(code));
+                previous = code;
             }
         }
 
@@ -174,11 +115,11 @@ impl RefinedSoundex {
 
     /// Whether two strings share a Refined Soundex code.
     ///
-    /// Mirrors rphonetic's `Encoder::is_encoded_equals`. Note that two
-    /// letter-free inputs both encode to `""` and therefore compare equal.
+    /// Note that two letter-free inputs both encode to `""` and therefore
+    /// compare equal.
     ///
     /// ```
-    /// use verbora_phonetics::refined_soundex::RefinedSoundex;
+    /// use verbora_phonetics::RefinedSoundex;
     ///
     /// let refined = RefinedSoundex::new();
     /// assert!(refined.compare("Smithers", "Smythers"));
@@ -190,7 +131,7 @@ impl RefinedSoundex {
     }
 
     /// Number of positions at which the two codes carry the same character —
-    /// commons-codec's `difference`, via rphonetic's
+    /// commons-codec's `difference`, via Commons Codec's
     /// `SoundexCommons::difference`.
     ///
     /// 0 means no similarity. Unlike classic Soundex (capped at 4 by its
@@ -199,7 +140,7 @@ impl RefinedSoundex {
     /// code's length are not counted.
     ///
     /// ```
-    /// use verbora_phonetics::refined_soundex::RefinedSoundex;
+    /// use verbora_phonetics::RefinedSoundex;
     ///
     /// let refined = RefinedSoundex::new();
     /// // Low similarity
@@ -212,7 +153,7 @@ impl RefinedSoundex {
         let a = self.process(a);
         let b = self.process(b);
         // Codes are pure ASCII (an A–Z letter then digits), so comparing
-        // bytes is comparing chars. rphonetic early-returns 0 when either
+        // bytes is comparing chars. Commons Codec early-returns 0 when either
         // code is empty; an empty zip counts 0 all the same.
         a.bytes().zip(b.bytes()).filter(|(x, y)| x == y).count()
     }
@@ -236,11 +177,12 @@ mod tests {
         RefinedSoundex::new()
     }
 
-    // Ported from rphonetic 3.0.6 `refined_soundex.rs::tests::test_encode`
+    // From Apache Commons Codec's `RefinedSoundexTest`, the distribution
+    // this mapping table comes from. (was: Apache Commons Codec `refined_soundex.rs::tests::test_encode`
     // (itself from commons-codec's RefinedSoundexTest). Every expected value
-    // re-verified against rphonetic 3.0.6 directly.
+    // re-verified against Apache Commons Codec directly.
     #[test]
-    fn encodes_the_rphonetic_vectors() {
+    fn encodes_the_commons_codec_vectors() {
         let r = rs();
         for (input, want) in [
             ("testing", "T6036084"),
@@ -259,11 +201,11 @@ mod tests {
         }
     }
 
-    // Ported from rphonetic 3.0.6 `refined_soundex.rs::tests::test_difference`
+    // Ported from Apache Commons Codec `refined_soundex.rs::tests::test_difference`
     // (itself from commons-codec's RefinedSoundexTest / the SQL Server
     // DIFFERENCE examples in commons-codec's javadoc).
     #[test]
-    fn difference_matches_rphonetic() {
+    fn difference_matches_the_commons_codec_measure() {
         let r = rs();
         assert_eq!(r.difference("", ""), 0);
         assert_eq!(r.difference(" ", " "), 0);
@@ -290,7 +232,7 @@ mod tests {
         assert_eq!(r.difference("", "Smith"), 0);
     }
 
-    // Digit of every letter, pinned one by one (verified against rphonetic
+    // Digit of every letter, pinned one by one (verified against Commons Codec
     // 3.0.6: encode of each single letter). This is the whole mapping table.
     #[test]
     fn alphabet_sweep_pins_every_group_digit() {
@@ -346,7 +288,7 @@ mod tests {
         }
     }
 
-    // Verified against rphonetic 3.0.6.
+    // Verified against Apache Commons Codec.
     #[test]
     fn non_letters_are_cleaned_away_not_separators() {
         let r = rs();
@@ -373,7 +315,7 @@ mod tests {
         assert_eq!(r.process("McDonald"), r.process("mcdonald"));
     }
 
-    // Verified against rphonetic 3.0.6.
+    // Verified against Apache Commons Codec.
     #[test]
     fn adjacent_duplicate_digits_collapse() {
         let r = rs();
@@ -388,7 +330,7 @@ mod tests {
         assert_eq!(r.process("Ashcraft"), "A03039026");
     }
 
-    // Verified against rphonetic 3.0.6.
+    // Verified against Apache Commons Codec.
     #[test]
     fn no_truncation_and_no_padding() {
         let r = rs();
@@ -422,33 +364,38 @@ mod tests {
         assert_eq!(code.len(), 1 + 6 * 2_000);
     }
 
-    // Verified against rphonetic 3.0.6: these Unicode inputs are inside its
-    // accepted domain (uppercase folds into A-Z, or the char is filtered).
+    /// The text unit, enumerated over one scalar of every class. A scalar
+    /// outside `A`-`Z` is skipped, and the skip is *transparent*: it does not
+    /// break a duplicate-digit run, or `"a\u{e9}a"` would encode differently
+    /// from `"aa"`.
     #[test]
-    fn unicode_inside_rphonetic_domain_is_byte_identical() {
+    fn only_ascii_letters_are_read() {
         let r = rs();
-        assert_eq!(r.process("ß"), "S3"); // ß uppercases to SS
-        assert_eq!(r.process("ﬁsh"), "F2030"); // ﬁ ligature uppercases to FI
-        assert_eq!(r.process("ſmith"), "S38060"); // long s uppercases to S
-        assert_eq!(r.process("ſmith"), r.process("Smith"));
-        assert_eq!(r.process("a😀b"), "A01"); // emoji is not alphabetic
-    }
-
-    // These inputs make rphonetic 3.0.6 PANIC (out-of-bounds mapping index);
-    // the module docs pin our documented divergence: such characters are
-    // dropped as if absent. Excluded from the benchmark domain.
-    #[test]
-    fn out_of_domain_letters_are_dropped_without_panicking() {
-        let r = rs();
-        assert_eq!(r.process("café"), "C302"); // é dropped
-        assert_eq!(r.process("naïve"), "N8020"); // ï dropped
-        assert_eq!(r.process("Ñ"), ""); // nothing left
-        assert_eq!(r.process("Москва"), "");
-        assert_eq!(r.process("日本語"), "");
-        assert_eq!(r.process("İstanbul"), "S3608107"); // İ dropped, S leads
-        assert_eq!(r.process("ʼn"), "N8"); // uppercases to ʼN; ʼ dropped
-        assert_eq!(r.process("a\u{212A}a"), "A0"); // Kelvin sign dropped...
-        assert_eq!(r.process("aéa"), "A0"); // ...and drops don't break runs
+        for input in [
+            "",
+            " ",
+            "12345",
+            "...",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "\u{1F600}",
+            "\u{041c}\u{043e}",
+            "\u{d1}",
+        ] {
+            assert_eq!(r.process(input), "", "for {input:?}");
+        }
+        assert_eq!(r.process("caf\u{e9}"), r.process("caf"));
+        assert_eq!(r.process("na\u{ef}ve"), r.process("nave"));
+        assert_eq!(r.process("\u{df}"), ""); // not an A-Z letter, so skipped
+        assert_eq!(r.process("stra\u{df}e"), r.process("strae"));
+        assert_eq!(r.process("\u{130}stanbul"), r.process("stanbul"));
+        assert_eq!(r.process("a\u{1F600}b"), "A01");
+        // A skipped scalar is transparent to the duplicate-digit collapse.
+        assert_eq!(r.process("a\u{e9}a"), "A0");
+        assert_eq!(r.process("a\u{212A}a"), "A0");
+        // Every code is ASCII.
+        for input in ["caf\u{e9}", "\u{65e5}\u{672c}\u{8a9e}", "jumped"] {
+            assert!(r.process(input).is_ascii(), "for {input:?}");
+        }
     }
 
     #[test]

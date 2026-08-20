@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 29525.3251953125,
-      "upper_bound": 30262.5859375
+      "lower_bound": 25861.55837937056,
+      "upper_bound": 26055.666813328928
     },
-    "point_estimate": 29893.95556640625,
-    "standard_error": 260.6719936377091
+    "point_estimate": 25944.449427312135,
+    "standard_error": 50.07340077008765
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 29525.3251953125,
-      "upper_bound": 30262.5859375
+      "lower_bound": 25789.413236401742,
+      "upper_bound": 25822.97885739991
     },
-    "point_estimate": 29893.95556640625,
-    "standard_error": 260.6719936377091
+    "point_estimate": 25803.471777876915,
+    "standard_error": 8.453934231754982
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 546.5313784807222
+      "lower_bound": 45.21527100616761,
+      "upper_bound": 99.43474892698816
     },
-    "point_estimate": 546.5313784807222,
-    "standard_error": 273.2670547046461
+    "point_estimate": 63.66078159496183,
+    "standard_error": 14.31142262115551
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 29525.3251953125,
-      "upper_bound": 30262.5859375
+      "lower_bound": 25791.83074930446,
+      "upper_bound": 25819.325965382704
     },
-    "point_estimate": 30115.1337890625,
-    "standard_error": 282.6287971709743
+    "point_estimate": 25804.62747261408,
+    "standard_error": 6.98829085985287
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 521.3220703034082
+      "lower_bound": 216.13231227497914,
+      "upper_bound": 775.1124645170314
     },
-    "point_estimate": 521.3220703034082,
-    "standard_error": 260.66233763243537
+    "point_estimate": 503.2676329150671,
+    "standard_error": 163.33258070315705
   }
 }

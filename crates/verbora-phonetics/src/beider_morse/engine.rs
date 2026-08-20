@@ -3,7 +3,7 @@
 //! resulting phoneme candidates — a direct algorithmic port of the
 //! `PhonemeBuilder`/`RulesApplication` shape shared by every independent
 //! implementation surveyed during design (Apache Commons Codec's Java,
-//! `rphonetic`'s Rust), not a reinterpretation.
+//! the corpus's own DSL), not a reinterpretation.
 
 use super::languages::LanguageSet;
 use super::rule::Rule;

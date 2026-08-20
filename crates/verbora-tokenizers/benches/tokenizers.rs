@@ -3,47 +3,45 @@
 // here.
 #![allow(missing_docs)]
 
-//! Criterion benchmarks for the tokenizers.
+//! Criterion benchmarks for the three UAX #29 tokenizers.
 //!
 //! Three things are measured, because they answer three different questions:
 //!
 //! * **Scaling** — the same tokenizer over documents spanning three orders of
 //!   magnitude, reported as throughput, so a per-byte regression is visible
 //!   rather than hidden inside a per-call number.
-//! * **Cross-tokenizer cost** — every family on one fixed document, which is
-//!   what shows the price of leaving the character-class scanner for a rewriting
-//!   pipeline (Treebank, the sentence splitter) or a statistical model
-//!   (Japanese).
-//! * **API shape** — `tokens` (lazy), `tokenize` (collect) and `tokenize_into`
-//!   (reused buffer) on identical input. This is the crate's central design
-//!   claim: the convenience APIs are built on the iterator, so the iterator must
-//!   be the cheapest of the three and the buffer-reusing form must beat the
-//!   allocating one.
+//! * **Script** — the same byte budget of ASCII, Cyrillic and Japanese. The
+//!   boundary rules take a documented ASCII fast path inside
+//!   `unicode-segmentation`, so an all-ASCII row cannot show what the general
+//!   automaton costs.
+//! * **API shape** — `tokens` (lazy), `tokenize_borrowed` (collect),
+//!   `tokenize_borrowed_into` (reused buffer) and `tokenize` (owned) on
+//!   identical input. This is the crate's central design claim: the convenience
+//!   APIs are built on the iterator, so the iterator must be the cheapest and
+//!   the buffer-reusing form must beat the allocating one.
 //!
 //! Inputs come from `benches/data/words.json`, the shared word list every
 //! tokenizer harness in the repo reads, so all of them are measured on
 //! byte-identical data.
+//!
+//! **No number from this file may be published without a fresh full-precision
+//! run**; the implementation changed wholesale in the Rust-native migration and
+//! every previously published figure measured code that no longer exists.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use verbora_tokenizers::{
-    AggressiveTokenizer, AggressiveTokenizerDe, AggressiveTokenizerHi, AggressiveTokenizerIt,
-    AggressiveTokenizerNo, AggressiveTokenizerRu, AggressiveTokenizerVi, CaseTokenizer,
-    SentenceTokenizer, Tokenize, TokenizerJa, TreebankWordTokenizer, WordPunctTokenizer,
-    WordTokenizer,
+    BorrowingTokenizer, SegmentTokenizer, SentenceTokenizer, Tokenizer, WordTokenizer,
 };
 
 /// Document sizes, in words.
 const SIZES: [usize; 4] = [16, 128, 1024, 8192];
 
-/// Japanese text for the segmenter, repeated to reach the target sizes.
-///
-/// A synthetic word list would not exercise the model: TinySegmenter's weights
-/// are keyed by actual characters and character-type transitions, so random
-/// kana would take a completely different set of branches from real prose.
+/// Japanese text: the case UAX #29 §4 explicitly does not segment, so every
+/// scalar is its own token and the per-token overhead is at its worst.
 const JA_TEXT: &str = "計算機科学における字句解析とは、ソースコードを構成する文字の並びを、\
 トークンの並びに変換することをいう。ここでいうトークンとは、意味を持つコードの最小単位のこと。";
 
-/// Russian text, for the non-ASCII branch of the character-class scanner.
+/// Russian text, for the non-ASCII branch of the boundary automaton.
 const RU_TEXT: &str = "Быстрая коричневая лиса перепрыгивает через ленивую собаку. \
 Это тест кириллического текста для измерения производительности токенизатора. ";
 
@@ -60,12 +58,13 @@ fn words() -> Vec<String> {
             path.display()
         )
     });
-    let json: serde_json::Value = serde_json::from_str(&body).expect("valid bench data");
-    json["words"]
-        .as_array()
-        .expect("word list")
-        .iter()
-        .map(|w| w.as_str().expect("string").to_owned())
+    // The file is `{"words": ["...", ...]}`; a hand-rolled scan avoids a
+    // `serde_json` dev-dependency for one benchmark input.
+    body.split('"')
+        .skip(3)
+        .step_by(2)
+        .map(str::to_owned)
+        .filter(|w| !w.is_empty())
         .collect()
 }
 
@@ -80,11 +79,12 @@ fn document(words: &[String], n: usize) -> String {
         .join(" ")
 }
 
-/// A document with the punctuation, contractions and sentence boundaries that
-/// the rewriting tokenizers actually branch on.
+/// A document with the punctuation, contractions and sentence boundaries the
+/// boundary rules actually branch on.
 ///
-/// Tokenizing punctuation-free text would measure the fast path of
-/// `TreebankWordTokenizer` and none of its seventeen rules.
+/// Punctuation-free text measures WB5 and nothing else — not the
+/// `MidLetter`/`MidNum`/`MidNumLet` lookahead of WB6/WB7/WB11/WB12, and none of
+/// the sentence rules.
 fn prose(words: &[String], n: usize) -> String {
     let mut out = String::new();
     for (i, w) in words.iter().cycle().take(n).enumerate() {
@@ -115,113 +115,47 @@ fn scaling(c: &mut Criterion) {
     for n in SIZES {
         let doc = document(&words, n);
         group.throughput(Throughput::Bytes(doc.len() as u64));
-
-        group.bench_with_input(
-            BenchmarkId::new("aggressive-en", doc.len()),
-            &doc,
-            |b, d| {
-                b.iter(|| AggressiveTokenizer::new().tokenize(black_box(d)).len());
-            },
-        );
         group.bench_with_input(BenchmarkId::new("word", doc.len()), &doc, |b, d| {
-            b.iter(|| WordTokenizer::new().tokenize(black_box(d)).map(|v| v.len()));
+            b.iter(|| WordTokenizer.tokenize_borrowed(black_box(d)).len());
         });
-        group.bench_with_input(BenchmarkId::new("wordpunct", doc.len()), &doc, |b, d| {
-            b.iter(|| {
-                WordPunctTokenizer::new()
-                    .tokenize(black_box(d))
-                    .map(|v| v.len())
-            });
-        });
-        group.bench_with_input(BenchmarkId::new("case", doc.len()), &doc, |b, d| {
-            b.iter(|| CaseTokenizer::new().tokenize(black_box(d)).len());
+        group.bench_with_input(BenchmarkId::new("segment", doc.len()), &doc, |b, d| {
+            b.iter(|| SegmentTokenizer.tokenize_borrowed(black_box(d)).len());
         });
 
         let text = prose(&words, n);
         group.throughput(Throughput::Bytes(text.len() as u64));
-        group.bench_with_input(BenchmarkId::new("treebank", text.len()), &text, |b, d| {
-            b.iter(|| TreebankWordTokenizer::new().tokenize(black_box(d)).len());
+        group.bench_with_input(BenchmarkId::new("word-prose", text.len()), &text, |b, d| {
+            b.iter(|| WordTokenizer.tokenize_borrowed(black_box(d)).len());
         });
         group.bench_with_input(BenchmarkId::new("sentence", text.len()), &text, |b, d| {
-            b.iter(|| SentenceTokenizer::new().tokenize(black_box(d)).len());
+            b.iter(|| {
+                SentenceTokenizer::new()
+                    .tokenize_borrowed(black_box(d))
+                    .len()
+            });
         });
     }
     group.finish();
 }
 
-fn languages(c: &mut Criterion) {
+fn scripts(c: &mut Criterion) {
     let words = words();
     let ascii = document(&words, 1024);
     let cyrillic = repeat_to(RU_TEXT, ascii.len());
-    let japanese = repeat_to(JA_TEXT, 4096);
+    let japanese = repeat_to(JA_TEXT, ascii.len());
 
-    let mut group = c.benchmark_group("languages");
+    let mut group = c.benchmark_group("scripts");
     group.throughput(Throughput::Bytes(ascii.len() as u64));
-    // All-ASCII input: the scanner never leaves its byte fast path.
-    group.bench_function("en", |b| {
-        b.iter(|| AggressiveTokenizer::new().tokenize(black_box(&ascii)).len());
+    group.bench_function("word-ascii", |b| {
+        b.iter(|| WordTokenizer.tokenize_borrowed(black_box(&ascii)).len());
     });
-    group.bench_function("it", |b| {
-        b.iter(|| {
-            AggressiveTokenizerIt::new()
-                .tokenize(black_box(&ascii))
-                .len()
-        });
-    });
-    group.bench_function("de", |b| {
-        b.iter(|| {
-            AggressiveTokenizerDe::new()
-                .tokenize(black_box(&ascii))
-                .len()
-        });
-    });
-    // Latin-1 and Latin Extended classes: wider `matches!` ladders.
-    group.bench_function("vi", |b| {
-        b.iter(|| {
-            AggressiveTokenizerVi::new()
-                .tokenize(black_box(&ascii))
-                .len()
-        });
-    });
-    // Rewriting variants: diacritic removal and punctuation deletion.
-    group.bench_function("no", |b| {
-        b.iter(|| {
-            AggressiveTokenizerNo::new()
-                .tokenize(black_box(&ascii))
-                .len()
-        });
-    });
-    group.bench_function("hi", |b| {
-        b.iter(|| {
-            AggressiveTokenizerHi::new()
-                .tokenize(black_box(&ascii))
-                .len()
-        });
-    });
-
     group.throughput(Throughput::Bytes(cyrillic.len() as u64));
-    group.bench_function("ru-cyrillic", |b| {
-        b.iter(|| {
-            AggressiveTokenizerRu::new()
-                .tokenize(black_box(&cyrillic))
-                .len()
-        });
-    });
-    // Regression guard for the block-mask scanner: WordTokenizer's class
-    // *includes* Cyrillic, so on this input word runs live outside the ASCII
-    // fast path entirely. A regression here means the block scan's non-ASCII
-    // handoff got more expensive, which the all-ASCII rows cannot show.
     group.bench_function("word-cyrillic", |b| {
-        b.iter(|| {
-            WordTokenizer::new()
-                .tokenize(black_box(&cyrillic))
-                .map(|v| v.len())
-        });
+        b.iter(|| WordTokenizer.tokenize_borrowed(black_box(&cyrillic)).len());
     });
-
     group.throughput(Throughput::Bytes(japanese.len() as u64));
-    group.bench_function("ja-segmenter", |b| {
-        b.iter(|| TokenizerJa::new().tokenize(black_box(&japanese)).len());
+    group.bench_function("word-japanese", |b| {
+        b.iter(|| WordTokenizer.tokenize_borrowed(black_box(&japanese)).len());
     });
     group.finish();
 }
@@ -229,7 +163,7 @@ fn languages(c: &mut Criterion) {
 fn api_shape(c: &mut Criterion) {
     let words = words();
     let doc = document(&words, 1024);
-    let t = AggressiveTokenizer::new();
+    let t = WordTokenizer;
 
     let mut group = c.benchmark_group("api-shape");
     group.throughput(Throughput::Bytes(doc.len() as u64));
@@ -238,38 +172,36 @@ fn api_shape(c: &mut Criterion) {
     group.bench_function("tokens-lazy", |b| {
         b.iter(|| t.tokens(black_box(&doc)).map(str::len).sum::<usize>());
     });
-    // The convenience API: one growing `Vec` per call.
-    group.bench_function("tokenize", |b| {
-        b.iter(|| t.tokenize(black_box(&doc)).len());
+    // One growing `Vec` of `&str` per call.
+    group.bench_function("tokenize-borrowed", |b| {
+        b.iter(|| t.tokenize_borrowed(black_box(&doc)).len());
     });
     // The hot-loop API: the caller's buffer keeps its capacity.
-    group.bench_function("tokenize-into-reused", |b| {
+    group.bench_function("tokenize-borrowed-into-reused", |b| {
         let mut buf = Vec::new();
         b.iter(|| {
             buf.clear();
-            t.tokenize_into(black_box(&doc), &mut buf);
+            t.tokenize_borrowed_into(black_box(&doc), &mut buf);
             buf.len()
         });
+    });
+    // The owned path: one `String` per token.
+    group.bench_function("tokenize-owned", |b| {
+        b.iter(|| t.tokenize(black_box(&doc)).len());
     });
     group.finish();
 }
 
 /// Sequential vs. `par_tokenize_batch` over batches of independent documents.
 ///
-/// Requires the `parallel` feature.
-///
-/// Three cases span the range that matters for the "when is this worth it"
-/// question `Tokenize::par_tokenize_batch`'s doc comment answers: many small
-/// documents (scheduling overhead can dominate), a middling size, and
-/// documents around the ~8192-word size this crate's own benchmarks already
-/// measure a single `tokenize` call on (see `scaling`, above). Every case
-/// uses the same document count so `Throughput::Elements` reports a clean
-/// per-document number and the sequential/parallel ratio at each size is
-/// directly comparable.
+/// Requires the `parallel` feature. The crossover this measures is currently
+/// **unmeasured** and no figure from it is published anywhere.
 #[cfg(feature = "parallel")]
 fn parallel_batch(c: &mut Criterion) {
+    use verbora_tokenizers::par_tokenize_batch;
+
     let words = words();
-    let t = AggressiveTokenizer::new();
+    let t = WordTokenizer;
 
     const N_DOCS: usize = 64;
     const WORDS_PER_DOC: [usize; 3] = [16, 1024, 8192];
@@ -283,18 +215,18 @@ fn parallel_batch(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("sequential", n_words), &docs, |b, docs| {
             b.iter(|| {
                 docs.iter()
-                    .map(|d| t.tokenize(black_box(d)))
+                    .map(|d| t.tokenize_borrowed(black_box(d)))
                     .collect::<Vec<_>>()
             });
         });
         group.bench_with_input(BenchmarkId::new("parallel", n_words), &docs, |b, docs| {
-            b.iter(|| t.par_tokenize_batch(black_box(docs)));
+            b.iter(|| par_tokenize_batch(&t, black_box(docs)));
         });
     }
     group.finish();
 }
 
-criterion_group!(benches, scaling, languages, api_shape);
+criterion_group!(benches, scaling, scripts, api_shape);
 #[cfg(feature = "parallel")]
 criterion_group!(parallel_benches, parallel_batch);
 

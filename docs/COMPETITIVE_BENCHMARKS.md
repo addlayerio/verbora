@@ -67,6 +67,85 @@ set used for execution.
 
 ## 1.1 Tokenizers
 
+**Update, text-shaping migration (2026-08) — every Verbora figure in this
+section is retired, and eight of the capabilities the rows describe no longer
+exist.** `verbora-tokenizers` was rewritten to the Rust-native contract in
+`docs/design/text-shaping-contract.md` and now exposes three tokenizers over
+one token shape — `WordTokenizer`, `SegmentTokenizer`, `SentenceTokenizer`,
+every token a borrowed `&str` substring of the input. Row group by row group:
+
+- **Whitespace tokenization — capability deleted, benchmark group deleted.**
+  The `RegexpTokenizer`/`Pattern` engine this row's Verbora side was a
+  configuration of is removed by contract §3.4, along with
+  `verbora-tokenizers`' `regex` dependency: Verbora performs no regex or
+  whitespace tokenization at *any* API, and a caller who wants it is told to
+  use `regex` directly. `benches/tokenizers.rs`' `whitespace_tokenization`
+  group went with it, so `tantivy::WhitespaceTokenizer` and Hugging Face
+  `WhitespaceSplit` have no Verbora counterpart left to time. Every figure in
+  the tantivy row — the original flat 3.6×–4.6× loss *and* the 1.11× / 1.70× /
+  2.36× / 1.97× reversal that closed it, together with the 18.8×–33.1×
+  Hugging Face win — measured the SWAR whitespace scanner inside that engine.
+  ⚠ **Retired. No current figure replaces them, and none can until Verbora
+  reacquires the capability** (`docs/PERFORMANCE_GAPS.md` entry 3).
+- **`AggressiveTokenizer` (English) vs. `unicode_words()` — benchmark group
+  deleted.** `AggressiveTokenizer` and its fifteen language variants are
+  removed by contract §3.4; §4.1 records why (nineteen hand-derived character
+  classes with documented bugs, not linguistics). The
+  `aggressive_tokenization_en` group is gone, and its result — "roughly at
+  parity at every size (16-8192 words), no consistent directional winner
+  across two runs, differences under ~1.3× either way" — is ⚠ **retired**.
+  The comparison it stood for is not lost, but it is no longer a *rival*
+  comparison; see the next item.
+- **`WordTokenizer` vs. `unicode-segmentation` — renamed, and reclassified out
+  of the competitive set.** `WordTokenizer::tokens` is literally
+  `str::unicode_words()` (`crates/verbora-tokenizers/src/word.rs`), so this row
+  measures Verbora against its own dependency, which `AGENTS.md`
+  § Cross-Implementation Benchmark Fairness forbids reporting as a competitive
+  result. The `word_tokenization_unicode_segmentation` group was therefore
+  renamed `word_tokenization_wrapper_overhead`, following
+  `benches/language.rs`' existing `whatlang_wrapper_overhead` precedent: its
+  numbers state what Verbora's wrapper costs over the primitive and are never
+  to be reported as Verbora beating or losing to `unicode-segmentation`. Both
+  recorded results — the "roughly at parity, ratios under ~1.3× in either
+  direction" against `unicode_words()` and the 5.5×–8.3× margin over
+  `split_word_bounds()` — are ⚠ **retired on two independent counts**: they
+  measured the deleted `WordRuns` class scanner, and they are the wrong *kind*
+  of claim for the group they now live in.
+- **`WordTokenizer` vs. `tantivy::SimpleTokenizer` / Hugging Face
+  `Whitespace`, and `SentenceTokenizer` vs. `segtok` — capabilities survive,
+  figures do not.** `word_tokenization`, `sentence_tokenization` and
+  `sentence_tokenization_boundary_density` remain genuine rival comparisons,
+  and their narrowed-domain boundary agreement is re-proved against the new
+  implementations in `tests/tokenizers_correctness.rs` before any timing is
+  trusted. But both Verbora tokenizers were reimplemented on UAX #29 —
+  `WordTokenizer` now does categorically *more* than a character-class test
+  (full WB1–WB999 segmentation), and `SentenceTokenizer` is built on
+  `split_sentence_bound_indices()` with no placeholder mask, no unmask pass and
+  no trimming (contract §3.1 removed trimming outright, because a tokenizer
+  that trims does not return substrings). The `segtok` row's 15.6×–24.0× /
+  5.9× margins, and the `SentenceTokenizer` row's whole crossover story — the
+  original `O(sentences²)` loss up to 3.40× and the flat 1.14×–1.22× reversal
+  that followed — all measured the mask-and-restore algorithm.
+  ⚠ **Pending re-measurement** (`docs/PERFORMANCE_GAPS.md` entries 4 and 23).
+- **`WordPunctTokenizer`, `TreebankWordTokenizer`, `CaseTokenizer`,
+  `OrthographyTokenizer`, the generic `RegexpTokenizer` engine and
+  `TokenizerJa` — capabilities deleted** by contract §3.4 (`TokenizerJa` with
+  its whole `ja/` subtree; `TreebankWordTokenizer` deferred rather than
+  dropped, §4.5). These rows carry no figures, so nothing is retired, but
+  their `NO FAIR COMPETITOR FOUND` verdicts are moot in a new way: the answer
+  is now "no Verbora side", not "no competitor". The `CaseTokenizer`
+  `İstanbul`→`İstanbulundefined` bug and the `SentenceTokenizer` non-fixpoint
+  unmask bug the rows cite as parity targets are gone with the code.
+
+⚠ **No Verbora tokenizer figure in this section is currently backed.**
+Competitor figures are unaffected; no competitor version moved. `results/raw/
+tokenizers-*` and the `tokenizers` rows of `results/results.json` are stale
+rather than approximately right, and must not be republished from anything but
+a fresh full-precision run. `docs/design/text-shaping-contract.md` §7 item 1
+names the specific question that run must answer: UAX #29 word segmentation
+against the deleted class scan, where a regression is expected and lands on
+the hottest path in the workspace.
+
 ### Whitespace / simple tokenization
 
 Neither the reference nor Verbora ship a *named* whitespace-only tokenizer
@@ -145,6 +224,43 @@ regex-splitting engine, not a preset.
 | Generic `ngrams()` engine, array input with `T = char` + a caller-side frequency-count fold (the same generic primitive `ngrams`/`ngrams_str`/`zh::ngrams_zh` are all built on, called directly here rather than through a string-specific wrapper) | `ngrammatic::Ngram`/`NgramBuilder` (the character n-gram + frequency-count generator `Corpus`'s own fuzzy-search feature is built on) | Rust | 0.7.0 | Partial | Yes | **Benchmarked** (`benches/ngrams.rs`). Both sides pad with `arity - 1` copies of the same character (space, by default) and slide an identical window; `tests/ngrams_correctness.rs` confirms byte-identical `(gram, count)` sets across all 20,000 words in the shared word list, at arity 2 and arity 3 (the one disclosed divergence, on inputs shorter than `arity - 1`, is not exercised by that word list — its shortest entry is 3 characters). `ngrammatic`'s headline `Corpus`/`search` fuzzy-matching feature has no Verbora equivalent and stays unbenchmarked — see the row below. **Result** (full-default Criterion, median metric, 3 independent runs, consistent direction every time): bigrams — Verbora wins all 3 runs, ~1.07×–1.16× faster; trigrams — Verbora loses all 3 runs, ngrammatic ~1.03×–1.08× faster — see `docs/PERFORMANCE_GAPS.md` entry 38. |
 | `ngrams_str`/`bigrams_str`/`trigrams_str` (word-tokenizing string input), `ngrams_with_stats`/`ngram_key`, and the `zh::*` UTF-16-code-unit-splitting family | (Rust, dedicated n-gram crate) | Rust | — | No | No | **NO FAIR COMPETITOR FOUND**, for these specific capabilities. `ngrammatic`'s `Ngram`/`NgramBuilder` (row above) is now a genuine Rust competitor for plain character-level n-gram + frequency-count generation, but nothing found tokenizes into words first the way `ngrams_str` does, replicates the UTF-16 `zh::*` splitting behavior, or matches these functions' output shape. Every other dedicated Rust n-gram crate remains either abandoned (`ngrams` pwoolcoc, ~10y stale; `ngram` nytopop, 6y stale, 4 stars; `ngram-search`, abandoned) or solves a different problem (`creature_feature` = ML featurization). Most Rust code reaches for `slice::windows(n)` inline instead of a crate. |
 
+**Update, text-shaping migration (2026-08) — three of the four Verbora rows
+describe deleted functions, and the fourth's figures are retired.**
+`verbora-ngrams` was rewritten to `docs/design/text-shaping-contract.md` §3.3
+and its public surface is now `ngrams`, `Padded`, and
+`char_ngrams`/`CharNGrams`.
+
+- **Deleted by contract §3.4:** `bigrams`, `trigrams`, `multrigrams`,
+  `ngrams_owned`, `ngrams_iter`/`NGramIter`; the whole `text` module
+  (`ngrams_str`/`bigrams_str`/`trigrams_str`); the whole `stats` module
+  (`ngrams_with_stats`/`ngram_key`); the `tokenizer` module and its
+  process-global mutable tokenizer binding; and the whole `zh::*`
+  UTF-16-code-unit-splitting family. The three rows built on them describe
+  capabilities Verbora no longer has, and the quirks they were pinned to —
+  the negative-slice re-anchoring padding, the `")"` empty-key
+  `String#substr` clamping bug, the global tokenizer binding, `zh::split_lossy`'s
+  fabricated `U+FFFD` — are gone with the code, not preserved.
+- **The `ngrammatic` row's benchmark survives under the same group names**
+  (`bigrams`, `trigrams` in `benches/ngrams.rs`) **but its Verbora side was
+  rewritten.** `ngrams(&chars, arity, Some(' '), Some(' '))` became
+  `Padded::new(&chars, arity, Some(&' '), Some(&' ')).ngrams()`: the arity is
+  now a `NonZeroUsize`, and the padded sequence is materialised once instead of
+  a lazy `Cow` window being cloned per gram. The recorded result — bigrams
+  Verbora ~1.07×–1.16× faster in all 3 runs, trigrams `ngrammatic` ~1.03×–1.08×
+  faster in all 3 runs — measured the deleted engine call, and the `Cow`-clone
+  cost its "Likely reason" rests on is exactly what the rewrite removed.
+  ⚠ **Retired, pending re-measurement** (`docs/PERFORMANCE_GAPS.md` entry 38
+  carries the same retirement; `docs/design/text-shaping-contract.md` §7
+  item 7 states the open question — `Padded` against the lazy `Cow` windows it
+  replaces, direction expected to favour the new shape and unverified).
+
+What did survive without a benchmark is correctness, and it strengthened:
+`tests/ngrams_correctness.rs` now checks identical `(gram, count)` maps over
+all 20,000 words at both benchmarked arities **and** over inputs shorter than
+`arity` — the one case the previous revision recorded as a disclosed,
+unexercised divergence. Competitor figures are unaffected; `ngrammatic` is
+still pinned at 0.7.0.
+
 ## 1.3 Stemmers
 
 | Verbora capability | Competitor | Language | Version | Equivalent? | Benchmarkable? | Notes |
@@ -195,7 +311,58 @@ regex-splitting engine, not a preset.
 | `StemmerId` (Indonesian, Sastrawi/Nazief–Adriani) | `sastrawi` (iDevoid/rust-sastrawi) | Rust | 0.1.1 | Partial | Yes | Genuine shared lineage — both Verbora and this crate independently port the same PHP Sastrawi reference (confirmed directly: both dictionaries hold exactly 29,932 root words); very low adoption (3K downloads), untouched since 2020. **Benchmarked and verified**: this is the real correctness pass the matrix itself never performed, and it found two genuine algorithmic gaps versus the shared reference — no hyphenated-reduplication/compound-plural handling at all, and only a single (not iterated-up-to-3×) prefix-stripping pass; 13 of 16 benchmarked words agree byte-for-byte, the three exercising those gaps excluded from the benchmarked sample. Verbora **loses** decisively on time (`sastrawi` ~3.6×–6.8× faster across all batch sizes) despite a mixed memory picture (fewer allocations, 464 vs. 525, but more bytes, 39,676 vs. 12,168, over the 13-word list) — see `docs/PERFORMANCE_GAPS.md`. `sastrawi`'s own one-time dictionary+regex-compilation construction cost (~47K allocations, ~21 MB) is real but paid once, unlike Verbora's `StemmerId::new()`, a zero-sized unit struct backed entirely by compiled-in static data. |
 | `StemmerId` (Indonesian, Sastrawi/Nazief–Adriani) | `sastrawi-rs` (ibahasa) | Rust | not on crates.io at research time | Partial | Selected cases | GitHub-only, "zero-regex/zero-copy/FST-powered" rewrite; no pinned release existed at research time so it could not be version-pinned per spec's "no implicit latest" rule. **Re-checked during this round's implementation: this crate now has real crates.io releases** (newest `0.5.3`) — this round's own assigned scope kept it unpinned regardless (see §5 data-quality note 2); a real candidate for a **future** pinning pass, not benchmarked here. |
 
-*The `rust-stemmers`/`snowball_stemmers_rs` ratios above predate `docs/PERFORMANCE_GAPS.md` entry 34's later update: a real, safe, 5%–18% per-word speedup (an `ends_with` fast-path fix, verified byte-exact against both competitors) landed after these numbers were measured — the direction of every affected row (wins German, splits Dutch, loses the other 7) is unchanged, and the shift is a single-digit-percentage narrowing, not a reclassification, so the table was not re-measured cell-by-cell for that alone. See entry 34's own "Update" section for the full story, including two different, provably-correct rewrite attempts that were tried, measured, found to regress Spanish/French specifically, and reverted before shipping.*
+⚠ **No Verbora stemmer ratio in this section is currently backed.** Competitor
+figures are unaffected; no competitor version moved. The equivalence verdicts
+are unaffected too — the rewrite below is pinned byte-exact against the
+implementation it replaced, and `tests/stemmers_correctness.rs` still asserts
+agreement with both competitors. Only the Verbora timings are retired, and they
+are retired *pending re-measurement*: the comparison is live and
+`benches/stemmers.rs` is waiting to answer it.
+
+**What changed underneath them.** Entry 34 diagnosed the gap as a *linear*
+suffix scan — `for s in suffixes { ends_with(w, s) }` in
+`crates/verbora-stemmers/src/units.rs`' `longest_suffix`/`first_suffix` — and
+recorded that the competitors' real advantage, the official Snowball compiler's
+`find_among`/`find_among_b` binary search over a sorted table with common-prefix
+tracking, "was not reimplemented here". **It has been since.** `longest_suffix`
+and `first_suffix` no longer exist; `crates/verbora-stemmers/src/among.rs`
+implements that same binary search (sorted by reversed code-unit sequence,
+`common_i`/`common_j` prefix tracking, `substring_i`-style links), and ten of
+the twelve benchmarked groups now route through it — `porter_de`, `porter_en`,
+`porter_es`, `porter_fr`, `porter_it`, `porter_nl`, `porter_no`, `porter_pt`,
+`porter_ru`, `porter_sv`, i.e. every language whose module imports
+`crate::among`. That is a different algorithm on the timed path, not a
+constant-factor tweak, so **the argument this paragraph used to make — that the
+only post-measurement change was the `ends_with` fast path, "a single-digit-
+percentage narrowing, not a reclassification" — no longer covers the table.**
+Whether any row's verdict flips is unknown, must not be inferred from the
+direction of the change, and is exactly what the re-run has to answer.
+`results/raw/stemmers-*` and the `stemmers` rows of `results/results.json` are
+stale rather than approximately right.
+
+**Two groups are *not* retired on this ground.** `stemmer_id` and `stemmer_ja`
+do not reach `among.rs` or `ends_with` at all (`id.rs` uses
+`eq_str`/`starts_with`, `ja.rs` only `slen`), so the `sastrawi` and `lindera`
+ratios are untouched by the suffix-matching rewrite. They are in scope of the
+text-shaping migration's own open question for this crate — see §7's
+"Downstream reach", where `verbora-stemmers` is listed as *named, not
+resolved*.
+
+**Two further changes that do *not* reach these numbers, recorded so the
+distinction is not lost.** `verbora-stemmers` now tokenizes with
+`verbora_tokenizers::WordTokenizer` (UAX #29) instead of fourteen deleted
+per-language character classes, and `PorterStemmerNo`/`PorterStemmerSv`'s
+`prepare` no longer folds diacritics (`å ä ö` and `æ ø å` are letters of those
+alphabets, and the fold had made 124 stop words unreachable). Both change
+*stems*, and both sit in `tokenize_and_stem`; `benches/stemmers.rs` times
+`stem(word)` per word over a fixed word list and never calls it, so neither is
+a reason to retire a figure here. Entry 10 carries the `tokenize_and_stem`
+question separately.
+
+*Historical: entry 34's own "Update" section records the two provably-correct
+`longest_suffix` rewrites that were tried before this one, measured, found to
+regress Spanish and French specifically, and reverted — and the `ends_with`
+fast path that did ship.*
 
 ## 1.4 Normalizers
 
@@ -218,6 +385,82 @@ regex-splitting engine, not a preset.
 | `normalize_ja` (Japanese width/kana/symbol normalization, 17 conversions) | `kana-converter` | Rust | 0.1.2 | Partial | Selected cases | **Benchmarked** (`benches/normalizers.rs`'s `ja_katakana_halfwidth_to_fullwidth` group). Even narrower single-purpose kana-width converter — its `to_double_byte(_, KanaOnly)` composes voiced/semi-voiced halfwidth katakana via a raw codepoint-offset heuristic (not a table like Verbora's `katakana_hf`), which is verified to agree on the standard gojuon pairs but genuinely diverges on `ｦ`/`ﾜ` + dakuten, an orphan mark, and halfwidth punctuation/space (which it folds and `katakana_hf` does not) — three real divergences, all confirmed with assertions in `tests/normalizers_correctness.rs` and excluded from the benchmarked domain. Real result: **Verbora loses, 1.19×–1.47× slower** — a narrower, single-pass-vs-single-pass gap (filed as `docs/PERFORMANCE_GAPS.md` entry 31) despite `kana-converter` allocating 2.4× the bytes Verbora does on the same input. |
 | `case::restore_case` (internal case-pattern restoration for inflectors) | the reference | reference | 8.1.1 | Yes | Yes | Required baseline (reference behavior). |
 | `case::restore_case` (internal case-pattern restoration for inflectors) | — | — | — | — | — | **NO FAIR COMPETITOR FOUND** — a UTF-16-indexed, reference-quirk case-pattern restorer with no Rust ecosystem target. |
+
+**Update, text-shaping migration (2026-08) — `verbora-normalizers` was reduced
+to six functions, and every Verbora figure in this section is retired.** Per
+`docs/design/text-shaping-contract.md` §3.2/§3.4 the crate's public surface is
+now `nfd`, `nfc`, `nfkd`, `nfkc`, `remove_diacritics`,
+`par_remove_diacritics_batch` and a `unicode_version()` accessor. (The
+`case::restore_case` row above is unaffected — that function lives in
+`verbora-inflectors`, not here, and was not touched by this migration.)
+
+- **`normalize` / `normalize_token` (English contraction expansion),
+  `normalize_no`, `normalize_sv`, and `normalize_ja` with `ja::converters`'
+  seventeen functions — deleted.** Their rows describe capabilities Verbora no
+  longer has; the `contractions`-crate rejection and the two selective-fold
+  `NO FAIR COMPETITOR FOUND` verdicts are moot in the same way §1.1's are —
+  the answer is now "no Verbora side", not "no competitor".
+- **`ja_hiragana_to_katakana` / `ja_katakana_to_hiragana` — benchmark groups
+  deleted, and the `unicode-jp` dependency with them.** Hiragana ↔ katakana
+  conversion is a *transliteration*, not a Unicode normalization (contract
+  §3.2, "Cut: the Japanese normalizers"), and it belongs to
+  `verbora-transliterators`, which today ships only kana → romaji
+  (`transliterate_ja`). Timing `unicode-jp`'s `hira2kata`/`kata2hira` alone
+  would measure nothing about Verbora. The recorded result — Verbora 3.7×–4.8×
+  slower in both directions at every tested size, and the later 4.1%-at-1024
+  pre-check speedup that narrowed it — measured `ja.rs`'s three-stage
+  `Table::translate` pipeline. ⚠ **Retired. No current figure replaces it, and
+  none can until the capability reappears somewhere**
+  (`docs/PERFORMANCE_GAPS.md` entry 30).
+- **`ja_katakana_halfwidth_to_fullwidth` — re-pointed and renamed
+  `nfkc_halfwidth_katakana`.** This capability genuinely survives: NFKC's
+  compatibility decomposition maps halfwidth katakana to its fullwidth form and
+  decomposes the halfwidth voiced sound mark `U+FF9E` to combining `U+3099`,
+  which canonical composition then recombines, so `nfkc("ｶﾞ") == "ガ"` — the
+  same user-visible operation `katakana_hf` performed. The competitor
+  (`kana-converter` 0.1.2, `to_double_byte(_, KanaOnly)`) and the narrowed
+  domain are unchanged, and per-character agreement is re-proved over the whole
+  of `U+FF66..=U+FF9D` in `tests/normalizers_correctness.rs`. But the recorded
+  1.19×–1.47× loss measured `katakana_hf`'s single purpose-built
+  `Table::translate` pass, and the replacement is general UAX #15 NFKC over
+  arbitrary Unicode — the two sides now do measurably different amounts of
+  work, which `benches/normalizers.rs`' `bench_nfkc_halfwidth_katakana` states
+  in full. ⚠ **Retired, pending re-measurement against `nfkc`; the new figure
+  is a new comparison, not a continuation of the old one**
+  (`docs/PERFORMANCE_GAPS.md` entry 31).
+- **`remove_diacritics` — same name, opposite mechanism, and two verdicts in
+  the table above invert with it.** The function is now `s` under NFD with
+  every scalar whose `Canonical_Combining_Class` is non-zero removed, under
+  NFC (contract §3.2), replacing an 820-entry precomposed-scalar table. The
+  `remove_diacritics_ascii`/`remove_diacritics_accented` groups and the pinned
+  `diacritics` 0.2.2 competitor both survive, and
+  `tests/normalizers_correctness.rs` proves the two still agree byte-for-byte
+  on everything those groups feed them — but the divergence *outside* that
+  domain grew from 7 codepoints in `U+00C0..=U+024F` to 105, because Verbora
+  now leaves every letter whose accent is part of its identity (`ø`, `æ`, `ß`,
+  `đ`, `ł`, `ſ`, `ı` — no canonical decomposition, so nothing to remove)
+  untouched where `diacritics`' table folds each to a bare ASCII letter. Two
+  rows above are therefore stale as *selection reasoning*, not just as
+  numbers, and are recorded rather than silently rewritten: **`unaccent`
+  0.1.1** was rejected partly *because* it decomposes and Verbora did not —
+  that objection is void and it is now the mechanism-matched competitor,
+  still unpinned only because the "non-standard" crates.io licence field needs
+  the review `AGENTS.md` § Licensing requires; and **`unicode-normalization`**
+  is no longer classifiable as a competitor at all, being the crate
+  `verbora-normalizers` is now implemented on — benchmarking against it would
+  be a wrapper-overhead measurement, and `benches/normalizers.rs` does not
+  pretend otherwise by including it. `secular` and
+  `deunicode`/`any_ascii`/`unidecode` keep their `No` verdicts unchanged.
+
+⚠ **No Verbora normalizer figure in this section is currently backed.**
+Competitor figures are unaffected; no competitor version moved.
+`results/raw/normalizers-ja_*` and the `normalizers` rows of
+`results/results.json` are stale rather than approximately right.
+`docs/design/text-shaping-contract.md` §7 items 2 and 3 name what a
+re-measurement must answer: `remove_diacritics`' three passes (NFD, filter,
+NFC) against the deleted one-lookup table — direction near-certain, magnitude
+not — and whether the four normalization forms' quick-check path makes the
+`Cow::Borrowed` guarantee cheap enough to justify the wrapper at all.
 
 ## 1.5 Inflectors
 
@@ -277,7 +520,7 @@ regex-splitting engine, not a preset.
 | Verbora capability | Competitor | Language | Version | Equivalent? | Benchmarkable? | Notes |
 |---|---|---|---|---|---|---|
 | Levenshtein | the reference | reference | 8.1.1 | Yes | Yes | Direct port source; required baseline. |
-| Levenshtein | strsim | Rust | 0.11.1 | Yes | Yes | Char-indexed (BMP-equivalent to Verbora's UTF-16 indexing); canonical Rust crate, ~990M downloads. |
+| Levenshtein | strsim | Rust | 0.11.1 | Yes | Yes | Char-indexed, and so is Verbora — one Unicode scalar is one unit on both sides, so the unit agreement is now exact rather than confined to the Basic Multilingual Plane. Canonical Rust crate, ~990M downloads. |
 | Levenshtein | rapidfuzz | Rust | 0.5.0 | Yes | Yes | Char-indexed; most complete single-crate algorithm parity found. |
 | Levenshtein | stringmetrics | Rust | 2.2.2 | Yes | Yes | Char-indexed; also has weighted costs; high recent adoption. |
 | Levenshtein | triple_accel | Rust | 0.4.0 | Partial | Selected cases | Byte-level (UTF-8 bytes), SIMD; fair only on ASCII corpora. |
@@ -293,34 +536,129 @@ reported separately from random-input medians; it measures shortcut behavior,
 not a representative mixed workload. Its exact equivalence is pinned by
 `levenshtein_competitors_agree_on_the_timed_edge_shapes` before timings are
 accepted.
-| Damerau-Levenshtein (unrestricted/true) | the reference | reference | 8.1.1 | Yes | Yes | `restricted:false` default on both sides. |
-| Damerau-Levenshtein (unrestricted/true) | strsim | Rust | 0.11.1 | ~~Yes~~ **Partial** | Yes | `damerau_levenshtein()` is explicitly the unrestricted variant — but **verdict narrowed this round**: Verbora/the reference's pinned unrestricted recurrence is deliberately *not* the textbook (Zhao–Sahni-style) Damerau-Levenshtein that strsim implements, and the two genuinely diverge on a measurable fraction of inputs — e.g. `"bb"`→`"abbb"` is 1 under Verbora's recurrence, 2 under the textbook's, and Verbora's recurrence is not even symmetric. Equivalence was verified on the benchmarked corpus specifically; known divergent inputs exist outside it, so the two are corpus-equivalent, not algorithm-equivalent. |
-| Damerau-Levenshtein (unrestricted/true) | rapidfuzz | Rust | 0.5.0 | ~~Yes~~ **Partial** | Yes | `distance::damerau_levenshtein` module, explicitly unrestricted — same **verdict narrowed this round** as the strsim row above (rapidfuzz ships the identical Zhao–Sahni-style algorithm; entry 29 already confirmed the two crates' sources share it line-for-line): equivalence with Verbora's deliberately non-textbook pinned recurrence holds on the benchmarked corpus, with known divergent inputs outside it (e.g. `"bb"`/`"abbb"`). |
-| Damerau-Levenshtein (restricted/OSA) | the reference | reference | 8.1.1 | Yes | Yes | Same fn, `restricted:true`. |
+| Damerau-Levenshtein (unrestricted/true) | the reference | reference | 8.1.1 | Yes | Yes | The reference's `restricted:false` default; Verbora's `damerau_levenshtein()`, a separate named fn since the `Options.restricted` flag was retired. |
+| Damerau-Levenshtein (unrestricted/true) | strsim | Rust | 0.11.1 | ~~Yes~~ ~~**Partial**~~ **Yes** | Yes | `damerau_levenshtein()` is explicitly the unrestricted variant, and so is Verbora's. **Verdict restored this round** (it had been narrowed to `Partial` while Verbora shipped a non-canonical, asymmetric recurrence inherited from the reference; that recurrence is gone — see `docs/PERFORMANCE_GAPS.md` entry 29's final update). Verbora's `damerau_levenshtein` is now canonical unrestricted Damerau-Levenshtein — the same Lowrance-Wagner function strsim computes, over the same Zhao–Sahni linear-space formulation — so this is full algorithm equivalence, not corpus equivalence. Byte-exact agreement verified over **202,000 randomized pairs** (four alphabet widths 2/3/4/26, length classes 1..=25 with unequal lengths and empty operands, plus 2,000 binary-alphabet mutation chains of up to eight edits — the shape that actually separates unrestricted Damerau from OSA), zero divergences, reproducible via `unrestricted_damerau_agrees_with_both_competitors_over_a_wide_randomized_sweep` in `rust-competitors/tests/distance_correctness.rs`. The former counterexample `"bb"`→`"abbb"` now answers 2 on both sides. |
+| Damerau-Levenshtein (unrestricted/true) | rapidfuzz | Rust | 0.5.0 | ~~Yes~~ ~~**Partial**~~ **Yes** | Yes | `distance::damerau_levenshtein` module, explicitly unrestricted — same **verdict restored this round** as the strsim row above, on the same 202,000-pair evidence (both crates are asserted against Verbora in the same sweep, so the agreement is three-way). Entry 29's earlier finding that strsim and rapidfuzz share the Zhao–Sahni algorithm line-for-line now cuts the other way: Verbora adopted that algorithm rather than being structurally forbidden from it. |
+| Damerau-Levenshtein (restricted/OSA) | the reference | reference | 8.1.1 | Yes | Yes | The reference's `restricted:true`; Verbora's `osa()`, likewise now a first-class named fn rather than a flag on `Options`. |
 | Damerau-Levenshtein (restricted/OSA) | strsim | Rust | 0.11.1 | Yes | Yes | `osa_distance()` — separate named fn. |
 | Damerau-Levenshtein (restricted/OSA) | rapidfuzz | Rust | 0.5.0 | Yes | Yes | `distance::osa` module. |
 | Damerau-Levenshtein (restricted/OSA) | triple_accel | Rust | 0.4.0 | Partial | Selected cases | `rdamerau()` restricted-only; byte-level, ASCII-only fair. |
-| Jaro | strsim | Rust | 0.11.1 | Yes | Yes | `jaro()` public fn. |
-| Jaro | rapidfuzz | Rust | 0.5.0 | Yes | Yes | `distance::jaro` module. |
-| Jaro | eddie | Rust | 0.4.2 | Yes | Yes | Correct algorithm but crate abandoned since 2020 — verify against fresh vectors before trusting. |
+| Jaro | strsim | Rust | 0.11.1 | ~~Yes~~ **Partial** | Yes | `jaro()` public fn — the same general task, computing a **different function**. **The former `Yes` is disproved by a passing test, not by a re-reading.** `docs/design/distance-contract.md` §3.4 defines the transposition term `t` as `raw as f64 / 2.0` — exact, so an odd raw count contributes `x.5`. `strsim` 0.11.1's `generic_jaro` accumulates the same raw count into a `usize` and then does `transpositions /= 2`, an **integer** division, dropping the half whenever the raw count is odd (exactly when the matched characters form an odd-length permutation cycle) and scoring higher than the contract. Minimal fixture: `jaro("abccba", "abbaca")` is `0.788…` for Verbora and `eddie`, `0.822…` here. Pinned by `strsim_and_rapidfuzz_jaro_diverge_from_the_contract_by_truncating_transpositions` in `benchmarks/competitive/rust-competitors/tests/distance_correctness.rs`, which sweeps 8,200 deterministic pairs and fails if the divergence stops appearing on more than one pair in five; `benchmarks/competitive/README.md`'s wider measurement of the same convention puts it at **23,428 of 82,000 random pairs (28.6%)**, smallest diverging operand length 6 — inside the benchmarked corpus, and reproducible on the timed `"<n>-near"` shape at n=64. Every swept pair additionally asserts the *direction* truncation forces (`strsim >= verbora`), so a divergence of any other kind fails loudly. `Benchmarkable?` stays `Yes` because the work is comparable, but **the `jaro` timing rows are not like-for-like and must not be published as an equivalence**. `eddie` is the only implementation in this harness that computes §3.4's function — see its row below, and note it carries no timing row. |
+| Jaro | rapidfuzz | Rust | 0.5.0 | ~~Yes~~ **Partial** | Yes | `distance::jaro` module — **same correction, same evidence, same fixture** as the `strsim` row above: 0.5.0 truncates the half-transposition count with the identical integer division, answers `0.822…` on `jaro("abccba", "abbaca")`, and is asserted in the same test (both crates are checked against Verbora on every pair of every sweep, so the finding is three-way, not a single-crate quirk). `Benchmarkable?` stays `Yes` on comparable work; the `jaro` timing row is **not** a like-for-like comparison. |
+| Jaro | eddie | Rust | 0.4.2 | Yes | ~~Yes~~ **No** | Correct algorithm — and, since the two rows above dropped to `Partial`, the only one here that is §3.4's function — ~~but crate abandoned since 2020 — verify against fresh vectors before trusting~~ **but the implementation is unsound, and that flag has now been discharged against it rather than left open.** `eddie-0.4.2`'s `utils/buffer.rs` `Buffer::store` calls `buf.clear()`, then writes through `buf.get_unchecked_mut(i)` for `i` beyond `buf.len()`, and only calls `set_len(i)` afterwards — a write into reserved-but-uninitialised capacity through a slice whose length is still `0`. Read directly from the crate's own published source, not reported from elsewhere. Every `eddie::Jaro::similarity` and `eddie::JaroWinkler::similarity` call routes through it, so `eddie::Jaro::new().similarity("a", "a")` alone is undefined behaviour: `tests/distance_correctness.rs` aborts with SIGABRT under a debug build (Rust's `unsafe` precondition checks catch it) and passes 13/13 under `--release` only because those checks are compiled out, not because the UB is absent. It was invisible until the `verbora-distance` migration's import repair made that target compile again. **Every `eddie` comparison in this section is affected, including the "no-loss result on Jaro/Jaro-Winkler" recorded below, which is retired.** **Disposition — decided, not open.** `eddie` is retained as a **correctness oracle only, reached exclusively through its sound slice API, and carries no timing row; none may be added.** `eddie::slice::Jaro`/`JaroWinkler::similarity` never touch `Buffer` and reach zero `unsafe` on their whole call graph, and `eddie`'s `str` Jaro is literally `buffer.store(s.chars())` followed by the slice call, so wrapping the slice API computes the same function soundly. It is kept rather than dropped because it is the **only** implementation in this harness that computes the function `docs/design/distance-contract.md` §3.4 specifies — the `strsim` and `rapidfuzz` rows above are now `Partial`, not `Yes`, so dropping `eddie` would leave the Jaro rows with no same-function cross-implementation check at all. A timing row is refused on two independent grounds: a timing row must call the competitor's published API as published, and `eddie`'s published `str` API is undefined behaviour on every call; and timing the slice wrapper instead would hand `eddie` pre-decoded `Vec<char>` operands while Verbora's `jaro(&str, &str)` decodes scalars inside the timed region — the "excluding real costs from only one implementation" that `AGENTS.md` § *Cross-Implementation Benchmark Fairness* forbids. Access is confined to `tests/distance_correctness.rs`'s `eddie_slice` module, `eddie` is a **dev**-dependency so the crate's own `src/` cannot reach it, and `every_reference_to_eddie_goes_through_the_sound_slice_wrapper` walks every `.rs` file in the crate and fails the suite if any other `eddie` path appears in code. See `benchmarks/competitive/README.md` § "Resolved: `eddie` 0.4.2 is unsound, and is now contained" → "The decision: isolate for correctness, drop from timing", and `manifests/competitors.json`'s own `eddie` entry. |
 | Jaro | the reference | reference | 8.1.1 | — | No | **NO FAIR COMPETITOR** — plain Jaro is an unexported private helper in the reference; nothing to call from outside. |
 | Jaro-Winkler | the reference | reference | 8.1.1 | Yes | Yes | Direct port source; required baseline. |
-| Jaro-Winkler | strsim | Rust | 0.11.1 | Yes | Yes | `jaro_winkler()`. |
-| Jaro-Winkler | rapidfuzz | Rust | 0.5.0 | Yes | Yes | `distance::jaro_winkler`. |
-| Jaro-Winkler | eddie | Rust | 0.4.2 | Yes | Yes | Same maintenance caveat as plain Jaro. |
+| Jaro-Winkler | strsim | Rust | 0.11.1 | ~~Yes~~ **Partial** | Yes | `jaro_winkler()` — **two** independent divergences from `docs/design/distance-contract.md` §3.4, not one. (a) It inherits the plain-Jaro half-transposition truncation from the row above, since Winkler is an affine function of the Jaro score. (b) It gates the Winkler boost behind `sim > 0.7`, where §3.4 fixes `jaro_winkler` at `sim_j + l * p * (1 - sim_j)`, `l = min(4, common_prefix_len)` in scalars and `p = 0.1`, applied **unconditionally** — so on any pair scoring at or below 0.7 with a shared prefix, `strsim` returns the unboosted Jaro value and Verbora does not. Verbora's side of (b) is pinned bit-exactly (not within a tolerance) by `assert_jaro_family_agrees` in `benchmarks/competitive/rust-competitors/tests/distance_correctness.rs`, which recomputes the affine relation from Verbora's own `jaro` on every swept pair and therefore pins both the fixed `p` and the absence of the `0.7` threshold. `Benchmarkable?` stays `Yes` on comparable work; the `jaro_winkler` timing rows are **not** a like-for-like comparison. |
+| Jaro-Winkler | rapidfuzz | Rust | 0.5.0 | ~~Yes~~ **Partial** | Yes | `distance::jaro_winkler` — **both** divergences of the `strsim` row above, for the same two reasons, asserted over the same sweeps. `Benchmarkable?` stays `Yes` on comparable work; the `jaro_winkler` timing row is **not** a like-for-like comparison. |
+| Jaro-Winkler | eddie | Rust | 0.4.2 | Yes | ~~Yes~~ **No** | ~~Same maintenance caveat as plain Jaro.~~ **Same unsoundness as plain Jaro, for the same reason**: `JaroWinkler::similarity` routes through the identical `Buffer::store`. `Equivalent?` stays `Yes` — the slice-level function is the one §3.4 specifies, and it agrees with Verbora on every swept pair — but `Benchmarkable?` is now **`No`**: correctness oracle only, no timing row exists and none may be added. See the Jaro row above for the defect and the decision. |
 | Sørensen-Dice coefficient | the reference | reference | 8.1.1 | Yes | Yes | Direct port source; required baseline. |
-| Sørensen-Dice coefficient | strsim | Rust | 0.11.1 | Partial | Selected cases | Multiset (not set) bigrams, case-sensitive, no whitespace-collapse-and-pad — a genuinely different Dice variant; fair only for pairs ≥2 chars, no case diff, no repeated bigrams, no whitespace. |
-| Sørensen-Dice coefficient | fuzzt | Rust | 0.3.1 | Partial | Selected cases | Forked from strsim, inherits the same variant divergence — functionally redundant with strsim for every other metric. |
+| Sørensen-Dice coefficient | strsim | Rust | 0.11.1 | Partial | Selected cases | Still a different Dice variant, but the divergence narrowed when Verbora stopped preprocessing its operands: **case sensitivity now agrees** (both treat `"ABC"`/`"abc"` as disjoint), and so do the degenerate pairs (both give `1.0` for two identical operands, including two empty ones, and `0.0` otherwise). Three real divergences remain, all confirmed by reading `strsim-0.11.1/src/lib.rs`'s `sorensen_dice`: it counts bigram **multiplicity** (a `HashMap<(char,char),usize>` multiset intersection) where Verbora uses the bigram **set**; it **strips every whitespace character** from both operands up front where Verbora treats `' '` as an ordinary unit forming ordinary bigrams; and its `< 2` short-circuit and its `a.len() + b.len() - 2` denominator are **byte** lengths, not character counts, so any non-ASCII operand gives it a denominator that does not match its own bigram count. Fair only for ASCII pairs of ≥2 characters with no whitespace and no repeated bigrams. |
+| Sørensen-Dice coefficient | fuzzt | Rust | 0.3.1 | Partial | Selected cases | Forked from strsim, inherits the same three divergences — functionally redundant with strsim for every other metric. |
 | Hamming | the reference | reference | 8.1.1 | Yes | Yes | Direct port source; required baseline. |
-| Hamming | strsim | Rust | 0.11.1 | Yes | Yes | `hamming()`, `Result` instead of Verbora's `-1` sentinel. |
-| Hamming | rapidfuzz | Rust | 0.5.0 | Yes | Yes | `distance::hamming`, `Result` + optional padding. |
+| Hamming | strsim | Rust | 0.11.1 | Yes | Yes | `hamming()` — a lockstep `chars()` walk returning `Result<usize, StrSimError>`, `Err(DifferentLengthArgs)` when the operands run out at different points. Verbora's `hamming` walks the same scalars and reports the same counts; the only divergence left is how each spells "no answer" — `Option::None` against an error value that carries nothing the caller did not already know. Both are total and neither panics. |
+| Hamming | rapidfuzz | Rust | 0.5.0 | Yes | Yes | `distance::hamming`, `Result` + optional padding (`Args::pad`, off by default; padded mode charges the surplus positions as differences, which Verbora has no equivalent for and the benchmark does not enable). |
 | Hamming | stringmetrics | Rust | 2.2.2 | Yes | Yes | `hamming()`, `Result<u32, LengthMismatchError>`. |
 | Hamming | triple_accel | Rust | 0.4.0 | Partial | Selected cases | Byte-level; ASCII-only fair. |
 | Fuzzy substring search (`levenshtein_search`/`damerau_levenshtein_search`) | the reference | reference | 8.1.1 | Yes | Yes | Direct port source; required baseline. |
-| Fuzzy substring search (`levenshtein_search`/`damerau_levenshtein_search`) | triple_accel | Rust | 0.4.0 | Partial | Selected cases | Bounded-`k`, multi-match search — a different problem shape (iterator of matches vs. single best match + backtrace), not just an implementation detail. |
-| Fuzzy substring search (`levenshtein_search`/`damerau_levenshtein_search`) | (all other surveyed crates) | Rust | — | — | No | **NO FAIR COMPETITOR** — strsim/rapidfuzz/eddie/editdistancek/stringmetrics only compute a scalar two-string distance; none locate a best-matching substring + offset within a longer target. |
+| Fuzzy substring search (`levenshtein_search`/`damerau_levenshtein_search`) | triple_accel | Rust | 0.4.0 | Partial | Selected cases | Bounded-`k`, multi-match search — a different problem shape (an iterator of matches vs. a single best match, always found, reported as the borrowed matched text plus its byte range in the target), not just an implementation detail. |
+| Fuzzy substring search (`levenshtein_search`/`damerau_levenshtein_search`) | (all other surveyed crates) | Rust | — | — | No | **NO FAIR COMPETITOR** — strsim/rapidfuzz/eddie/editdistancek/stringmetrics only compute a scalar two-string distance; none locate a best-matching substring and its position within a longer target. |
 
-**Now actually benchmarked (real numbers, TIME and MEMORY) — `stringmetrics`, `eddie`, `triple_accel`, and `editdistancek` were selected by this matrix but never wired into `rust-competitors/Cargo.toml`/`manifests/competitors.json` before this round; that gap is now closed.** All four are pinned at the exact versions above, correctness-checked once against Verbora in `benchmarks/competitive/rust-competitors/tests/distance_correctness.rs` before any timing number was trusted (two real, narrow, documented divergences found for `eddie` there — both-empty-string and equal-single-character Jaro similarity — neither reachable by the benchmarked corpus), and real numbers for every row above now exist in `docs/PERFORMANCE.md`'s `verbora-distance` "Competitive (Rust-vs-Rust)" section: **Update, third pass — the whole distance group re-measured after this round's kernel work landed (see `docs/PERFORMANCE_GAPS.md` entries 1, 26, and 27's own later updates).** Plain Levenshtein first: the second-pass multi-block bit-vector fix had already flipped the large sizes against `stringmetrics`/`triple_accel`/`editdistancek`; this round's BitPeq rewrite (flat/packed bit-tables replacing the `HashMap`-based `Peq` inside the same Myers kernels, and the single-word gate widened from 8..=64 to 1..=64 chars) finishes the job — Verbora now **beats all five Levenshtein competitors at every size 4–1024**, including `rapidfuzz` (2.16× faster at n=4, narrowing to 1.09× at n=1024 — entry 1's original headline 90.8× loss, fully reversed) and the former small-size holdouts `stringmetrics` (1.76× at n=4) and `triple_accel` (4.48× at n=4); margins over the other four crates reach 17×–37× at n=1024. Restricted Damerau-Levenshtein (OSA) flipped the same way (entry 27's own later update): brand-new bit-parallel OSA kernels (Hyyrö's 2003 transposition extension of Myers, single-word + multi-word block, gated to unit costs) turn what was a one-sided loss into **beating every competitor at every size** — 1.90× (n=4) to 1.39× (n=1024) faster than `rapidfuzz`, 4.8×–22.7× faster than `triple_accel`'s SIMD `rdamerau`, up to ~75× faster than `strsim`. Jaro/Jaro-Winkler likewise: new bit-parallel match-flagging kernels in Verbora's own greedy orientation (fractional-transposition semantics preserved exactly; the scalar loop kept for `max_len<=16` and as the differential oracle) put Verbora **ahead of both `rapidfuzz` and `strsim` at every size** — 3.4× (n=4), ~2.1× (n=64), 1.26× (n=1024) over `rapidfuzz`, up to ~32× over `strsim`. Unrestricted Damerau-Levenshtein is the honestly-mixed one, dramatically narrowed but **not** reversed everywhere: distance mode no longer builds the full `f64` cost+parent matrices (a two-rows-plus-per-symbol-snapshot-arena kernel now evaluates the same pinned recurrence exactly, `u16` cells where the combined lengths fit, `u32` beyond), and Verbora now **wins outright at n=16** against both crates (1.06×), edges `rapidfuzz` at n=64 (1.06×) and n=256 (0.2%, within noise), is level with `strsim` at n=64 (0.5%), but trails `strsim` ~1.08×–1.11× at n=256/1024, trails `rapidfuzz` ~4% at n=1024 (also within run noise), and still loses to both at n=4 (1.13× vs. `rapidfuzz`, 1.46× vs. `strsim`). That residual is structural, not unfinished tuning: Verbora's pinned unrestricted recurrence is deliberately *not* the textbook Zhao–Sahni algorithm those two crates share (see the amended `~~Yes~~ **Partial**` verdicts on their rows above — `"bb"`→`"abbb"` is 1 vs. their 2, and the recurrence is not even symmetric), which structurally forbids Verbora from adopting their linear-space formulation or affix trimming. **Update, fourth pass (2026-08) — unrestricted Damerau-Levenshtein re-tiered, and the mixed verdict becomes a near-sweep** (see `docs/PERFORMANCE_GAPS.md` entry 29's second update): the byte path now dispatches across three measured tiers — a table-free stack-matrix kernel for operands ≤ 8 bytes, a register-carried peeled kernel ≤ 128, a memory-carried variant beyond, all evaluating the pinned recurrence exactly (differentially pinned against the `full_matrix` oracle plus cross-tier agreement tests, 91 tests green; UTF-16 path unchanged) — and Verbora now **beats `rapidfuzz` at all five sizes** (2.39× at n=4, 1.34× at n=16, 1.61× at n=64, 1.15× at n=256, 1.11× at n=1024) and **beats `strsim` at four of five** (1.88× / 1.11× / 1.49× / 1.03× at n=4/16/64/256), with one remaining ~2% loss at n=1024 (1.906 vs. 1.866 ms) — a statistical tie at the measured structural floor (the bare min-chain of the pinned recurrence alone costs 1.86–1.88 ms at this size, and the recurrence's measured divergence from textbook DL, 38.6% of random small-alphabet pairs, is what forbids strsim's Zhao–Sahni candidate pruning), recorded as a loss, not rounded away. Unchanged through all of the above: `stringmetrics` still wins on Levenshtein MEMORY (~4×, entry 28 — a genuinely separate axis, its single-`u32`-row design uses less memory regardless of how fast either side runs); `triple_accel` still wins Hamming (its widest margin, up to 20.6×) and fuzzy substring search (neither path routes through any of the new kernels), and by a much larger margin on MEMORY for fuzzy substring search specifically (up to 283×, entry 29 — whose companion 683× unrestricted-Damerau memory figure was measured against the old full-`f64`-matrix distance path and has not been re-measured against the new two-row kernel); `eddie`'s no-loss result on Jaro/Jaro-Winkler (a real win for it as recorded, not filed as a gap, despite the crate's own maintenance caveat) predates this round's bit-parallel Jaro kernels and was **not re-measured against them** — it stands only for the code it actually measured, and no fresher `eddie` number exists. `stringmetrics`' own `damerau_levenshtein` — deliberately never called, verified by reading `stringmetrics-2.2.2`'s own source: the whole `damerau` module is commented out of both `mod` and `pub use` in `algorithms.rs`, so it is not merely an unused stub but genuinely unreachable through the published 2.2.2 API. See `manifests/competitors.json`'s four new entries for the full per-crate detail.
+**Now actually benchmarked (real numbers, TIME and MEMORY) — `stringmetrics`, `eddie`, `triple_accel`, and `editdistancek` were selected by this matrix but never wired into `rust-competitors/Cargo.toml`/`manifests/competitors.json` before this round; that gap is now closed.** All four are pinned at the exact versions above, correctness-checked once against Verbora in `benchmarks/competitive/rust-competitors/tests/distance_correctness.rs` before any timing number was trusted (two real, narrow, documented divergences found for `eddie` there — both-empty-string and equal-single-character Jaro similarity — neither reachable by the benchmarked corpus), and real numbers for every row above now exist in `docs/PERFORMANCE.md`'s `verbora-distance` "Competitive (Rust-vs-Rust)" section: **Update, third pass — the whole distance group re-measured after this round's kernel work landed (see `docs/PERFORMANCE_GAPS.md` entries 1, 26, and 27's own later updates).** Plain Levenshtein first: the second-pass multi-block bit-vector fix had already flipped the large sizes against `stringmetrics`/`triple_accel`/`editdistancek`; this round's BitPeq rewrite (flat/packed bit-tables replacing the `HashMap`-based `Peq` inside the same Myers kernels, and the single-word gate widened from 8..=64 to 1..=64 chars) finishes the job — Verbora now **beats all five Levenshtein competitors at every size 4–1024**, including `rapidfuzz` (2.16× faster at n=4, narrowing to 1.09× at n=1024 — entry 1's original headline 90.8× loss, fully reversed) and the former small-size holdouts `stringmetrics` (1.76× at n=4) and `triple_accel` (4.48× at n=4); margins over the other four crates reach 17×–37× at n=1024. Restricted Damerau-Levenshtein (OSA) flipped the same way (entry 27's own later update): brand-new bit-parallel OSA kernels (Hyyrö's 2003 transposition extension of Myers, single-word + multi-word block, gated to unit costs) turn what was a one-sided loss into **beating every competitor at every size** — 1.90× (n=4) to 1.39× (n=1024) faster than `rapidfuzz`, 4.8×–22.7× faster than `triple_accel`'s SIMD `rdamerau`, up to ~75× faster than `strsim`. Jaro/Jaro-Winkler likewise: new bit-parallel match-flagging kernels in Verbora's own greedy orientation (fractional-transposition semantics preserved exactly; the scalar loop kept for `max_len<=16` and as the differential oracle) put Verbora **ahead of both `rapidfuzz` and `strsim` at every size** — 3.4× (n=4), ~2.1× (n=64), 1.26× (n=1024) over `rapidfuzz`, up to ~32× over `strsim`. Unrestricted Damerau-Levenshtein is the honestly-mixed one, dramatically narrowed but **not** reversed everywhere — ⚠ **every unrestricted-Damerau timing figure from here to the end of the fourth-pass update below is retired: it was measured against the pinned-recurrence kernels, which no longer exist. Pending re-measurement; do not cite.** Retained as-is for provenance, since the reasoning attached to those numbers is what the fifth-pass update overturns. — distance mode no longer builds the full `f64` cost+parent matrices (a two-rows-plus-per-symbol-snapshot-arena kernel now evaluates the same pinned recurrence exactly, `u16` cells where the combined lengths fit, `u32` beyond), and Verbora now **wins outright at n=16** against both crates (1.06×), edges `rapidfuzz` at n=64 (1.06×) and n=256 (0.2%, within noise), is level with `strsim` at n=64 (0.5%), but trails `strsim` ~1.08×–1.11× at n=256/1024, trails `rapidfuzz` ~4% at n=1024 (also within run noise), and still loses to both at n=4 (1.13× vs. `rapidfuzz`, 1.46× vs. `strsim`). That residual is structural, not unfinished tuning: Verbora's pinned unrestricted recurrence is deliberately *not* the textbook Zhao–Sahni algorithm those two crates share (see the amended `~~Yes~~ **Partial**` verdicts on their rows above — `"bb"`→`"abbb"` is 1 vs. their 2, and the recurrence is not even symmetric), which structurally forbids Verbora from adopting their linear-space formulation or affix trimming. **Update, fourth pass (2026-08) — unrestricted Damerau-Levenshtein re-tiered, and the mixed verdict becomes a near-sweep** (see `docs/PERFORMANCE_GAPS.md` entry 29's second update): the byte path now dispatches across three measured tiers — a table-free stack-matrix kernel for operands ≤ 8 bytes, a register-carried peeled kernel ≤ 128, a memory-carried variant beyond, all evaluating the pinned recurrence exactly (differentially pinned against the `full_matrix` oracle plus cross-tier agreement tests, 91 tests green; UTF-16 path unchanged) — and Verbora now **beats `rapidfuzz` at all five sizes** (2.39× at n=4, 1.34× at n=16, 1.61× at n=64, 1.15× at n=256, 1.11× at n=1024) and **beats `strsim` at four of five** (1.88× / 1.11× / 1.49× / 1.03× at n=4/16/64/256), with one remaining ~2% loss at n=1024 (1.906 vs. 1.866 ms) — a statistical tie at the measured structural floor (the bare min-chain of the pinned recurrence alone costs 1.86–1.88 ms at this size, and the recurrence's measured divergence from textbook DL, 38.6% of random small-alphabet pairs, is what forbids strsim's Zhao–Sahni candidate pruning), recorded as a loss, not rounded away. **Update, fifth pass (2026-08) — the premise under every unrestricted-Damerau sentence above is gone, so all of their numbers are retired rather than amended** (see `docs/PERFORMANCE_GAPS.md` entry 29's final update): `damerau_levenshtein`/`damerau_levenshtein_search` now compute **canonical** unrestricted Damerau-Levenshtein via the Zhao–Sahni linear-space algorithm — symmetric, with common-affix trimming applied. The three claims those figures rested on are all void: the recurrence is no longer "deliberately not the textbook algorithm", the 38.6%-divergence measurement described a function Verbora no longer computes, and nothing structurally forbids the linear-space formulation or affix trimming any more — Verbora uses both. Consequently the n=4/16/64/256/1024 ratios against `strsim` and `rapidfuzz`, the "structural floor" argument, and the ≤8/≤128/beyond tier split they describe are all **pending re-measurement against the current kernels**; no number here should be quoted until that re-benchmark lands. What did get re-verified without a benchmark is correctness, and it strengthened: the two competitor rows in the table above returned from `Partial` to `Yes` on 202,000 randomized pairs with zero divergences. Unchanged through all of the above: `stringmetrics` still wins on Levenshtein MEMORY (~4×, entry 28 — a genuinely separate axis, its single-`u32`-row design uses less memory regardless of how fast either side runs); `triple_accel` still wins Hamming (its widest margin, up to 20.6×) and fuzzy substring search (neither path routes through any of the new kernels), and by a much larger margin on MEMORY for fuzzy substring search specifically (up to 283×, entry 29 — whose companion 683× unrestricted-Damerau memory figure was measured against the old full-`f64`-matrix distance path, was never re-measured against the pinned-recurrence kernels that replaced it, and is now two kernel generations stale — ⚠ retired, pending re-measurement against the canonical Zhao–Sahni path); `eddie`'s no-loss result on Jaro/Jaro-Winkler (recorded at the time as a real win for it, not filed as a gap, despite the crate's own maintenance caveat) ⚠ **is retired outright, and is not pending re-measurement — there is nothing to re-measure.** It predates this round's bit-parallel Jaro kernels and was never re-measured against them, but that is the smaller objection: it was produced by a release build that executed undefined behaviour, so it does not "stand for the code it measured" either. No fresher `eddie` number exists, none may be produced, and the ten `eddie` timing rows it came from have been removed from `benchmarks/competitive/results/results.json` and `results/distance-memory.json` (see the `eddie` row in the matrix above). `stringmetrics`' own `damerau_levenshtein` — deliberately never called, verified by reading `stringmetrics-2.2.2`'s own source: the whole `damerau` module is commented out of both `mod` and `pub use` in `algorithms.rs`, so it is not merely an unused stub but genuinely unreachable through the published 2.2.2 API. See `manifests/competitors.json`'s four new entries for the full per-crate detail.
+
+**Update, sixth pass — the retirement widens from unrestricted Damerau to the
+whole group.** `verbora-distance` was rewritten to the Rust-native contract
+specified in `docs/design/distance-contract.md`, and the rewrite reaches every
+Verbora row in this section:
+
+- **The unit changed.** One Unicode scalar value (`char`) is one unit,
+  replacing the UTF-16 code unit, and the non-ASCII path materialises
+  `Vec<char>` rather than `Vec<u16>`. Every timed row here uses an ASCII
+  corpus, where one byte is one scalar is one code unit by definition, so no
+  *result* on the benchmarked domain moves — but the dispatch that selects the
+  path is not the code that was measured.
+- **Unit costs became the absence of an argument.** `levenshtein`,
+  `damerau_levenshtein` and `osa` take no cost set and return `usize`; the
+  weighted forms are separate functions over validated `LevenshteinCosts` /
+  `OsaCosts` / `DamerauCosts`. The per-call cost comparison that used to
+  choose between the bit-parallel and scalar tiers is gone. The kernels on
+  either side of it are the same code; the removal itself is untimed.
+- **Hamming's signature and its general path both changed.** `hamming` returns
+  `Option<usize>`, and the fall-through path is one fused `chars()` walk that
+  decides comparability and counts differences together, allocation-free on
+  every input. The ASCII tiered kernel is untouched, but the wrapper around it
+  is not free — `Option<usize>` returns in two registers rather than one, which
+  the contract flags as costing the SWAR tier a tail call, unmeasured — so even
+  the untouched kernel's published figure is no longer backed.
+- **Jaro–Winkler lost its equality short-circuit.** The `if s1 == s2 { 1.0 }`
+  exit at the top of the function is gone: the identity now falls out of the
+  formula itself, because Jaro's match window is clamped at zero rather than
+  going negative for one-unit operands. Any equal pair the corpus contains
+  therefore runs the kernels instead of returning on one comparison. The
+  `ignore_case` and `dj` options are deleted with it.
+- **Dice's algorithm changed.** The unconditional lowercase/whitespace-collapse/
+  trim preprocessing and the one-scalar space padding are both deleted, so the
+  function does strictly less work per call *and* returns a different score for
+  any operand containing an upper-case letter or whitespace.
+- **Search returns borrowed text.** `levenshtein_search` and its siblings report
+  a `&str` borrowed from the target plus its byte range, with no lossy-decode
+  allocation, and unit-cost plain Levenshtein search runs a bit-parallel
+  per-column kernel rather than the full cost-plus-parent matrix.
+
+⚠ **Every Verbora timing and memory figure in this section therefore predates
+the code it describes and is retired pending re-measurement** — including the
+Levenshtein, OSA, Jaro/Jaro-Winkler, Hamming and fuzzy-substring-search rows
+the fifth-pass update above left standing. Competitor figures are unaffected;
+no competitor version moved. The equivalence verdicts in the table above are
+also unaffected on the benchmarked ASCII domain, and where the underlying
+comparison genuinely shifted — Sørensen-Dice against `strsim`/`fuzzt`, Hamming
+against `strsim` — the rows themselves have been re-derived rather than
+reworded. `docs/PERFORMANCE_GAPS.md` entries 26–29 carry the same retirement.
+
+**Separately — `eddie` 0.4.2 is unsound, so its rows are not merely stale.**
+The two paragraphs above retire Verbora figures because Verbora's code moved
+underneath them. This is a different failure, on the competitor's side, and it
+is not fixed by any re-measurement: every `eddie::Jaro`/`eddie::JaroWinkler`
+call is undefined behaviour (`Buffer::store` writes past a cleared `Vec`
+through `get_unchecked_mut` before `set_len`; the two eddie rows in the table
+above carry the full reading of the crate's source, and
+`docs/PERFORMANCE_GAPS.md` entry 36 item 3 carries it as an upstream-defect
+finding, with the earlier, milder framing of that item explicitly withdrawn).
+Two consequences for this
+section's record, stated because they contradict text that stands above:
+
+- The sentence "correctness-checked once against Verbora in
+  `…/tests/distance_correctness.rs` before any timing number was trusted (two
+  real, narrow, documented divergences found for `eddie` there — both-empty-
+  string and equal-single-character Jaro similarity — neither reachable by the
+  benchmarked corpus)" is accurate about what that pass found, and wrong about
+  what it implies. Those two divergences were **Verbora** defects, since fixed
+  by `docs/design/distance-contract.md` §3.4 and now asserted as *agreements*;
+  the correctness pass did not, and could not, clear `eddie` itself, because
+  the target it ran in did not compile at the time. It compiles now, and it
+  aborts.
+- `eddie`'s "no-loss result on Jaro/Jaro-Winkler" was already recorded as
+  standing only for the pre-bit-parallel code it measured. That framing is too
+  generous and is withdrawn: the numbers came out of a release build with the
+  UB checks compiled out, so they do not stand for any code at all. ⚠ **The
+  result is retired outright, not pending re-measurement, and may not be cited
+  as a competitor result on either ground.** The ten `eddie` timing rows it was
+  drawn from have been removed from
+  `benchmarks/competitive/results/results.json`, together with their ten
+  `results/raw/distance-*-eddie-*.json` copies and the ten `eddie` rows in
+  `results/distance-memory.json`.
+
+**The decision is now recorded, in three places that agree.** `eddie` stays
+pinned as a **dev**-dependency and is reached only through the sound
+slice-level `Jaro`/`JaroWinkler`, as a correctness oracle; it carries **no
+timing row, and none may be added**. Replacing it with the `strsim`/`rapidfuzz`
+Jaro rows — the alternative this paragraph used to leave open — is not
+available: those rows are `Partial`, not `Yes` (they truncate the
+half-transposition count and gate the Winkler boost), so `eddie` is the only
+same-function cross-implementation check the Jaro rows have. See
+`benchmarks/competitive/README.md` § "Resolved: `eddie` 0.4.2 is unsound, and
+is now contained", `manifests/competitors.json`'s `eddie` entry, and the
+machine-enforced containment test
+`every_reference_to_eddie_goes_through_the_sound_slice_wrapper`.
 
 ## 1.9 Language Detection
 
@@ -548,11 +886,11 @@ No competitor selected — see §3. `PhoneticIndex` already ships its own intern
 
 ## 2.8 Distances
 
-- **strsim** — Rust, **0.11.1**. Repo: `github.com/rapidfuzz/strsim-rs`. **989,876,846 total / 204,458,609/90d downloads** — the de-facto standard string-similarity crate in the Rust ecosystem by every metric checked; 494 GitHub stars; pushed 2025-11-27 (under the `rapidfuzz` org, absorbed from the original `dguo/strsim-rs`); MIT. Char-indexed (`.chars()`), BMP-equivalent to Verbora's UTF-16-unit indexing — identical results on any text confined to the Basic Multilingual Plane, diverges only on astral-plane characters. Sørensen-Dice is confirmed a **different algorithm variant** (multiset not set, case-sensitive, no whitespace-collapse-and-pad, `1.0` not `NaN` for two empty strings) — only fair in a restricted input domain.
-- **rapidfuzz** (rapidfuzz-rs) — Rust, **0.5.0**. Repo: `github.com/rapidfuzz/rapidfuzz-rs`. 1,642,373 total / 980,955/90d downloads; published crate is stale (2023-12-01) though the GitHub repo itself was pushed 2024-06-29 (unreleased development exists past 0.5.0, not yet shipped); MIT per `Cargo.toml` (README claims dual MIT/Apache-2.0 — a real metadata mismatch). The only single crate found that explicitly separates unrestricted (`damerau_levenshtein`) from restricted/OSA (`osa`) Damerau-Levenshtein while also covering Levenshtein, Hamming, Jaro, Jaro-Winkler — the tightest algorithmic match to Verbora's own `Options.restricted` split. Does not implement Dice at all.
+- **strsim** — Rust, **0.11.1**. Repo: `github.com/rapidfuzz/strsim-rs`. **989,876,846 total / 204,458,609/90d downloads** — the de-facto standard string-similarity crate in the Rust ecosystem by every metric checked; 494 GitHub stars; pushed 2025-11-27 (under the `rapidfuzz` org, absorbed from the original `dguo/strsim-rs`); MIT. Char-indexed (`.chars()`), the same unit Verbora counts — one Unicode scalar on both sides, so the two agree on astral-plane input as well as on the Basic Multilingual Plane, with no restriction needed on the shared corpus. Sørensen-Dice remains a **different algorithm variant**, though a narrower one than previously recorded: the multiset-not-set bigram counting stands, and so does its up-front removal of every whitespace character and its use of **byte** lengths in both the `< 2` short-circuit and the `a.len() + b.len() - 2` denominator; what no longer diverges is case handling (both are case-sensitive) and the two-empty-strings case (both `1.0`). Only fair in a restricted input domain — see §1.8's row for the exact conditions.
+- **rapidfuzz** (rapidfuzz-rs) — Rust, **0.5.0**. Repo: `github.com/rapidfuzz/rapidfuzz-rs`. 1,642,373 total / 980,955/90d downloads; published crate is stale (2023-12-01) though the GitHub repo itself was pushed 2024-06-29 (unreleased development exists past 0.5.0, not yet shipped); MIT per `Cargo.toml` (README claims dual MIT/Apache-2.0 — a real metadata mismatch). The only single crate found that explicitly separates unrestricted (`damerau_levenshtein`) from restricted/OSA (`osa`) Damerau-Levenshtein while also covering Levenshtein, Hamming, Jaro, Jaro-Winkler — the tightest algorithmic match to Verbora's own split, which mirrors rapidfuzz's shape exactly: two separately-named functions, `damerau_levenshtein` and `osa`, chosen by name rather than by a mode flag. Does not implement Dice at all.
 - **triple_accel** — Rust, **0.4.0**. Repo: `github.com/Daniel-Liu-c0deb0t/triple_accel`. 1,874,447 total / 219,611/90d downloads; 110 stars; last commit 2023-03-13 (~3 years dormant, not archived). MIT. SIMD-accelerated (AVX2/SSE4.1) exact Hamming/Levenshtein/restricted-only Damerau plus bounded fuzzy substring search — a genuinely relevant *performance* competitor. Operates on raw UTF-8 bytes (not chars/UTF-16 units), so it diverges on ordinary accented/non-Latin text, not just rare astral-plane input — fair only on ASCII-only corpora.
 - **editdistancek** — Rust, **1.0.2**. Repo: `github.com/nkkarpov/editdistancek`. 368,648 total / 55,227/90d downloads; 11 stars; last commit 2024-03-25. MIT. Specialist exact-Levenshtein-only crate (Ukkonen/Landau–Myers–Schmidt-inspired, bounded-`k` variant available), byte-level API — same ASCII-only caveat as triple_accel, plus fixed unit costs only (no parameterized costs).
-- **stringmetrics** — Rust, **2.2.2**. Repo: `github.com/pluots/stringmetrics`. 8,543,533 total / 3,173,998/90d downloads (real, currently-growing); last commit 2024-09-03; Apache-2.0 (crates.io flags SPDX metadata as "non-standard," but the actual LICENSE file text is standard Apache-2.0). Char-indexed, genuinely supports independent per-operation costs (`LevWeights{insert,delete,substitute}`), close to Verbora's `Options`. **Important trap found by reading source, not README**: its exported `damerau_levenshtein` is an unimplemented stub that always returns `0` — do not benchmark stringmetrics's Damerau-Levenshtein under any circumstances.
+- **stringmetrics** — Rust, **2.2.2**. Repo: `github.com/pluots/stringmetrics`. 8,543,533 total / 3,173,998/90d downloads (real, currently-growing); last commit 2024-09-03; Apache-2.0 (crates.io flags SPDX metadata as "non-standard," but the actual LICENSE file text is standard Apache-2.0). Char-indexed, genuinely supports independent per-operation costs (`LevWeights{insertion,deletion,substitution}`) — the closest ecosystem analogue to Verbora's `LevenshteinCosts` and its `levenshtein_weighted` entry point. The costs are `u32` there and `f64` here, so `stringmetrics` cannot price a fractional operation and has nothing to validate, while Verbora's constructor returns `Result` and rejects negative and non-finite costs before they can reach a metric. **Important trap found by reading source, not README**: its exported `damerau_levenshtein` is an unimplemented stub that always returns `0` — do not benchmark stringmetrics's Damerau-Levenshtein under any circumstances.
 - **eddie** — Rust, **0.4.2**. Repo: `github.com/thaumant/eddie`. 45,522 total / only 1,112/90d downloads (declining); 20 stars; last publish/commit both 2020-01-18/19 (~6 years abandoned). MIT. Struct-based API covering exactly Verbora's Jaro/Jaro-Winkler surface, with a documented `str` (Unicode-safe) vs. `slice` (fast, "incorrect for UTF-8") split. Historically built to be benchmarked against strsim/`distance`/`natural` (visible in its own dev-dependencies) — a secondary/low-priority reference, re-verify against fresh vectors before trusting.
 - **fuzzt** — Rust, **0.3.1**. Repo: `github.com/luizvbo/fuzzt`. 1,561,692 total / 558,944/90d downloads (striking spike for a 4-star crate — likely transitive, weak direct-trust signal); created 2024-02-09; MIT. Explicitly "heavily based on strsim-rs" — included only to show the Dice-variant divergence documented above is a shared lineage issue across two published crates, not a strsim-specific quirk; redundant with strsim for every other metric.
 
@@ -615,6 +953,23 @@ No competitor selected. `nlprule` (bminixhofer, Rust, 0.6.4, Apache-2.0/MIT, 156
 
 ---
 
+# 2.19 Candidate competitors not yet evaluated
+
+Found after the matrix was written. Each closes a module that currently has no
+competitive number at all. None is measured yet; adding one means a new bench
+target, a correctness target, and a re-run of that target alone — not another
+campaign.
+
+| Module | Candidate | Version / last release | Recent downloads | Comparability note |
+|---|---|---|---|---|
+| Sentiment | `sentiment` | 0.1.1, Nov 2017 | 628 | Unmaintained for nine years, but a real AFINN-style scorer. Age must be stated beside any figure; a stale competitor is a fair comparison only if the reader knows it is stale. |
+| WordNet | `wordnet` | 0.1.2, Nov 2017 | 39 | Same vintage, and barely used. Weakest of the three. |
+| WordNet | `wordnet-db` | 0.1.3, Jan 2026 | 1,346 | **The interesting one.** A memory-mapped reader for prebuilt WordNet files, actively used. `verbora-wordnet` cannot mmap — `unsafe_code = "deny"` forbids it, and `LazyResident` is the declared stand-in. Measuring against this puts a number on the cost of that policy, which is today an assertion with no figure. Comparability limit: it is data-only, with no query functions, so the honest comparison is load-and-access, not synset lookup. Timing Verbora's richer operation against its narrower one would flatter whichever side we chose to under-describe. |
+| WordNet / thesaurus | `thesaurus` | 0.5.2, Aug 2022 | 10,469 | By adoption the strongest WordNet-adjacent competitor by two orders of magnitude over `wordnet`. Offers WordNet by default and Moby behind a feature. Synonym lookup is the overlapping capability: WordNet synsets *are* synonym sets, so the comparison is fair on that operation and on nothing else — `thesaurus` has no hypernym/hyponym traversal to compare against. |
+
+`analyzers`, `util` and `tagger` also carry no competitor; `tagger` is measured
+under `pos_tagging`.
+
 # 3. Modules / sub-capabilities with no fair competitor identified
 
 Every `NO FAIR COMPETITOR FOUND` outcome from the matrix, in one place, with its one-line reason — so a reader can see at a glance what will and won't have a competitive number in the next phase.
@@ -652,6 +1007,23 @@ Every `NO FAIR COMPETITOR FOUND` outcome from the matrix, in one place, with its
 | WordNet | Rust side, entire module | The only named candidate (`wordnet` njaard/wordnet-rs) is abandoned ~9 years; no actively-maintained alternative exists at comparable scope (lookup + synset + relation traversal + closure). |
 | Trie | Exact semantics (UTF-16 keying, the reference `for…in` order, `keys_with_prefix` case-folding bug) | No Rust crate replicates any of these three specific behaviors; `trie-rs`/`qp-trie` are fair only for generic prefix-search throughput, not output/ordering equivalence. |
 | Analyzers | Rust side, entire module | No Rust crate performs the composed task (PP-marking + subject/predicate split + 4-way sentence-type classification over pre-tagged input) in one rule-based pass; the closest candidates (`nlprule`, rust-bert) solve different, differently-shaped problems. |
+
+**Update, text-shaping migration (2026-08) — eight of the rows above have
+stopped being "no competitor" rows and become "no Verbora side" rows.** The
+migration deleted the capability itself in each case (see §1.1, §1.2 and
+§1.4's own update blocks, and `docs/design/text-shaping-contract.md` §3.4):
+Tokenizers' fifteen `AggressiveTokenizer` language variants,
+`WordPunctTokenizer`, `TreebankWordTokenizer`, `CaseTokenizer`,
+`OrthographyTokenizer` and the generic `RegexpTokenizer` engine; N-Grams'
+`ngrams_str`/`bigrams_str`/`trigrams_str`, `ngrams_with_stats`/`ngram_key` and
+the `zh::*` family; and Normalizers' `normalize_no`/`normalize_sv`. Their
+stated reasons remain accurate about the Rust ecosystem and are kept for that
+record, but none of them is something the next benchmark campaign has anything
+to measure. Whitespace tokenization is a ninth case in the opposite direction:
+it was never a `NO FAIR COMPETITOR FOUND` row — two real competitors were
+found and benchmarked — and it belongs on this list now only because the
+Verbora side of the comparison is gone (§1.1). The `case::restore_case` row is
+**not** affected: that function lives in `verbora-inflectors`.
 
 **19 of 19 required modules are represented in the matrix above**, each with at least one row — 18 have at least one genuine `Yes`/`Partial` competitor (usually the reference at minimum); only **Phonetic Index / Phonetic Neighbors** has zero competitors of any kind, including the reference, because it is a Verbora-native extension with no upstream equivalent to port from.
 
@@ -694,3 +1066,121 @@ Small inconsistencies and unresolved items surfaced while consolidating the 7 re
 - **Status update (post-implementation).** The line above described this file's state at the end of the research phase, before a single benchmark had been run — it no longer describes the project's current state and is kept only as a historical marker. Every competitor selected above now has an exact `=x.y.z` version locked in `benchmarks/competitive/rust-competitors/Cargo.toml` (mirrored in `manifests/competitors.json`), and real, executed benchmark numbers exist for all 19 modules: `benchmarks/competitive/results/results.json` (205 benchmark rows) plus `results/raw/` (498 raw Criterion files) hold every Rust-vs-Rust competitive number (Distances, Tokenizers, Stemmers, Normalizers, Inflectors, Trie, Phonetics, Language/Script Detection/Transliteration, POS Tagging, Spellcheck, TF-IDF, Classifiers); `docs/PERFORMANCE.md` carries a `## Results —` section, in the same format, for every one of the 19 modules, including the three with no Rust competitor by design (N-Grams, WordNet, Analyzers) and Sentiment; and every real loss found along the way is recorded, not hidden, in `docs/PERFORMANCE_GAPS.md` (16 entries as of this round). Phonetic Index / Phonetic Neighbors remains the one module with zero competitors of any kind, exactly as this matrix already documents above — its internal-only Criterion suite (`crates/verbora-phonetics/benches/phonetic_index.rs`) predates Fase 6 (it shipped in Fase 4) and stays out of scope for a competitive comparison by design, not because it was skipped. The competitor **selection** reasoning throughout the rest of this file (candidates considered, why each was accepted/rejected, Yes/Partial/No judgments) was re-verified during implementation and stands unchanged — only this closing framing needed updating, per this round's own consolidation pass.
 - **Follow-up audit correction.** The "every competitor selected above now has an exact version locked" claim two sentences up was itself found to be inaccurate by a later, dedicated fairness audit: several matrix rows marked `Yes`/`Selected cases` (§1.8 Distances: `stringmetrics`, `eddie`, `triple_accel`, `editdistancek`; other modules' own sections carry their own siblings' equivalent corrections) had never actually been pinned in `Cargo.toml` or benchmarked, with no documented reason distinguishing them from genuine, deliberate exclusions like `classifier` (jackm321, §1.13, excluded for a real compile failure) or `unaccent` (§1.4, excluded for a real license/algorithm mismatch). This round closes the Distances gaps specifically — see §1.8's own "Now actually benchmarked" note above, `docs/PERFORMANCE_GAPS.md` entries 26–29, and `docs/PERFORMANCE.md`'s `verbora-distance` "Competitive (Rust-vs-Rust)" section — plus, separately, adds the memory/RSS dimension (`benchmarks/competitive/rust-competitors/src/memory.rs`) that was completely absent from every module's competitive suite before this round, timing having been the only dimension measured until now.
 - **N-Grams competitor added (later pass).** The "three with no Rust competitor by design" named two paragraphs up (N-Grams, WordNet, Analyzers) is now two: re-examining `ngrammatic` 0.7.0 found its `Ngram`/`NgramBuilder` — the character n-gram + frequency-count generator its `Corpus` fuzzy-search feature is itself built on — to be a fair, comparable primitive against Verbora's generic `ngrams()` engine at char granularity. Its headline `Corpus`/`search` fuzzy-matching feature has no Verbora equivalent and remains unbenchmarked. See §1.2/§2.2 for the matrix rows and `docs/PERFORMANCE_GAPS.md` entry 38 for the measured numbers (bigrams: Verbora wins all 3 runs, ~1.07×–1.16× faster; trigrams: Verbora loses all 3 runs, ngrammatic ~1.03×–1.08× faster). WordNet and Analyzers remain the only two modules with no Rust competitor by design.
+- **Text-shaping migration (2026-08) — the tokenizer, n-gram and normalizer
+  numbers claimed two paragraphs up no longer describe shipped code.**
+  `verbora-tokenizers`, `verbora-normalizers` and `verbora-ngrams` were
+  rewritten to `docs/design/text-shaping-contract.md`: some of the
+  capabilities those `results.json` rows measured were deleted outright, and
+  the rest were reimplemented. §7 below lists, capability by capability, which
+  figures are retired with nothing left to re-measure and which are pending a
+  re-measurement the next campaign must schedule.
+
+---
+
+# 7. Text-shaping migration — what the next benchmark campaign must answer
+
+**No figure in the lists below was re-measured, and none may be estimated.**
+The distinction between the two lists is load-bearing: a *retired* entry has
+no question left to ask, because the code it measured no longer exists and
+nothing replaced it; a *pending* entry has a live question and a benchmark
+group waiting to answer it.
+
+`verbora-tokenizers`, `verbora-normalizers` and `verbora-ngrams` were
+rewritten to `docs/design/text-shaping-contract.md`;
+§1.1, §1.2 and §1.4 carry the per-row reasoning; this section is the
+consolidated ask. "Entry" numbers throughout are `docs/PERFORMANCE_GAPS.md`
+entries, which carry the same retirements from the other direction.
+
+**Retired — nothing to re-measure, the Verbora capability is gone:**
+
+| What it measured | Where it lived | Recorded result now withdrawn |
+|---|---|---|
+| Whitespace tokenization vs. `tantivy::WhitespaceTokenizer` and Hugging Face `WhitespaceSplit` | `benches/tokenizers.rs`' deleted `whitespace_tokenization` group; entry 3 | 3.6×–4.6× loss, then the 1.11×/1.70×/2.36×/1.97× reversal; 18.8×–33.1× HF win |
+| `AggressiveTokenizer` (en) vs. `unicode_words()` | deleted `aggressive_tokenization_en` group | parity at every size, under ~1.3× either way |
+| `hiragana_to_katakana`/`katakana_to_hiragana` vs. `unicode-jp` | deleted `ja_hiragana_to_katakana`/`ja_katakana_to_hiragana` groups; entry 30 | 3.7×–4.8× loss both directions; the later 4.1%-at-1024 pre-check speedup |
+| `ngrams_str` vs. the reference | `crates/verbora-ngrams`' own `string_input` group; entry 5 | ~2.15×–2.31× loss; the 2.2×–2.5× pre-tokenized win beside it |
+| `normalize_ja` vs. the reference | `crates/verbora-normalizers`' own `normalize_ja/mixed` group; entry 11 | 53.1× / 4.0× wins declining to 0.9× at 24576 B |
+
+**Retired *and* reclassified — the group survives, but not as a competitive
+comparison:** the `unicode-segmentation` rows moved out of
+`word_tokenization`/`sentence_tokenization` into
+`word_tokenization_wrapper_overhead`/`sentence_tokenization_wrapper_overhead`,
+because `WordTokenizer::tokens` *is* `str::unicode_words()` and
+`SentenceTokenizer` is built directly on `split_sentence_bound_indices()`.
+Their future numbers state wrapper cost over a dependency and must never be
+reported as Verbora beating or losing to `unicode-segmentation` —
+`docs/PERFORMANCE_GAPS.md` entry 23 is the entry this reclassification
+voids.
+
+**Pending re-measurement — the comparison is still genuine, only Verbora's
+side changed:**
+
+| Comparison | Group | Entry |
+|---|---|---|
+| `WordTokenizer` vs. `tantivy::SimpleTokenizer` / HF `Whitespace` | `word_tokenization` | 4 |
+| `SentenceTokenizer` vs. `segtok` | `sentence_tokenization`, `sentence_tokenization_boundary_density` | — (a Verbora win, never filed as a gap; entry 23 is the *`unicode-segmentation`* pairing and is retired, not pending) |
+| padded character n-grams vs. `ngrammatic` | `bigrams`, `trigrams` | 38 |
+| `remove_diacritics` vs. `diacritics` 0.2.2 | `remove_diacritics_ascii`, `remove_diacritics_accented` | — |
+| `nfkc` vs. `kana-converter` `KanaOnly` | `nfkc_halfwidth_katakana` (was `ja_katakana_halfwidth_to_fullwidth`) | 31 |
+| the whole `verbora-distance` group | `benches/distance.rs` | 1, 26–29 |
+
+**Not text-shaping — one further pending item, from the same discipline.**
+§1.3's per-language stemmer ratios were measured against a linear suffix scan
+that no longer exists. `crates/verbora-stemmers/src/among.rs` replaced it with
+the Snowball runtime's own `find_among`/`find_among_b` binary search — the
+algorithm `docs/PERFORMANCE_GAPS.md` entry 34 recorded as *not* reimplemented —
+and ten of the twelve benchmarked groups route through it:
+
+| Comparison | Group | Entry |
+|---|---|---|
+| nine Snowball languages vs. `rust-stemmers` and `snowball_stemmers_rs` | `porter_de`, `porter_es`, `porter_fr`, `porter_it`, `porter_nl`, `porter_no`, `porter_pt`, `porter_ru`, `porter_sv` | 34 |
+| English original-Porter vs. `porter-stemmer` and `nltk-porter` | `porter_en` | 24 |
+
+`stemmer_id` (`sastrawi`) and `stemmer_ja` (`lindera`) do **not** reach
+`among.rs` and are not retired on this ground; they remain covered by the
+"named, not resolved" line for `verbora-stemmers` below. §1.3 carries the
+per-row reasoning.
+
+**Downstream reach.** Five crates tokenize *inside* a measured region and
+therefore now run a different tokenizer there — `verbora-tfidf`,
+`verbora-classifiers`, `verbora-stemmers`, `verbora-phonetics` and
+`verbora-sentiment` — because each depends on
+`verbora_tokenizers::WordTokenizer` directly. Only one of the five was traced
+row by row in this pass:
+
+- **`verbora-tfidf` — traced.** `docs/PERFORMANCE_GAPS.md` entries 13 and 14
+  now carry row-level retirements: the whole `build/verbora/<n>` sweep and
+  `query/tfidf_cold_cache`/`query/tfidfs_64_documents` run the tokenizer and
+  are pending re-measurement; `idf_cold/deserialized` and
+  `documents/add_document_raw` do not reach it and are unaffected *by this
+  change*.
+- **`verbora-classifiers` (entries 15, 19–22), `verbora-stemmers`
+  (`tokenize_and_stem`, entry 10), `verbora-phonetics`, `verbora-sentiment` —
+  named, not resolved.** Whether each affected figure is retired or merely
+  pending depends on changes inside those crates that this pass did not
+  verify, and asserting either way without verifying would be a guess. They
+  are listed so the campaign can settle them, not marked.
+
+`docs/design/text-shaping-contract.md` §7 items 4 and 5 carry the two
+structural questions underneath all five: whether `verbora-tfidf`'s SWAR fast
+path survives a UAX #29-correct ASCII rule at all (its bitmap encoded
+`[a-z0-9_]`, and the rule needs `MidLetter`/`MidNum`/`MidNumLet` lookahead a
+single bitmask cannot express), and the workspace-wide `Cow` and borrow
+footprint now that the `Utf16Token`/`Cow`/`String` token shapes are gone.
+
+**One item on this list is not a measurement question at all:** `eddie`
+0.4.2's unsoundness (§1.8). No campaign can produce a trustworthy number
+from it, because the only build that completes is the one with the UB checks
+compiled out. It is therefore **not on either list**: its rows are retired with
+nothing to re-measure, `eddie` is kept as a correctness oracle through its
+sound slice API only, and no timing row exists or may be added. The campaign's
+one obligation here is negative — do not collect `eddie` timings, and do not
+restore the ten rows removed from `results/results.json`,
+`results/raw/distance-*-eddie-*.json` and `results/distance-memory.json`.
+
+**A second item the campaign should not have to rediscover:** §1.8's `jaro` and
+`jaro_winkler` timing rows against `strsim` and `rapidfuzz` are legitimate
+*timings* but not an *equivalence* — both crates truncate the
+half-transposition count and gate the Winkler boost behind `sim > 0.7`, so the
+verdicts are `Partial`. Re-measure them; do not re-mark them `Yes`.
+

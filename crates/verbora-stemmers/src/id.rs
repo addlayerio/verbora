@@ -61,11 +61,9 @@
 
 use std::borrow::Cow;
 
-use verbora_tokenizers::classes;
-
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::indonesian_dict;
-use crate::stopwords::{self, Language};
+use crate::stopwords::Language;
 use crate::units::{eq_str, starts_with, text, units};
 
 /// The Indonesian stemmer.
@@ -78,10 +76,42 @@ use crate::units::{eq_str, starts_with, text, units};
 /// assert_eq!(s.stem("buku-buku"), "buku");
 /// assert_eq!(s.stem("malaikat-malaikat-Nya"), "malaikat");
 /// ```
+///
+/// # Reduplication is one word, so `-` does not break a token
+///
+/// Indonesian marks the plural by reduplicating the root and joining the two
+/// halves with `U+002D`, and its orthography treats the result as a single
+/// word: `buku-buku` ("books"), `malaikat-malaikat-nya` ("his angels"). This
+/// stemmer is built for that — [`Self::is_plural`] answers by looking for the
+/// hyphen, and the plural branch of [`Self::stem`] splits on it, stems both
+/// halves and keeps the common root.
+///
+/// The crate's data is built for it too: **335 of the 29,932 roots** in
+/// [`Self::dictionary`] and **22 of the 809 Indonesian stop words** are single
+/// lexemes spelled with a hyphen — `abal-abal`, `alai-belai`, `tiba-tiba`,
+/// `masing-masing`.
+///
+/// Untailored UAX #29 breaks at `U+002D`, which would hand `stem` two
+/// fragments instead of one lexeme and leave every one of those entries
+/// unreachable through [`TokenizeAndStem::tokenize_and_stem`] — the plural
+/// branch could never run there at all. So this is the one stemmer in the
+/// crate that sets [`TokenizeAndStem::HYPHEN_JOINS_LETTERS`]:
+///
+/// ```
+/// use verbora_stemmers::{StemmerId, TokenizeAndStem};
+/// let s = StemmerId::new();
+/// assert_eq!(s.tokenize_and_stem("buku-buku itu", true), ["buku", "itu"]);
+/// // Only between letters: a hyphenated date keeps the default boundaries.
+/// assert_eq!(s.tokenize_and_stem("12-05-2020", true), ["12", "05", "2020"]);
+/// ```
+///
+/// A hyphenated word that is *not* a reduplication is not damaged by this:
+/// the plural branch stems both halves, finds they disagree, and returns the
+/// token exactly as it arrived.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StemmerId;
 
-/// Which kind of affix a [`Removal`] recorded — the reference's `affixType`.
+/// Which kind of affix a [`Removal`] recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RemovalKind {
     /// `DP` — a derivational **prefix**, produced by the prefix rules.
@@ -95,7 +125,8 @@ pub enum RemovalKind {
 }
 
 impl RemovalKind {
-    /// The reference's two-letter code.
+    /// The two-letter code Nazief–Adriani names this affix class by, as it
+    /// appears in the literature: `DP`, `DS`, `PP`, `P`.
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
@@ -152,12 +183,13 @@ impl Removal {
     }
 }
 
-/// What a rule function returns — the reference hands back `globalThis`.
+/// What one affix-removal rule produced: the removal it recorded, if any,
+/// and the word as the rule left it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleResult {
-    /// `globalThis.removal`; `None` is the reference's `undefined`.
+    /// The removal this rule recorded, or `None` when it matched nothing.
     pub removal: Option<Removal>,
-    /// `globalThis.currentWord`.
+    /// The word as the rule left it.
     pub current_word: String,
 }
 
@@ -177,27 +209,116 @@ pub struct RuleResult {
 /// for correctness (an unfindable word must still be looked up, not just assumed
 /// absent) rather than for speed.
 fn find(w: &[u16]) -> bool {
-    if w.iter().any(|&c| c >= 0x80) {
+    // The longest root is 20 bytes (`ekstrateritorialitas`), so anything
+    // longer is absent without a lookup — and, since every root is ASCII, so
+    // is anything carrying a non-ASCII unit. Both are pure filters on a
+    // function that has no side effects, so an early `false` is exactly what
+    // the search would have returned.
+    if w.len() > MAX_ROOT_LEN || w.iter().any(|&c| c >= 0x80) {
         return false;
     }
-    const STACK_CAP: usize = 64;
-    let mut stack = [0u8; STACK_CAP];
-    let mut heap;
-    let bytes: &[u8] = if w.len() <= STACK_CAP {
-        for (dst, &c) in stack.iter_mut().zip(w) {
-            *dst = c as u8;
-        }
-        &stack[..w.len()]
-    } else {
-        heap = vec![0u8; w.len()];
-        for (dst, &c) in heap.iter_mut().zip(w) {
-            *dst = c as u8;
-        }
-        &heap
-    };
-    let s = core::str::from_utf8(bytes).expect("ASCII code units are valid UTF-8");
-    indonesian_dict::SORTED.binary_search(&s).is_ok()
+    let mut bytes = [0u8; MAX_ROOT_LEN];
+    for (dst, &c) in bytes.iter_mut().zip(w) {
+        *dst = c as u8;
+    }
+    DICT.contains(&bytes[..w.len()])
 }
+
+/// The length in bytes of the longest dictionary root, pinned by
+/// `the_dictionary_is_the_reference_size`.
+const MAX_ROOT_LEN: usize = 20;
+
+/// An open-addressed hash index over [`indonesian_dict::SORTED`].
+///
+/// # Why not `binary_search`
+///
+/// Nazief–Adriani is *driven* by dictionary membership rather than merely
+/// checked against it: every affix-removal candidate, every disambiguator
+/// alternative and every restored prefix is looked up, which measured at
+/// **28.2 lookups per stemmed word** over the bench corpus. Against 29,932
+/// entries a binary search is ~15 probes, and each probe is two dependent
+/// loads — one into the 480 KB pointer array, one into the scattered string
+/// data — so a single word chased roughly 420 dependent cache misses. That,
+/// and not the rule engine, was the entire gap to `sastrawi` (which reaches
+/// for a `HashMap`): the stemmer ran 6.8× slower than it and the rules
+/// themselves were never the problem.
+///
+/// # Shape
+///
+/// One `u32` per slot, packing a 16-bit hash tag above a 16-bit
+/// `index + 1` into `SORTED` (`0` marks an empty slot, and an occupied one
+/// is never `0` because the index is biased). The tag settles almost every
+/// probe without touching the string data at all, so a hit costs one load
+/// from the 256 KB slot array plus one string compare, and a miss usually
+/// costs just the one load. 65,536 slots for 29,932 entries keeps the load
+/// factor at 0.46, where linear probing stays short.
+struct DictIndex {
+    slots: Vec<u32>,
+}
+
+/// Slots in [`DictIndex`]; a power of two so the modulus is a mask.
+const DICT_SLOTS: usize = 1 << 16;
+const DICT_MASK: usize = DICT_SLOTS - 1;
+
+/// FNV-1a over the ASCII bytes of a root.
+///
+/// Chosen over the standard library's `SipHash` because the keys are three
+/// to twenty bytes and are hashed tens of times per word: at that size the
+/// per-byte multiply-xor beats SipHash's setup, and the quality needed is
+/// only "spreads 29,932 short lowercase Latin strings", which FNV does.
+#[inline]
+fn dict_hash(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    for &c in bytes {
+        h ^= u64::from(c);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+impl DictIndex {
+    fn build() -> DictIndex {
+        let mut slots = vec![0u32; DICT_SLOTS];
+        for (i, word) in indonesian_dict::SORTED.iter().enumerate() {
+            let h = dict_hash(word.as_bytes());
+            let tag = (h >> 48) as u32;
+            let biased =
+                u32::try_from(i + 1).expect("the dictionary has far fewer than 2^16 roots");
+            debug_assert!(
+                biased < (1 << 16),
+                "the index must fit the low half of a slot"
+            );
+            let mut p = (h as usize) & DICT_MASK;
+            while slots[p] != 0 {
+                p = (p + 1) & DICT_MASK;
+            }
+            slots[p] = (tag << 16) | biased;
+        }
+        DictIndex { slots }
+    }
+
+    /// Whether `bytes` is a dictionary root.
+    #[inline]
+    fn contains(&self, bytes: &[u8]) -> bool {
+        let h = dict_hash(bytes);
+        let tag = (h >> 48) as u32;
+        let mut p = (h as usize) & DICT_MASK;
+        loop {
+            let slot = self.slots[p];
+            if slot == 0 {
+                return false;
+            }
+            if slot >> 16 == tag
+                && indonesian_dict::SORTED[(slot & 0xFFFF) as usize - 1].as_bytes() == bytes
+            {
+                return true;
+            }
+            p = (p + 1) & DICT_MASK;
+        }
+    }
+}
+
+static DICT: std::sync::LazyLock<DictIndex> = std::sync::LazyLock::new(DictIndex::build);
 
 // ---------------------------------------------------------------------------
 // Small scanners
@@ -358,10 +479,21 @@ fn plain_suffix(w: &[u16], alts: &[&str]) -> Option<usize> {
 }
 
 /// `suffix_rules`'s `createResultObject`: no removal when nothing changed.
-fn suffix_result(result: Vec<u16>, word: &[u16], kind: RemovalKind) -> (Option<Removal>, Vec<u16>) {
-    if result == word {
-        return (None, result);
+///
+/// Takes the cut point rather than an already-built result so that the
+/// unchanged case — by far the common one, since each rule is tried against
+/// every word — costs no allocation at all. `word[..cut]` equals `word`
+/// exactly when `cut` is `word.len()`, so the test is the same one the
+/// reference's `result === word` makes.
+fn suffix_result(
+    cut: usize,
+    word: &[u16],
+    kind: RemovalKind,
+) -> (Option<Removal>, Option<Vec<u16>>) {
+    if cut == word.len() {
+        return (None, None);
     }
+    let result = word[..cut].to_vec();
     let removed = delete_first(word, &result);
     (
         Some(Removal {
@@ -370,27 +502,28 @@ fn suffix_result(result: Vec<u16>, word: &[u16], kind: RemovalKind) -> (Option<R
             removed,
             kind,
         }),
-        result,
+        Some(result),
     )
 }
 
-fn remove_particle(w: &[u16]) -> (Option<Removal>, Vec<u16>) {
+fn remove_particle(w: &[u16]) -> (Option<Removal>, Option<Vec<u16>>) {
     let cut = dashed_suffix(w, &["lah", "kah", "tah", "pun"]).unwrap_or(w.len());
-    suffix_result(w[..cut].to_vec(), w, RemovalKind::Particle)
+    suffix_result(cut, w, RemovalKind::Particle)
 }
 
-fn remove_possessive(w: &[u16]) -> (Option<Removal>, Vec<u16>) {
+fn remove_possessive(w: &[u16]) -> (Option<Removal>, Option<Vec<u16>>) {
     let cut = dashed_suffix(w, &["ku", "mu", "nya"]).unwrap_or(w.len());
-    suffix_result(w[..cut].to_vec(), w, RemovalKind::PossessivePronoun)
+    suffix_result(cut, w, RemovalKind::PossessivePronoun)
 }
 
-fn remove_derivational_suffix(w: &[u16]) -> (Option<Removal>, Vec<u16>) {
+fn remove_derivational_suffix(w: &[u16]) -> (Option<Removal>, Option<Vec<u16>>) {
     let cut = plain_suffix(w, &["is", "isme", "isasi", "i", "kan", "an"]).unwrap_or(w.len());
-    suffix_result(w[..cut].to_vec(), w, RemovalKind::DerivationalSuffix)
+    suffix_result(cut, w, RemovalKind::DerivationalSuffix)
 }
 
-/// The three suffix rules, in `SuffixRules.rules` order.
-type SuffixRule = fn(&[u16]) -> (Option<Removal>, Vec<u16>);
+/// The three suffix rules, in `SuffixRules.rules` order. `None` for the new
+/// word means the rule left it alone; see [`suffix_result`].
+type SuffixRule = fn(&[u16]) -> (Option<Removal>, Option<Vec<u16>>);
 static SUFFIX_RULES: &[SuffixRule] = &[
     remove_particle,
     remove_possessive,
@@ -782,17 +915,28 @@ static PREFIX_RULES: &[PrefixRule] = &[
 ];
 
 impl PrefixRule {
-    fn apply(&self, w: &[u16]) -> (Option<Removal>, Vec<u16>) {
+    /// Applies the rule, returning the removal it recorded (if any) and the
+    /// new word — `None` when the rule left the word alone.
+    ///
+    /// # Why the word is optional
+    ///
+    /// `checkPrefixRules` runs every rule in turn until one records a
+    /// removal, so a word is tried against dozens of rules that do not match
+    /// it. Returning the unchanged word by value made each of those a full
+    /// copy of the buffer, and they dominated: the stemmer allocated 40.4
+    /// times per word where the Snowball ports allocate 0.1 to 0.4. `None`
+    /// says "keep what you have", and the driver then simply does not
+    /// assign.
+    fn apply(&self, w: &[u16]) -> (Option<Removal>, Option<Vec<u16>>) {
         match self {
             Self::Plain => {
-                // `word.replace(/^(di|ke|se)/, '')`
-                let result = ["di", "ke", "se"]
-                    .into_iter()
-                    .find(|p| lit_at(w, 0, p))
-                    .map_or_else(|| w.to_vec(), |_| w[2..].to_vec());
-                if result == w {
-                    return (None, result);
+                // `word.replace(/^(di|ke|se)/, '')`. A matched prefix always
+                // shortens the word by two units, so the reference's
+                // `result === word` test is exactly "nothing matched".
+                if !["di", "ke", "se"].into_iter().any(|p| lit_at(w, 0, p)) {
+                    return (None, None);
                 }
+                let result = w[2..].to_vec();
                 let removed = delete_first(w, &result);
                 (
                     Some(Removal {
@@ -801,7 +945,7 @@ impl PrefixRule {
                         removed,
                         kind: RemovalKind::DerivationalPrefix,
                     }),
-                    result,
+                    Some(result),
                 )
             }
             Self::Dis(rules) => {
@@ -815,7 +959,7 @@ impl PrefixRule {
                     }
                 }
                 let Some(result) = result else {
-                    return (None, w.to_vec());
+                    return (None, None);
                 };
                 // The prefix `createResultObject` is unconditional: it records a
                 // removal even when the result equals the input.
@@ -827,7 +971,7 @@ impl PrefixRule {
                         removed,
                         kind: RemovalKind::DerivationalPrefix,
                     }),
-                    result,
+                    Some(result),
                 )
             }
         }
@@ -857,7 +1001,9 @@ impl State {
             if let Some(r) = removal {
                 self.removals.push(r);
             }
-            self.current = next;
+            if let Some(next) = next {
+                self.current = next;
+            }
             if self.found() {
                 return;
             }
@@ -882,7 +1028,9 @@ impl State {
             if let Some(r) = removal {
                 self.removals.push(r);
             }
-            self.current = next;
+            if let Some(next) = next {
+                self.current = next;
+            }
             if self.found() || self.removals.len() > before {
                 return;
             }
@@ -911,10 +1059,13 @@ impl State {
         // removals that `removePrefixes` appends below are never visited.
         let n = self.removals.len();
         for i in 0..n {
-            let removal = self.removals[i].clone();
-            if !removal.kind.is_suffix() {
+            // The kind is `Copy`, so the skip is decided before anything is
+            // cloned — most entries are prefix removals and never needed the
+            // three buffers a `Removal` carries.
+            if !self.removals[i].kind.is_suffix() {
                 continue;
             }
+            let removal = self.removals[i].clone();
             if eq_str(&removal.removed, "kan") {
                 self.current = cat!(removal.result.as_slice(), "k");
                 self.remove_prefixes();
@@ -1009,6 +1160,33 @@ fn split_last_hyphen(w: &[u16]) -> Option<usize> {
     (0..w.len()).rev().find(|&i| w[i] == 0x2D)
 }
 
+/// [`StemmerId::is_plural`] over already-encoded units, so `stem` does not
+/// re-encode the token it has already encoded.
+fn is_plural_units(w: &[u16]) -> bool {
+    // `/^(.*)-(ku|mu|nya|lah|kah|tah|pun)$/` — `(.*)` is greedy, so the
+    // shortest possessive wins the tie and the hyphen sits as late as it can.
+    let head = if dot_end(w, 0) == w.len() {
+        [
+            ["ku", "mu"].as_slice(),
+            ["nya", "lah", "kah", "tah", "pun"].as_slice(),
+        ]
+        .into_iter()
+        .find_map(|group| {
+            group.iter().find_map(|a| {
+                let n = a.len();
+                (w.len() > n && lit_at(w, w.len() - n, a) && w[w.len() - n - 1] == 0x2D)
+                    .then(|| w.len() - n - 1)
+            })
+        })
+    } else {
+        None
+    };
+    match head {
+        Some(cut) => w[..cut].contains(&0x2D),
+        None => w.contains(&0x2D),
+    }
+}
+
 impl StemmerId {
     /// Creates the stemmer. It is stateless and zero-sized.
     #[inline]
@@ -1030,51 +1208,33 @@ impl StemmerId {
     /// `isPlural`.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn is_plural(&self, token: &str) -> bool {
-        let w = units(token);
-        // `/^(.*)-(ku|mu|nya|lah|kah|tah|pun)$/` — `(.*)` is greedy, so the
-        // shortest possessive wins the tie and the hyphen sits as late as it can.
-        let head = if dot_end(&w, 0) == w.len() {
-            [
-                ["ku", "mu"].as_slice(),
-                ["nya", "lah", "kah", "tah", "pun"].as_slice(),
-            ]
-            .into_iter()
-            .find_map(|group| {
-                group.iter().find_map(|a| {
-                    let n = a.len();
-                    (w.len() > n && lit_at(&w, w.len() - n, a) && w[w.len() - n - 1] == 0x2D)
-                        .then(|| w.len() - n - 1)
-                })
-            })
-        } else {
-            None
-        };
-        match head {
-            Some(cut) => w[..cut].contains(&0x2D),
-            None => w.contains(&0x2D),
-        }
+        is_plural_units(&units(token))
     }
-
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        let lower = token.to_lowercase();
-        let w = units(&lower);
+        // The lowered code units land straight in the working vector: the
+        // reference's `toLowerCase()` string is never materialised, and
+        // `is_plural` reads the units rather than re-encoding them.
+        let mut w: Vec<u16> = Vec::with_capacity(token.len());
+        crate::units::for_each_lowercase_unit(token, |unit| w.push(unit));
         let mut st = State {
             // Reset here, and — deliberately — nowhere else.
             removals: Vec::new(),
             original: Vec::new(),
             current: Vec::new(),
         };
-        let out = if self.is_plural(&lower) {
+        let out = if is_plural_units(&w) {
             stem_plural(&w, &mut st)
         } else {
             st.stem_singular(&w)
@@ -1089,20 +1249,24 @@ impl StemmerId {
     /// the driver reads off it. See the module documentation.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn remove_inflectional_particle(&self, word: &str) -> RuleResult {
-        let (removal, current) = remove_particle(&units(word));
+        let w = units(word);
+        let (removal, current) = remove_particle(&w);
         RuleResult {
             removal,
-            current_word: text(&current),
+            // `None` is the rule reporting that it left the word alone, which
+            // the reference expresses by storing the word back unchanged.
+            current_word: text(current.as_deref().unwrap_or(&w)),
         }
     }
 
     /// Appends a stop word to the **process-global Indonesian list**.
     pub fn add_stop_word(&self, word: impl Into<String>) {
-        stopwords::add(Language::Id, word);
+        Language::Id.add(word);
     }
 
     /// Appends several stop words to the process-global Indonesian list.
@@ -1111,12 +1275,12 @@ impl StemmerId {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        stopwords::add_all(Language::Id, words);
+        Language::Id.add_all(words);
     }
 
     /// Removes the first occurrence of `word` from the Indonesian list.
     pub fn remove_stop_word(&self, word: &str) {
-        stopwords::remove(Language::Id, word);
+        Language::Id.remove(word);
     }
 
     /// Removes the first occurrence of each of `words`.
@@ -1124,7 +1288,7 @@ impl StemmerId {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        stopwords::remove_all(Language::Id, words);
+        Language::Id.remove_all(words);
     }
 }
 
@@ -1162,9 +1326,10 @@ impl TokenizeAndStem for StemmerId {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Raw;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_id(c)
-    }
+    /// Indonesian writes reduplication as one hyphenated word, so the hyphen
+    /// is word-internal here. See [`StemmerId`]'s "Reduplication is one word"
+    /// and [`TokenizeAndStem::HYPHEN_JOINS_LETTERS`].
+    const HYPHEN_JOINS_LETTERS: bool = true;
 
     /// The whole document is lowercased before tokenizing, as in English.
     fn prepare(text: &str) -> Cow<'_, str> {
@@ -1172,7 +1337,7 @@ impl TokenizeAndStem for StemmerId {
     }
 
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Id, word)
+        Language::Id.contains(word)
     }
 
     fn stem_token(&self, token: &str) -> String {
@@ -1213,6 +1378,71 @@ mod tests {
         }
     }
 
+    /// The hash index replaced a `binary_search` over the same sorted table,
+    /// and that search is still the definition of the answer — so it is kept
+    /// here as the oracle and checked over every root (each of which must be
+    /// *found*, which is what catches a probe sequence that terminates early)
+    /// and over a corpus of near-misses built by mutating real roots, which
+    /// is where a bad hash or a bad tag comparison would show up.
+    #[test]
+    fn the_hash_index_agrees_with_a_binary_search() {
+        let oracle = |s: &str| indonesian_dict::SORTED.binary_search(&s).is_ok();
+        for word in indonesian_dict::SORTED {
+            assert!(DICT.contains(word.as_bytes()), "missing root {word:?}");
+        }
+        let mut rng = Rng(0xD1C7_1DEA_5EED_0011);
+        for _ in 0..80_000 {
+            // Mutations of real roots: truncations, extensions and single
+            // character edits all land near occupied slots.
+            let base = indonesian_dict::SORTED[rng.below(indonesian_dict::SORTED.len())];
+            let mut w = base.to_owned();
+            match rng.below(4) {
+                0 => w.truncate(rng.below(w.len().max(1))),
+                1 => w.push((b'a' + rng.below(26) as u8) as char),
+                2 => {
+                    let at = rng.below(w.len().max(1));
+                    if w.is_char_boundary(at) {
+                        w.insert(at, (b'a' + rng.below(26) as u8) as char);
+                    }
+                }
+                _ => {}
+            }
+            assert_eq!(DICT.contains(w.as_bytes()), oracle(&w), "{w:?}");
+        }
+    }
+
+    /// `find` skips the lookup for anything longer than the longest root, so
+    /// that constant must really be the longest root.
+    #[test]
+    fn max_root_len_is_the_longest_root() {
+        let longest = indonesian_dict::SORTED
+            .iter()
+            .map(|w| w.len())
+            .max()
+            .expect("the dictionary is not empty");
+        assert_eq!(longest, MAX_ROOT_LEN);
+        assert!(
+            indonesian_dict::SORTED.iter().all(|w| w.is_ascii()),
+            "`find`'s ASCII rejection assumes every root is ASCII"
+        );
+    }
+
+    /// A deterministic xorshift, so the fuzz above needs no dev-dependency.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
     #[test]
     fn is_plural_reads_the_hyphen_before_the_pronoun() {
         let st = StemmerId::new();
@@ -1228,10 +1458,14 @@ mod tests {
         assert_eq!(StemmerId::new().dictionary().len(), 29932);
     }
 
-    /// The cross-cutting battery from `docs/PARITY.md`: empty, one character,
-    /// uppercase, accented Latin, Greek, Cyrillic, CJK, an astral pair,
-    /// punctuation, digits, a line terminator, and a very long word. Every
-    /// expectation below was read off the reference with `node`.
+    /// The cross-cutting battery every stemmer in this crate answers: empty,
+    /// one character, uppercase, accented Latin, Greek, Cyrillic, CJK, an
+    /// astral pair, punctuation, digits, a line terminator, and a very long
+    /// word.
+    ///
+    /// The expectations are the *identity* in every row but the case fold,
+    /// which is the whole point: none of these is a word of this language, so
+    /// a stemmer that changes one is reaching outside its own alphabet.
     #[test]
     fn cross_script_battery() {
         for (input, want) in [
@@ -1259,5 +1493,54 @@ mod tests {
     fn a_bare_hyphen_run_is_not_a_plural() {
         assert_eq!(s("---"), "---");
         assert_eq!(s("МАМА"), "мама");
+    }
+
+    /// Reduplication is spelled with `-` and is **one** Indonesian word, so
+    /// the whole lexeme has to reach [`StemmerId::stem`] through the pipeline.
+    ///
+    /// Every hyphenated entry the crate carries — 335 of the 29,932 roots and
+    /// 22 of the 809 stop words — is a single lexeme, and untailored UAX #29
+    /// breaks at `U+002D`, which made all of them unreachable through
+    /// `tokenize_and_stem` and left [`stem_plural`] dead in that path.
+    #[test]
+    fn hyphenated_lexemes_survive_tokenization() {
+        let st = StemmerId::new();
+
+        // Reduplication resolves to its root, exactly as `stem` does.
+        assert_eq!(st.tokenize_and_stem("buku-buku itu", true), ["buku", "itu"]);
+        assert_eq!(
+            st.tokenize_and_stem("malaikat-malaikat-Nya", true),
+            ["malaikat"]
+        );
+
+        // Every hyphenated stop word is still filtered.
+        let hyphenated_stops: Vec<&str> = crate::stopwords::Language::Id
+            .defaults()
+            .iter()
+            .copied()
+            .filter(|w| w.contains('-'))
+            .collect();
+        assert_eq!(hyphenated_stops.len(), 22);
+        for word in &hyphenated_stops {
+            assert!(
+                st.tokenize_and_stem(word, false).is_empty(),
+                "{word:?} is not filtered through the pipeline"
+            );
+        }
+
+        // Every hyphenated root reaches `stem` whole.
+        let mut split = Vec::new();
+        for root in indonesian_dict::WORDS.iter().filter(|w| w.contains('-')) {
+            let got = st.tokenize_and_stem(root, true);
+            if got != [s(root)] {
+                split.push(*root);
+            }
+        }
+        assert!(
+            split.is_empty(),
+            "{} hyphenated roots do not reach `stem` whole: {:?}",
+            split.len(),
+            &split[..split.len().min(8)]
+        );
     }
 }

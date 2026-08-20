@@ -25,7 +25,7 @@ Iterators first, borrowed tokens, and no allocation you did not ask for.</p>
 <div class="hero-signals" role="group" aria-label="Verbora at a glance">
 <span><b>19 crates</b><small>Depend on what you use</small></span>
 <span><b>Iterators first</b><small>Lazy, borrowed tokens</small></span>
-<span><b>29.08 µs</b><small>Levenshtein, 1024 chars</small></span>
+<span><b>No <code>unsafe</code></b><small>Denied workspace-wide</small></span>
 <span><b>Reproducible</b><small>Hardware and commands</small></span>
 </div>
 
@@ -40,10 +40,9 @@ verbora-distance = "0.1"
 ```
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let tokenizer = AggressiveTokenizer::new();
-let tokens: Vec<&str> = tokenizer.tokenize("Verbora reads text without copying it");
+let tokens: Vec<&str> = WordTokenizer.tokenize_borrowed("Verbora reads text without copying it");
 
 assert_eq!(tokens[0], "Verbora");
 assert_eq!(tokens.len(), 6);
@@ -69,8 +68,8 @@ own, behind a fast, idiomatic Rust API.
 <p class="capmap-sub">Raw text into comparable units</p>
 </div>
 <ul class="capmap-leaves">
-<li><a href="features/tokenizers">Tokenizers</a><span class="capmap-meta">25</span></li>
-<li><a href="features/normalizers">Normalizers</a><span class="capmap-meta">6 + 17 ja</span></li>
+<li><a href="features/tokenizers">Tokenizers</a><span class="capmap-meta">3, UAX #29</span></li>
+<li><a href="features/normalizers">Normalizers</a><span class="capmap-meta">5, all <code>Cow</code></span></li>
 <li><a href="features/inflectors">Inflectors</a><span class="capmap-meta">6</span></li>
 <li><a href="features/transliterators">Transliterators</a><span class="capmap-meta">kana → romaji</span></li>
 <li><a href="features/stemmers">Stemmers</a><span class="capmap-meta">16</span></li>
@@ -82,8 +81,8 @@ own, behind a fast, idiomatic Rust API.
 <p class="capmap-sub">Similarity, sound and lookup</p>
 </div>
 <ul class="capmap-leaves">
-<li><a href="features/distance">String distance</a><span class="capmap-meta">8 metrics</span></li>
-<li><a href="features/phonetics">Phonetics</a><span class="capmap-meta">4 encoders</span></li>
+<li><a href="features/distance">String distance</a><span class="capmap-meta">7 metrics</span></li>
+<li><a href="features/phonetics">Phonetics</a><span class="capmap-meta">12 encoders</span></li>
 <li><a href="features/phonetic-index">Phonetic index</a><span class="capmap-meta"><span class="capmap-status is-native">native</span></span></li>
 <li><a href="features/trie">Trie</a><span class="capmap-meta">prefix + path</span></li>
 <li><a href="features/spellcheck">Spellcheck</a><span class="capmap-meta">correction + index</span></li>
@@ -96,7 +95,7 @@ own, behind a fast, idiomatic Rust API.
 </div>
 <ul class="capmap-leaves">
 <li><a href="features/ngrams">N-grams</a><span class="capmap-meta">+ chinese</span></li>
-<li><a href="features/tfidf">TF-IDF</a><span class="capmap-meta">idf cache</span></li>
+<li><a href="features/tfidf">TF-IDF</a><span class="capmap-meta">sparse, interned</span></li>
 <li><a href="features/sentiment">Sentiment</a><span class="capmap-meta">14 lexicons</span></li>
 <li><a href="features/classifiers">Classifiers</a><span class="capmap-meta">3 models</span></li>
 </ul>
@@ -116,7 +115,7 @@ own, behind a fast, idiomatic Rust API.
 </div>
 <div class="capmap-trunk" aria-hidden="true"></div>
 <div class="capmap-toolkit">High-performance language toolkit</div>
-<p class="capmap-base">All four families rest on <a href="features/core">verbora-core</a> — six traits, <code>Token</code>, whitespace helpers — and on <code>verbora-util</code>: stop words, abbreviations, digraphs, storage.</p>
+<p class="capmap-base">All four families rest on <a href="features/core">verbora-core</a> — five traits and <code>StopWords</code> — and on <code>verbora-util</code>: abbreviations, graphs, path trees.</p>
 </div>
 
 Everything on the map ships today; none of it is roadmap. The two entries marked
@@ -189,21 +188,24 @@ decision trees for every subsystem that offers more than one shape.
 - **Tokenizers are iterators first.** `tokens()` is the primitive; `tokenize()`
   and `tokenize_into()` are written on top of it, so there is one implementation
   and no second copy to drift.
-- **Nothing is copied that need not be.** Thirteen tokenizers yield `&str`
-  slices of your input; four of the six normalizers return `Cow<'_, str>` and
-  allocate only at the first character they actually change.
-- **Errors are values.** An empty token to an inflector, or a regex
-  metacharacter leading a SoundEx input, gives you a `Result` rather than a
-  panic.
+- **Nothing is copied that need not be.** Every token all three tokenizers yield
+  is a `&str` slice of your input; all five normalizers return `Cow<'_, str>` and
+  allocate only when the result would differ from what you passed in.
+- **The per-call path has almost nothing to fail on.** Every phonetic encoder
+  and every inflector method is total: no `Result`, no panic, on any `&str`. An
+  input the algorithm recognises nothing in yields an empty key or an unchanged
+  word — an answer you branch on, not an error you handle. What is fallible is
+  construction, where a bad abbreviation list or a rule that will not compile is
+  rejected once, before the first call.
 - **The data layout is chosen, not inherited.** The trie is a flat arena
   addressed by `u32`, not one heap object per node; Levenshtein reaches for a
   bit-parallel word first and falls back to two rows in L1.
 
-Measured on an i9-14900KF: Levenshtein over two 1024-character strings in
-**29.08 µs**, Jaro–Winkler over short words in **15.3 ns**, Hamming over 1024
-characters in **275.3 ns**. Every number on this site carries its hardware, its
-method and the command to reproduce it — see
-[Performance](performance/index.md).
+Every number on this site carries its hardware, its method and the command to
+reproduce it, and a figure whose code has changed underneath it is marked pending
+rather than restated from memory — see [Performance](performance/index.md) and
+[Benchmarks](benchmarks/index.md) for the current results, including the ones
+Verbora loses.
 
 <div class="callout callout-note">
 <strong>Correctness and scope.</strong> Behaviour is pinned by an executable

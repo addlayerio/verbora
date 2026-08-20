@@ -11,10 +11,9 @@ keywords = ["sentiment", "nlp", "afinn"]
 categories.workspace = true
 
 [dependencies]
-# The reference's second constructor argument is any object with `.stem()`, and
-# its own spec passes six different Porter variants. `Stemmer` is that contract;
-# this dependency exists to implement it for the ported stemmers so the two
-# crates compose without an adapter.
+# `SentimentAnalyzer`'s optional second constructor argument is anything that
+# can stem a word. This dependency exists so that `Stemmer` is implemented for
+# every Verbora stemmer and the two crates compose without an adapter.
 verbora-stemmers = { workspace = true }
 
 # The vocabularies are up to 24,839 entries and every token costs one lookup.
@@ -22,13 +21,20 @@ verbora-stemmers = { workspace = true }
 # sense that any text is, and never used to size an allocation.
 rustc-hash = { workspace = true }
 
-# Deliberately no `serde_json`: the lexicons ship as `key \0 polarity \0` blobs
-# machine-dumped from the reference tables, which is 1.2 MB instead of the
-# reference's 7.5 MB of JSON and needs no parser at all.
+# A lexicon key is text, not a token: the tables spell entries `cover-up`,
+# `bad luck` and `Abfall`. Keys are therefore indexed by the same UAX #29 word
+# segmentation the caller's tokens come from, so the two can meet — see
+# `Vocabulary`'s "lookup form". Without this the 14,273 keys this tokenizer
+# cuts into two or more pieces are unreachable from any token stream.
+verbora-tokenizers = { workspace = true }
+
+# Deliberately no `serde_json`: the lexicons ship as `key \0 polarity \0`
+# blobs, 1.2 MB of packed pairs instead of ~7.5 MB of source JSON, and need no
+# parser at all.
 #
-# Deliberately no `verbora-core`: nothing here splits or trims on `\s`, so
-# `is_js_whitespace` has no call site. The only reference string semantics in
-# play is `toLowerCase`, which `str::to_lowercase` already matches exactly.
+# Deliberately no `verbora-core` dependency of its own: the one text operation
+# this crate performs is the Unicode full lowercase mapping, which
+# `str::to_lowercase` already implements exactly.
 
 # Optional: batch-scores many independent documents against one shared
 # analyzer, behind the `parallel` feature. Off by default so the common case
@@ -37,9 +43,6 @@ rustc-hash = { workspace = true }
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
-# Used only by the crate-level doctest that pipes a tokenizer into the analyzer,
-# which is the composition the iterator-first API exists for.
-verbora-tokenizers = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]

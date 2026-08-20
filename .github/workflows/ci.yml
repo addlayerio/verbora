@@ -1,0 +1,85 @@
+# The workspace quality gates.
+#
+# `AGENTS.md` § "Quality Gates" lists `cargo fmt --all --check`, `cargo clippy
+# --workspace --all-targets --all-features -- -D warnings`, `cargo test
+# --workspace --all-features` and `cargo doc --workspace --all-features
+# --no-deps` as what the workspace must stay compatible with, and
+# `AGENTS.md:1607` states that "CI enforces both" `--no-default-features` and
+# `--all-features` "(the `features` job in `.github/workflows/ci.yml`)".
+#
+# That file did not exist. Neither did the job. The only Rust CI in the
+# repository was `release.yml`'s `cargo test --workspace --all-features`, which
+# runs on a push to `main` — after review, not before it — and never on a pull
+# request, so no feature-combination or lint failure could block a merge.
+#
+# Nothing here is `continue-on-error`: a gate that reports without failing is
+# not a gate.
+#
+# No benchmark runs here, deliberately. `CLAUDE.md` forbids running them
+# automatically — a competitive campaign takes hours and every result is
+# invalidated by the next change. `cargo check --all-targets` below keeps the
+# bench targets *compiling*, which is the part CI is responsible for.
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # `--all-targets` so a bench target that stopped compiling fails here rather
+  # than at the start of a benchmark campaign, hours after it was worth knowing.
+  check:
+    name: check (all targets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-features --all-targets
+
+  # The job AGENTS.md:1607 names. `rayon` is optional and gated behind a
+  # `parallel` feature that is never in `default`, so a single-item primitive
+  # that silently started requiring it would pass an --all-features run and
+  # break every default build. Both configurations are tested, not just built.
+  features:
+    name: features (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ['--no-default-features', '--all-features']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace ${{ matrix.features }}

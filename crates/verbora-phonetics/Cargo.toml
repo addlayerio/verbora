@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Phonetic algorithms (Soundex, Metaphone, Double Metaphone) for Rust"
+description = "Phonetic encoders (Soundex, Metaphone, Double Metaphone, NYSIIS, Caverphone, Cologne, Daitch-Mokotoff, Beider-Morse) for Rust"
 keywords = ["soundex", "metaphone", "phonetics"]
 categories.workspace = true
 
@@ -14,9 +14,9 @@ categories.workspace = true
 verbora-core = { workspace = true }
 verbora-tokenizers = { workspace = true }
 rayon = { workspace = true, optional = true }
-# Beider-Morse's rule contexts are genuine regexes (`src/beider_morse/`'s own
-# doc comment) -- already a workspace dependency used by verbora-tokenizers
-# and verbora-inflectors, not a new dependency category for the workspace.
+# Beider-Morse's rule contexts are genuine regexes, written as such in the
+# rule corpus itself -- see `src/beider_morse/rule.rs`. Already a workspace
+# dependency, not a new dependency category.
 regex = { workspace = true }
 
 [dev-dependencies]

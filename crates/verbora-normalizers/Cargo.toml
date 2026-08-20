@@ -6,37 +6,32 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Text normalization and diacritic removal for Rust"
-keywords = ["normalization", "diacritics"]
+description = "Unicode normalization forms and diacritic folding for Rust"
+keywords = ["normalization", "unicode", "nfc", "nfkc", "diacritics"]
 categories.workspace = true
 
 [dependencies]
-# Otherwise deliberately empty.
-#
-# No `regex`: every pattern in this cluster is either a one-or-two-character
-# table lookup or a scan needing the reference's ASCII-only `\w`, which `regex`
-# makes Unicode-aware by default. Hand-written scanners are both faster and the
-# only way to keep parity. See src/table.rs and src/english.rs.
-#
-# No `verbora-core`: nothing here splits or trims on `\s`, so `is_js_whitespace`
-# has no call site. The one place the reference's character semantics do bite —
-# `.` in normalizeJa's iteration-mark passes — needs the *complement* of the four
-# LineTerminators over UTF-16 code units, which is local to src/ja.rs.
-#
+# UAX #15 is the whole crate. `unicode-normalization` supplies the four form
+# iterators, the quick-check properties the `Cow::Borrowed` guarantee is
+# decided with, and the `Canonical_Combining_Class` lookup `remove_diacritics`
+# is defined over. A hand-frozen table is not an alternative here: normalization
+# is defined by UCD properties, so a frozen table is simply wrong for every
+# character encoded after the freeze
+# (`docs/design/text-shaping-contract.md` §4.2).
+unicode-normalization = { workspace = true }
+
 # `par_remove_diacritics_batch`: data-parallel fan-out over
 # `remove_diacritics`, gated behind the `parallel` feature. See that
-# function's doc comment in `src/diacritics.rs` for when to reach for it.
+# function's doc comment for when to reach for it.
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-serde_json = { workspace = true }
 
 [features]
 default = []
 # Adds `par_remove_diacritics_batch`, a `rayon`-backed fan-out over the
-# existing sequential `remove_diacritics`. See its doc comment in
-# `src/diacritics.rs` for when to reach for it.
+# existing sequential `remove_diacritics`.
 parallel = ["dep:rayon"]
 
 [[bench]]

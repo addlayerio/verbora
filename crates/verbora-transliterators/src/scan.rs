@@ -1,48 +1,102 @@
-//! The replacement engine behind the transliterator's table phases.
+//! The lookup index and the splice helpers the scanner is built from.
 //!
-//! # What the reference does
-//!
-//! `util/utils` exposes `replacer(table)`: it joins the table's keys into one
-//! alternation, compiles it with the `g` flag, and returns
-//! `str => str.replace(re, m => table[m])`. That is a single non-overlapping
-//! left-to-right pass whose replacements are never rescanned, and whose match
-//! preference is the reference's **leftmost-first** — the earliest-*listed*
-//! alternative that matches at the leftmost possible position wins.
-//!
-//! # Why this is leftmost-longest instead
-//!
-//! Leftmost-first depends on the order of the alternation, which is the order of
-//! `for (key in translationTable)`, which is the order the keys were written in
-//! the source. Carrying that ordering through the port would mean every future
-//! reader had to keep it in mind.
-//!
-//! It is not necessary here. In all three tables, no key is a proper prefix of a
-//! **later** key — a table that breaks this was refused at derivation time, and
-//! the invariant is re-checked by this module's own tests. Whenever two keys both match
-//! at a position the longer one is therefore listed first, so leftmost-first
-//! picks it: exactly leftmost-longest, which is order-free. `キョウ` -> `kyō`
-//! beating `キョ` -> `kyo` beating `キ` -> `ki` is the property in action.
-//!
-//! # Why not a regex or an Aho–Corasick automaton
-//!
-//! Every key is at most three `char`s long, so "longest match here" is decided
-//! by the current character and at most the next two. [`Table`] turns the first
-//! character into an index with one subtraction, and the slot it lands on names
-//! the two- and three-character keys that could continue — never more than five
-//! of them. An automaton would need a runtime construction step and a pointer
-//! chase per byte to answer the same question, and a regex would need a
-//! 382-branch alternation.
+//! Everything here is private to the crate. The data these types describe is
+//! written by `build.rs` from `src/syllabary.rs`; the shapes are here so that
+//! the generated file has something to name.
 
 use std::borrow::Cow;
+
+/// One mora's romanization, short and lengthened.
+///
+/// Both forms are `&'static str` because both are laid out at build time, so a
+/// rewrite never allocates to name its replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Mora {
+    /// The romanization on its own: `か` → `"ka"`.
+    pub(crate) short: &'static str,
+    /// `short` with its final vowel macronned — `Some("kā")` for `か` — or
+    /// `None` when `short` does not end in a vowel and so cannot be lengthened.
+    pub(crate) long: Option<&'static str>,
+}
+
+impl Mora {
+    /// The ASCII vowel `short` ends in, if it ends in one.
+    ///
+    /// Reads the last byte directly: `build.rs` rejects any romanization that
+    /// is not ASCII, so the last byte is the last character.
+    #[inline]
+    pub(crate) fn final_vowel(self) -> Option<u8> {
+        match self.short.as_bytes().last() {
+            Some(&b @ (b'a' | b'e' | b'i' | b'o' | b'u')) => Some(b),
+            _ => None,
+        }
+    }
+}
+
+/// Everything the index knows about keys beginning with one particular scalar.
+#[derive(Debug)]
+pub(crate) struct Slot {
+    /// The mora for the one-scalar key that is exactly this character.
+    pub(crate) one: Option<Mora>,
+    /// Half-open range into [`tables::TWO`](crate::tables::TWO) naming the
+    /// two-scalar keys that begin with this character.
+    pub(crate) two: (usize, usize),
+}
+
+impl Slot {
+    /// Whether no key at all begins with this slot's character.
+    #[inline]
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.one.is_none() && self.two.0 == self.two.1
+    }
+}
+
+/// The longest key matching at byte offset `at`, with its length in bytes.
+///
+/// Leftmost-longest by construction rather than by list order: the two-scalar
+/// keys are tried before the one-scalar key, and there are no longer keys.
+///
+/// Returns `None` when `at` is not a character boundary of a key start, when
+/// the character there begins no key, or when `at >= text.len()`.
+#[inline]
+pub(crate) fn longest_at(text: &str, at: usize) -> Option<(usize, Mora)> {
+    let first = text.get(at..)?.chars().next()?;
+    let slot = slot(first)?;
+    let after = at + first.len_utf8();
+
+    // Decoding the second character is deferred to here, so it only happens
+    // for characters that actually begin a key.
+    if slot.two.0 != slot.two.1 {
+        if let Some(second) = text[after..].chars().next() {
+            let group = &crate::tables::TWO[slot.two.0..slot.two.1];
+            if let Some(&(_, mora)) = group.iter().find(|&&(k, _)| k == second) {
+                return Some((after + second.len_utf8() - at, mora));
+            }
+        }
+    }
+    slot.one.map(|mora| (first.len_utf8(), mora))
+}
+
+/// The slot for `c`, or `None` when `c` begins no key at all.
+#[inline]
+fn slot(c: char) -> Option<&'static Slot> {
+    // Wrapping subtraction folds "below the base" into a huge value, so one
+    // unsigned compare decides both ends of the span.
+    let i = (c as u32).wrapping_sub(crate::tables::SLOT_BASE) as usize;
+    crate::tables::SLOTS.get(i).filter(|s| !s.is_empty())
+}
 
 /// One replacement the scanner found: a byte range of the input and the text
 /// that takes its place.
 ///
 /// Byte offsets rather than character indices because that is what splicing
-/// needs, and because a `char` index would have to be recomputed anyway.
-/// `from` is the matched slice; for the lookahead phase it is **not** the whole
-/// pattern, only the part the reference actually consumes (the lookahead is
-/// zero-width and its character is left in the output).
+/// needs, and because a character index would have to be recomputed anyway.
+///
+/// `to` is `&'static str` and may be empty: a mora that romanizes to nothing —
+/// a sokuon with no consonant to double, a prolonged sound mark with no vowel
+/// to lengthen — is reported as a rewrite to `""` rather than skipped, so that
+/// the stream describes the whole transformation and not merely its visible
+/// half.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rewrite<'a> {
     /// Byte offset where the replaced text begins.
@@ -51,174 +105,14 @@ pub struct Rewrite<'a> {
     pub end: usize,
     /// The slice being replaced, `&text[start..end]`.
     pub from: &'a str,
-    /// The text written in its place.
+    /// The text written in its place, possibly empty.
     pub to: &'static str,
-}
-
-/// One conversion table, in the form the scanner wants it.
-///
-/// # Why not sorted key slices and a binary search
-///
-/// That was the first design, and it is what the sibling `verbora-normalizers`
-/// uses — reasonably, because its tables are consulted for a handful of
-/// characters per document. This one is different: the main kana table is
-/// consulted for *every* kana character of Japanese text, which is the entire
-/// input this crate exists to process. Three binary searches over 149, 189 and
-/// 44 sorted entries came to roughly twenty comparisons per character and
-/// measured 169 MiB/s; the index below measures 474 MiB/s on the same input,
-/// and takes the whole pipeline from 1.6x to 3.2x the reference.
-///
-/// So the keys are indexed by their first `char` instead. Every key of every
-/// table starts inside one or two short code-point windows, so the first
-/// character is turned into a slot index by a subtraction and a bounds check,
-/// and the slot names the *contiguous* run of keys beginning with that
-/// character — never more than five of them, which a linear scan finishes before
-/// a binary search has computed its first midpoint. The same slot doubles as the
-/// membership gate: a character inside a window that begins no key lands on an
-/// empty slot and is rejected without a single comparison against key data.
-///
-/// Only the *tail* of each multi-character key is stored, since the first
-/// character is implied by the slot that points at it.
-pub(crate) struct Table {
-    /// Code-point windows covering every character that begins some key, sorted
-    /// by base and disjoint. One for tables 1 and 2; two for table 3, whose keys
-    /// begin either with a latin vowel or with a small kana.
-    pub(crate) windows: &'static [Window],
-    /// Tails of the two-`char` keys, grouped by first character in window order
-    /// and sorted within each group.
-    pub(crate) two: &'static [(char, &'static str)],
-    /// Tails of the three-`char` keys, grouped and sorted the same way.
-    pub(crate) three: &'static [([char; 2], &'static str)],
-}
-
-/// A contiguous run of code points that begin some key.
-pub(crate) struct Window {
-    /// The code point [`Window::slots`]`[0]` describes.
-    pub(crate) base: u32,
-    /// One slot per code point in the window, including the ones that begin no
-    /// key at all — those are what make the index a gate as well as a lookup.
-    pub(crate) slots: &'static [Slot],
-}
-
-/// Everything the table knows about keys beginning with one particular `char`.
-pub(crate) struct Slot {
-    /// The replacement, if that `char` is itself a key.
-    pub(crate) one: Option<&'static str>,
-    /// Half-open range into [`Table::two`].
-    pub(crate) two: (u16, u16),
-    /// Half-open range into [`Table::three`].
-    pub(crate) three: (u16, u16),
-}
-
-impl Slot {
-    /// Whether no key at all begins with this slot's character.
-    #[inline]
-    const fn is_empty(&self) -> bool {
-        self.one.is_none() && self.two.0 == self.two.1 && self.three.0 == self.three.1
-    }
-}
-
-impl Table {
-    /// The slot for `c`, or `None` when `c` is outside every window.
-    #[inline]
-    fn slot(&self, c: char) -> Option<&'static Slot> {
-        let cp = c as u32;
-        for w in self.windows {
-            // Wrapping subtraction folds "below the window" into a huge value,
-            // so one unsigned compare decides both ends.
-            let i = cp.wrapping_sub(w.base) as usize;
-            if i < w.slots.len() {
-                return Some(&w.slots[i]);
-            }
-        }
-        None
-    }
-
-    /// Whether some key in this table starts with `c`.
-    ///
-    /// Exposed for the tests that assert the generated index is exact — it must
-    /// admit every key's first character and nothing else.
-    #[cfg(test)]
-    pub(crate) fn gate_admits(&self, c: char) -> bool {
-        self.slot(c).is_some_and(|s| !s.is_empty())
-    }
-
-    /// Every key of this table, reconstructed from the index.
-    ///
-    /// The index is generated, so tests that want to assert something about "all
-    /// the keys" have to read them back out of it. Reconstruction rather than a
-    /// second copy of the key list means the assertions are about the data the
-    /// scanner actually uses.
-    #[cfg(test)]
-    pub(crate) fn keys(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for w in self.windows {
-            for (i, slot) in w.slots.iter().enumerate() {
-                let Some(first) = char::from_u32(w.base + i as u32) else {
-                    continue;
-                };
-                if slot.one.is_some() {
-                    out.push(first.to_string());
-                }
-                for &(b, _) in &self.two[slot.two.0 as usize..slot.two.1 as usize] {
-                    out.push(format!("{first}{b}"));
-                }
-                for &([b, d], _) in &self.three[slot.three.0 as usize..slot.three.1 as usize] {
-                    out.push(format!("{first}{b}{d}"));
-                }
-            }
-        }
-        out
-    }
-
-    /// The next leftmost-longest match at or after byte offset `from`.
-    ///
-    /// Returns `(start, end, replacement)`. The caller resumes at `end`, which is
-    /// what makes matches non-overlapping and keeps replacements from being
-    /// rescanned — the semantics of a `g`-flagged `String#replace`.
-    pub(crate) fn next_match(
-        &self,
-        text: &str,
-        from: usize,
-    ) -> Option<(usize, usize, &'static str)> {
-        for (offset, c) in text[from..].char_indices() {
-            let Some(slot) = self.slot(c).filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let start = from + offset;
-            let after = start + c.len_utf8();
-
-            // Decoding the following characters is deferred to here, so it only
-            // happens for characters that actually begin a key.
-            let mut rest = text[after..].chars();
-            if let Some(b) = rest.next() {
-                // Longest first. `キョウ` -> `kyō` must beat `キョ` -> `kyo`,
-                // which must beat `キ` -> `ki`.
-                let three = &self.three[slot.three.0 as usize..slot.three.1 as usize];
-                if !three.is_empty() {
-                    if let Some(d) = rest.next() {
-                        if let Some(&(_, to)) = three.iter().find(|&&(k, _)| k == [b, d]) {
-                            return Some((start, after + b.len_utf8() + d.len_utf8(), to));
-                        }
-                    }
-                }
-                let two = &self.two[slot.two.0 as usize..slot.two.1 as usize];
-                if let Some(&(_, to)) = two.iter().find(|&&(k, _)| k == b) {
-                    return Some((start, after + b.len_utf8(), to));
-                }
-            }
-            if let Some(to) = slot.one {
-                return Some((start, after, to));
-            }
-        }
-        None
-    }
 }
 
 /// Splices a stream of ascending, non-overlapping rewrites into `text`.
 ///
 /// Returns [`Cow::Borrowed`] when the stream was empty, which is the usual
-/// outcome for text the phase has nothing to do with. The output buffer is
+/// outcome for text the scanner has nothing to do with. The output buffer is
 /// allocated at the first rewrite and unmatched runs are copied in bulk rather
 /// than character by character.
 pub(crate) fn apply<'a, I>(text: &'a str, rewrites: I) -> Cow<'a, str>
@@ -261,8 +155,8 @@ where
 /// Applies `f` to a [`Cow`] without giving up the borrow when neither step
 /// changed anything.
 ///
-/// The transliterator is five passes over text that usually needs at most one of
-/// them; chaining naively would allocate a `String` per pass.
+/// `transliterate_ja_normalized` is three stages over text that usually needs
+/// none of them; chaining naively would allocate a `String` per stage.
 pub(crate) fn map_cow<'a>(
     input: Cow<'a, str>,
     f: impl for<'b> FnOnce(&'b str) -> Cow<'b, str>,
@@ -270,9 +164,9 @@ pub(crate) fn map_cow<'a>(
     match input {
         Cow::Borrowed(s) => f(s),
         Cow::Owned(owned) => {
-            // Re-borrowing inside the match keeps `f`'s temporary alive only for
-            // the statement, so `owned` can be handed back untouched when `f`
-            // made no change.
+            // Re-borrowing inside the match keeps `f`'s temporary alive only
+            // for the statement, so `owned` can be handed back untouched when
+            // `f` made no change.
             let next = match f(&owned) {
                 Cow::Borrowed(_) => None,
                 Cow::Owned(v) => Some(v),
@@ -286,133 +180,75 @@ pub(crate) fn map_cow<'a>(
 mod tests {
     use super::*;
 
-    /// Keys `ア`, `アイ`, `アイウ`, `カ` — a miniature of the real shape.
-    ///
-    /// The window runs `ア` (U+30A2) to `カ` (U+30AB), so the seven code points
-    /// between them get empty slots. That is the gate: `イ` is inside the window
-    /// and still rejected, because nothing starts with it.
-    static SAMPLE: Table = Table {
-        windows: &[Window {
-            base: 0x30A2,
-            slots: &[
-                // ア: one key of each length.
-                Slot {
-                    one: Some("a"),
-                    two: (0, 1),
-                    three: (0, 1),
-                },
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                }, // イ U+30A3 .. カ-1, all empty
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-                Slot {
-                    one: None,
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-                // カ U+30AB.
-                Slot {
-                    one: Some("ka"),
-                    two: (1, 1),
-                    three: (1, 1),
-                },
-            ],
-        }],
-        two: &[('イ', "ai")],
-        three: &[(['イ', 'ウ'], "aiu")],
-    };
+    #[test]
+    fn longest_at_prefers_the_two_scalar_key() {
+        // `きょ` is a key and so is `き`; the two-scalar one must win.
+        assert_eq!(
+            longest_at("きょ", 0).map(|(n, m)| (n, m.short)),
+            Some((6, "kyo"))
+        );
+        assert_eq!(
+            longest_at("きあ", 0).map(|(n, m)| (n, m.short)),
+            Some((3, "ki"))
+        );
+        assert_eq!(
+            longest_at("き", 0).map(|(n, m)| (n, m.short)),
+            Some((3, "ki"))
+        );
+    }
 
-    fn translate(s: &str) -> Cow<'_, str> {
-        let mut pos = 0;
-        let mut hits = Vec::new();
-        while let Some((a, b, to)) = SAMPLE.next_match(s, pos) {
-            hits.push(Rewrite {
-                start: a,
-                end: b,
-                from: &s[a..b],
-                to,
-            });
-            pos = b;
+    #[test]
+    fn longest_at_rejects_everything_that_begins_no_key() {
+        for (text, at) in [("abc", 0), ("漢", 0), ("😀", 0), ("", 0), ("ki", 1)] {
+            assert!(longest_at(text, at).is_none(), "{text:?} at {at}");
         }
-        apply(s, hits.into_iter())
+        // Inside the slot span but begins no key: `ー`, `ん`, `っ`.
+        for text in ["ー", "ん", "っ", "ン", "ッ"] {
+            assert!(longest_at(text, 0).is_none(), "{text:?}");
+        }
+        // Past the end of the string.
+        assert!(longest_at("き", 3).is_none());
     }
 
     #[test]
-    fn borrows_when_nothing_matches() {
-        assert!(matches!(translate("zzz"), Cow::Borrowed("zzz")));
-        assert!(matches!(translate(""), Cow::Borrowed("")));
-        assert!(matches!(translate("漢字"), Cow::Borrowed("漢字")));
+    fn final_vowel_reads_the_last_byte() {
+        let ka = longest_at("か", 0).expect("か").1;
+        assert_eq!(ka.short, "ka");
+        assert_eq!(ka.long, Some("kā"));
+        assert_eq!(ka.final_vowel(), Some(b'a'));
+
+        let dot = longest_at("・", 0).expect("・").1;
+        assert_eq!(dot.short, " ");
+        assert_eq!(dot.long, None);
+        assert_eq!(dot.final_vowel(), None);
     }
 
     #[test]
-    fn prefers_the_longest_key() {
-        assert_eq!(translate("アイウ"), "aiu");
-        assert_eq!(translate("アイ"), "ai");
-        assert_eq!(translate("ア"), "a");
+    fn apply_borrows_when_the_stream_is_empty() {
+        assert!(matches!(
+            apply("zzz", std::iter::empty()),
+            Cow::Borrowed("zzz")
+        ));
+        assert!(matches!(apply("", std::iter::empty()), Cow::Borrowed("")));
     }
 
     #[test]
-    fn matches_are_non_overlapping_and_never_rescanned() {
-        // The leading `ア` has no `イ` after it, so it takes the one-char key;
-        // the second `ア` then pairs with `イ`.
-        assert_eq!(translate("アアイ"), "aai");
-        // `ka` must not be re-read as anything.
-        assert_eq!(translate("カ"), "ka");
-    }
-
-    #[test]
-    fn astral_characters_are_left_alone() {
-        assert_eq!(translate("😀ア😀"), "😀a😀");
-    }
-
-    #[test]
-    fn the_gate_admits_exactly_the_key_first_characters() {
-        assert!(SAMPLE.gate_admits('ア'));
-        assert!(SAMPLE.gate_admits('カ'));
-        // Inside the window but begins no key: rejected by the empty slot.
-        assert!(!SAMPLE.gate_admits('イ'));
-        // Outside every window.
-        assert!(!SAMPLE.gate_admits('a'));
-        assert!(!SAMPLE.gate_admits('漢'));
-        assert!(!SAMPLE.gate_admits('😀'));
-    }
-
-    #[test]
-    fn keys_round_trip_out_of_the_index() {
-        let mut keys = SAMPLE.keys();
-        keys.sort();
-        assert_eq!(keys, ["ア", "アイ", "アイウ", "カ"]);
+    fn apply_splices_in_order_including_empty_replacements() {
+        let hits = [
+            Rewrite {
+                start: 0,
+                end: 3,
+                from: "か",
+                to: "ka",
+            },
+            Rewrite {
+                start: 3,
+                end: 6,
+                from: "ー",
+                to: "",
+            },
+        ];
+        assert_eq!(apply("かー", hits.into_iter()), "ka");
     }
 
     #[test]

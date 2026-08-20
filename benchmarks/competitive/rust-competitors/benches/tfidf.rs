@@ -67,7 +67,7 @@ use std::path::Path;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use verbora_tfidf::{DocKey, DocumentInput, Terms, TfIdf};
+use verbora_tfidf::TfIdf;
 
 // Capped at 256, not the `[4, 16, 64, 256, 1024]` every other competitive
 // module uses (`scripts/collect-results.py`'s `SIZES`): every document here
@@ -152,12 +152,22 @@ fn chunked_texts(text: &str, words_per_doc: usize, n: usize) -> Vec<String> {
         .collect()
 }
 
+/// Builds the Verbora corpus with the *keyless* `add_document`, matching the
+/// competitors exactly.
+///
+/// The pre-migration API was `add_document(DocumentInput::Text(doc),
+/// DocKey::Num(i as f64), false) -> Result<_, _>`, and this function passed a
+/// synthetic numeric key for every document. Neither competitor stores a key:
+/// `afshinm`'s `TfIdf::add(&str)` and `rust_tfidf`'s vectorizer both take the
+/// text alone. Verbora now offers both shapes — `add_document(&str)` and
+/// `add_document_with_key(&str, key)` — so this uses the keyless one, which is
+/// both the direct migration and the like-for-like workload. Timing Verbora
+/// storing keys the other two never store would charge it for work the
+/// comparison does not ask any side to do.
 fn verbora_corpus(docs: &[String]) -> TfIdf {
     let mut t = TfIdf::new();
-    #[expect(clippy::cast_precision_loss, reason = "benchmark corpora are tiny")]
-    for (i, doc) in docs.iter().enumerate() {
-        t.add_document(DocumentInput::Text(doc), DocKey::Num(i as f64), false)
-            .expect("a fresh instance always has a documents array");
+    for doc in docs {
+        t.add_document(doc);
     }
     t
 }
@@ -187,7 +197,7 @@ fn vectorize(doc: &str) -> Vec<(String, usize)> {
 
 fn bench_build(c: &mut Criterion) {
     let text = document();
-    let mut g = c.benchmark_group("build");
+    let mut g = c.benchmark_group("tfidf_build");
     for n in SIZES {
         let docs = rotated_texts(&text, n);
         let total_bytes: u64 = docs.iter().map(|d| d.len() as u64).sum();
@@ -234,12 +244,19 @@ fn bench_idf(c: &mut Criterion) {
     let mut g = c.benchmark_group("idf");
     for n in SIZES {
         let docs = rotated_texts(&text, n);
-        let mut verbora = verbora_corpus(&docs);
+        let verbora = verbora_corpus(&docs);
         let afshinm = afshinm_corpus(&docs);
         let vectors: Vec<Vec<(String, usize)>> = docs.iter().map(|d| vectorize(d)).collect();
 
+        // `idf_value(term, force = true)` before the migration; `idf(term)`
+        // now. The `force` flag existed to bypass an idf cache, and the cache
+        // is gone — `TfIdf::idf` recomputes from the document-frequency map on
+        // every call (`crates/verbora-tfidf/src/corpus.rs`, whose own doc
+        // comment says the design "removes the need for an idf cache"). So
+        // this row still times a real computation against `afshinm`'s real
+        // computation, exactly as `force = true` was there to ensure.
         g.bench_with_input(BenchmarkId::new("verbora", n), &n, |b, _| {
-            b.iter(|| black_box(verbora.idf_value(black_box("the"), true).unwrap()));
+            b.iter(|| black_box(verbora.idf(black_box("the")).unwrap()));
         });
         g.bench_with_input(BenchmarkId::new("afshinm", n), &n, |b, _| {
             b.iter(|| black_box(afshinm.idf(black_box(&tfidf::tfidf::Term("the")))));
@@ -263,12 +280,12 @@ fn bench_tfidf(c: &mut Criterion) {
     let mut g = c.benchmark_group("tfidf");
     for n in SIZES {
         let docs = rotated_texts(&text, n);
-        let mut verbora = verbora_corpus(&docs);
+        let verbora = verbora_corpus(&docs);
         let afshinm = afshinm_corpus(&docs);
         let vectors: Vec<Vec<(String, usize)>> = docs.iter().map(|d| vectorize(d)).collect();
 
         g.bench_with_input(BenchmarkId::new("verbora", n), &n, |b, _| {
-            b.iter(|| black_box(verbora.tfidf(black_box(Terms::Text("the")), 0).unwrap()));
+            b.iter(|| black_box(verbora.tfidf(black_box("the"), 0).unwrap()));
         });
         g.bench_with_input(BenchmarkId::new("afshinm", n), &n, |b, _| {
             b.iter(|| black_box(afshinm.tfidf(black_box(&tfidf::tfidf::Term("the")), 0)));

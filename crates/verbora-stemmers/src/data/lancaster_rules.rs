@@ -1,10 +1,9 @@
-//! The Lancaster (Paice/Husk) rule table, transcribed from
-//! The reference `lancaster_rules`.
+//! The Lancaster (Paice/Husk) rule table.
 //!
-//! Generated data. Array order is semantic — the first rule whose pattern matches
-//! *and* whose result is acceptable wins — so the order here is byte-for-byte the
-//! order in the reference. `size` is a decimal STRING in the reference; it is parsed
-//! once, here, into a `u8`.
+//! Checked-in data. **Array order is semantic**: the first rule whose pattern
+//! matches and whose result is acceptable wins, so reordering this table
+//! changes stems. Grounding the order in the published Paice/Husk rule set is
+//! an open item of the stemmers' own migration.
 
 use crate::lancaster::Rule;
 

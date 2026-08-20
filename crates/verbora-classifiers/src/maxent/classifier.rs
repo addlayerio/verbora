@@ -181,11 +181,25 @@ impl MaxEntClassifier {
 
     /// The serialised shape `save()` writes.
     ///
-    /// The feature set and sample appear three times over — once at the top
-    /// level, once under `scaler` and once under `p` — because the reference
-    /// follows the references and the graph has no cycle.
+    /// The object opens with the compatibility stamp (see [`ArtifactStamp`](crate::ArtifactStamp)).
+    /// After it, the feature set and sample appear three times over — once at
+    /// the top level, once under `scaler` and once under `p` — because the
+    /// reference follows the references and the graph has no cycle.
+    ///
+    /// Maximum entropy's exposure to a boundary change is narrower than
+    /// [`Classifier`](crate::Classifier)'s — [`Self::restore`] regenerates the
+    /// features from the sample's elements and discards the trained parameters,
+    /// so nothing derived survives the round trip — but the *sample* it revives
+    /// is text produced by whatever pipeline built it, and a caller should not
+    /// have to know which of this crate's three classifiers is exposed in order
+    /// to know whether their file is safe. Every persisted artifact this crate
+    /// writes is stamped, and every load checks.
     pub fn to_value(&self) -> DynValue {
         let mut fields = vec![
+            (
+                crate::stamp::STAMP_PROPERTY.to_owned(),
+                crate::stamp::ArtifactStamp::current().to_value(),
+            ),
             ("features".to_owned(), self.features.borrow().to_value()),
             ("sample".to_owned(), self.sample.borrow().to_value()),
         ];
@@ -213,13 +227,15 @@ impl MaxEntClassifier {
     ///
     /// # Errors
     ///
-    /// Propagates a JSON parse failure, or an element that cannot generate
-    /// features.
+    /// [`RestoreError::Parse`] for a JSON syntax failure, [`RestoreError::Stamp`]
+    /// for a model this build must not read (see [`ArtifactStamp`](crate::ArtifactStamp)), and
+    /// [`RestoreError::MaxEnt`] for an element that cannot generate features.
     pub fn restore(
         json: &str,
         revive: impl FnMut(&str, Rc<Context>) -> Rc<Element>,
     ) -> Result<Self, RestoreError> {
         let value = DynValue::parse(json).map_err(RestoreError::Parse)?;
+        crate::stamp::verify_stamp(&value).map_err(RestoreError::Stamp)?;
         let sample_value = value.get("sample").cloned().unwrap_or(DynValue::Undefined);
         let sample = Sample::from_value(&sample_value, revive);
         let mut features = FeatureSet::new();
@@ -260,6 +276,10 @@ impl MaxEntClassifier {
 }
 
 /// Why a saved maximum-entropy classifier could not be revived.
+///
+/// [`Self::Parse`] and [`Self::Stamp`] are deliberately distinct: the first says
+/// the file is damaged, the second says it is intact but was written by another
+/// build, and those need opposite responses from a user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreError {
     /// The file could not be read. Carries the message rather than the
@@ -267,6 +287,9 @@ pub enum RestoreError {
     Io(String),
     /// The bytes were not valid JSON.
     Parse(crate::dynval::ParseError),
+    /// The model carries no usable compatibility stamp, or one from another
+    /// build. See [`ArtifactStamp`](crate::ArtifactStamp).
+    Stamp(crate::stamp::StampError),
     /// The revived elements could not regenerate their features.
     MaxEnt(MaxEntError),
 }
@@ -276,6 +299,7 @@ impl std::fmt::Display for RestoreError {
         match self {
             Self::Io(e) => write!(f, "{e}"),
             Self::Parse(e) => write!(f, "{e}"),
+            Self::Stamp(e) => write!(f, "{e}"),
             Self::MaxEnt(e) => write!(f, "{e}"),
         }
     }
@@ -393,5 +417,76 @@ mod tests {
             "no correction feature"
         );
         assert!(revived.distribution().is_none(), "alpha is not restored");
+    }
+
+    // -- the compatibility stamp --------------------------------------------
+
+    fn revive(a: &str, b: Rc<Context>) -> Rc<Element> {
+        Rc::new(SEElement::new(a, b))
+    }
+
+    /// Replaces the pretty-printed `_verbora` member with `replacement`.
+    ///
+    /// `to_value` writes the stamp first and `json_stringify_pretty` indents by
+    /// two, so the model proper begins at the next top-level member.
+    fn with_stamp(json: &str, replacement: &str) -> String {
+        assert!(json.starts_with("{\n  \"_verbora\":"), "{json}");
+        let tail = json
+            .find("\n  \"features\":")
+            .expect("the stamp is followed by features");
+        format!("{{\n  \"_verbora\": {replacement},{}", &json[tail..])
+    }
+
+    #[test]
+    fn a_model_from_another_build_is_refused() {
+        let c = reference();
+        let current = crate::stamp::ArtifactStamp::current();
+        let (major, minor, update) = current.unicode;
+        let json = with_stamp(
+            &c.to_json(),
+            &format!(
+                r#"{{"schema": {}, "unicode": "{}.{minor}.{update}"}}"#,
+                current.schema,
+                major + 1
+            ),
+        );
+        let Err(RestoreError::Stamp(crate::StampError::Incompatible(mismatch))) =
+            MaxEntClassifier::restore(&json, revive)
+        else {
+            panic!("a foreign Unicode version must be refused");
+        };
+        assert_eq!(mismatch.found.unicode, (major + 1, minor, update));
+        assert_eq!(mismatch.expected, current);
+    }
+
+    /// A model saved before stamping existed carries no version information at
+    /// all, so it cannot be validated and is refused under its own variant.
+    #[test]
+    fn a_model_saved_before_stamping_is_refused_as_unstamped() {
+        let c = reference();
+        let json = c.to_json();
+        let tail = json
+            .find("\n  \"features\":")
+            .expect("the stamp is followed by features");
+        let pre_stamp = format!("{{{}", &json[tail..]);
+        assert_eq!(
+            MaxEntClassifier::restore(&pre_stamp, revive).err(),
+            Some(RestoreError::Stamp(crate::StampError::Missing))
+        );
+    }
+
+    /// A damaged file and a stale one are different problems and are reported as
+    /// different errors.
+    #[test]
+    fn a_corrupt_file_is_distinguishable_from_an_incompatible_one() {
+        assert!(matches!(
+            MaxEntClassifier::restore("{not json", revive),
+            Err(RestoreError::Parse(_))
+        ));
+        let damaged = with_stamp(&reference().to_json(), r#""17.0.0""#);
+        assert_eq!(
+            MaxEntClassifier::restore(&damaged, revive).err(),
+            Some(RestoreError::Stamp(crate::StampError::Malformed))
+        );
     }
 }

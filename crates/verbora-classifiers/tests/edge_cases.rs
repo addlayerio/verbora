@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use verbora_classifiers::{
     BayesClassifier, Context, DynValue, FeatureSet, LogisticRegressionClassifier, MaxEntClassifier,
-    SEElement, Sample, dynval,
+    SEElement, Sample, number_to_string,
 };
 
 /// One document per category of awkward input, all given as token slices so the
@@ -226,7 +226,7 @@ fn number_formatting_matches_the_reference_at_the_boundaries() {
         (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
         (f64::MAX, "1.7976931348623157e+308"),
     ] {
-        assert_eq!(dynval::number_to_string(value), want, "{value}");
+        assert_eq!(number_to_string(value), want, "{value}");
     }
 }
 

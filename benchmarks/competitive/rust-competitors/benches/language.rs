@@ -28,15 +28,56 @@
 //! 2. [`bench_language_detection_by_length`],
 //!    [`bench_language_detection_by_language`], and
 //!    [`bench_language_detection_by_language_paragraph`] — the real
-//!    three-way algorithm comparison: Verbora (via `WhatlangDetector`,
-//!    n-gram + alphabet filter) vs. `lingua` (rule engine + 1-5-gram,
-//!    restricted to the 21-language overlap via `from_languages()` — never
-//!    its default 75-language configuration) vs. `whichlang` (hashed n-gram
-//!    linear model, 13-language overlap, cannot abstain). Split into "by
-//!    length" (one language, the full length ladder) and "by language" (13
+//!    algorithm comparison: Verbora in its three shipped detector
+//!    configurations vs. `lingua` (rule engine + 1-5-gram, restricted to
+//!    the 21-language overlap via `from_languages()` — never its default
+//!    75-language configuration) vs. `whichlang` (hashed n-gram linear
+//!    model, 13-language overlap, cannot abstain). Split into "by length"
+//!    (one language, the full length ladder) and "by language" (13
 //!    languages, one fixed tier — `sentence` and `paragraph` as two separate
 //!    groups) rather than one combinatorial group, so each Criterion report
 //!    reads as a clean one-dimensional sweep.
+//!
+//!    **Why three Verbora rows, not one.** `whichlang` is a hashed-linear
+//!    model and `WhatlangDetector` is an n-gram-profile model, so a single
+//!    `verbora` row would report an *algorithm* difference as a *library*
+//!    difference. Verbora ships both algorithm families, so both are
+//!    measured, under the same names `examples/language_accuracy.rs` uses
+//!    for their accuracy — every speed number here has an accuracy number
+//!    there, per the spec's `ACCURACY + PERFORMANCE` rule.
+//!
+//!    **Every row id names its own detector**, because a Criterion report
+//!    (or a scrape of `results/raw/*.json`) shows the id and nothing else:
+//!    a bare `verbora` would leave a reader unable to tell which of three
+//!    genuinely different detectors produced a number that varies by ~400x
+//!    between them. Accuracy is this dataset's 13 languages x 4 tiers,
+//!    measured by `examples/language_accuracy.rs`:
+//!
+//!    | row id | detector | short_word | short_phrase | sentence | paragraph | overall |
+//!    |---|---|---|---|---|---|---|
+//!    | `verbora_default_whatlang` | `WhatlangDetector` (`language-detection`) — **the default** | 10/13 | 13/13 | 13/13 | 13/13 | **49/52** |
+//!    | `verbora_fast_hashed_linear` | `HashedLinearDetector` (`fast-language-detection`), opt-in | 7/13 | 12/13 | 13/13 | 13/13 | 45/52 |
+//!    | `verbora_fallback_hashed_whatlang` | `FallbackDetector<Hashed, Whatlang>` | 10/13 | 13/13 | 13/13 | 13/13 | **49/52** |
+//!    | `whichlang` | `whichlang::detect_language` | 9/13 | 13/13 | 13/13 | 13/13 | 48/52 |
+//!    | `lingua` | 21-language restricted | 12/13 | 13/13 | 13/13 | 13/13 | 51/52 |
+//!
+//!    **`verbora_fast_hashed_linear` is faster than `whichlang` at every
+//!    tier on this machine and is still not the default**, and this table
+//!    is why: it is the row directly comparable to `whichlang` in
+//!    algorithm family, and at 45/52 against `whichlang`'s 48/52 it is
+//!    *less accurate than the library it outruns*. Publishing its speed as
+//!    "Verbora beats whichlang" would be precisely the spec's forbidden
+//!    "10x faster" quoted without the correctness half. It is a
+//!    first-class, separately labelled row instead — never merged into,
+//!    nor substituted for, the default's row.
+//!
+//!    `verbora_default_whatlang` is what Verbora's `DefaultDetector` alias
+//!    resolves to (`crates/verbora-language/src/lib.rs`, pinned by that
+//!    crate's `tests/default_detector.rs`), and stays the row any "Verbora
+//!    vs X" statement refers to unless it says otherwise. The
+//!    `verbora`-without-a-suffix ids elsewhere in this file belong to
+//!    groups with only one Verbora implementation to name (script
+//!    detection, transliteration), where there is nothing to disambiguate.
 //! 3. [`bench_script_detection_by_length`],
 //!    [`bench_script_detection_by_language`], and
 //!    [`bench_script_detection_by_language_paragraph`] — Verbora's
@@ -93,7 +134,9 @@ use criterion::{
 use competitive_rust::language_support::{
     LanguageEntry, TIERS, lingua_restricted_languages, load_dataset,
 };
-use verbora_language::{LanguageDetector, WhatlangDetector, detect_script};
+use verbora_language::{
+    FallbackDetector, HashedLinearDetector, LanguageDetector, WhatlangDetector, detect_script,
+};
 use verbora_transliterators::transliterate_ja;
 use wana_kana::ConvertJapanese;
 
@@ -221,6 +264,9 @@ fn bench_language_detection_by_length(c: &mut Criterion) {
         .find(|l| l.iso639_1 == "en")
         .expect("english is in the dataset");
     let verbora = WhatlangDetector::new();
+    let verbora_fast = HashedLinearDetector::new();
+    let verbora_fallback =
+        FallbackDetector::new(HashedLinearDetector::new(), WhatlangDetector::new());
     let lingua_detector =
         lingua::LanguageDetectorBuilder::from_languages(&lingua_restricted_languages()).build();
 
@@ -229,10 +275,24 @@ fn bench_language_detection_by_length(c: &mut Criterion) {
     for (label, text) in length_ladder(english, 64) {
         g.throughput(Throughput::Bytes(text.len() as u64));
         g.bench_with_input(
-            BenchmarkId::new("verbora", &label),
+            BenchmarkId::new("verbora_default_whatlang", &label),
             &text.as_str(),
             |b, &text| {
                 b.iter(|| black_box(verbora.detect(black_box(text))));
+            },
+        );
+        g.bench_with_input(
+            BenchmarkId::new("verbora_fast_hashed_linear", &label),
+            &text.as_str(),
+            |b, &text| {
+                b.iter(|| black_box(verbora_fast.detect(black_box(text))));
+            },
+        );
+        g.bench_with_input(
+            BenchmarkId::new("verbora_fallback_hashed_whatlang", &label),
+            &text.as_str(),
+            |b, &text| {
+                b.iter(|| black_box(verbora_fallback.detect(black_box(text))));
             },
         );
         g.bench_with_input(
@@ -264,6 +324,9 @@ fn bench_language_detection_by_length(c: &mut Criterion) {
 fn bench_language_detection_at_tier(c: &mut Criterion, group_name: &str, tier: &str) {
     let dataset = load_dataset();
     let verbora = WhatlangDetector::new();
+    let verbora_fast = HashedLinearDetector::new();
+    let verbora_fallback =
+        FallbackDetector::new(HashedLinearDetector::new(), WhatlangDetector::new());
     let lingua_detector =
         lingua::LanguageDetectorBuilder::from_languages(&lingua_restricted_languages()).build();
 
@@ -273,9 +336,19 @@ fn bench_language_detection_at_tier(c: &mut Criterion, group_name: &str, tier: &
         let text = entry.items.get(tier);
         g.throughput(Throughput::Bytes(text.len() as u64));
         g.bench_with_input(
-            BenchmarkId::new("verbora", &entry.iso639_1),
+            BenchmarkId::new("verbora_default_whatlang", &entry.iso639_1),
             &text,
             |b, &text| b.iter(|| black_box(verbora.detect(black_box(text)))),
+        );
+        g.bench_with_input(
+            BenchmarkId::new("verbora_fast_hashed_linear", &entry.iso639_1),
+            &text,
+            |b, &text| b.iter(|| black_box(verbora_fast.detect(black_box(text)))),
+        );
+        g.bench_with_input(
+            BenchmarkId::new("verbora_fallback_hashed_whatlang", &entry.iso639_1),
+            &text,
+            |b, &text| b.iter(|| black_box(verbora_fallback.detect(black_box(text)))),
         );
         g.bench_with_input(
             BenchmarkId::new("lingua", &entry.iso639_1),

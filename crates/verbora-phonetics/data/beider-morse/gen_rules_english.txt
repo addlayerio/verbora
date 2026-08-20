@@ -18,8 +18,8 @@
 // GENERAL
 
 // CONSONANTS
-"�" "" "" "" // O�Neill
-"'" "" "" "" // O�Neill
+"’" "" "" "" // O’Neill
+"'" "" "" "" // O’Neill
 "mc" "^" "" "mak" // McDonald
 "tz" "" "" "ts" // Fitzgerald
 "tch" "" "" "tS"

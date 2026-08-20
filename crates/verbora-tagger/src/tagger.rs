@@ -1,219 +1,306 @@
-//! The tagger itself: lexicon lookup, then transformation rules.
-//!
-//! # Two levels, one behaviour
-//!
-//! [`BrillPosTagger::tag_iter`] is the primitive. It pulls tokens from any
-//! iterator and yields tagged words one at a time, holding at most seven of them
-//! in a fixed window, so a document of any size tags in constant memory and
-//! nothing is copied — tokens are `&str` slices into the caller's input.
-//! [`BrillPosTagger::tag`] and [`BrillPosTagger::apply_rules`] are the
-//! The reference-shaped conveniences, and both route through the same per-position
-//! routine, so there is exactly one description of what a rule does.
-//!
-//! # Why streaming is exact, not an approximation
-//!
-//! `applyRules` walks positions left to right, running **every** rule at each
-//! one and mutating tags in place. A rule at position *i* therefore sees:
-//!
-//! * positions *i-1*, *i-2*, *i-3* — already **final**;
-//! * position *i* — as edited by rules earlier in the same rule set;
-//! * positions *i+1*, *i+2*, *i+3* — still carrying their **original lexicon**
-//!   tags, because those positions have not been visited yet.
-//!
-//! No predicate in the closed 36-template set reaches further than three
-//! positions either way, so a window of three behind and three ahead reproduces
-//! the batch result exactly — including the bounds tests, since "fewer than
-//! three exist ahead" is equally true of the window and of the whole sentence.
+//! The tagger: initial-state annotation, then transformation rules.
 
 use std::borrow::Cow;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-use crate::error::TaggerError;
+use crate::corpus::Corpus;
 use crate::lexicon::Lexicon;
-use crate::rule::TransformationRule;
 use crate::ruleset::RuleSet;
-use crate::sentence::{Sentence, TaggedWord};
+use crate::tag::TaggedToken;
 
-/// How far a predicate can look in each direction: `PREV1OR2OR3TAG` and
-/// `NEXT1OR2OR3TAG` reach three positions, and nothing reaches further.
-const REACH: usize = 3;
-
-/// Applies every rule of `rules`, in order, at one position.
+/// A Brill part-of-speech tagger: a [`Lexicon`] and a [`RuleSet`].
 ///
-/// This is the single source of rule behaviour: both the batch and the streaming
-/// path call it, with `words` being either the whole sentence or the window.
+/// Both are borrowed, so one lexicon and one rule set can back any number of
+/// taggers on any number of threads without copying either.
 ///
-/// # Errors
+/// # How tagging works
 ///
-/// Propagates whatever a predicate throws.
-#[inline]
-pub fn apply_rules_at(
-    rules: &[TransformationRule],
-    words: &mut [TaggedWord<'_>],
-    position: isize,
-) -> Result<(), TaggerError> {
-    for rule in rules {
-        rule.apply(words, position)?;
-    }
-    Ok(())
-}
-
-/// A Brill part-of-speech tagger: a lexicon plus a rule set.
+/// 1. **Initial-state annotation.** Every token takes [`Lexicon::tag_of`] — its
+///    most frequent tag, or a default. Brill (1995) §2.
+/// 2. **Transformation.** Each rule of the set is applied, in order, to the
+///    whole sentence before the next rule runs.
 ///
-/// Both are borrowed, as they are in the reference, so changes to either — an
-/// `add_word`, an added rule — are visible to the tagger immediately.
+/// # Simultaneous application, stated on purpose
+///
+/// Within one rule, every site is decided against the tagging **as it stood
+/// before that rule ran**, and all the resulting rewrites land together. The
+/// alternative — rewriting in place as a left-to-right scan proceeds — makes a
+/// rule's own earlier rewrites visible to its own later tests, so the result
+/// depends on scan direction and a position's outcome can depend on the entire
+/// prefix of the sentence. Verbora chooses simultaneous application because it
+/// keeps a transformation's effect a function of a bounded window, which is what
+/// makes [`BrillTagger::tag_stream`] exact rather than approximate.
+///
+/// # Nothing is rewritten but the tag
+///
+/// Tokens come back byte-identical to the ones handed in, borrowed from the
+/// caller's input where possible.
+///
+/// # Choosing the right API
+///
+/// | API | Use when | Allocates | Returns |
+/// |---|---|---|---|
+/// | [`tag`](Self::tag) | the default; a sentence or document already in memory | one `Vec` of the output length | `Vec<TaggedToken>` |
+/// | [`tag_into`](Self::tag_into) | tagging many documents in a loop, reusing one buffer | nothing, once the buffer is warm | appends to your `Vec` |
+/// | [`tag_stream`](Self::tag_stream) | input arrives lazily, or is far larger than memory | `O(block + context)`, independent of input length | an `Iterator` |
+/// | [`annotate`](Self::annotate) | you want the lexicon's answer *without* the rules | one `Vec` | `Vec<TaggedToken>` |
+/// | [`transform`](Self::transform) | you already hold tagged tokens and want the rules re-run | one scratch `Vec<usize>` | in place |
+/// | [`par_tag_batch`](Self::par_tag_batch) | **many independent documents**, `parallel` feature on | one `Vec` per document | `Vec<Vec<TaggedToken>>` |
+///
+/// The decision is short:
+///
+/// * One document in memory → [`tag`](Self::tag). It is the right choice for
+///   the large majority of programs; the others exist for shapes it handles
+///   badly, not because it is slow.
+/// * A loop over documents where the tagged output is consumed and discarded
+///   each time → [`tag_into`](Self::tag_into), which reuses the allocation
+///   [`tag`](Self::tag) would make and free once per document.
+/// * A document that does not fit, or a token source that is itself lazy →
+///   [`tag_stream`](Self::tag_stream). It buffers
+///   `RuleSet::context_span` tokens on each side plus a block, so its
+///   memory is bounded by the *rule set*, not by the document. It costs one
+///   clone of each buffered token, so it is not the faster option for input
+///   that already fits.
+/// * Many documents and more than one core → [`par_tag_batch`](Self::par_tag_batch),
+///   whose body is `documents.par_iter().map(tag).collect()` and nothing more.
+///
+/// Every one of these produces the same tags; they differ only in where the
+/// memory goes. `tests/api_equivalence.rs` asserts that over the whole bundled
+/// character-class sweep.
+///
+/// Performance for the post-migration implementation is **unmeasured**: the
+/// crate's benchmarks compile and are ready to run, but no campaign has been run
+/// against this code, so no timing figure is published here.
 #[derive(Debug, Clone, Copy)]
-pub struct BrillPosTagger<'a> {
+pub struct BrillTagger<'a> {
     /// The dictionary used for the initial tagging.
     pub lexicon: &'a Lexicon,
-    /// The transformation rules applied afterwards.
-    pub rule_set: &'a RuleSet,
+    /// The transformation rules applied afterwards, in order.
+    pub rules: &'a RuleSet,
 }
 
-impl<'a> BrillPosTagger<'a> {
-    /// Builds a tagger over a lexicon and rule set.
+/// How many positions [`BrillTagger::tag_stream`] finalises per refill, before
+/// context is added on each side.
+const STREAM_BLOCK: usize = 1024;
+
+impl<'a> BrillTagger<'a> {
+    /// Builds a tagger over a lexicon and a rule set.
     #[must_use]
-    pub const fn new(lexicon: &'a Lexicon, rule_set: &'a RuleSet) -> Self {
-        Self { lexicon, rule_set }
+    pub const fn new(lexicon: &'a Lexicon, rules: &'a RuleSet) -> Self {
+        Self { lexicon, rules }
     }
 
-    /// `tagWithLexicon(sentence)`: the initial tagging, before any rule runs.
+    /// The initial state: every token takes [`Lexicon::tag_of`], no rules.
     ///
-    /// Each word takes `lexicon.tagWord(word)[0]`, **unconditionally** — a word
-    /// present with an empty category list yields no tag rather than the default
-    /// category.
-    pub fn tag_with_lexicon<'t, I>(&self, words: I) -> Sentence<'t>
+    /// Useful on its own for measuring how much the rules contribute — that is
+    /// what [`Evaluation::accuracy_before_rules`] reports.
+    pub fn annotate<'t, I>(&self, tokens: I) -> Vec<TaggedToken<'t>>
     where
         I: IntoIterator,
         I::Item: Into<Cow<'t, str>>,
     {
-        let iter = words.into_iter();
-        let mut sentence = Sentence {
-            tagged_words: Vec::with_capacity(iter.size_hint().0),
-        };
-        for w in iter {
-            let token: Cow<'t, str> = w.into();
-            let tag = self.lexicon.first_category(&token);
-            sentence.tagged_words.push(TaggedWord::new(token, tag));
-        }
-        sentence
+        let mut out = Vec::new();
+        self.annotate_into(tokens, &mut out);
+        out
     }
 
-    /// `applyRules(sentence)`: runs every rule at every position, in place.
-    ///
-    /// # Errors
-    ///
-    /// Propagates predicate errors — for example an empty token reaching
-    /// `CURRENT-WORD-IS-CAP`. Neither bundled rule set can fail this way.
-    pub fn apply_rules(&self, sentence: &mut Sentence<'_>) -> Result<(), TaggerError> {
-        let rules = self.rule_set.rules();
-        let words = &mut sentence.tagged_words;
-        for i in 0..words.len() {
-            apply_rules_at(rules, words, i as isize)?;
-        }
-        Ok(())
-    }
-
-    /// `tag(sentence)`: lexicon lookup followed by the rules.
-    ///
-    /// # Errors
-    ///
-    /// Propagates predicate errors from the rule pass.
-    pub fn tag<'t, I>(&self, words: I) -> Result<Sentence<'t>, TaggerError>
+    /// [`Self::annotate`], appending to `out` instead of allocating.
+    pub fn annotate_into<'t, I>(&self, tokens: I, out: &mut Vec<TaggedToken<'t>>)
     where
         I: IntoIterator,
         I::Item: Into<Cow<'t, str>>,
     {
-        let mut sentence = self.tag_with_lexicon(words);
-        self.apply_rules(&mut sentence)?;
-        Ok(sentence)
+        let iter = tokens.into_iter();
+        out.reserve(iter.size_hint().0);
+        for t in iter {
+            let token: Cow<'t, str> = t.into();
+            let tag = self.lexicon.tag_of(&token);
+            out.push(TaggedToken { token, tag });
+        }
     }
 
-    /// Tags a token stream lazily, in constant memory.
+    /// Applies every rule, in order, to an already-tagged sentence, in place.
     ///
-    /// The result of collecting this iterator is identical to [`Self::tag`]; see
-    /// the module documentation for why a seven-word window suffices.
+    /// Each rule sees the tagging the previous rule produced; within one rule,
+    /// every site is decided before any rewrite lands.
+    pub fn transform(&self, words: &mut [TaggedToken<'_>]) {
+        let mut sites = Vec::new();
+        self.transform_with(words, &mut sites);
+    }
+
+    /// [`Self::transform`] with a caller-supplied scratch buffer.
+    ///
+    /// The buffer holds the sites one rule fires at; reusing it across sentences
+    /// removes the one allocation `transform` makes. It is cleared on entry, so
+    /// forgetting to clear it is not a correctness bug.
+    pub fn transform_with(&self, words: &mut [TaggedToken<'_>], sites: &mut Vec<usize>) {
+        for rule in self.rules.rules() {
+            sites.clear();
+            sites.extend((0..words.len()).filter(|&i| rule.applies_at(words, i)));
+            for &i in sites.iter() {
+                words[i].tag = rule.to.clone();
+            }
+        }
+    }
+
+    /// Tags a sentence or document: initial state, then the rules.
     ///
     /// ```
-    /// use verbora_tagger::{BrillPosTagger, Language, Lexicon, RuleSet};
+    /// use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
     ///
-    /// let lexicon = Lexicon::detached(Some("EN"), Some("NN"), None);
-    /// let rules = RuleSet::for_language(Language::English);
-    /// let tagger = BrillPosTagger::new(&lexicon, &rules);
+    /// let lexicon = Lexicon::bundled(Language::English);
+    /// let rules = RuleSet::bundled(Language::English);
+    /// let tagger = BrillTagger::new(&lexicon, &rules);
     ///
-    /// let tags: Vec<_> = tagger
-    ///     .tag_iter("the dog runs quickly".split(' '))
-    ///     .map(|w| w.unwrap().tag().map(str::to_string))
+    /// let tagged = tagger.tag(["I", "would", "book", "a", "flight"]);
+    /// let tags: Vec<&str> = tagged.iter().map(|w| w.tag().as_str()).collect();
+    /// assert_eq!(tags, ["NN", "MD", "VB", "DT", "NN"]);
+    /// ```
+    ///
+    /// `book` is `NN` in the lexicon; the rule `NN VB PREV-WORD-IS would` is
+    /// what makes it a verb. `I` comes back `NN` because the bundled English
+    /// lexicon has no entry for `I` and lists `NN` first for `i` — a limitation
+    /// of that dictionary, not of the algorithm, and one a caller fixes with a
+    /// single `lexicon.insert("I", vec![Tag::new("PRP")?])`.
+    pub fn tag<'t, I>(&self, tokens: I) -> Vec<TaggedToken<'t>>
+    where
+        I: IntoIterator,
+        I::Item: Into<Cow<'t, str>>,
+    {
+        let mut out = Vec::new();
+        self.tag_into(tokens, &mut out);
+        out
+    }
+
+    /// [`Self::tag`], appending to `out` instead of allocating a fresh `Vec`.
+    ///
+    /// # Why it exists
+    ///
+    /// A loop that tags many documents and consumes each result immediately
+    /// otherwise allocates and frees one `Vec` per document. `tag_into` lets one
+    /// buffer serve the whole loop:
+    ///
+    /// ```
+    /// # use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
+    /// # let lexicon = Lexicon::bundled(Language::English);
+    /// # let rules = RuleSet::bundled(Language::English);
+    /// # let tagger = BrillTagger::new(&lexicon, &rules);
+    /// # let documents = [vec!["the", "dog"], vec!["a", "cat"]];
+    /// let mut buffer = Vec::new();
+    /// for document in &documents {
+    ///     buffer.clear();
+    ///     tagger.tag_into(document.iter().copied(), &mut buffer);
+    ///     assert!(!buffer.is_empty());
+    /// }
+    /// ```
+    ///
+    /// # What it costs
+    ///
+    /// The `clear()` is yours to remember — but forgetting it is *not* silently
+    /// wrong here: the rules are applied only to the newly appended range, so a
+    /// stale prefix is left exactly as it was rather than re-transformed. What
+    /// you get is a growing buffer, not corrupted tags. Tokens already in `out`
+    /// are also invisible to the new range's conditions, so appending twice is
+    /// not the same as tagging the concatenation — which is the right semantics,
+    /// since the two calls are two documents.
+    pub fn tag_into<'t, I>(&self, tokens: I, out: &mut Vec<TaggedToken<'t>>)
+    where
+        I: IntoIterator,
+        I::Item: Into<Cow<'t, str>>,
+    {
+        let start = out.len();
+        self.annotate_into(tokens, out);
+        self.transform(&mut out[start..]);
+    }
+
+    /// Tags a lazily produced token stream in memory bounded by the rule set.
+    ///
+    /// The output equals [`Self::tag`]'s, element for element, for any input.
+    ///
+    /// # Why it exists, and what it buffers
+    ///
+    /// Each rule runs over the whole sentence before the next one, so rule *k*'s
+    /// answer at position *i* can depend on rule *k-1*'s answers up to
+    /// `reach(rule_k)` away — and the reaches add up over the set. Summed, that
+    /// is [`RuleSet::context_span`]. This iterator therefore holds
+    /// `context_span.0 + 1024 + context_span.1` tokens at a time and no more,
+    /// whatever the document length: it finalises 1024 positions per refill,
+    /// with exactly enough context on each side for those positions to come out
+    /// identical to a whole-document run.
+    ///
+    /// For the bundled English rules that is 4 tokens of context; for the 285
+    /// Dutch rules it is larger but still a property of the rule set, not of the
+    /// input.
+    ///
+    /// # What it costs
+    ///
+    /// Each buffered token is cloned once into the working block. For tokens
+    /// borrowed from the caller's input (`&str`) that is a pointer-and-length
+    /// copy; for owned `String` tokens it is a real copy. If the document
+    /// already fits in memory, [`Self::tag`] does strictly less work.
+    ///
+    /// ```
+    /// use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
+    ///
+    /// let lexicon = Lexicon::bundled(Language::English);
+    /// let rules = RuleSet::bundled(Language::English);
+    /// let tagger = BrillTagger::new(&lexicon, &rules);
+    ///
+    /// let tags: Vec<String> = tagger
+    ///     .tag_stream("the dog runs quickly".split(' '))
+    ///     .map(|w| w.tag().to_string())
     ///     .collect();
-    /// assert_eq!(tags[3].as_deref(), Some("RB"));
+    /// assert_eq!(tags[3], "RB");
     /// ```
-    pub fn tag_iter<'t, I>(&self, tokens: I) -> TagIter<'a, 't, I::IntoIter>
+    pub fn tag_stream<'t, I>(&self, tokens: I) -> TagStream<'a, 't, I::IntoIter>
     where
         I: IntoIterator,
         I::Item: Into<Cow<'t, str>>,
     {
-        TagIter {
+        let (left, right) = self.rules.context_span();
+        TagStream {
             tagger: *self,
             src: tokens.into_iter(),
-            buf: Vec::with_capacity(2 * REACH + 2),
+            window: Vec::new(),
+            base: 0,
             cursor: 0,
+            left,
+            right,
+            ready: std::collections::VecDeque::new(),
             src_done: false,
-            failed: false,
         }
     }
 
     /// Tags many independent documents in parallel, one [`Self::tag`] call per
-    /// document, distributed across a Rayon thread pool.
+    /// document.
     ///
-    /// # When to reach for this over [`Self::tag`] in a loop
+    /// # When to reach for it
     ///
     /// Only when tagging **many separate documents** that do not depend on one
-    /// another — a batch job, a corpus being tagged offline, a request handler
-    /// fanning out over an uploaded set of files. `lexicon` and `rule_set` are
-    /// read-only for the whole batch (`tag` never mutates either), so sharing
-    /// `&self` across worker threads is safe with no locking and no per-document
-    /// setup cost.
+    /// another. `lexicon` and `rules` are read-only for the whole batch, so
+    /// sharing `&self` across worker threads needs no locking and no per-document
+    /// setup.
     ///
-    /// Do **not** reach for this to parallelise *within* one document: `tag`
-    /// already runs its rule pass in O(positions × rules) single-threaded work
-    /// with no independent chunks to split, and [`Self::tag_iter`] is the right
-    /// tool when memory, not throughput, is the constraint.
+    /// Do not reach for it to parallelise *within* one document: a document is a
+    /// single ordered rule pass with no independent chunks to split, and
+    /// [`Self::tag_stream`] is the tool when memory rather than throughput is the
+    /// constraint.
     ///
     /// # What it costs
     ///
-    /// This crate's own bench (`tag/english`) measures roughly 200us for a
-    /// 512-token document and 846us for a 4096-token one — near-linear in
-    /// document length. That is comfortably above Rayon's per-task dispatch
-    /// overhead, so on typical multi-core hardware `par_tag_batch` measures
-    /// faster than the sequential loop even at a handful of documents, and the
-    /// margin grows with both document count and core count: the
-    /// `tag_batch/english-512tok` Criterion group in `benches/tagger.rs`
-    /// measured (32-core host, 512 tokens/document) roughly 153us→104us at 1
-    /// document, 885us→410us at 8 (~2.2×), 6.9ms→1.4ms at 64 (~5×), and
-    /// 33ms→5.5ms at 256 (~6×). Documents much shorter than a few hundred
-    /// tokens, or a build with only one or two cores available, narrow or
-    /// remove that margin — re-run the bench group on the target hardware
-    /// before assuming a number.
+    /// One `Vec` per document, exactly as a sequential
+    /// `documents.iter().map(tag).collect()` would allocate, plus Rayon's
+    /// per-task dispatch. Output order always matches input order, and each
+    /// element is what the equivalent sequential call would have produced.
     ///
-    /// This allocates one `Vec` for the results (exactly as a sequential
-    /// `documents.iter().map(tag).collect()` would) plus whatever each `tag`
-    /// call itself allocates; no additional buffering happens per document.
-    ///
-    /// Output order always matches input order, and each element is exactly
-    /// what the equivalent sequential call would have produced — including
-    /// which documents come back `Err`. This is deliberately *not* a new
-    /// algorithm: the body is a `par_iter().map(Self::tag).collect()` over the
-    /// same per-document routine used everywhere else in this module.
-    ///
-    /// # Errors
-    ///
-    /// Each element of the returned `Vec` carries its own `Result`, identical
-    /// to calling [`Self::tag`] on that document alone — one document failing
-    /// its rule pass does not affect any other document's result.
+    /// The crossover point is **unmeasured for this implementation** — the
+    /// `tag_batch` bench group exists but no campaign has been run against the
+    /// post-migration code, so no speedup figure is published. Measure on your
+    /// own hardware before assuming one.
     #[cfg(feature = "parallel")]
-    pub fn par_tag_batch<'t, D>(&self, documents: &[D]) -> Vec<Result<Sentence<'t>, TaggerError>>
+    pub fn par_tag_batch<'t, D>(&self, documents: &[D]) -> Vec<Vec<TaggedToken<'t>>>
     where
         D: AsRef<[&'t str]> + Sync,
     {
@@ -222,73 +309,155 @@ impl<'a> BrillPosTagger<'a> {
             .map(|doc| self.tag(doc.as_ref().iter().copied()))
             .collect()
     }
+
+    /// Scores the tagger against an annotated corpus.
+    ///
+    /// The corpus is only read. Each sentence is tagged from its tokens alone,
+    /// so nothing leaks between sentences and the gold annotation is never
+    /// touched.
+    #[must_use]
+    pub fn evaluate(&self, corpus: &Corpus<'_>) -> Evaluation {
+        let mut ev = Evaluation::default();
+        let mut buf: Vec<TaggedToken<'_>> = Vec::new();
+        let mut sites = Vec::new();
+        for sentence in corpus.sentences() {
+            buf.clear();
+            self.annotate_into(sentence.iter().map(|w| w.token()), &mut buf);
+            ev.tokens += sentence.len();
+            ev.correct_before_rules += sentence
+                .iter()
+                .zip(&buf)
+                .filter(|(gold, got)| gold.tag == got.tag)
+                .count();
+            self.transform_with(&mut buf, &mut sites);
+            ev.correct_after_rules += sentence
+                .iter()
+                .zip(&buf)
+                .filter(|(gold, got)| gold.tag == got.tag)
+                .count();
+        }
+        ev
+    }
 }
 
-/// Lazy tagger output; see [`BrillPosTagger::tag_iter`].
+/// What [`BrillTagger::evaluate`] measured.
+///
+/// Counts, not percentages: an empty corpus has no accuracy, and reporting
+/// `0/0` as a number would either invent a value or produce a `NaN` that
+/// poisons every later comparison. The percentages are available from
+/// [`Evaluation::accuracy`] and [`Evaluation::accuracy_before_rules`], both of
+/// which return `None` for an empty corpus.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Evaluation {
+    /// Tokens compared.
+    pub tokens: usize,
+    /// Tokens the lexicon alone tagged correctly.
+    pub correct_before_rules: usize,
+    /// Tokens tagged correctly after the rules ran.
+    pub correct_after_rules: usize,
+}
+
+impl Evaluation {
+    /// Fraction correct after the rules, in `0.0..=1.0`, or `None` for an empty
+    /// corpus.
+    ///
+    /// The division is the only floating-point operation: the counters are
+    /// exact integers, so there is no accumulation order to get wrong.
+    #[must_use]
+    pub fn accuracy(&self) -> Option<f64> {
+        self.fraction(self.correct_after_rules)
+    }
+
+    /// Fraction correct from the lexicon alone, or `None` for an empty corpus.
+    #[must_use]
+    pub fn accuracy_before_rules(&self) -> Option<f64> {
+        self.fraction(self.correct_before_rules)
+    }
+
+    #[allow(clippy::cast_precision_loss)] // counts stay far below 2^53
+    fn fraction(&self, correct: usize) -> Option<f64> {
+        (self.tokens > 0).then(|| correct as f64 / self.tokens as f64)
+    }
+}
+
+/// Lazy tagger output in bounded memory; see [`BrillTagger::tag_stream`].
 #[derive(Debug)]
-pub struct TagIter<'a, 't, I> {
-    tagger: BrillPosTagger<'a>,
+pub struct TagStream<'a, 't, I> {
+    tagger: BrillTagger<'a>,
     src: I,
-    /// The live window: finalised history, the position being worked on, and the
-    /// lookahead. Never longer than `2 * REACH + 1`.
-    buf: Vec<TaggedWord<'t>>,
-    /// Index in `buf` of the next position to run rules at.
+    /// Initial-state tokens from absolute position `base` onwards.
+    window: Vec<TaggedToken<'t>>,
+    base: usize,
+    /// Absolute position of the next token to emit.
     cursor: usize,
+    left: usize,
+    right: usize,
+    ready: std::collections::VecDeque<TaggedToken<'t>>,
     src_done: bool,
-    failed: bool,
 }
 
-impl<'t, I, T> Iterator for TagIter<'_, 't, I>
+impl<'t, I, T> TagStream<'_, 't, I>
 where
     I: Iterator<Item = T>,
     T: Into<Cow<'t, str>>,
 {
-    type Item = Result<TaggedWord<'t>, TaggerError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.failed {
-            return None;
-        }
-        loop {
-            // Keep REACH words of lookahead beyond the cursor, so the bounds
-            // tests inside the predicates see the same answers they would on the
-            // whole sentence.
-            while !self.src_done && self.buf.len() < self.cursor + REACH + 1 {
-                match self.src.next() {
-                    Some(tok) => {
-                        let token: Cow<'t, str> = tok.into();
-                        let tag = self.tagger.lexicon.first_category(&token);
-                        self.buf.push(TaggedWord::new(token, tag));
-                    }
-                    None => self.src_done = true,
+    /// Pulls from the source until `window` reaches absolute position `want`.
+    fn fill_to(&mut self, want: usize) {
+        while !self.src_done && self.base + self.window.len() < want {
+            match self.src.next() {
+                Some(t) => {
+                    let token: Cow<'t, str> = t.into();
+                    let tag = self.tagger.lexicon.tag_of(&token);
+                    self.window.push(TaggedToken { token, tag });
                 }
-            }
-
-            // The front word is emitted once no future position can read it,
-            // i.e. once REACH finalised words separate it from the cursor.
-            let drained = self.src_done && self.cursor == self.buf.len();
-            if self.cursor > REACH || (drained && !self.buf.is_empty()) {
-                let w = self.buf.remove(0);
-                self.cursor -= 1;
-                return Some(Ok(w));
-            }
-
-            if self.cursor < self.buf.len() {
-                let rules = self.tagger.rule_set.rules();
-                let at = self.cursor as isize;
-                if let Err(e) = apply_rules_at(rules, &mut self.buf, at) {
-                    self.failed = true;
-                    return Some(Err(e));
-                }
-                self.cursor += 1;
-            } else {
-                return None;
+                None => self.src_done = true,
             }
         }
     }
 
+    /// Finalises the next block of positions into `ready`.
+    fn refill(&mut self) {
+        let block_end = self.cursor + STREAM_BLOCK;
+        self.fill_to(block_end + self.right);
+        let end = self.base + self.window.len();
+        if self.cursor >= end {
+            return;
+        }
+        let emit_to = block_end.min(end);
+        let lo = self.cursor.saturating_sub(self.left).max(self.base);
+        let hi = (emit_to + self.right).min(end);
+
+        let mut block: Vec<TaggedToken<'t>> = self.window[lo - self.base..hi - self.base].to_vec();
+        self.tagger.transform(&mut block);
+        self.ready
+            .extend(block.drain(self.cursor - lo..emit_to - lo));
+        self.cursor = emit_to;
+
+        // Keep only the left context the next block will need.
+        let keep_from = self.cursor.saturating_sub(self.left).max(self.base);
+        self.window.drain(..keep_from - self.base);
+        self.base = keep_from;
+    }
+}
+
+impl<'t, I, T> Iterator for TagStream<'_, 't, I>
+where
+    I: Iterator<Item = T>,
+    T: Into<Cow<'t, str>>,
+{
+    type Item = TaggedToken<'t>;
+
+    fn next(&mut self) -> Option<TaggedToken<'t>> {
+        if let Some(w) = self.ready.pop_front() {
+            return Some(w);
+        }
+        self.refill();
+        self.ready.pop_front()
+    }
+
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let buffered = self.buf.len();
+        let buffered =
+            self.ready.len() + (self.base + self.window.len()).saturating_sub(self.cursor);
         let (lo, hi) = self.src.size_hint();
         (lo + buffered, hi.and_then(|h| h.checked_add(buffered)))
     }
@@ -297,27 +466,165 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ruleset::Language;
+    use crate::corpus::Corpus;
+    use crate::language::Language;
+    use crate::tag::Tag;
 
-    fn en() -> (Lexicon, RuleSet) {
+    fn tag(s: &'static str) -> Tag {
+        Tag::new(s).unwrap()
+    }
+
+    fn english() -> (Lexicon, RuleSet) {
         (
-            Lexicon::detached(Some("EN"), Some("NN"), None),
-            RuleSet::for_language(Language::English),
+            Lexicon::bundled(Language::English),
+            RuleSet::bundled(Language::English),
         )
     }
 
-    fn tags(s: &Sentence<'_>) -> Vec<Option<String>> {
-        s.tagged_words
-            .iter()
-            .map(|w| w.tag().map(str::to_string))
-            .collect()
+    fn tags_of(words: &[TaggedToken<'_>]) -> Vec<String> {
+        words.iter().map(|w| w.tag().to_string()).collect()
+    }
+
+    /// Every tag below is read off the bundled data, not off a previous run:
+    /// `would` is `MD`, `a` is `DT` and `flight` is `NN` in the lexicon, `book`
+    /// is `NN` there and becomes `VB` through `NN VB PREV-WORD-IS would`, and
+    /// `I` has no entry so the retry finds `i`, whose first tag is `NN`.
+    #[test]
+    fn the_textbook_sentence() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        assert_eq!(
+            tags_of(&t.tag(["I", "would", "book", "a", "flight"])),
+            ["NN", "MD", "VB", "DT", "NN"]
+        );
+        assert_eq!(lex.primary_tag("book"), Some(tag("NN")));
+        assert_eq!(lex.primary_tag("i"), Some(tag("NN")));
+        assert!(!lex.contains("I"));
+
+        // With the missing entry supplied, the same sentence tags as expected.
+        let mut fixed = Lexicon::bundled(Language::English);
+        fixed.insert("I", vec![tag("PRP")]).unwrap();
+        assert_eq!(
+            tags_of(&BrillTagger::new(&fixed, &rules).tag(["I", "would", "book", "a", "flight"])),
+            ["PRP", "MD", "VB", "DT", "NN"]
+        );
+    }
+
+    /// The suffix conditions are real suffix tests now, so `sees` ends with `s`
+    /// and `singing` ends with `ing`. Both were false before the migration.
+    #[test]
+    fn suffix_rules_fire_on_real_suffixes() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        // Tokens absent from the lexicon, so the initial state is the NN
+        // default and only the suffix rules can move them.
+        assert_eq!(
+            tags_of(&t.tag(["zzcats", "zzsees", "zzstring", "zzsinging", "zzss"])),
+            ["NNS", "NNS", "VBG", "VBG", "NNS"]
+        );
     }
 
     #[test]
-    fn streaming_matches_batch_on_every_length() {
-        let (lex, rules) = en();
-        let tagger = BrillPosTagger::new(&lex, &rules);
-        let words = [
+    fn rule_order_is_observable() {
+        let mut lex = Lexicon::new(tag("NN"));
+        lex.insert("the", vec![tag("DT")]).unwrap();
+        let words = ["the", "a", "b"];
+
+        let forward: RuleSet = "NN VB PREV-TAG DT\nNN JJ NEXT-TAG NN".parse().unwrap();
+        assert_eq!(
+            tags_of(&BrillTagger::new(&lex, &forward).tag(words)),
+            ["DT", "VB", "NN"]
+        );
+        let reverse: RuleSet = "NN JJ NEXT-TAG NN\nNN VB PREV-TAG DT".parse().unwrap();
+        assert_eq!(
+            tags_of(&BrillTagger::new(&lex, &reverse).tag(words)),
+            ["DT", "JJ", "NN"]
+        );
+    }
+
+    /// A rule decides every site against the tagging that existed before it ran,
+    /// so its own rewrites are invisible to its own later tests. With
+    /// left-to-right in-place application the second token would become `B` as
+    /// well; with simultaneous application it does not.
+    #[test]
+    fn a_rule_does_not_see_its_own_rewrites() {
+        let lex = Lexicon::new(tag("A"));
+        let rules: RuleSet = "A B PREV-TAG A".parse().unwrap();
+        let t = BrillTagger::new(&lex, &rules);
+        assert_eq!(tags_of(&t.tag(["x", "y", "z", "w"])), ["A", "B", "B", "B"]);
+
+        let rules: RuleSet = "A B PREV-TAG B".parse().unwrap();
+        let t = BrillTagger::new(&lex, &rules);
+        assert_eq!(
+            tags_of(&t.tag(["x", "y", "z", "w"])),
+            ["A", "A", "A", "A"],
+            "no B exists before the rule runs, so nothing can chain off one"
+        );
+    }
+
+    /// A later rule *does* see an earlier rule's rewrites: that is what makes
+    /// the sequence a sequence.
+    #[test]
+    fn a_later_rule_sees_an_earlier_rules_rewrites() {
+        let lex = Lexicon::new(tag("A"));
+        let rules: RuleSet = "A B CURRENT-WORD-IS x\nA C PREV-TAG B".parse().unwrap();
+        let t = BrillTagger::new(&lex, &rules);
+        assert_eq!(tags_of(&t.tag(["x", "y", "z"])), ["B", "C", "A"]);
+    }
+
+    /// Tokens are returned exactly as supplied, whatever script or length.
+    #[test]
+    fn every_character_class_tags_without_rewriting_or_panicking() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        let long = "z".repeat(10_000);
+        let cases: &[(&str, &str)] = &[
+            ("", "NN"),
+            ("z", "NN"),
+            ("Z", "NNP"),
+            ("Zzzzz", "NNP"),
+            ("café", "NN"),
+            ("Café", "NNP"),
+            ("Ålesundzz", "NNP"),
+            ("Москвазз", "NNP"),
+            ("Ελλάςζζ", "NNP"),
+            ("ΟΔΟΣΣΣ", "NNP"),
+            ("İstanbulzz", "NNP"),
+            ("straßezz", "NN"),
+            ("日本語", "NN"),
+            ("😀", "NN"),
+            ("𝐀bc", "NNP"),
+            (".", "."),
+            ("5", "CD"),
+            ("3.14", "CD"),
+            ("www.example.com", "URL"),
+            (&long, "NN"),
+            ("a b", "NN"),
+            ("\u{feff}", "NN"),
+        ];
+        for (token, want) in cases {
+            let got = t.tag([*token]);
+            assert_eq!(got[0].tag().as_str(), *want, "{token:?}");
+            assert_eq!(got[0].token(), *token, "token was rewritten");
+        }
+    }
+
+    #[test]
+    fn empty_and_single_token_input() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        assert!(t.tag(Vec::<&str>::new()).is_empty());
+        assert!(t.tag_stream(Vec::<&str>::new()).next().is_none());
+        assert_eq!(tags_of(&t.tag(["a"])), ["DT"]);
+    }
+
+    /// The four ways of producing tags must agree on every length, including the
+    /// lengths around the streaming block boundary.
+    #[test]
+    fn all_apis_agree_on_every_length() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        let words: Vec<&str> = [
             "the",
             "quick",
             "brown",
@@ -334,280 +641,157 @@ mod tests {
             "book",
             "cats",
             "sees",
-        ];
-        for n in 0..=words.len() {
+        ]
+        .into_iter()
+        .cycle()
+        .take(2100)
+        .collect();
+
+        for n in (0..=64).chain([1023, 1024, 1025, 2047, 2048, 2049, 2100]) {
             let slice = &words[..n];
-            let batch = tagger.tag(slice.iter().copied()).unwrap();
-            let streamed: Vec<TaggedWord<'_>> = tagger
-                .tag_iter(slice.iter().copied())
-                .map(Result::unwrap)
-                .collect();
+            let batch = t.tag(slice.iter().copied());
+            let streamed: Vec<TaggedToken<'_>> = t.tag_stream(slice.iter().copied()).collect();
+            assert_eq!(streamed, batch, "tag_stream diverges at length {n}");
+
+            let mut buf = Vec::new();
+            t.tag_into(slice.iter().copied(), &mut buf);
+            assert_eq!(buf, batch, "tag_into diverges at length {n}");
+
+            let mut annotated = t.annotate(slice.iter().copied());
+            t.transform(&mut annotated);
             assert_eq!(
-                streamed, batch.tagged_words,
-                "length {n} diverges between the streaming and batch paths"
+                annotated, batch,
+                "annotate+transform diverges at length {n}"
             );
         }
     }
 
+    /// The same equivalence, with the Dutch rule set — 285 rules, so the
+    /// streaming context is far wider than the English one and the block logic
+    /// is exercised properly.
     #[test]
-    fn suffix_rules_use_first_occurrence() {
-        let (lex, rules) = en();
-        let tagger = BrillPosTagger::new(&lex, &rules);
-        let got = tagger
-            .tag(["zzcats", "zzsees", "zzstring", "zzsinging", "zzss"])
-            .unwrap();
-        assert_eq!(
-            tags(&got),
-            [
-                Some("NNS".into()),
-                Some("NN".into()),
-                Some("VBG".into()),
-                Some("NN".into()),
-                Some("NN".into())
-            ]
-        );
-    }
-
-    /// One token per script and character class the crate is expected to
-    /// survive, tagged end to end.
-    ///
-    /// The interesting column is `NNP` versus `NN`: the capitalised default is
-    /// gated on `/[A-Z]/` against the first UTF-16 code unit, which is **ASCII
-    /// only** — so `Ålesund`, `Москва`, `Ελλάς` and `İstanbul` all take the
-    /// ordinary default however capitalised they look. A port reaching for
-    /// `char::is_uppercase` gets every one of those wrong.
-    #[test]
-    fn every_character_class_tags_without_panicking() {
-        let lex = Lexicon::detached(Some("EN"), Some("NN"), Some("NNP"));
-        let rules = RuleSet::for_language(Language::English);
-        let tagger = BrillPosTagger::new(&lex, &rules);
-        let long = "z".repeat(10_000);
-        let cases: &[(&str, Option<&str>)] = &[
-            ("", None),                       // present with an empty tag list
-            ("z", Some("NN")),                // single char, lowercase
-            ("Z", Some("NNP")),               // single char, ASCII uppercase
-            ("Zzzz", Some("NNP")),            // uppercase word
-            ("café", Some("NN")),             // accented Latin
-            ("Café", Some("NNP")),            // accented Latin, ASCII-capitalised
-            ("Ålesund", Some("NN")),          // non-ASCII capital: NOT NNP
-            ("Москва", Some("NN")),           // Cyrillic
-            ("Ελλάς", Some("NN")),            // Greek
-            ("ΟΔΟΣ", Some("NN")),             // Greek, all caps
-            ("İstanbul", Some("NN")),         // Turkish dotted capital
-            ("straße", Some("NN")),           // sharp s
-            ("日本語", Some("NN")),           // CJK
-            ("😀", Some("NN")),               // astral
-            ("𝐀bc", Some("NN")),              // astral, mathematically capital
-            (".", Some(".")),                 // punctuation: tagged with itself
-            ("5", Some("CD")),                // digits
-            ("3.14", Some("CD")),             // decimal: a URL rule could steal this
-            ("www.example.com", Some("URL")), // two adjacent letters plus a dot
-            (&long, Some("NN")),              // very long input
-        ];
-        for (token, want) in cases {
-            let got = tagger.tag([*token]).unwrap();
-            assert_eq!(got.tagged_words[0].tag(), *want, "{token:?}");
-            assert_eq!(&*got.tagged_words[0].token, *token, "token was rewritten");
+    fn streaming_matches_batch_with_the_dutch_rule_set() {
+        let lex = Lexicon::bundled(Language::Dutch);
+        let rules = RuleSet::bundled(Language::Dutch);
+        let t = BrillTagger::new(&lex, &rules);
+        let (left, right) = rules.context_span();
+        assert!(left >= 3 && right >= 3, "context is wide enough to matter");
+        let words: Vec<&str> = [
+            "het", "is", "een", "mooie", "dag", "niet", "waar", "er", "aan",
+        ]
+        .into_iter()
+        .cycle()
+        .take(1500)
+        .collect();
+        for n in [0, 1, 7, 100, 1023, 1024, 1030, 1500] {
+            let slice = &words[..n];
+            let batch = t.tag(slice.iter().copied());
+            let streamed: Vec<TaggedToken<'_>> = t.tag_stream(slice.iter().copied()).collect();
+            assert_eq!(streamed, batch, "length {n}");
         }
     }
 
-    /// A `Lexicon` aliases a process-global dictionary behind a lock, so it must
-    /// be shareable; a regression here would make the crate single-threaded.
+    #[test]
+    fn streaming_holds_a_bounded_window() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        let n = 50_000;
+        let mut stream = t.tag_stream(std::iter::repeat_n("dog", n));
+        let mut count = 0;
+        while let Some(w) = stream.next() {
+            assert_eq!(w.tag().as_str(), "NN");
+            count += 1;
+            assert!(
+                stream.window.len() <= STREAM_BLOCK + 8,
+                "window grew to {}",
+                stream.window.len()
+            );
+        }
+        assert_eq!(count, n);
+    }
+
+    #[test]
+    fn tag_into_appends_and_leaves_the_prefix_alone() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        let mut buf = t.tag(["would", "book"]);
+        let before = buf.clone();
+        t.tag_into(["a", "flight"], &mut buf);
+        assert_eq!(&buf[..2], &before[..]);
+        assert_eq!(tags_of(&buf[2..]), ["DT", "NN"]);
+    }
+
+    #[test]
+    fn transform_with_clears_the_scratch_buffer() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        let mut sites = vec![9999, 12345];
+        let mut words = t.annotate(["would", "book"]);
+        t.transform_with(&mut words, &mut sites);
+        assert_eq!(tags_of(&words), ["MD", "VB"]);
+    }
+
+    #[test]
+    fn evaluation_reports_counts_and_never_nan() {
+        let mut lex = Lexicon::new(tag("NN"));
+        lex.insert("to", vec![tag("TO")]).unwrap();
+        lex.insert("book", vec![tag("NN")]).unwrap();
+        let corpus = Corpus::parse_brown("to_TO book_VB").unwrap();
+
+        let none = RuleSet::new();
+        let ev = BrillTagger::new(&lex, &none).evaluate(&corpus);
+        assert_eq!(ev.tokens, 2);
+        assert_eq!(ev.correct_before_rules, 1);
+        assert_eq!(ev.correct_after_rules, 1);
+        assert_eq!(ev.accuracy(), Some(0.5));
+
+        let fix: RuleSet = "NN VB PREV-TAG TO".parse().unwrap();
+        let ev = BrillTagger::new(&lex, &fix).evaluate(&corpus);
+        assert_eq!(ev.accuracy_before_rules(), Some(0.5));
+        assert_eq!(ev.accuracy(), Some(1.0));
+
+        let empty = Corpus::new();
+        let ev = BrillTagger::new(&lex, &fix).evaluate(&empty);
+        assert_eq!(ev.tokens, 0);
+        assert_eq!(ev.accuracy(), None, "0/0 is None, never NaN");
+        assert_eq!(ev.accuracy_before_rules(), None);
+    }
+
     #[test]
     fn taggers_and_lexicons_cross_threads() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Lexicon>();
         assert_send_sync::<RuleSet>();
-        assert_send_sync::<BrillPosTagger<'_>>();
-        assert_send_sync::<Sentence<'_>>();
+        assert_send_sync::<BrillTagger<'_>>();
+        assert_send_sync::<TaggedToken<'_>>();
     }
 
-    #[test]
-    fn empty_and_single_token_sentences() {
-        let (lex, rules) = en();
-        let tagger = BrillPosTagger::new(&lex, &rules);
-        assert!(tagger.tag(Vec::<&str>::new()).unwrap().is_empty());
-        // The English lexicon has the key "" with an empty tag list, so the
-        // token survives with NO tag rather than taking the default.
-        let got = tagger.tag([""]).unwrap();
-        assert_eq!(tags(&got), [None]);
-        assert_eq!(tags(&tagger.tag(["a"]).unwrap()), [Some("DT".into())]);
-    }
-
-    #[test]
-    fn rule_order_at_a_position_is_observable() {
-        let lex = Lexicon::detached(Some("EN"), Some("NN"), None);
-        let sentence = || {
-            Sentence::from_words(vec![
-                TaggedWord::new("the", Some(Cow::Borrowed("DT"))),
-                TaggedWord::new("a", Some(Cow::Borrowed("NN"))),
-                TaggedWord::new("b", Some(Cow::Borrowed("NN"))),
-            ])
-        };
-        let forward =
-            RuleSet::from_rule_strings(&["NN VB PREV-TAG DT", "NN JJ NEXT-TAG NN"]).unwrap();
-        let mut s = sentence();
-        BrillPosTagger::new(&lex, &forward)
-            .apply_rules(&mut s)
-            .unwrap();
-        assert_eq!(
-            tags(&s),
-            [Some("DT".into()), Some("VB".into()), Some("NN".into())]
-        );
-
-        let reversed =
-            RuleSet::from_rule_strings(&["NN JJ NEXT-TAG NN", "NN VB PREV-TAG DT"]).unwrap();
-        let mut s = sentence();
-        BrillPosTagger::new(&lex, &reversed)
-            .apply_rules(&mut s)
-            .unwrap();
-        assert_eq!(
-            tags(&s),
-            [Some("DT".into()), Some("JJ".into()), Some("NN".into())]
-        );
-    }
-
-    #[test]
-    fn backward_predicates_see_final_tags_forward_ones_see_lexicon_tags() {
-        // Position 1's rule fires on position 0's ALREADY-REWRITTEN tag, while
-        // position 0's rule saw position 1's original tag. Any implementation
-        // that pre-computed all rule matches would get this wrong.
-        let lex = Lexicon::detached(Some("EN"), Some("NN"), None);
-        let rules = RuleSet::from_rule_strings(&["AA BB CURWD x", "CC DD PREV-TAG BB"]).unwrap();
-        let mut s = Sentence::from_words(vec![
-            TaggedWord::new("x", Some(Cow::Borrowed("AA"))),
-            TaggedWord::new("y", Some(Cow::Borrowed("CC"))),
-        ]);
-        BrillPosTagger::new(&lex, &rules)
-            .apply_rules(&mut s)
-            .unwrap();
-        assert_eq!(tags(&s), [Some("BB".into()), Some("DD".into())]);
-    }
-
-    #[test]
-    fn streaming_stops_after_an_error() {
-        let lex = Lexicon::detached(Some("EN"), Some("NN"), None);
-        // The wildcard old category, because "" is a real English entry with an
-        // EMPTY tag list — so the token carries no tag for "NN" to match.
-        let rules = RuleSet::from_rule_strings(&["* JJ CURRENT-WORD-IS-CAP YES"]).unwrap();
-        let tagger = BrillPosTagger::new(&lex, &rules);
-        let mut it = tagger.tag_iter(["ok", "", "more"]);
-        // "" reaches currentWordIsCap, which reads `word[0].toUpperCase()`.
-        let outcomes: Vec<_> = std::iter::from_fn(|| it.next()).collect();
-        assert!(outcomes.iter().any(Result::is_err));
-        assert_eq!(
-            tagger.tag(["ok", "", "more"]),
-            Err(TaggerError::undefined("toUpperCase"))
-        );
-    }
-
-    #[test]
-    fn very_long_input_streams_in_constant_memory() {
-        let (lex, rules) = en();
-        let tagger = BrillPosTagger::new(&lex, &rules);
-        let n = 50_000;
-        let count = tagger
-            .tag_iter(std::iter::repeat_n("dog", n))
-            .filter(|w| w.as_ref().is_ok_and(|w| w.tag() == Some("NN")))
-            .count();
-        assert_eq!(count, n);
-    }
-
-    /// `par_tag_batch` must reproduce `tag` called once per document, in
-    /// order, including on inputs this crate's own suite already knows are
-    /// tricky: the empty document, a single token, the mixed-length sentence
-    /// from [`streaming_matches_batch_on_every_length`], and the full
-    /// character-class sweep from
-    /// [`every_character_class_tags_without_panicking`].
     #[cfg(feature = "parallel")]
     #[test]
-    fn par_tag_batch_matches_sequential_tag_per_document() {
-        let (lex, rules) = en();
-        let tagger = BrillPosTagger::new(&lex, &rules);
-
+    fn par_tag_batch_matches_the_sequential_loop() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
         let documents: Vec<Vec<&str>> = vec![
             vec![],
             vec!["a"],
-            vec![
-                "the",
-                "quick",
-                "brown",
-                "fox",
-                "jumps",
-                "over",
-                "the",
-                "lazy",
-                "dog",
-                "quickly",
-                "5",
-                "www.example.com",
-                "would",
-                "book",
-                "cats",
-                "sees",
-            ],
+            vec!["I", "would", "book", "a", "flight"],
             vec![
                 "",
                 "z",
                 "Z",
-                "Zzzz",
                 "café",
-                "Café",
                 "Ålesund",
                 "Москва",
-                "Ελλάς",
-                "ΟΔΟΣ",
-                "İstanbul",
-                "straße",
                 "日本語",
                 "😀",
-                "𝐀bc",
                 ".",
                 "5",
                 "3.14",
                 "www.example.com",
             ],
+            std::iter::repeat_n("dog", 3000).collect(),
         ];
-
-        let sequential: Vec<_> = documents
-            .iter()
-            .map(|doc| tagger.tag(doc.iter().copied()))
-            .collect();
-        let parallel = tagger.par_tag_batch(&documents);
-
-        assert_eq!(parallel, sequential);
-    }
-
-    /// Each document's `Result` must survive the batch independently: one
-    /// document's predicate error must not affect any other document's
-    /// outcome, and the error must be byte-identical to the sequential one —
-    /// the same case [`streaming_stops_after_an_error`] exercises.
-    #[cfg(feature = "parallel")]
-    #[test]
-    fn par_tag_batch_preserves_per_document_errors() {
-        let lex = Lexicon::detached(Some("EN"), Some("NN"), None);
-        let rules = RuleSet::from_rule_strings(&["* JJ CURRENT-WORD-IS-CAP YES"]).unwrap();
-        let tagger = BrillPosTagger::new(&lex, &rules);
-
-        let documents: Vec<Vec<&str>> = vec![
-            vec!["ok", "more"],
-            vec!["ok", "", "more"],
-            vec![],
-            vec!["ok", "", "more"],
-            vec!["fine"],
-        ];
-
-        let sequential: Vec<_> = documents
-            .iter()
-            .map(|doc| tagger.tag(doc.iter().copied()))
-            .collect();
-        let parallel = tagger.par_tag_batch(&documents);
-
-        assert_eq!(parallel, sequential);
-        assert!(sequential[0].is_ok());
-        assert!(sequential[1].is_err());
-        assert!(sequential[2].is_ok());
-        assert!(sequential[3].is_err());
-        assert!(sequential[4].is_ok());
+        let sequential: Vec<_> = documents.iter().map(|d| t.tag(d.iter().copied())).collect();
+        assert_eq!(t.par_tag_batch(&documents), sequential);
     }
 }

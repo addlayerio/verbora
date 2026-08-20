@@ -6,13 +6,13 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "N-gram generation and frequency tables for Rust"
+description = "N-gram windows over sequences and Unicode scalars"
 keywords = ["ngram", "bigram", "trigram"]
 categories.workspace = true
 
+# No dependencies. The crate is `slice::windows` with a precondition the type
+# system discharges, one padding rule, and one character-window iterator.
 [dependencies]
-verbora-core = { workspace = true }
-rustc-hash = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
