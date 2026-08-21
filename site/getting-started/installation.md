@@ -20,12 +20,19 @@ character database, and `verbora-ngrams` has no dependencies at all.
 verbora-tokenizers = "0.2"
 ```
 
+<div class="callout callout-warn">
+<strong>Upgrading from 0.1?</strong> <code>0.2.0</code> is a breaking release: a
+caret requirement of <code>"0.1"</code> will not resolve to it, every module
+path is gone in favour of the crate root, and several results changed without
+changing type. <a href="upgrading">Upgrading from 0.1 to 0.2</a> is the
+old-signature-to-new-signature guide, including the changes that do not produce
+a compile error.
+</div>
+
 <div class="callout callout-note">
-<strong>Pre-1.0.</strong> The crates are at <code>0.2.0</code>, which is a
-breaking release relative to <code>0.1.0</code>: a caret requirement of
-<code>"0.1"</code> will not resolve to it, and the examples on this site are
-written against the newer API. If the version you want is not on crates.io yet,
-use the git or path form below — the code is identical either way.
+<strong>Pre-1.0.</strong> The examples on this site are written against
+<code>0.2</code>. If the version you want is not on crates.io yet, use the git or
+path form below — the code is identical either way.
 </div>
 
 From git:
@@ -94,9 +101,20 @@ verbora-trie = "0.2"
 ## Cargo features
 
 Every optional feature is off by default, so a plain dependency stays sequential
-and pulls in nothing extra. Features add explicit parallel batch APIs, two
-language-detection implementations, and a `serde` hook on the core types — see
-[Cargo features](cargo-features.md).
+and pulls in nothing extra. Features add explicit parallel batch APIs and two
+language-detection implementations — see [Cargo features](cargo-features.md).
+
+<div class="callout callout-warn">
+<strong>Removed in 0.2.0.</strong> <code>verbora-core</code> declared a
+<code>serde</code> feature that nothing in the crate ever used — no item derived
+or implemented a <code>serde</code> trait. It is gone, and no crate in 0.2.0 has
+one. A dependency written as
+<code>verbora-core = { version = "0.1", features = ["serde"] }</code> fails to
+resolve once the pin moves to <code>"0.2"</code>; drop the
+<code>features</code> key. Serialization lives in the crates that actually do it
+— <code>verbora-tfidf</code> and <code>verbora-classifiers</code> — where
+<code>serde</code> is a plain dependency, not a feature.
+</div>
 
 ## Building from source
 
@@ -121,3 +139,5 @@ unoptimised debug build makes them unusably slow.
   split the way they are.
 - [Cargo features](cargo-features.md) — parallel batch APIs and the other
   opt-ins.
+- [Upgrading from 0.1 to 0.2](upgrading.md) — what broke, what silently changed,
+  and what to write instead.

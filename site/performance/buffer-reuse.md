@@ -72,7 +72,11 @@ this is the single easiest mistake to make with these APIs.
 | `BorrowingTokenizer::tokenize_borrowed_into` | **appends** — you call `clear()` |
 | `Tokenizer::tokenize_into` | **appends** |
 | `NounInflector::pluralize_into` / `singularize_into` | **appends** |
+| `OrdinalInflector::nth_into` | **appends** |
 | `verbora_inflectors::CaseMode::apply_into` | **appends** |
+| `SoundEx::process_into` / `Metaphone::process_into` | **appends** |
+| `verbora_transliterators::transliterate_ja_into` | **appends** |
+| `BrillTagger::tag_into` / `annotate_into` | **appends** — and the rules apply only to the newly appended range, so a forgotten `clear()` grows the buffer rather than re-transforming what was already there |
 | `verbora_core::Stemmer::stem_into` | **clears first** |
 
 Appending is the default because accumulating tokens across documents is a real
@@ -173,10 +177,15 @@ allocates at most one `Vec<i64>` holding its three rolling rows (and nothing at
 all for short operands). Those `O(m)` and `O(nm)` allocations cannot be hoisted
 out of a loop today.
 
-Jaro–Winkler *is* allocation-free for inputs up to 128 units: its two
-match-flag arrays live on the stack below that threshold, and only above it does
-it allocate two `Vec<bool>`. Words are short by nature, so the stack path is the
-common one.
+`jaro` and `jaro_winkler` are the crate's allocation-free case, on ASCII input:
+nothing at all when the longer operand is at most 16 units — the greedy scalar
+loop keeps its match flags in `[bool; 128]` stack arrays — and nothing when both
+trimmed operands fit one 64-bit word, because the byte pattern-match table is a
+fixed 256-entry stack array. Past that, the packed pattern-match table becomes
+one `Vec<u64>`, while the match-flag bitsets stay on the stack up to 1024 units
+per side. A non-ASCII pair adds one `Vec<char>` per operand for the scalar decode
+and hashes the table instead. Words are short by nature, so the allocation-free
+paths are the common ones.
 
 ## Related
 

@@ -118,6 +118,7 @@ gtag('config', 'G-BK7VXYJHQJ');`,
       {
         text: 'More',
         items: [
+          { text: 'Upgrading from 0.1 to 0.2', link: '/getting-started/upgrading' },
           { text: 'Rust API reference', link: '/reference/api' },
           { text: 'Documentation is part of the code', link: '/reference/docs-are-code' },
         ],
@@ -166,6 +167,7 @@ function sidebarGettingStarted() {
         { text: 'Your first program', link: '/getting-started/first-program' },
         { text: 'The workspace map', link: '/getting-started/workspace' },
         { text: 'Cargo features', link: '/getting-started/cargo-features' },
+        { text: 'Upgrading from 0.1 to 0.2', link: '/getting-started/upgrading' },
       ],
     },
   ];

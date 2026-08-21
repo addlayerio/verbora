@@ -41,7 +41,7 @@ compute the same values.
 | `levenshtein_variants/plain_myers_unit` | 177.17 µs | 166.1 ns | **1066.6×** |
 | `levenshtein_variants/osa_bit_vector` | 190.07 µs | 179.4 ns | **1059.5×** |
 | `levenshtein_variants/damerau_zhao_sahni` | 304.11 µs | 7.75 µs | **39.2×** † |
-| `levenshtein_variants/search_matrix` | 176.86 µs | 12.79 µs | **13.8×** |
+| `levenshtein_variants/search_matrix` | 176.86 µs | 12.79 µs | **13.8×** ‡ |
 | `jaro_winkler/4` | 27.2 ns | 15.3 ns | **1.8×** |
 | `jaro_winkler/16` | 532.3 ns | 79.4 ns | **6.7×** |
 | `jaro_winkler/64` | 4.30 µs | 130.7 ns | **32.9×** |
@@ -64,6 +64,13 @@ of a pinned, non-canonical recurrence, before the move to Zhao–Sahni's
 linear-space algorithm with common-affix trimming. The JavaScript side is
 unaffected. The pair is retained as the record of that run and is **pending
 re-measurement**; no replacement number has been invented for it.
+
+‡ The `search_matrix` row's Verbora figure — and therefore its speedup — was
+captured while plain-Levenshtein search still built the full cost + parent
+matrix, before the move to the same per-column bit-vector deltas the
+distance-mode kernel uses. The JavaScript side is unaffected. The pair is
+retained as the record of that run and is **pending re-measurement**; no
+replacement number has been invented for it.
 
 ## Current Levenshtein shape suite
 
@@ -116,26 +123,30 @@ fastest data structure:
 | distance, OSA (fallback, weighted costs) | **3 rows** | transposition reaches row − 2 |
 | distance, unrestricted Damerau, unit cost | **3 rolling rows + one saved-cell row** | transposition reaches an arbitrary earlier row, but Zhao–Sahni's linear-space algorithm shows only the no-column-gap and no-row-gap candidates can win, so one remembered cell each replaces the cost + parent matrices (byte operands of at most 8 units run a table-free stack matrix instead) |
 | distance, unrestricted Damerau (fallback, weighted costs) | full matrix | a weighted transposition reaches an arbitrary earlier row at an arbitrary price |
-| search, any variant | full matrix | the match start is recovered by walking parents |
+| search, Levenshtein, unit cost | per-column bit-vector deltas (no matrix) | `search_bits` recovers every cell's cost, and every parent choice, from the same Myers/Hyyrö `Pv`/`Mv` words the distance-mode kernel already produces, so the backtrace never reads a stored parent |
+| search (every other combination — OSA or unrestricted Damerau at any cost, or a weighted search of any variant) | full matrix | a transposition's parent depends on state (`last_row_map`) that cell costs alone cannot recover, and weighted costs have no bit-vector form at all |
 
 The bit-parallel kernels are why `levenshtein/ascii/1024` posts **3307.4×** —
 the largest gap on this page by a wide margin. The `levenshtein_variants` rows
-are named for the kernels they actually exercise, which is why none of them
-reads as a row count any more: `plain_myers_unit` and `osa_bit_vector` both run
-bit-parallel kernels at 64 characters (their fixed input size) — hence
-**1066.6×** and **1059.5×**, not what a literal two-row or three-row scalar
-sweep would produce. `damerau_zhao_sahni` never builds a matrix either; its
-**39.2×** predates the Zhao–Sahni kernel it is now named for and is pending
-re-measurement, as the footnote to the table above records. Only `search_matrix`
-is what its name says — the full cost + parent matrix, required for the
-backtrace — and its **13.8×** is the structural-savings story below.
+are named for the kernels they exercised when they were measured, which is why
+none of them reads as a row count — or a matrix — any more: `plain_myers_unit`
+and `osa_bit_vector` both run bit-parallel kernels at 64 characters (their
+fixed input size) — hence **1066.6×** and **1059.5×**, not what a literal
+two-row or three-row scalar sweep would produce. `damerau_zhao_sahni` never
+builds a matrix either; its **39.2×** predates the Zhao–Sahni kernel it is now
+named for and is pending re-measurement, as the footnote to the table above
+records. `search_matrix` no longer builds one either: the plain, unit-cost
+search it benchmarks now runs the same per-column bit-vector deltas as the
+distance-mode kernel, recomputing each backtrack step from cell costs instead
+of reading a stored parent. Its **13.8×** predates that move and is pending
+re-measurement too, for the same reason `damerau_zhao_sahni`'s is — see the
+second footnote to the table above.
 
-Where the full matrix *is* required — search mode, and unrestricted Damerau at
-weighted costs — it is stored
-struct-of-arrays: costs in one
-flat `Vec<f64>`, parents in another. The hot cost sweep stays contiguous, and the
-parents — touched only during backtracking — never pollute a cache line during
-it.
+Where the full matrix *is* required — every search except plain Levenshtein
+at unit cost, plus unrestricted-Damerau distance at weighted costs — it is
+stored struct-of-arrays: costs in one flat `Vec<f64>`, parents in another. The
+hot cost sweep stays contiguous, and the parents — touched only during
+backtracking — never pollute a cache line during it.
 
 ## Where the wins are smaller, and why
 
@@ -198,8 +209,14 @@ comparison. See [Fuzzy name matching](../recipes/fuzzy-matching.md).
 **They do not cover the other crates.** No tokenizer, phonetics, n-gram,
 normalizer, inflector or trie comparison has been published. Do not extrapolate.
 
-**They say nothing about memory.** Allocation counts and peak RSS are not yet
-instrumented.
+**They say nothing about memory.** Verbora's distance metrics hold no
+persistent state and have an `O(m)` working set in their fast paths, so
+there's little for a memory benchmark to show for them specifically, and none
+of the figures above carry one. Memory *is* instrumented elsewhere in the
+workspace — `verbora-spellcheck`'s `counting_alloc`, a `#[cfg(test)]` global
+allocator its own memory-bound tests measure peak bytes with — but it is
+scoped to that crate's test build and does not reach the metrics on this
+page; see the [allocation reference](../performance/allocation.md).
 
 ## Reproducing
 

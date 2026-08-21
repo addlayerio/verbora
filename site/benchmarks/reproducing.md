@@ -1,7 +1,21 @@
 # Reproducing the benchmarks
 
-Every number in this section can be regenerated from a clean checkout. If one
-cannot be reproduced, that is a bug.
+The commands below are the ones that produced every number in this section —
+run them from a clean checkout and they work, or that is a bug.
+
+<div class="callout callout-warn">
+<strong>A fresh run will not always reproduce the printed number.</strong>
+Nothing on the <a href="index">benchmark method</a>,
+<a href="competitive">competitive</a> or
+<a href="distance">string distance</a> pages has been re-measured against
+Verbora 0.2.0, and several of the kernels those pages' numbers measured have
+since been replaced. Where a table or row is marked **pending
+re-measurement**, running the matching command here reports whatever the
+current code does, not the figure sitting next to it — that gap is the open
+work, not a bug in the command. See
+<a href="../getting-started/upgrading">Upgrading from 0.1 to 0.2</a> for what
+changed.
+</div>
 
 ## Prerequisites
 
@@ -40,15 +54,27 @@ cargo bench -p verbora-distance
 ```
 
 Criterion writes HTML reports to `target/criterion/` and stores a baseline it
-compares against on the next run. The other benched crates:
+compares against on the next run. Eighteen crates ship a `benches/`
+directory; `verbora-distance` is above, and the other seventeen are:
 
 ```bash
+cargo bench -p verbora-analyzers
+cargo bench -p verbora-classifiers
 cargo bench -p verbora-inflectors
+cargo bench -p verbora-language
 cargo bench -p verbora-ngrams
 cargo bench -p verbora-normalizers
 cargo bench -p verbora-phonetics
+cargo bench -p verbora-sentiment
+cargo bench -p verbora-spellcheck
+cargo bench -p verbora-stemmers
+cargo bench -p verbora-tagger
+cargo bench -p verbora-tfidf
 cargo bench -p verbora-tokenizers
+cargo bench -p verbora-transliterators
 cargo bench -p verbora-trie
+cargo bench -p verbora-util
+cargo bench -p verbora-wordnet
 ```
 
 ## 3. Run the competitive suite

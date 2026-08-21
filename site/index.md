@@ -22,6 +22,11 @@ Iterators first, borrowed tokens, and no allocation you did not ask for.</p>
 <a class="hero-btn hero-btn--ghost" href="features/">Browse the features</a>
 </div>
 
+<p class="hero-note"><strong>0.2.0 is a breaking release.</strong> If you are on
+<code>0.1</code>, some of it fails to compile and some of it quietly returns
+something different — <a href="getting-started/upgrading">what changed and how to
+migrate</a>.</p>
+
 <div class="hero-signals" role="group" aria-label="Verbora at a glance">
 <span><b>19 crates</b><small>Depend on what you use</small></span>
 <span><b>Iterators first</b><small>Lazy, borrowed tokens</small></span>
@@ -94,7 +99,7 @@ own, behind a fast, idiomatic Rust API.
 <p class="capmap-sub">Statistics and trained models</p>
 </div>
 <ul class="capmap-leaves">
-<li><a href="features/ngrams">N-grams</a><span class="capmap-meta">+ chinese</span></li>
+<li><a href="features/ngrams">N-grams</a><span class="capmap-meta">windows + padding</span></li>
 <li><a href="features/tfidf">TF-IDF</a><span class="capmap-meta">sparse, interned</span></li>
 <li><a href="features/sentiment">Sentiment</a><span class="capmap-meta">14 lexicons</span></li>
 <li><a href="features/classifiers">Classifiers</a><span class="capmap-meta">3 models</span></li>
@@ -198,8 +203,10 @@ decision trees for every subsystem that offers more than one shape.
   construction, where a bad abbreviation list or a rule that will not compile is
   rejected once, before the first call.
 - **The data layout is chosen, not inherited.** The trie is a flat arena
-  addressed by `u32`, not one heap object per node; Levenshtein reaches for a
-  bit-parallel word first and falls back to two rows in L1.
+  addressed by `u32`, not one heap object per node; unit-cost Levenshtein is
+  bit-parallel at every length — one 64-bit word of state for a short pattern,
+  contiguous blocks of them for a long one — and a dynamic-programming row
+  appears only in the weighted forms, which have no bit-parallel formulation.
 
 Every number on this site carries its hardware, its method and the command to
 reproduce it, and a figure whose code has changed underneath it is marked pending

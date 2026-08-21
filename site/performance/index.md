@@ -81,6 +81,19 @@ phonetics, n-grams, normalizers, inflectors and the trie exist in-tree
 (<code>crates/*/benches/</code>) but their tables are not published yet, so this
 section says "fewer allocations" rather than quoting a speed figure for those
 subsystems. Where a page describes allocation behaviour it describes
-<em>what the code does</em>, read from the source — allocation counting and
-peak-RSS instrumentation are not in the repository.
+<em>what the code does</em>, read from the source: there is no per-API
+allocation-count table anywhere in this repository. The one allocation
+instrument that does exist is <code>verbora-spellcheck</code>'s
+<code>counting_alloc</code> — a <code>#[cfg(test)]</code> global allocator that
+its own memory-bound tests measure peak bytes with. It is scoped to that crate's
+test build, it is not compiled into any published library, and it produces no
+figure this section quotes.
+</div>
+
+<div class="callout callout-warn">
+<strong>Nothing here has been re-measured against 0.2.0.</strong> The benchmark
+campaign for that release has not been run, so every timing on these pages
+predates it and is marked pending — several of the kernels underneath them have
+since been replaced. See
+<a href="../getting-started/upgrading">Upgrading from 0.1 to 0.2</a>.
 </div>

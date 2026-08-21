@@ -151,6 +151,13 @@ jobs:
       - name: Check internal links and anchors
         run: python3 check-links.py
 
+      # Runs before the build so a broken overlay fails fast, and because the
+      # defect it catches is invisible to every other gate here: the site
+      # builds, the links resolve, the snippets pass, and the mobile menu or
+      # the search modal silently does not open. Both have shipped.
+      - name: Check no nav ancestor is a containing block
+        run: python3 check-containing-blocks.py
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3

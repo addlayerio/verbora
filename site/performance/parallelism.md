@@ -17,6 +17,15 @@ verbora-tokenizers = { version = "0.2", features = ["parallel"] }
 and adds one or more `par_*` functions, each a thin fan-out over the crate's
 existing sequential primitive:
 
+<div class="callout callout-warn">
+<strong>Pending re-measurement.</strong> The per-word costs on this page are
+0.1.0 measurements. They are retained because the <em>argument</em> they support
+— that a per-word task is far below <code>rayon</code>'s dispatch overhead — is
+structural and holds across an order of magnitude, but the numbers themselves
+predate 0.2.0 and no figure here should be quoted as current.
+</div>
+
+
 | Crate | API | Granularity |
 |---|---|---|
 | [`verbora-spellcheck`](../features/spellcheck) | `Spellcheck::par_corrections_batch` | per word |
@@ -41,14 +50,17 @@ the feature is opt-in and the functions are called by name.
 
 <div class="callout callout-note">
 <strong><code>verbora-tfidf</code> is the one split case.</strong>
-<code>add_document</code> takes <code>&amp;mut self</code> and mutates the term
-interner and the incremental document-frequency table, so
-<code>par_add_documents</code> runs the stateless phase (tokenizing) in
-parallel and replays the stateful phase (interning, stop-word filtering, the
-document-frequency update) sequentially, in the same order. The result is
-byte-for-byte identical to the sequential loop — down to the term-id assignment
-order and the serialized bytes — and the sequential phase is a real,
-un-parallelised fraction of the total, which bounds what fan-out can buy.
+<code>add_document</code> takes <code>&amp;mut self</code> and mutates shared
+corpus state — the term table, the document-frequency table and the document
+list — so <code>par_add_documents</code> runs the stateless phase in parallel
+(<code>Analyzer::terms</code>: tokenizing, case folding and stop-word filtering,
+all pure functions of the text and the analyzer) and replays the resulting term
+lists through the sequential counting primitive, in the original order. The
+result is identical to the sequential loop — same positions, same counts, same
+term-id assignment order, same serialized bytes — and the sequential phase is a
+real, un-parallelised fraction of the total, which bounds what fan-out can buy.
+It also costs one <code>String</code> per term, which
+<code>add_document</code> does not: its terms are borrowed from the text.
 </div>
 
 ## Where there is deliberately no `par_*` API
@@ -192,11 +204,11 @@ property of the code rather than of a run:
   fan-out and the only question is whether the batch is big enough to amortize
   fork-join.
 - **TF-IDF is Amdahl-limited by construction.** `par_add_documents` parallelises
-  tokenizing and replays interning and counting sequentially, in order, so the
-  sequential fraction is real and bounded below by the corpus update itself. It
-  also allocates one `String` per term, which `add_document` does not — its terms
-  are borrowed from the text. A handful of short documents will be slower this
-  way.
+  the analyzer and replays the counting sequentially, in order, so the sequential
+  fraction is real and bounded below by the corpus update itself. Fork-join has a
+  fixed cost on top, so a handful of short documents will be slower this way; the
+  crate's own documentation states the crossover is unmeasured for the current
+  ingestion path.
 
 Four checks before you parallelise anything yourself:
 

@@ -425,7 +425,7 @@ See [Allocation](../performance/allocation.md),
 ## Parallelism
 
 `verbora-core` ships no `par_*` function — it is shared traits, not an algorithm;
-thirteen concrete crates do, behind an opt-in `parallel` feature (see
+fourteen concrete crates do, behind an opt-in `parallel` feature (see
 [Parallelism](../performance/parallelism.md)). Every implementation in the
 workspace takes `&self`, holds no per-call mutable state, and is `Send + Sync`,
 so a `rayon` `par_iter` over your documents is sound — but it gives up buffer

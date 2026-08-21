@@ -35,8 +35,8 @@ it rejected rather than repairing it:
 
 | Operation | Rejects |
 |---|---|
-| `Rule` and `RuleSet` from text, via `FromStr` or `RuleSet::parse_lines` | too few fields, an unknown condition name, the wrong argument count for the condition named |
-| `Corpus::parse_brown` | a `token_TAG` pair with no tag, an empty token, or an empty tag |
+| `Rule` and `RuleSet` from text, via `FromStr` or `RuleSet::parse_lines` | too few fields, an unknown condition name, the wrong argument count for the condition named, a field that is not a valid tag or word, and a boolean argument that is neither `YES` nor `NO` |
+| `Corpus::parse_brown` | a `token_TAG` pair with no tag, an empty token, an empty tag, or the wildcard tag `*` |
 | `Corpus::build_lexicon` | a corpus token that is not a conforming lexicon key — which `from_sentences` can produce and `parse_brown` cannot |
 | `Lexicon::insert` | an empty key, a key containing whitespace, or an empty tag list |
 | `Tag::new` and `Word::new` | the empty string, and any `White_Space` scalar |
@@ -82,10 +82,14 @@ in.
 | Score a tagger against an annotated corpus | `BrillTagger::evaluate` → `Evaluation` |
 | Learn transformation rules | `Trainer` → `Training` |
 
-`tag_stream` yields the same tags a whole-document `tag` would, holding only a
-window of the rule set's own context span — 4 tokens for the bundled English
-rules. It is the tool when memory, not throughput, is the constraint; if the
-document already fits in memory, `tag` does strictly less work.
+`tag_stream` yields the same tags a whole-document `tag` would, element for
+element, holding `context_span.0 + 1024 + context_span.1` tokens at a time and
+no more, whatever the document length: it finalises 1024 positions per refill
+with exactly enough context on each side for those positions to come out
+identical to a whole-document run. `RuleSet::context_span` is a property of the
+rule set, not of the input — `(4, 0)` for the bundled English rules. It is the
+tool when memory, not throughput, is the constraint; if the document already
+fits in memory, `tag` does strictly less work.
 
 `Evaluation` reports counts, not percentages: `tokens`, `correct_before_rules`
 and `correct_after_rules`. `accuracy` and `accuracy_before_rules` divide them and

@@ -254,22 +254,41 @@ body {
    transparent (§4) so the bar, its title block and its content body all let
    this through. VitePress's own divider stops at the sidebar edge; one
    full-width hairline here replaces it. */
-/* The glass goes on `.VPNavBar`, never on `.VPNav`.
+/* The glass goes on a pseudo-element, never on a real ancestor.
 
-   `.VPNav` is the wrapper around *both* the bar and `.VPNavScreen`, the
-   mobile menu — and `.VPNavScreen` is `position: fixed` with
-   `top: var(--vp-nav-height); bottom: 0`, expecting the viewport as its
-   containing block. `backdrop-filter` (like `filter` and `transform`)
-   makes an element the containing block for its fixed descendants, so
-   putting it on `.VPNav` resolves those offsets against the 64px bar
-   instead: the menu opens with zero height and nothing appears, while the
-   hamburger still flips to its close state. Scoping the effect to the bar
-   keeps the look and leaves the menu measuring against the viewport. */
+   `backdrop-filter` (like `filter` and `transform`) makes an element the
+   containing block for its `position: fixed` descendants. The nav has two
+   of those, and each one breaks differently when an ancestor absorbs it:
+
+   * `.VPNavScreen`, the mobile menu, is `top: var(--vp-nav-height);
+     bottom: 0` and is a child of `.VPNav`. With the glass on `.VPNav` it
+     opened at zero height — nothing appeared, while the hamburger still
+     flipped to its close state.
+   * `.VPLocalSearchBox` is `position: fixed; inset: 0` and is a child of
+     `.VPNavBar`, because VitePress renders it in place rather than
+     teleporting it to `<body>`. With the glass on `.VPNavBar` the search
+     modal resolved its four offsets against the 64px bar: it opened
+     clipped to the bar's height, so the field could not be typed into.
+
+   Moving the effect from `.VPNav` to `.VPNavBar` fixed the first and left
+   the second, since the search box lives inside the bar. A pseudo-element
+   fixes both at once and cannot be outgrown: `::before` carries the filter,
+   so no element an actual component renders into is ever a containing
+   block. `site/check-containing-blocks.py` fails the build if that stops
+   being true. */
 .VPNavBar {
+    background: transparent;
+    border-bottom: 1px solid var(--vp-c-divider);
+}
+
+.VPNavBar::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
     background: rgb(var(--ox-bg-rgb) / 0.8);
     backdrop-filter: blur(16px) saturate(140%);
     -webkit-backdrop-filter: blur(16px) saturate(140%);
-    border-bottom: 1px solid var(--vp-c-divider);
 }
 
 .VPNavBar .divider-line {
@@ -1001,6 +1020,19 @@ body {
     flex-wrap: wrap;
     gap: var(--sp-3);
     margin-top: var(--sp-6);
+}
+
+/* The migration signal on the landing page. Set apart by a rule rather than a
+   filled panel: a reader on the current version should be able to skip it, and
+   one arriving from 0.1 should not be able to miss it. */
+.vp-doc .hero-note {
+    max-width: 62ch;
+    margin: var(--sp-6) 0 0;
+    padding-left: var(--sp-4);
+    border-left: 2px solid var(--vp-c-brand-1);
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--vp-c-text-2);
 }
 
 /* One filled pair for both modes: white on #b7410e is 5.6:1 either way, and

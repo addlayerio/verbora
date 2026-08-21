@@ -56,6 +56,14 @@ match, and apply no corpus frequency. Each neighbour arrives with its exact
 distance already computed, so ranking at the call site is one sort and no
 recomputation.
 
+That sort needs no comparator. `Correction` and `Neighbor` both order by the
+ranking their documentation states rather than by field declaration order —
+`Correction` by ascending distance, then descending frequency, then ascending
+word; `Neighbor` by ascending distance, then ascending word. Sorting a
+`corrections` result therefore leaves it as it was, `Iterator::min` over one
+answers what `best_correction` answers, and `found.sort()` over a
+`Vec<Neighbor>` puts the nearest first rather than the alphabetically first.
+
 ```rust
 use verbora_spellcheck::{DeletionIndexBuilder, FuzzyIndexBuilder};
 
@@ -85,7 +93,9 @@ fn main() {
 }
 ```
 
-`DeletionIndex` fixes its ceiling at build time, so a query beyond it is a
+`DeletionIndex` fixes its ceiling when the builder is created —
+`DeletionIndexBuilder::new(2)` above — and reports it back through
+`DeletionIndex::max_distance()`, so a query beyond it is a
 `DistanceBeyondIndex` error rather than a silently short answer.
 
 ## Cost
