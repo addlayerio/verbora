@@ -17,6 +17,15 @@ verbora-tokenizers = { version = "0.2", features = ["parallel"] }
 and adds one or more `par_*` functions, each a thin fan-out over the crate's
 existing sequential primitive:
 
+<div class="callout callout-warn">
+<strong>Pending re-measurement.</strong> The per-word costs on this page are
+0.1.0 measurements. They are retained because the <em>argument</em> they support
+— that a per-word task is far below <code>rayon</code>'s dispatch overhead — is
+structural and holds across an order of magnitude, but the numbers themselves
+predate 0.2.0 and no figure here should be quoted as current.
+</div>
+
+
 | Crate | API | Granularity |
 |---|---|---|
 | [`verbora-spellcheck`](../features/spellcheck) | `Spellcheck::par_corrections_batch` | per word |

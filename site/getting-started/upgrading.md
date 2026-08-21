@@ -88,7 +88,7 @@ the list to scan first, because each row is a small edit rather than a redesign.
 | `verbora-transliterators` | `transliterate`, `transliterate_into` | `transliterate_ja`, `transliterate_ja_into`, `transliterate_ja_normalized` |
 | | `Phase` | gone — the pipeline is internal |
 | `verbora-normalizers` | `normalize`, `normalize_token` (English contraction expansion: `"I'D"` → `["I", "would"]`) | gone — this crate is Unicode normalization and diacritic folding only |
-| | `normalize_ja`, `normalize_no`, `normalize_sv` | gone — `nfkc` covers the width and kana folding `normalize_ja` did; `normalize_no` and `normalize_sv` existed for the Norwegian and Swedish stemmers, which is exactly where the umlaut-folding defect lived, and they are no longer public |
+| | `normalize_ja`, `normalize_no`, `normalize_sv` | gone — `nfkc` covers most of `normalize_ja`, but **not all of it**: width folding and composite symbols (`㍼54年㋃㏪` → `昭和54年4月11日`) match, while iteration marks (`時々刻々` → `時時刻刻`) and the small-tsu rewrite before the n-row (`まっなか` → `まんなか`) are **not** applied — `nfkc` returns those unchanged, so treat it as a replacement only if you did not rely on those two; `normalize_no` and `normalize_sv` existed for the Norwegian and Swedish stemmers, which is exactly where the umlaut-folding defect lived, and they are no longer public |
 | `verbora-inflectors` | `pluralize` → `Result<String, EmptyToken>` | → `String` (total; the empty token has no inflected form and comes back unchanged) |
 | | `CountInflector`, `CountInflectorFr` | `OrdinalInflector`, `OrdinalInflectorFr` (the French one takes a `Gender`) |
 | | `CaseMode::{Lower, Capitalize, Upper}` | `CaseMode::{Preserve, Title, Upper}` |
@@ -153,6 +153,32 @@ plan on rewriting the call site.
 an <code>Unknown</code> variant. A <code>match</code> ported across mechanically
 will compile and mean something different.
 </div>
+
+### The one break that is not in your code
+
+Every fix above is something the compiler points at inside a `.rs` file. This
+one fails earlier, in `Cargo.toml`, before anything is compiled:
+
+```toml
+# 0.1
+verbora-core = { version = "0.1", features = ["serde"] }
+# 0.2 — drop the features key entirely
+verbora-core = "0.2"
+```
+
+`verbora-core` declared a `serde` feature that nothing in the crate ever used:
+no item derived or implemented a `serde` trait, and no dependent enabled it. It
+is gone, and **no crate in 0.2.0 has a `serde` feature**. Cargo reports this as
+`the package 'verbora-core' does not have the feature 'serde'`, which does not
+name a version and so does not obviously point here.
+
+The crates that do serialize — `verbora-tfidf` and `verbora-classifiers` —
+always used `serde` as a plain dependency rather than a feature, so their JSON
+persistence is unchanged.
+
+Every other Cargo feature carried over: `parallel` on the fourteen crates that
+had it, and `language-detection` / `fast-language-detection` on
+`verbora-language`.
 
 ## `#[non_exhaustive]`, once and properly
 

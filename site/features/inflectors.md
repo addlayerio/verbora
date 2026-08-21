@@ -634,6 +634,8 @@ two `String`s per word and `pluralize_into` one. A freshly constructed inflector
 holds no heap allocation of its own.
 
 No inflector results are published yet; see [Benchmarks](../benchmarks/index.md).
+The per-word figure quoted under *Concurrency* below predates 0.2.0 and is
+pending re-measurement.
 
 ## Concurrency
 

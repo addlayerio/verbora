@@ -230,7 +230,8 @@ over the existing sequential `classify`, order-preserving, with each element
 carrying its own `Result` so one text's error does not abort the others.
 
 **When to reach for it.** Only when the *batch*, not the single classification,
-is the unit of work. A single `classify` costs on the order of 13 µs for a Bayes
+is the unit of work. A single `classify` costs on the order of 13 µs (a 0.1.0
+measurement, pending re-measurement) for a Bayes
 classifier trained on a few dozen documents, and a `rayon` task costs about a
 microsecond to schedule, so a handful of texts is close to break-even — prefer a
 plain `texts.iter().map(...)` loop there. Batches in the thousands amortise the

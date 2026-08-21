@@ -22,6 +22,11 @@ Iterators first, borrowed tokens, and no allocation you did not ask for.</p>
 <a class="hero-btn hero-btn--ghost" href="features/">Browse the features</a>
 </div>
 
+<p class="hero-note"><strong>0.2.0 is a breaking release.</strong> If you are on
+<code>0.1</code>, some of it fails to compile and some of it quietly returns
+something different — <a href="getting-started/upgrading">what changed and how to
+migrate</a>.</p>
+
 <div class="hero-signals" role="group" aria-label="Verbora at a glance">
 <span><b>19 crates</b><small>Depend on what you use</small></span>
 <span><b>Iterators first</b><small>Lazy, borrowed tokens</small></span>

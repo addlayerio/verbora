@@ -101,9 +101,20 @@ verbora-trie = "0.2"
 ## Cargo features
 
 Every optional feature is off by default, so a plain dependency stays sequential
-and pulls in nothing extra. Features add explicit parallel batch APIs, two
-language-detection implementations, and a `serde` hook on the core types — see
-[Cargo features](cargo-features.md).
+and pulls in nothing extra. Features add explicit parallel batch APIs and two
+language-detection implementations — see [Cargo features](cargo-features.md).
+
+<div class="callout callout-warn">
+<strong>Removed in 0.2.0.</strong> <code>verbora-core</code> declared a
+<code>serde</code> feature that nothing in the crate ever used — no item derived
+or implemented a <code>serde</code> trait. It is gone, and no crate in 0.2.0 has
+one. A dependency written as
+<code>verbora-core = { version = "0.1", features = ["serde"] }</code> fails to
+resolve once the pin moves to <code>"0.2"</code>; drop the
+<code>features</code> key. Serialization lives in the crates that actually do it
+— <code>verbora-tfidf</code> and <code>verbora-classifiers</code> — where
+<code>serde</code> is a plain dependency, not a feature.
+</div>
 
 ## Building from source
 

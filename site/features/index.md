@@ -50,7 +50,7 @@ you want to *do*, or from the crate map further down.
 | [Trie](trie.md) | `verbora-trie` | prefix tree, prefix and path queries |
 | [Transliterators](transliterators.md) | `verbora-transliterators` | Japanese kana → romaji, one left-to-right pass over a generated mora index |
 | [WordNet](wordnet.md) | `verbora-wordnet` | lexical database, synsets, relation traversal, 4 storage strategies |
-| [TF-IDF](tfidf.md) | `verbora-tfidf` | term interning, incremental idf cache, `list_terms`/`tfidf`/`tfidfs` |
+| [TF-IDF](tfidf.md) | `verbora-tfidf` | `TfIdf`, `TermScore`, `list_terms`/`tfidf`/`tfidfs`, JSON persistence |
 | [Sentiment](sentiment.md) | `verbora-sentiment` | 14 lexicons across 10 languages, sticky negation |
 | [Classifiers](classifiers.md) | `verbora-classifiers` | Bayes, logistic regression, MaxEnt + GIS |
 | [Stemmers](stemmers.md) | `verbora-stemmers` | 16 stemmers: Porter/Snowball across 12 languages, plus Carry (French), Lancaster, Japanese, Indonesian |
