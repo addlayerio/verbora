@@ -415,6 +415,46 @@ come from without any value moving:
 If you were relying on one of those claims rather than on the code, your program
 was already doing something else.
 
+## `verbora-wordnet` 0.3.0
+
+Crates version independently: one moves when *its own* public API does. Every
+crate except this one is at `0.2`.
+
+`verbora-wordnet` 0.2.0 could not read **8.8% of a real WordNet dictionary** —
+13,606 of 155,467 index entries, including `run`, `cat`, `light`, `water`,
+`computer` and `node`. `PointerSymbol::from_symbol` accepted the domain pointers
+only in their qualified spellings (`;c`, `-c`, `;r`, `-r`, `;u`, `-u`) and
+rejected the bare `;` and `-` that Princeton's `index.*` files actually write —
+the class letter belongs to the sense, so it appears only in `data.*`.
+`index_entry`, `senses`, `sense` and `lookup` all failed on any affected lemma.
+
+If you are on 0.2.0 and WordNet lookups were failing for common words, that is
+why. Move to `"0.3"`.
+
+The fix is breaking in one way:
+
+```rust ignore
+// 0.2 — compiles
+match symbol {
+    PointerSymbol::Hypernym => "…",
+    // … every other variant …
+}
+
+// 0.3 — `PointerSymbol` gained `Domain` (`;`) and `Member` (`-`) and is
+// `#[non_exhaustive]`, so a wildcard arm is required.
+match symbol {
+    PointerSymbol::Hypernym => "…",
+    // … every other variant …
+    _ => "…",
+}
+```
+
+`Domain` and `Member` are relations in their own right rather than being folded
+into one of the three classes: an index entry states that a domain relation
+exists and deliberately does not state which kind, and choosing one would be a
+claim the file does not make. They appear only from index entries — a data
+record that omits the class letter is malformed and is rejected.
+
 ## If you are stuck
 
 1. **Check the crate's rustdoc first.** The crate root is the whole public

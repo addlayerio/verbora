@@ -47,7 +47,7 @@ verbora-stemmers = { path = "crates/verbora-stemmers", version = "0.2.0" }
 verbora-tagger = { path = "crates/verbora-tagger", version = "0.2.0" }
 verbora-transliterators = { path = "crates/verbora-transliterators", version = "0.2.0" }
 verbora-util = { path = "crates/verbora-util", version = "0.2.0" }
-verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.2.0" }
+verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.3.0" }
 verbora-classifiers = { path = "crates/verbora-classifiers", version = "0.2.0" }
 verbora-sentiment = { path = "crates/verbora-sentiment", version = "0.2.0" }
 verbora-tfidf = { path = "crates/verbora-tfidf", version = "0.2.0" }
