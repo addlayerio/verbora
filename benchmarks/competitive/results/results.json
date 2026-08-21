@@ -5899,102 +5899,6 @@
       "commit": "313d025"
     },
     {
-      "benchmark": "ngrams_bigrams_16",
-      "module": "ngrams",
-      "group": "bigrams",
-      "input_size": 16,
-      "implementations": [
-        {
-          "name": "collect",
-          "median_ns": 9.166582336837909,
-          "mean_ns": 9.322589844526036,
-          "stddev_ns": 0.45112730226606446,
-          "raw_file": "raw/ngrams-bigrams-collect-16.json"
-        },
-        {
-          "name": "iter",
-          "median_ns": 0.47716353810426665,
-          "mean_ns": 0.4789856789985296,
-          "stddev_ns": 0.04997886927133994,
-          "raw_file": "raw/ngrams-bigrams-iter-16.json"
-        }
-      ],
-      "measured_at": "2026-08-20T11:41:17+00:00",
-      "commit": "313d025"
-    },
-    {
-      "benchmark": "ngrams_bigrams_256",
-      "module": "ngrams",
-      "group": "bigrams",
-      "input_size": 256,
-      "implementations": [
-        {
-          "name": "collect",
-          "median_ns": 74.69366211281775,
-          "mean_ns": 75.15485398887074,
-          "stddev_ns": 1.048892100729479,
-          "raw_file": "raw/ngrams-bigrams-collect-256.json"
-        },
-        {
-          "name": "iter",
-          "median_ns": 0.47289901797464623,
-          "mean_ns": 0.48407777212228476,
-          "stddev_ns": 0.05701927258354849,
-          "raw_file": "raw/ngrams-bigrams-iter-256.json"
-        }
-      ],
-      "measured_at": "2026-08-20T11:41:17+00:00",
-      "commit": "313d025"
-    },
-    {
-      "benchmark": "ngrams_bigrams_4096",
-      "module": "ngrams",
-      "group": "bigrams",
-      "input_size": 4096,
-      "implementations": [
-        {
-          "name": "collect",
-          "median_ns": 948.562016969086,
-          "mean_ns": 953.9811414391202,
-          "stddev_ns": 11.846471173316448,
-          "raw_file": "raw/ngrams-bigrams-collect-4096.json"
-        },
-        {
-          "name": "iter",
-          "median_ns": 0.47562864613439854,
-          "mean_ns": 0.47033264137045755,
-          "stddev_ns": 0.05242370220081726,
-          "raw_file": "raw/ngrams-bigrams-iter-4096.json"
-        }
-      ],
-      "measured_at": "2026-08-20T11:41:17+00:00",
-      "commit": "313d025"
-    },
-    {
-      "benchmark": "ngrams_bigrams_20000",
-      "module": "ngrams",
-      "group": "bigrams",
-      "input_size": 20000,
-      "implementations": [
-        {
-          "name": "collect",
-          "median_ns": 4575.665769584566,
-          "mean_ns": 4584.144152789388,
-          "stddev_ns": 29.567286526847983,
-          "raw_file": "raw/ngrams-bigrams-collect-20000.json"
-        },
-        {
-          "name": "iter",
-          "median_ns": 0.47938580602885084,
-          "mean_ns": 0.4751820947691205,
-          "stddev_ns": 0.043576802746960186,
-          "raw_file": "raw/ngrams-bigrams-iter-20000.json"
-        }
-      ],
-      "measured_at": "2026-08-20T11:41:17+00:00",
-      "commit": "313d025"
-    },
-    {
       "benchmark": "ngrams_trigrams",
       "module": "ngrams",
       "group": "trigrams",
@@ -9541,13 +9445,6 @@
           "mean_ns": 121685229.75555559,
           "stddev_ns": 6074496.056951426,
           "raw_file": "raw/pos_tagging-pos_cold_start-rust_bert-cold.json"
-        },
-        {
-          "name": "verbora",
-          "median_ns": 4383.46396889401,
-          "mean_ns": 4490.398853073435,
-          "stddev_ns": 386.2057576123229,
-          "raw_file": "raw/pos_tagging-pos_cold_start-verbora-cold.json"
         }
       ],
       "measured_at": "2026-08-20T11:41:17+00:00",
@@ -9572,13 +9469,6 @@
           "mean_ns": 11957246.4925,
           "stddev_ns": 832901.3564266184,
           "raw_file": "raw/pos_tagging-pos_tag_batch-rust_bert-8.json"
-        },
-        {
-          "name": "verbora",
-          "median_ns": 7599.123404255319,
-          "mean_ns": 7609.70877400448,
-          "stddev_ns": 34.20936958739383,
-          "raw_file": "raw/pos_tagging-pos_tag_batch-verbora-8.json"
         }
       ],
       "measured_at": "2026-08-20T11:41:17+00:00",
@@ -9603,13 +9493,6 @@
           "mean_ns": 12799993.948000003,
           "stddev_ns": 289305.6024838376,
           "raw_file": "raw/pos_tagging-pos_tag_sentence-rust_bert-20tok.json"
-        },
-        {
-          "name": "verbora",
-          "median_ns": 2111.511666364871,
-          "mean_ns": 2127.0189789891947,
-          "stddev_ns": 100.28076826265881,
-          "raw_file": "raw/pos_tagging-pos_tag_sentence-verbora-20tok.json"
         }
       ],
       "measured_at": "2026-08-20T11:41:17+00:00",
@@ -9634,13 +9517,6 @@
           "mean_ns": 8554135.304285716,
           "stddev_ns": 2664203.346648518,
           "raw_file": "raw/pos_tagging-pos_tag_sentence-rust_bert-9tok.json"
-        },
-        {
-          "name": "verbora",
-          "median_ns": 939.86956194271,
-          "mean_ns": 942.5540007457878,
-          "stddev_ns": 21.79742455701831,
-          "raw_file": "raw/pos_tagging-pos_tag_sentence-verbora-9tok.json"
         }
       ],
       "measured_at": "2026-08-20T11:41:17+00:00",

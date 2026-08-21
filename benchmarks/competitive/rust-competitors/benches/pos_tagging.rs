@@ -4,29 +4,53 @@
 // kept consistent with the in-workspace benches this file mirrors).
 #![allow(missing_docs)]
 
-//! Verbora vs. real, pinned third-party Rust competitors — part-of-speech
-//! tagging.
+//! Real, pinned third-party Rust competitors — part-of-speech tagging.
 //!
 //! See `docs/COMPETITIVE_BENCHMARKS.md` §1.16 for why `postagger` and
 //! `rust-bert` were selected, and `../../README.md` for why this crate lives
 //! outside the main workspace.
 //!
-//! # Three different algorithm classes — never blended into one number
+//! # Verbora is withdrawn from this comparison
 //!
-//! - **Verbora** (`verbora_tagger::BrillTagger`) — a deterministic Brill
-//!   transformation-rule tagger: a lexicon lookup, then 18 hand-authored
-//!   context rules applied in sequence.
+//! This module used to have a third side: `verbora_tagger::BrillTagger`,
+//! constructed from `Lexicon::bundled(Language::English)` and
+//! `RuleSet::bundled(Language::English)`. Those two constructors, the
+//! `Language` enum they took, and the four bundled lexicons and rule sets
+//! behind them were all removed in `verbora-tagger` 0.3.0: they derived from
+//! LGPL-3.0 (`dariusk/pos-js`) and unlicensable (Brill-NL) sources, and could
+//! not be redistributed under MIT.
+//!
+//! The row is not rebuilt against a substitute lexicon, and the reason is not
+//! that the crate got worse — it is that the comparison stopped being
+//! possible on equal terms. `postagger` and `rust-bert` each ship the model
+//! they are measured with; `verbora-tagger` now ships none. Any lexicon this
+//! harness assembled for the Verbora side would be one this repository also
+//! cannot ship, so the row would either time a configuration nobody can
+//! reproduce or re-introduce the licensing defect 0.3.0 just removed.
+//! Reinstating it is a measurement-design decision before it is a benchmark
+//! run: the harness would have to choose one lexicon and hand the same one to
+//! every side, or the sides are not answering the same question. See
+//! `../../README.md`'s "Withdrawn: `verbora-tagger` has no lexicon left to
+//! measure" section.
+//!
+//! What is left is a competitor-only module, and it is kept rather than
+//! deleted because it still answers a real question — what a bundled-model
+//! tagger costs — and that answer never depended on Verbora being in the
+//! table.
+//!
+//! # Two different algorithm classes — never blended into one number
+//!
 //! - **`postagger`** (shubham0204/postagger.rs 0.0.3) — a pretrained
 //!   averaged-perceptron model, weights extracted directly from NLTK's
 //!   `averaged_perceptron_tagger.zip`.
 //! - **`rust-bert`** (0.23.0, `POSModel`) — a MobileBERT transformer forward
 //!   pass.
 //!
-//! All three assign Penn-Treebank-family tags to English text, so the *task*
-//! is the same, but the *technique* is not (matrix: both competitors are
-//! `Partial`, never `Yes`) — no test anywhere in this crate asserts the
-//! three produce the same tag for the same word, and none should. What is
-//! compared is wall-clock time on byte-identical input sentences.
+//! Both assign Penn-Treebank-family tags to English text, so the *task* is
+//! the same, but the *technique* is not (matrix: both are `Partial`, never
+//! `Yes`) — no test anywhere in this crate asserts the two produce the same
+//! tag for the same word, and none should. What is compared is wall-clock
+//! time on byte-identical input sentences.
 //!
 //! # Cold start vs. steady state — measured and labeled separately
 //!
@@ -34,16 +58,13 @@
 //! model-load cost is never blended into per-sentence latency:
 //!
 //! - `pos_cold_start` — the full cost of getting each implementation from
-//!   "just started" to "ready to tag": for Verbora, constructing a
-//!   [`Lexicon`] *and* a [`RuleSet`] *and* a [`BrillTagger`] (the whole
-//!   set of objects `postagger`'s and `rust-bert`'s single `::new()` call
-//!   already bundles); for `postagger`, `PerceptronTagger::new` (parses a
-//!   5.6 MB weights.json); for `rust-bert`, `POSModel::new` (loads a ~94 MB
-//!   MobileBERT checkpoint into a `VarStore`). `rust-bert`'s group runs at a
-//!   deliberately small `sample_size` — each iteration is tens of
-//!   milliseconds, and Criterion's default 100 samples would make this one
-//!   group dominate the whole suite's wall-clock time for no extra
-//!   precision.
+//!   "just started" to "ready to tag": for `postagger`,
+//!   `PerceptronTagger::new` (parses a 5.6 MB weights.json); for
+//!   `rust-bert`, `POSModel::new` (loads a ~94 MB MobileBERT checkpoint into
+//!   a `VarStore`). `rust-bert`'s group runs at a deliberately small
+//!   `sample_size` — each iteration is tens of milliseconds, and Criterion's
+//!   default 100 samples would make this one group dominate the whole
+//!   suite's wall-clock time for no extra precision.
 //! - `pos_tag_sentence` — steady-state per-call latency on a warm
 //!   (already-constructed) tagger/model, the number that matters for a
 //!   long-running process. Never includes construction.
@@ -78,7 +99,10 @@
 //! WordNet database. Run `../../scripts/fetch-models.sh` once; every group
 //! that needs one of these skips cleanly with a printed notice (not a hard
 //! failure) if it is absent, so a missing licence-restricted asset never
-//! fails `cargo bench` for everyone else's groups.
+//! fails `cargo bench` for everyone else's groups. Since the withdrawal
+//! above there is no third side to fall back on: without either asset this
+//! module measures nothing, and says so on stderr rather than reporting an
+//! empty run as a successful one.
 
 use std::path::{Path, PathBuf};
 
@@ -91,21 +115,19 @@ use rust_bert::pipelines::token_classification::{
 };
 use rust_bert::resources::LocalResource;
 use tch::Device;
-use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
 
 /// The canonical short sentence: `postagger`'s own README example, and a
 /// perfectly ordinary Penn-Treebank-taggable English sentence. Nine tokens.
 const SHORT_SENTENCE: &str = "the quick brown fox jumps over the lazy dog";
 
 /// A longer sentence (20 tokens), built from the exact same word list
-/// `crates/verbora-tagger/benches/tagger.rs`'s own `english_tokens` cycles —
+/// `crates/verbora-tagger/benches/tagger.rs`'s own `VOCABULARY` cycles —
 /// reusing that list rather than inventing a second one, so a reader
-/// comparing the two files sees the same words doing the same job.
+/// comparing the two files sees the same words doing the same job. It
+/// outlived the Verbora side of this module deliberately: the sentence is
+/// what makes the two competitors' numbers comparable to the in-workspace
+/// tagger bench's, if that comparison is ever wanted again.
 const LONG_SENTENCE: &str = "the quick brown fox jumps over a lazy dog and would book a flight to Paris quickly www.example.com 5 cats";
-
-fn tokens(sentence: &str) -> Vec<&str> {
-    sentence.split_whitespace().collect()
-}
 
 /// `benchmarks/competitive/models/postagger/`, or `$POSTAGGER_MODEL_DIR`.
 fn postagger_model_dir() -> Option<PathBuf> {
@@ -181,15 +203,6 @@ fn load_rust_bert_pos(dir: &Path) -> POSModel {
 fn bench_cold_start(c: &mut Criterion) {
     let mut g = c.benchmark_group("pos_cold_start");
 
-    g.bench_with_input(BenchmarkId::new("verbora", "cold"), &(), |b, ()| {
-        b.iter(|| {
-            let lexicon = Lexicon::bundled(Language::English);
-            let rules = RuleSet::bundled(Language::English);
-            let tagger = BrillTagger::new(&lexicon, &rules);
-            black_box(tagger.tag(black_box(tokens(SHORT_SENTENCE))))
-        });
-    });
-
     if let Some(dir) = postagger_model_dir() {
         g.bench_with_input(BenchmarkId::new("postagger", "cold"), &dir, |b, dir| {
             b.iter(|| {
@@ -228,10 +241,6 @@ fn bench_cold_start(c: &mut Criterion) {
 fn bench_tag_sentence(c: &mut Criterion) {
     let mut g = c.benchmark_group("pos_tag_sentence");
 
-    let en_lexicon = Lexicon::bundled(Language::English);
-    let en_rules = RuleSet::bundled(Language::English);
-    let verbora_tagger = BrillTagger::new(&en_lexicon, &en_rules);
-
     let postagger_tagger = postagger_model_dir().map(|d| load_postagger(&d));
     if postagger_tagger.is_none() {
         skip_notice("postagger steady-state tagging", "postagger");
@@ -243,12 +252,6 @@ fn bench_tag_sentence(c: &mut Criterion) {
     }
 
     for (label, sentence) in [("9tok", SHORT_SENTENCE), ("20tok", LONG_SENTENCE)] {
-        let toks = tokens(sentence);
-
-        g.bench_with_input(BenchmarkId::new("verbora", label), &toks, |b, toks| {
-            b.iter(|| black_box(verbora_tagger.tag(black_box(toks.iter().copied()))));
-        });
-
         if let Some(tagger) = &postagger_tagger {
             g.bench_with_input(BenchmarkId::new("postagger", label), sentence, |b, s| {
                 b.iter(|| black_box(tagger.tag(black_box(s))));
@@ -268,27 +271,14 @@ fn bench_tag_sentence(c: &mut Criterion) {
 /// `rust-bert`'s `POSModel::predict` takes a batch of sentences at once
 /// (`batch_size: 64` in the config above); this shows what a caller gets by
 /// actually batching instead of calling `predict` once per sentence, versus
-/// Verbora/`postagger` processing the same sentences in a sequential loop
-/// (neither has a batched API — each `tag`/`tag` call is independent, which
-/// is the fair comparison: what a real caller processing many short
-/// documents would write for each library as it is actually shaped).
+/// `postagger` processing the same sentences in a sequential loop (it has no
+/// batched API — each `tag` call is independent, which is the fair
+/// comparison: what a real caller processing many short documents would
+/// write for each library as it is actually shaped).
 fn bench_batch(c: &mut Criterion) {
     let mut g = c.benchmark_group("pos_tag_batch");
 
-    let en_lexicon = Lexicon::bundled(Language::English);
-    let en_rules = RuleSet::bundled(Language::English);
-    let verbora_tagger = BrillTagger::new(&en_lexicon, &en_rules);
-    let toks = tokens(SHORT_SENTENCE);
-
     const BATCH: usize = 8;
-
-    g.bench_with_input(BenchmarkId::new("verbora", BATCH), &toks, |b, toks| {
-        b.iter(|| {
-            for _ in 0..BATCH {
-                black_box(verbora_tagger.tag(black_box(toks.iter().copied())));
-            }
-        });
-    });
 
     if let Some(dir) = postagger_model_dir() {
         let tagger = load_postagger(&dir);

@@ -76,6 +76,34 @@ LOGS="$COMPETITIVE/results/logs"
 # gain a benchmarks/competitive/rust-competitors/benches/<module>.rs file —
 # see benchmarks/competitive/README.md's "Adding a new module" section.
 #
+# ---------------------------------------------------------------------------
+# These names are not labels. They are lookup keys, and a wrong one is silent.
+# ---------------------------------------------------------------------------
+#
+# `collect-results.py` resolves each `<group>:<id,id,...>` spec straight into
+# `$CARGO_TARGET_DIR/criterion/<group>/<id>/…/estimates.json`. A group or id
+# named here that the bench does not emit resolves to a path that does not
+# exist, and the collector's answer to a path that does not exist is to
+# *skip that row* — the same code path a competitor that was legitimately
+# skipped for a missing model asset takes. Nothing distinguishes the two
+# afterwards: the module still collects, results.json still gets written, and
+# the missing rows are simply not there. A campaign costs hours; a spec typo
+# costs the whole module's coverage and reports as a success.
+#
+# So every group name below must be the exact string some
+# `benchmark_group("…")` in that module's bench file passes, and every id must
+# be an exact `BenchmarkId::new("…", _)`/`bench_function("…", _)` first
+# argument inside that group. When a bench file renames a group, this array
+# is part of that rename. To re-derive the truth from the source rather than
+# from this comment:
+#
+#   grep -n 'benchmark_group(' benchmarks/competitive/rust-competitors/benches/<m>.rs
+#
+# (a handful of groups are built from a variable or a macro — `ngrams`'
+# `bigrams`/`trigrams`, `language`'s four by-language groups, `trie`'s
+# `contains_hit`/`contains_miss`, and `stemmers`' seven `snowball_group!`
+# languages — so follow the caller, not just the literal.)
+#
 # NOTE on the `*_wrapper_overhead` groups: they are collected like any other,
 # but they are NOT rival-implementation comparisons — Verbora's word and
 # sentence tokenizers are built on `unicode-segmentation`, so those rows
@@ -83,9 +111,37 @@ LOGS="$COMPETITIVE/results/logs"
 # module doc comment; never report them as Verbora winning or losing against
 # unicode-segmentation.
 #
-# `whitespace_tokenization` is gone: `RegexpTokenizer`/`Pattern` were deleted
-# by the text-shaping migration and Verbora performs no whitespace or regex
-# tokenization at any API, so the row had no Verbora side left.
+# `whitespace_tokenization` and `aggressive_tokenization_en` are gone from
+# `tokenizers`, and `ja_hiragana_to_katakana`/`ja_katakana_to_hiragana` from
+# `normalizers`: the text-shaping migration deleted `RegexpTokenizer`/
+# `Pattern`, the 15 `AggressiveTokenizer` variants and `ja::converters`
+# outright, so each of those groups lost its Verbora side and was removed from
+# the bench. `word_tokenization_unicode_segmentation` was not deleted but
+# renamed to `word_tokenization_wrapper_overhead` (and gained a sentence-level
+# twin), and `ja_katakana_halfwidth_to_fullwidth` was re-pointed at `nfkc` and
+# renamed `nfkc_halfwidth_katakana`. See benchmarks/competitive/README.md's
+# "Migration debt" section, which tabulates which is which.
+#
+# `count_inflector_nth_str` (`inflectors`) and `dm_soundex` (`phonetics`) are
+# gone for the same reason and are likewise absent below: `CountInflector::
+# nth_str` and `SoundExDM` no longer exist. `dm_soundex` was never a synonym
+# for `daitch_mokotoff` — the two were separate groups timing rphonetic's
+# `.encode()` and `.soundex()` respectively, and only the `.soundex()` one
+# still has a Verbora counterpart.
+#
+# `verbora` is absent from `pos_tagging`'s three id lists, and must stay
+# absent. `verbora-tagger` 0.3.0 removed `Lexicon::bundled`,
+# `RuleSet::bundled` and the `Language` enum along with all four bundled
+# lexicons and rule sets, which were LGPL-3.0 or unlicensable and could not
+# ship under MIT. The crate now ships no lexicon at all, while `postagger` and
+# `rust_bert` each ship the model they are measured with, so any lexicon this
+# harness built for the Verbora side would be one the repository also cannot
+# ship — the row would time a configuration nobody can reproduce.
+# `benches/pos_tagging.rs` emits no `verbora` row in any of the three groups.
+# The competitor rows stay: what a bundled-model tagger costs is a real
+# question that never depended on Verbora being in the table. See
+# `benchmarks/competitive/README.md`'s "Withdrawn: `verbora-tagger` has no
+# lexicon left to measure" section.
 #
 # `eddie` is absent from `distance`'s `jaro`/`jaro_winkler` id lists, and must
 # stay absent. `eddie` 0.4.2's published `str` API executes undefined
@@ -119,13 +175,13 @@ LOGS="$COMPETITIVE/results/logs"
 # lists below. Nothing above applies to it.
 declare -A MODULE_SPECS=(
   [classifiers]="bayes_train:verbora,smartcore,naivebayes bayes_predict:verbora,smartcore,naivebayes logistic_train:verbora,smartcore,linfa_logistic,rustlearn logistic_predict:verbora,smartcore,linfa_logistic,rustlearn"
-  [distance]="levenshtein:verbora,strsim,rapidfuzz,stringmetrics,triple_accel,editdistancek damerau_levenshtein_unrestricted:verbora,strsim,rapidfuzz damerau_levenshtein_restricted_osa:verbora,strsim,rapidfuzz,triple_accel jaro:verbora,strsim,rapidfuzz,eddie jaro_winkler:verbora,strsim,rapidfuzz,eddie hamming:verbora,strsim,rapidfuzz,stringmetrics,triple_accel fuzzy_substring_search:verbora,triple_accel"
-  [inflectors]="count_inflector_nth:verbora,ordinal count_inflector_nth_str:verbora,inflector noun_inflector_pluralize:verbora,pluralizer,inflector noun_inflector_singularize:verbora,pluralizer,inflector"
-  [language]="whatlang_wrapper_overhead:verbora_wrapper,raw_whatlang language_detection_by_length:verbora,lingua,whichlang language_detection_by_language:verbora,lingua,whichlang script_detection_by_length:verbora,whatlang script_detection_by_language:verbora,whatlang transliteration_ja:verbora,wana_kana"
+  [distance]="levenshtein:verbora,strsim,rapidfuzz,stringmetrics,triple_accel,editdistancek levenshtein_edge_shapes:verbora,strsim,rapidfuzz,stringmetrics,triple_accel,editdistancek damerau_levenshtein_unrestricted:verbora,strsim,rapidfuzz damerau_levenshtein_restricted_osa:verbora,strsim,rapidfuzz,triple_accel jaro:verbora,strsim,rapidfuzz jaro_winkler:verbora,strsim,rapidfuzz hamming:verbora,strsim,rapidfuzz,stringmetrics,triple_accel fuzzy_substring_search:verbora,triple_accel"
+  [inflectors]="count_inflector_nth:verbora,ordinal noun_inflector_pluralize:verbora,pluralizer,inflector noun_inflector_singularize:verbora,pluralizer,inflector"
+  [language]="whatlang_wrapper_overhead:verbora_wrapper,raw_whatlang language_detection_by_length:verbora_default_whatlang,verbora_fast_hashed_linear,verbora_fallback_hashed_whatlang,lingua,whichlang language_detection_by_language:verbora_default_whatlang,verbora_fast_hashed_linear,verbora_fallback_hashed_whatlang,lingua,whichlang language_detection_by_language_paragraph:verbora_default_whatlang,verbora_fast_hashed_linear,verbora_fallback_hashed_whatlang,lingua,whichlang script_detection_by_length:verbora,whatlang script_detection_by_language:verbora,whatlang script_detection_by_language_paragraph:verbora,whatlang transliteration_ja:verbora,wana_kana transliteration_ja_by_shape:verbora,wana_kana"
   [ngrams]="bigrams:verbora,ngrammatic trigrams:verbora,ngrammatic"
-  [normalizers]="remove_diacritics_ascii:verbora,diacritics-crate remove_diacritics_accented:verbora,diacritics-crate ja_hiragana_to_katakana:verbora,unicode-jp ja_katakana_to_hiragana:verbora,unicode-jp ja_katakana_halfwidth_to_fullwidth:verbora,kana-converter"
-  [phonetics]="soundex:verbora,rphonetic metaphone:verbora,rphonetic double_metaphone:verbora,rphonetic dm_soundex:verbora,rphonetic"
-  [pos_tagging]="pos_cold_start:verbora,postagger,rust_bert pos_tag_sentence:verbora,postagger,rust_bert pos_tag_batch:verbora,postagger,rust_bert"
+  [normalizers]="remove_diacritics_ascii:verbora,diacritics-crate remove_diacritics_accented:verbora,diacritics-crate nfkc_halfwidth_katakana:verbora,kana-converter"
+  [phonetics]="soundex:verbora,rphonetic metaphone:verbora,rphonetic double_metaphone:verbora,rphonetic cologne:verbora,rphonetic nysiis:verbora,rphonetic caverphone1:verbora,rphonetic caverphone2:verbora,rphonetic phonex:verbora,rphonetic refined_soundex:verbora,rphonetic match_rating:verbora,rphonetic daitch_mokotoff:verbora,rphonetic beider_morse:verbora,rphonetic"
+  [pos_tagging]="pos_cold_start:postagger,rust_bert pos_tag_sentence:postagger,rust_bert pos_tag_batch:postagger,rust_bert"
   # §1.14 Sentiment. One group only, and its input domain is deliberately
   # narrow: `sentiment` 0.1.1 embeds AFINN-111 where Verbora ships AFINN-165,
   # implements no negation rule, and tokenizes internally. The corpus is built
@@ -157,11 +213,16 @@ declare -A MODULE_SPECS=(
   # files actually write. See `benches/wordnet.rs`'s "A Verbora defect narrows
   # this benchmark's domain" section — the defect is in `crates/`, not here.
   [wordnet]="wordnet_open:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned wordnet_cold:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned wordnet_lookup:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned wordnet_index_entry:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned"
-  [spellcheck]="spellcheck_new:verbora,harper_core,symspell,fast_symspell spellcheck_get_corrections_d1:verbora,harper_core,symspell,fast_symspell spellcheck_get_corrections_d2:verbora,harper_core,symspell,fast_symspell spellcheck_is_correct:verbora,harper_core,symspell,fast_symspell spellcheck_spellbook_is_correct:spellbook,verbora_own_corpus spellcheck_spellbook_suggest:spellbook,verbora_own_corpus spellcheck_batch_correction:verbora,harper_core,symspell,fast_symspell spellcheck_fuzzyindex_construction:fuzzy_index,fast_symspell spellcheck_fuzzyindex_query:fuzzy_index,fast_symspell fst_fuzzy_construction:fuzzy_index,fst fst_fuzzy_query:fuzzy_index,fst"
+  # `spellcheck` spans two bench targets — benches/spellcheck.rs and
+  # benches/fst_fuzzy.rs — collected under one module name. `fst_fuzzy_query`
+  # sweeps two `max_distance` values: distance 2 keeps the original unsuffixed
+  # `fuzzy_index`/`fst` ids (results/raw/ references them), distance 1 gets the
+  # `_d1` suffix, so all four ids belong to the one group.
+  [spellcheck]="spellcheck_new:verbora,harper_core,symspell,fast_symspell spellcheck_get_corrections_d1:verbora,verbora-borrowed,harper_core,symspell,fast_symspell spellcheck_get_corrections_d2:verbora,verbora-borrowed,harper_core,symspell,fast_symspell spellcheck_is_correct:verbora,harper_core,symspell,fast_symspell spellcheck_spellbook_is_correct:spellbook,verbora_own_corpus spellcheck_spellbook_suggest:spellbook,verbora_own_corpus spellcheck_batch_correction:verbora,verbora-borrowed,harper_core,symspell,fast_symspell spellcheck_fast_symspell_archived_load:fast_symspell spellcheck_fuzzyindex_construction:fuzzy_index,fast_symspell spellcheck_fuzzyindex_query:fuzzy_index,fast_symspell fst_fuzzy_construction:fuzzy_index,fst fst_fuzzy_query:fuzzy_index,fst,fuzzy_index_d1,fst_d1"
   [stemmers]="porter_de:verbora,rust-stemmers,snowball-stemmers-rs porter_en:verbora,nltk-porter,porter-stemmer porter_es:verbora,rust-stemmers,snowball-stemmers-rs porter_fr:verbora,rust-stemmers,snowball-stemmers-rs porter_it:verbora,rust-stemmers,snowball-stemmers-rs porter_nl:verbora,rust-stemmers,snowball-stemmers-rs porter_no:verbora,rust-stemmers,snowball-stemmers-rs porter_pt:verbora,rust-stemmers,snowball-stemmers-rs porter_ru:verbora,rust-stemmers,snowball-stemmers-rs porter_sv:verbora,rust-stemmers,snowball-stemmers-rs stemmer_id:verbora,sastrawi stemmer_ja:verbora,lindera"
-  [tfidf]="build:verbora,afshinm idf:verbora,afshinm,rust_tfidf tfidf:verbora,afshinm,rust_tfidf"
-  [tokenizers]="whitespace_tokenization:verbora,tantivy,huggingface word_tokenization:verbora,tantivy,huggingface word_tokenization_unicode_segmentation:verbora,unicode-words,unicode-bounds aggressive_tokenization_en:verbora,unicode-words sentence_tokenization:verbora,unicode-sentences,unicode-bounds,segtok"
-  [trie]="build:verbora,qp_trie,trie_rs,fast_radix_trie,fst common_prefix_search:verbora,trie_rs contains_hit:verbora,qp_trie,trie_rs,fast_radix_trie,fst contains_miss:verbora,qp_trie,trie_rs,fast_radix_trie,fst predictive_search:verbora,qp_trie,trie_rs,fast_radix_trie,fst"
+  [tfidf]="tfidf_build:verbora,afshinm build_many_small:verbora,afshinm idf:verbora,afshinm,rust_tfidf tfidf:verbora,afshinm,rust_tfidf"
+  [tokenizers]="word_tokenization:verbora,verbora-lazy,tantivy,huggingface word_tokenization_wrapper_overhead:verbora,verbora-lazy,unicode-words,unicode-bounds sentence_tokenization:verbora,verbora-lazy,segtok sentence_tokenization_wrapper_overhead:verbora,verbora-lazy,unicode-sentences,unicode-bounds sentence_tokenization_boundary_density:verbora,verbora-lazy,segtok"
+  [trie]="trie_build:verbora,trie_rs,qp_trie,fast_radix_trie,fst contains_hit:verbora,verbora_frozen,trie_rs,qp_trie,fast_radix_trie,fst contains_miss:verbora,verbora_frozen,trie_rs,qp_trie,fast_radix_trie,fst common_prefix_search:verbora,trie_rs,fast_radix_trie predictive_search:verbora,verbora_frozen,trie_rs,qp_trie,fast_radix_trie,fst"
 )
 
 MODULES=("${@:-${!MODULE_SPECS[@]}}")
