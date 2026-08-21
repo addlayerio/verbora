@@ -6,10 +6,26 @@ what it costs, side by side with pinned third-party crates and — for the few
 capabilities where no comparable Rust crate exists — a widely-used JavaScript
 NLP library.
 
-Every number here is reproducible with the commands on
-[Reproducing the benchmarks](reproducing.md). Nothing is estimated, and the
+Every number here was produced by the commands on
+[Reproducing the benchmarks](reproducing.md), never estimated, and the
 results that went the wrong way are published next to the ones that went the
 right way.
+
+<div class="callout callout-warn">
+<strong>Nothing on these four pages has been re-measured against Verbora
+0.2.0.</strong> The benchmark campaign for that release has not run yet, and
+several of the kernels these numbers measured have since been replaced —
+plain Levenshtein search among them, which now runs a bit-parallel kernel
+instead of the full matrix its own figures were captured against (see
+<a href="distance#where-the-levenshtein-win-comes-from">Where the
+Levenshtein win comes from</a>). Where a table or row is marked **pending
+re-measurement**, treat its number as historical rather than current; running
+the commands on <a href="reproducing">Reproducing the benchmarks</a> today
+will report whatever the current code does, not the number printed there. See
+<a href="../getting-started/upgrading">Upgrading from 0.1 to 0.2</a> for what
+changed, and <a href="competitive">Competitive benchmarks</a>'s own
+coverage table for exactly which capabilities are still waiting on a re-run.
+</div>
 
 ## The three pages
 
@@ -88,15 +104,27 @@ is written up rather than quietly corrected.
 
 ## What has not been measured
 
-Memory is not yet instrumented. The planned work is allocation counts and peak
-RSS for the data-heavy modules — WordNet's index, the 3.9 MB Brill lexicon, the
-~7 MB sentiment lexicons — where footprint matters at least as much as
-throughput. The distance metrics hold no persistent state and have an `O(m)`
-working set in their fast paths, so there is little to report for them.
+No capability's table on these pages carries a memory column: allocation
+counts and peak RSS are not part of this section's own suite. The one
+instrument that exists lives outside it — `verbora-spellcheck`'s
+`counting_alloc`, a `#[cfg(test)]` global allocator its own memory-bound
+tests measure peak bytes with. It is scoped to that crate's test build, is
+not compiled into any published library, and produced the one set of
+peak-RSS figures this project has published:
+[Upgrading from 0.1 to 0.2](../getting-started/upgrading.md#resource-behaviour)
+records `DeletionIndex` construction falling from 4.0 GB to 32.4 MB of peak
+RSS for an 800-scalar token, once its deletion generation moved from cubic to
+quadratic in word length.
 
-Until then, the [allocation reference](../performance/allocation.md) describes
-what the code does structurally rather than what a profiler measured, and labels
-itself as such.
+The data-heavy modules that instrument does not reach — WordNet's index, the
+3.9 MB Brill lexicon, the ~7 MB sentiment lexicons — remain unmeasured for
+footprint, where it matters at least as much as throughput. The distance
+metrics hold no persistent state and have an `O(m)` working set in their fast
+paths, so there is little to report for them regardless.
+
+The [allocation reference](../performance/allocation.md) describes what the
+rest of the code does structurally rather than what a profiler measured, and
+labels itself as such.
 
 ## Next
 

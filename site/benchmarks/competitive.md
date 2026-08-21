@@ -34,7 +34,7 @@ harnesses and raw data are linked from each section;
 | OS | Linux 7.0.11-76070011-generic |
 | rustc | 1.97.1, `--release` (`opt-level = 3`, `lto = "thin"`, `codegen-units = 16`) — identical `[profile.release]`/`[profile.bench]` to the main Verbora workspace, not a tuned profile for this audit |
 | Node.js | v25.9.0 (used only for the three JavaScript-library-only modules linked above, not for the tables on this page) |
-| Verbora commit | [`af1aee9`](https://github.com/addlayerio/verbora/commit/af1aee9d9da2b1d1b750f0761ef250d4c290b48c), crate version 0.1.0 |
+| Verbora commit | Not resolvable — `af1aee9d9da2b1d1b750f0761ef250d4c290b48c` matches no object in this repository's history, on any branch, or on GitHub (checked directly against the GitHub API). Crate version 0.1.0 and the Date row below are what this run is still pinned to |
 | Datasets | Shared word/name/pair lists from `benches/data/*.json` (`tools/bench-data/generate.py`, one generator read by every implementation); the 13-language, 4-tier UDHR corpus for language-detection accuracy (sourced below) |
 | Warmup | Criterion's own warmup phase before every measured sample (400 ms–1 s per group; see below) |
 | Samples | Criterion's default 100 per benchmark, reduced for the most expensive groups: 30 for language-detection-by-length, 20 for spellcheck construction, 15 for POS-tagging cold start (model load) |
@@ -700,7 +700,7 @@ bug).
 suffix matching is the Snowball runtime's own
 <code>find_among</code>/<code>find_among_b</code> binary search
 (<code>crates/verbora-stemmers/src/among.rs</code>): a table sorted by
-reversed code-unit sequence, <code>common_i</code>/<code>common_j</code>
+reversed scalar sequence, <code>common_i</code>/<code>common_j</code>
 prefix tracking so no unit is compared twice, and
 <code>substring_i</code>-style links so one search replaces a whole guarded
 else-if chain. Ten of the eleven language modules route through it —
@@ -744,18 +744,18 @@ them and no table stands in for them until the re-run
 entry 24).
 
 The correctness finding stands on its own: `porter-stemmer` operates on
-grapheme clusters rather than code units, an architectural difference that
+grapheme clusters rather than Unicode scalar values, an architectural difference that
 turns out not to matter on this plain-ASCII corpus — 63 of 64 benchmarked
 words agree byte-exact, the one mismatch a real, isolated `porter-stemmer`
 bug (`"sky"`→`"ski"`), unrelated to graphemes and excluded from the sample.
 
 #### Japanese — `lindera-analysis`
 
-Verbora's `StemmerJa` (trailing katakana U+30FC drop, minimum 4 code units)
-against `lindera-analysis`'s `JapaneseKatakanaStemTokenFilter`, `min = 3`
-(the filter's own default) — verified to reproduce Verbora's `>= 4`-unit
-threshold exactly on the shared word list before any number below was
-trusted.
+Verbora's `StemmerJa` (trailing katakana U+30FC drop, minimum 4 Unicode
+scalar values) against `lindera-analysis`'s `JapaneseKatakanaStemTokenFilter`,
+`min = 3` (the filter's own default) — verified to reproduce Verbora's
+`>= 4`-scalar threshold exactly on the shared word list before any number
+below was trusted.
 
 | Input size | Verbora | lindera-analysis | Faster |
 |---:|--:|--:|--:|
