@@ -36,14 +36,15 @@ benchmarks/competitive/
 ├── scripts/
 │   ├── machine-metadata.sh  writes results/metadata.json
 │   ├── fetch-models.sh      fetches third-party model/dictionary assets
-│   │                          (POS-tagging, spellcheck) too large/separately
-│   │                          licensed to vendor — see below
+│   │                          (POS-tagging, spellcheck, WordNet) too large or
+│   │                          separately licensed to vendor — see below
 │   └── collect-results.py   reads Criterion's estimates.json for a module's
 │                              benchmarks, writes results/results.json +
 │                              results/raw/*.json
 ├── models/                  fetched third-party assets (gitignored) — a
 │                              pretrained POS-tagging model, a MobileBERT
-│                              checkpoint, a Hunspell dictionary; populated by
+│                              checkpoint, a Hunspell dictionary, the Princeton
+│                              WordNet database; populated by
 │                              scripts/fetch-models.sh, never committed
 └── results/
     ├── metadata.json        machine/software metadata for the current run
@@ -66,6 +67,14 @@ one doesn't exist yet, rather than rebuilding it.
 1. Confirm the competitor(s) and exact pinned version(s) in
    `docs/COMPETITIVE_BENCHMARKS.md`'s matrix (§1) — never add a dependency
    that isn't already recorded there with its research dossier.
+   (Two pins currently run **ahead** of that matrix, deliberately and with the
+   reasoning written down where the pin is: `sentiment` 0.1.1, which §1.14
+   marks `No` for benchmarked on grounds that hold for arbitrary text but not
+   for the narrowed corpus `benches/sentiment.rs` constructs and
+   `tests/sentiment_correctness.rs` proves; and `wordnet-db` 0.1.3, published
+   after §1.15's "NO FAIR COMPETITOR FOUND (Rust)" pass and already named in
+   §3's own shortlist. Both matrix verdicts need amending — that is open
+   documentation debt, recorded rather than quietly created.)
 2. Add the competitor crate(s) to `rust-competitors/Cargo.toml` under
    `[dev-dependencies]`, pinned with `=x.y.z` (exact version — no implicit
    `latest`, no `^`/`~` ranges that could silently drift).
@@ -106,7 +115,7 @@ python3 scripts/collect-results.py <module> <group>:<ids> ...   # per module, af
 
 ### Fetched model/dictionary assets
 
-Two modules need a real third-party asset too large or too separately
+Three modules need a real third-party asset too large or too separately
 licensed to vendor into this repository, the same reasoning
 `crates/verbora-wordnet` already applies to the WordNet database itself:
 
@@ -115,9 +124,18 @@ licensed to vendor into this repository, the same reasoning
   MobileBERT English POS checkpoint.
 - **Spellcheck** (`benches/spellcheck.rs`) — a real Hunspell `en_US`
   `.aff`/`.dic` pair for `spellbook`.
+- **WordNet** (`benches/wordnet.rs`, `tests/wordnet_correctness.rs`) — the
+  Princeton WordNet 3.1 `dict` directory, which *both* sides of that
+  comparison read: `verbora-wordnet` deliberately ships no dictionary, and
+  `wordnet-db` 0.1.3 is a reader for files the caller supplies. 3.1 rather
+  than 3.0 because `docs/COMPETITIVE_BENCHMARKS.md` §1.15 pins the reference
+  side to the npm `wordnet-db` 3.1.14 package's data, and synset offsets
+  differ between releases; an existing 3.0 install is still accepted. The
+  database is under **Princeton's own licence, not MIT** — see
+  `crates/verbora-wordnet/LICENSE-WORDNET`.
 
 Run `./scripts/fetch-models.sh` once (or `./scripts/fetch-models.sh
-<postagger|rust-bert-pos|hunspell-en-us>` for just one) to populate
+<postagger|rust-bert-pos|hunspell-en-us|wordnet-en>` for just one) to populate
 `models/` (gitignored). Every bench group that needs one of these skips
 cleanly, with a printed notice, if it has not been fetched — a missing
 licence-restricted asset never fails `cargo bench` for everyone else's
@@ -320,3 +338,146 @@ claim that Verbora's match-window clamp made it diverge from `strsim` and
 `rapidfuzz` on `jaro("a", "a")`. It does not — `strsim` clamps with
 `saturating_sub(1)` and all three return `1.0`. Nothing had ever asserted it.
 The degenerate row now enumerates all four implementations.
+
+## Retired: `linfa-bayes` 0.8.1 cannot be timed as published
+
+`linfa-bayes` 0.8.1 ships a debugging statement in non-test code. Its
+training loop —
+
+```
+linfa-bayes-0.8.1/src/multinomial_nb.rs:78
+    dbg!(&model.class_info.get(&class));
+```
+
+— is inside `MultinomialNb::fit_with`, not behind `#[cfg(test)]` and not
+behind a feature. It writes the whole `ClassHistogram` for a class, a
+log-probability vector as wide as the vocabulary, to stderr, **once per class
+on every `.fit()` call**.
+
+This harness used to record that as a curiosity rather than a blocker:
+`benches/classifiers.rs` said the spew was "intrinsic to calling the published
+crate as a normal user would … left in rather than patched around, and flagged
+here so a reader is not surprised". The reasoning was right and the conclusion
+was wrong, because it priced the spew per *call*, and `bayes_train` put `fit`
+inside `b.iter`, which calls it millions of times. **One campaign produced a
+1.5 GB log file that could not be pushed to GitHub.**
+
+### The decision: isolate for correctness, drop from timing
+
+There are exactly two ways to obtain a timing number, and both are barred.
+
+**Measure it as published.** That is what produced the 1.5 GB file. A
+benchmark whose artefact cannot be stored is not a measurement anyone can
+check — and the `write(2)` calls are inside the timed region besides, so the
+figure would be part Naive Bayes and part I/O.
+
+**Patch it locally** — vendor the crate, delete the `dbg!`, measure that.
+Then the number describes code nobody can install. The "Fairness discipline"
+section above requires the published API as published; it is the same rule
+that keeps `eddie` out of `benches/distance.rs`.
+
+So the split is the one `eddie` gets. **Correctness — kept.** `linfa-bayes`
+stays a dev-dependency and stays in `tests/classifiers_accuracy.rs`, which
+fits once per corpus size (five `dbg!` bursts in a whole run, not millions),
+and in `examples/memory_report.rs`, which fits once. Those calls were never
+the problem, and linfa's *accuracy* is still reported beside smartcore's and
+Verbora's. **Timing — removed, and it may not come back.**
+`benches/classifiers.rs` emits no `linfa_bayes` row in `bayes_train` or
+`bayes_predict`, and `scripts/competitive-benchmarks.sh`'s `MODULE_SPECS`
+names it in neither.
+
+Strictly, only `bayes_train` produced the flood — `bayes_predict` fits once
+per probe shape, outside `b.iter`. Its row went too, on the same precedent: a
+competitor removed from a module's `MODULE_SPECS` still costs a campaign
+hours to run while nothing reads the result, and a half-retired competitor is
+the state this file exists to prevent.
+
+**Coverage lost:** the `linfa_bayes` timing rows for `bayes_train` and
+`bayes_predict`. `smartcore` and `naivebayes` remain, so the group keeps two
+rival Naive Bayes implementations. **`linfa-logistic` is a different crate and
+is untouched** — its `logistic_train`/`logistic_predict` rows are unaffected
+by any of the above.
+
+## Resolved: `verbora-wordnet` rejected 8.8% of a real dictionary's index entries
+
+Found by installing a real Princeton distribution so `benches/wordnet.rs`
+could run — the first time anything in this repo read a whole dictionary.
+**Fixed in `crates/verbora-wordnet`; kept here because the harness is what
+found it, and because the mechanism is worth not rediscovering.**
+
+`PointerSymbol::from_symbol` accepted the two-character domain pointers `;c`,
+`;r`, `;u`, `-c`, `-r`, `-u` but not the bare `;` and `-`. Princeton's
+`index.*` files write the **bare** forms — the class letter appears only in
+`data.*` — so `WordNet::index_entry`, `senses`, `sense` and `lookup` all
+failed:
+
+```
+MalformedIndexEntry { path: ".../dict/index.noun", line_start: 1740,
+                      kind: InvalidField { field: "ptr_symbol", value: ";" } }
+```
+
+Measured over the shipped files: **13,606 of 155,467 index entries in WordNet
+3.1 (8.8%)** and **13,488 of 155,287 in 3.0 (8.7%)**, across all four parts of
+speech — including `run`, `cat`, `light`, `water`, `computer`, `node`,
+`house`, `hand`, `idea`, `music`, `river`, `bird` and `new_york`. Data records
+are unaffected.
+
+The crate's own test suite already contains the test that catches this —
+`crates/verbora-wordnet/tests/enumeration.rs`'s
+`every_entry_of_the_real_dictionary_is_reachable`. It fails on both releases,
+at the first affected line. It is `#[ignore]`d for want of the
+separately-licensed database, so nothing had ever run it against real data;
+its sibling `every_synset_of_the_real_dictionary_parses` passes, which is what
+localises the fault to the index parser. `wordnet-db` 0.1.3 reads every one of
+these entries, which is how the disagreement surfaced.
+
+`PointerSymbol` now carries `Domain` (`;`) and `Member` (`-`) as relations in
+their own right — the index states that a domain relation exists and
+deliberately does not state which kind — and the data-record parser rejects
+them, since a record omitting the class letter is malformed.
+
+What let it through is the part worth keeping: the crate's index fixture read
+`… #p ;c 8 0 …` where the real file reads `… #p ; 8 0 …`. One character,
+written from the symbol table rather than copied from the file. Every test
+agreed with it because it was the only thing they had to agree with.
+
+`tests/wordnet_correctness.rs`'s
+`both_parsers_agree_on_the_formerly_unreadable_entries` is the fixture that
+replaced the one pinning the defect: it asserts `verbora-wordnet` and
+`wordnet-db` return the same sense counts for exactly the lemmas that used to
+diverge. The benchmark's probe list no longer avoids anything, so its rows
+describe the whole dictionary.
+
+## Not benchmarked: `thesaurus` 0.5.2 clones its whole dictionary per lookup
+
+`docs/COMPETITIVE_BENCHMARKS.md` §3's competitor shortlist proposes
+`thesaurus` (grantshandy) as the strongest WordNet-adjacent competitor by
+adoption, with synonym lookup as the fair overlapping operation. The operation
+is the right one — a WordNet synset *is* a synonym set. Reading
+`thesaurus-0.5.2/src/lib.rs` before writing the bench is what stopped it:
+
+```rust
+pub fn synonyms(word: impl AsRef<str>) -> Vec<String> {
+    let mut s = dict().get(word.as_ref()) ...
+pub fn dict() -> HashMap<String, Vec<String>> {
+    dict.extend(DICT.to_owned());               // `static` feature
+    if dict.is_empty() { dict.extend(parse_dict()); }   // otherwise
+```
+
+`synonyms()` calls `dict()`, and `dict()` deep-clones the entire
+`HashMap<String, Vec<String>>` — 125,701 WordNet keys averaging 3.4 synonyms,
+so upwards of half a million `String` clones and a full rehash — **on every
+lookup**. Without the `static` feature it re-decompresses and re-parses the
+embedded corpus instead, which is worse. There is no borrowing accessor in the
+published API.
+
+A timing row built on that would measure `HashMap::clone` against a WordNet
+index search: an implementation defect in one crate, reported as a speed
+difference between two. Hoisting `dict()` out of the timed region was
+considered and rejected on the `eddie` precedent — a timing row calls the
+published API as published, and lifting a cost out of one side's loop is that
+same manoeuvre pointed the other way. So: no dependency, no bench, no row.
+
+This is a statement about **0.5.2's API**, not about the comparison. A release
+exposing a non-cloning lookup makes the synonym-set row fair immediately, and
+it should then be added.

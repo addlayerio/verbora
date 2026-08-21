@@ -35,15 +35,9 @@
 //!   stop-word filtering) is real, additional documented daylight beyond
 //!   the pre-built-matrix caveat: Verbora's own tokenizer stems and drops
 //!   stop words, this one does neither — see [`Vocab`]'s own doc comment.
-//! - `linfa-bayes` 0.8.1's `MultinomialNb::fit_with` contains a leftover
-//!   `dbg!` call in its own published source
-//!   (`linfa-bayes-0.8.1/src/multinomial_nb.rs:78`) that writes to stderr
-//!   once per class on every `.fit()` call — confirmed by reading the crate
-//!   source directly, not assumed. That I/O is intrinsic to calling the
-//!   published crate as a normal user would (there is no way to disable it
-//!   from outside the crate), so it is left in rather than patched around,
-//!   and flagged here so a reader is not surprised by console spew during
-//!   `cargo bench`.
+//! - **linfa-bayes 0.8.1 is RETIRED from timing.** It has no `bayes_train` or
+//!   `bayes_predict` row here any more, and it may not get one back. See the
+//!   section below.
 //! - **naivebayes (ruivieira) 0.1.2** takes pre-tokenized `Vec<String>`
 //!   input — [`tokenize`] does the same whitespace-split-and-lowercase job
 //!   [`Vocab::build`] does for smartcore/linfa-bayes, so all three Bayes
@@ -65,6 +59,49 @@
 //!   output-value agreement beyond the narrow "same argmax on a clear-cut,
 //!   unambiguous case" domain that same test file's
 //!   `naivebayes_agrees_with_verbora_on_a_clear_cut_case` checks.
+//!
+//! ## linfa-bayes 0.8.1 cannot be timed as published
+//!
+//! `MultinomialNb::fit_with` contains a leftover debugging statement in the
+//! crate's own published source — `linfa-bayes-0.8.1/src/multinomial_nb.rs:78`,
+//! `dbg!(&model.class_info.get(&class));`, in the training loop, not behind
+//! `#[cfg(test)]` and not behind a feature. It writes the *whole*
+//! `ClassHistogram` for a class — a log-probability vector as wide as the
+//! vocabulary — to stderr, once per class, on every single `.fit()` call.
+//!
+//! This file used to say that was acceptable: "intrinsic to calling the
+//! published crate as a normal user would … left in rather than patched
+//! around, and flagged here so a reader is not surprised by console spew".
+//! The reasoning was right and the conclusion was wrong, because it costed the
+//! spew per *call* and a Criterion group calls `fit` millions of times. The
+//! `bayes_train` row put `fit` inside `b.iter`, and one campaign produced a
+//! **1.5 GB log file** that could not be pushed to GitHub.
+//!
+//! There are exactly two ways to get a number out of it, and both are barred:
+//!
+//! * **Measure it as published.** That is what produced the 1.5 GB file. A
+//!   benchmark whose artefact cannot be stored is not a measurement anyone can
+//!   check, and the stderr writes are inside the timed region besides, so the
+//!   number would be part Naive Bayes and part `write(2)`.
+//! * **Patch it locally** — vendor the crate, delete the `dbg!`, measure that.
+//!   Then the figure describes code nobody can install. `../../README.md`'s
+//!   "Fairness discipline" section requires the published API as published,
+//!   which is the same rule that keeps `eddie` out of `benches/distance.rs`.
+//!
+//! So: **retired from timing, kept for correctness** — the identical split
+//! `eddie` gets. `linfa-bayes` stays a dependency and stays in
+//! `../tests/classifiers_accuracy.rs` (which fits once per corpus size, five
+//! `dbg!` bursts in total, not millions) and in `../examples/memory_report.rs`
+//! (once). Those are the calls that were never the problem. Only the Criterion
+//! rows are gone, and `scripts/competitive-benchmarks.sh`'s `MODULE_SPECS` no
+//! longer names `linfa_bayes` in either group.
+//!
+//! **Coverage lost:** the `linfa_bayes` timing rows for `bayes_train` and
+//! `bayes_predict`. `smartcore` and `naivebayes` remain as Naive Bayes timing
+//! competitors, so the group keeps two rival implementations, and linfa's
+//! *accuracy* is still reported beside them. `linfa-logistic` is a **different
+//! crate** and is unaffected — its `logistic_train`/`logistic_predict` rows
+//! stay exactly as they were.
 //!
 //! ## Logistic Regression competitors
 //!
@@ -336,21 +373,10 @@ fn bench_train(c: &mut Criterion) {
             });
         });
 
-        g.bench_with_input(BenchmarkId::new("linfa_bayes", n), &data, |b, data| {
-            use linfa::prelude::*;
-            use linfa_bayes::MultinomialNbParams;
-            b.iter(|| {
-                let vocab = Vocab::build(black_box(data));
-                let rows = vocab.matrix(data);
-                let flat: Vec<f64> = rows.iter().flatten().map(|&v| f64::from(v)).collect();
-                let x = Array2::from_shape_vec((rows.len(), vocab.len()), flat)
-                    .expect("rectangular matrix");
-                let y = label_ids(data);
-                let y = ndarray::Array1::from(y);
-                let ds = DatasetView::new(x.view(), y.view());
-                black_box(MultinomialNbParams::new().fit(&ds).expect("fits"))
-            });
-        });
+        // No `linfa_bayes` row: RETIRED, and it may not come back. See the
+        // module doc comment's "linfa-bayes 0.8.1 cannot be timed as
+        // published" section and `../../README.md`'s section of the same
+        // name.
 
         g.bench_with_input(BenchmarkId::new("naivebayes", n), &data, |b, data| {
             b.iter(|| {
@@ -387,7 +413,9 @@ fn bench_predict(c: &mut Criterion) {
     let refs: Vec<&[u32]> = rows.iter().map(Vec::as_slice).collect();
     let x = DenseMatrix::<u32>::from_2d_array(&refs).expect("rectangular matrix");
     let y = label_ids_u32(&data);
-    let y_linfa = label_ids(&data);
+    // No `let y_linfa = label_ids(&data);` any more — it existed only to build
+    // the retired `linfa_bayes` row's `DatasetView`. `label_ids` itself is
+    // still used by `bench_logistic_*`, so the helper stays.
     let sm_model = MultinomialNB::fit(&x, &y, Default::default()).expect("fits");
 
     let mut nb = NaiveBayes::new();
@@ -407,24 +435,14 @@ fn bench_predict(c: &mut Criterion) {
                 black_box(sm_model.predict(&xt).expect("predicts"))
             });
         });
-        g.bench_with_input(BenchmarkId::new("linfa_bayes", shape), probe, |b, probe| {
-            use linfa::prelude::*;
-            use linfa_bayes::MultinomialNbParams;
-            let flat: Vec<f64> = rows.iter().flatten().map(|&v| f64::from(v)).collect();
-            let x = Array2::from_shape_vec((rows.len(), vocab.len()), flat).expect("rectangular");
-            let y_arr = ndarray::Array1::from(y_linfa.clone());
-            let ds = DatasetView::new(x.view(), y_arr.view());
-            let model = MultinomialNbParams::new().fit(&ds).expect("fits");
-            b.iter(|| {
-                let row = vocab.row(black_box(probe.as_str()));
-                let xt = Array2::from_shape_vec(
-                    (1, vocab.len()),
-                    row.iter().map(|&v| f64::from(v)).collect(),
-                )
-                .expect("one row");
-                black_box(model.predict(&xt))
-            });
-        });
+        // No `linfa_bayes` row here either. Only `bayes_train` calls `fit`
+        // inside `b.iter`, so this group never produced the log flood — but
+        // `scripts/competitive-benchmarks.sh`'s `MODULE_SPECS` no longer
+        // collects a `linfa_bayes` id for either group, and a Criterion row
+        // that runs for hours and is then read by nothing is worse than no
+        // row. Retired with its sibling, on the `eddie` precedent: a
+        // competitor removed from timing is removed from timing, not left
+        // half-measured.
         g.bench_with_input(BenchmarkId::new("naivebayes", shape), probe, |b, probe| {
             b.iter(|| black_box(nb.classify(&tokenize(black_box(probe.as_str())))));
         });

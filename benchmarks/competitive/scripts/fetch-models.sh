@@ -10,7 +10,8 @@
 # printed notice (not a hard failure) if it is absent.
 #
 # Usage: benchmarks/competitive/scripts/fetch-models.sh [target...]
-#   targets: postagger | rust-bert-pos | hunspell-en-us | all (default: all)
+#   targets: postagger | rust-bert-pos | hunspell-en-us | wordnet-en | all
+#            (default: all)
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # -> benchmarks/competitive/
 OUT="$PWD/models"
@@ -81,13 +82,60 @@ fetch_hunspell_en_us () {
   echo "  wrote $dir"
 }
 
+fetch_wordnet_en () {
+  # §1.15 WordNet. Both sides of benches/wordnet.rs -- verbora-wordnet and
+  # `wordnet-db` 0.1.3 -- read the same eight `index.*`/`data.*` files from the
+  # same directory, and NEITHER crate ships them: verbora-wordnet deliberately
+  # does not (see crates/verbora-wordnet/LICENSE-WORDNET and its crate docs),
+  # and wordnet-db is a reader for "prebuilt WordNet database files" it expects
+  # the caller to supply. So the dictionary is fetched here like every other
+  # separately-licensed asset in this script.
+  #
+  # WordNet 3.1 rather than 3.0, deliberately: docs/COMPETITIVE_BENCHMARKS.md
+  # §1.15 pins the reference's own WordNet row to the npm `wordnet-db` 3.1.14
+  # package's data, which is WordNet 3.1. Fetching 3.0 here would put the Rust
+  # comparison on a different release from the reference comparison it is
+  # published beside, and synset offsets differ between the two releases.
+  # `benches/wordnet.rs` and `tests/wordnet_correctness.rs` accept either
+  # (they resolve `models/wordnet-3.1/dict` then `models/wordnet-3.0/dict`),
+  # so an existing 3.0 install is still usable -- this is the default, not a
+  # requirement.
+  #
+  # LICENCE: Princeton University's own, NOT MIT. It requires the copyright
+  # notice to accompany all copies of the database, which is one more reason
+  # this is fetched into a gitignored directory rather than vendored. The
+  # notice ships inside the tarball as `dict/LICENSE` and is left in place
+  # beside the files. It is reproduced verbatim in
+  # crates/verbora-wordnet/LICENSE-WORDNET.
+  local dir="$OUT/wordnet-3.1"
+  if [ -f "$dir/dict/index.noun" ]; then
+    echo "WordNet dictionary already present at $dir/dict"
+    return
+  fi
+  echo "fetching Princeton WordNet 3.1 database files (~16 MB)..."
+  mkdir -p "$dir"
+  local tmp
+  tmp=$(mktemp -d)
+  curl -sL -o "$tmp/wn.tar.gz" "https://wordnetcode.princeton.edu/wn3.1.dict.tar.gz"
+  # The tarball's top-level directory is `dict/`, which is exactly the layout
+  # both crates want, so it is extracted as-is rather than flattened.
+  tar -xzf "$tmp/wn.tar.gz" -C "$dir"
+  rm -rf "$tmp"
+  if [ ! -f "$dir/dict/index.noun" ]; then
+    echo "  ERROR: $dir/dict/index.noun missing after extraction" >&2
+    exit 1
+  fi
+  echo "  wrote $dir/dict"
+}
+
 targets=("${@:-all}")
 for t in "${targets[@]}"; do
   case "$t" in
     postagger) fetch_postagger ;;
     rust-bert-pos) fetch_rust_bert_pos ;;
     hunspell-en-us) fetch_hunspell_en_us ;;
-    all) fetch_postagger; fetch_rust_bert_pos; fetch_hunspell_en_us ;;
-    *) echo "unknown target: $t (want postagger|rust-bert-pos|hunspell-en-us|all)" >&2; exit 1 ;;
+    wordnet-en) fetch_wordnet_en ;;
+    all) fetch_postagger; fetch_rust_bert_pos; fetch_hunspell_en_us; fetch_wordnet_en ;;
+    *) echo "unknown target: $t (want postagger|rust-bert-pos|hunspell-en-us|wordnet-en|all)" >&2; exit 1 ;;
   esac
 done
