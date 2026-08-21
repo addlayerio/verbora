@@ -346,10 +346,20 @@ pub(crate) fn parse_synset(line: &str) -> std::result::Result<SynsetRef<'_>, Rec
     let mut pointers = Vec::with_capacity(p_cnt.min(1024) as usize);
     for _ in 0..p_cnt {
         let symbol_token = parse::required(tokens.next(), "ptr_symbol")?;
-        let symbol = PointerSymbol::from_symbol(symbol_token).ok_or(RecordError::InvalidField {
-            field: "ptr_symbol",
-            value: symbol_token.to_owned(),
-        })?;
+        // A data record always writes the domain pointer's class letter; only an
+        // index entry may omit it, because there the relation is summarised over
+        // every sense of the lemma and the class belongs to the sense. Accepting
+        // the unqualified form here would admit a malformed record as a
+        // `Domain`/`Member` whose class nothing can later supply.
+        let symbol = match PointerSymbol::from_symbol(symbol_token) {
+            Some(PointerSymbol::Domain | PointerSymbol::Member) | None => {
+                return Err(RecordError::InvalidField {
+                    field: "ptr_symbol",
+                    value: symbol_token.to_owned(),
+                });
+            }
+            Some(symbol) => symbol,
+        };
         let target = parse::offset(
             "synset_offset",
             parse::required(tokens.next(), "synset_offset")?,

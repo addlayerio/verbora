@@ -650,12 +650,16 @@ pub struct Sense { pub lemma: String, pub pos: PartOfSpeech, pub number: SenseNu
 impl std::str::FromStr for Sense { type Err = ParseSenseError; }
 impl std::fmt::Display for Sense { /* "lemma#pos#number" */ }
 
-// pointer — 26 relations: Antonym, Hypernym, InstanceHypernym, Hyponym,
+// pointer — 28 relations: Antonym, Hypernym, InstanceHypernym, Hyponym,
 // InstanceHyponym, MemberHolonym, SubstanceHolonym, PartHolonym, MemberMeronym,
 // SubstanceMeronym, PartMeronym, Attribute, DerivationallyRelatedForm,
 // DomainOfTopic, MemberOfTopic, DomainOfRegion, MemberOfRegion, DomainOfUsage,
-// MemberOfUsage, Entailment, Cause, AlsoSee, VerbGroup, SimilarTo,
-// ParticipleOfVerb, Pertainym
+// MemberOfUsage, Domain, Member, Entailment, Cause, AlsoSee, VerbGroup,
+// SimilarTo, ParticipleOfVerb, Pertainym
+//
+// `Domain` (`;`) and `Member` (`-`) are the unqualified domain pointers, which
+// only an index file writes: the topic/region/usage class belongs to the sense,
+// so it appears only in the data record. `#[non_exhaustive]`.
 impl PointerSymbol {
     pub fn from_symbol(symbol: &str) -> Option<Self>;
     pub fn symbol(self) -> &'static str;
