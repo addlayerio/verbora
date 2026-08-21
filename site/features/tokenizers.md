@@ -19,7 +19,7 @@ second copy to drift.
 <strong>Specification status.</strong> Three tokenizers, one error type, one
 version accessor and one parallel entry point — the crate root is the whole
 public surface. <code>cargo test -p verbora-tokenizers --all-features</code>
-runs <strong>21</strong> tests and <strong>7</strong> doctests, including a
+runs <strong>24</strong> tests and <strong>8</strong> doctests, including a
 conformance suite that replays the Unicode Character Database's own
 <code>WordBreakTest.txt</code> and <code>SentenceBreakTest.txt</code>.
 </div>

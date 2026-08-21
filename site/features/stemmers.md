@@ -1,8 +1,8 @@
 # Stemmers
 
 `verbora-stemmers` reduces inflected words to stable stems for indexing,
-matching and feature extraction. Sixteen stemmers ship: thirteen
-Porter/Snowball implementations covering twelve languages, plus Lancaster,
+matching and feature extraction. Sixteen stemmers ship: twelve Porter/Snowball
+implementations, one per language, plus the French Carry stemmer, Lancaster,
 a Japanese katakana stemmer and an Indonesian dictionary stemmer.
 
 ## When to use it
@@ -76,7 +76,8 @@ fn main() {
 ```
 
 The cache is caller-owned so eviction, lifetime and hasher stay your decision,
-and every stemmer stays zero-sized and `Sync`. It is consulted only for the
+and every stemmer but `PorterStemmerNl` stays zero-sized and `Sync` — that one
+carries a one-byte sticky flag and is neither, as the callout below explains. It is consulted only for the
 string that would have been handed to the stemmer — after the stop-word test, and
 only for tokens that pass the language's gate — so results are identical to
 `tokenize_and_stem`. Entries are trusted verbatim: do not share one map between
@@ -102,15 +103,22 @@ exposes its `Regions`, and `StemmerId` exposes its `Removal`, `RemovalKind` and
 
 ## Important behaviour
 
-**Snowball algorithms index UTF-16 code units.** They compare positions against
-constants, so they run over code units wherever position affects the result.
-Lancaster, Carry, Japanese and Indonesian are unaffected by that distinction and
-work directly on `&str`.
+**The text unit is one Unicode scalar value**, in every stemmer here and in
+every other Verbora crate. Region boundaries (R1, R2, RV), the short-word gates
+and each rule's removal `size` are all counts of scalar values — which is what
+the published algorithms ask for, since Snowball and Porter are specified over
+*letters* and no such definition names a unit of storage. Below `U+10000` a
+scalar and a UTF-16 code unit coincide exactly, so this changes an answer only
+for astral text: `PorterStemmer::stem("😀s")` returns `"😀s"` unchanged, because
+`"😀s"` is two scalar values and Porter's three-letter gate declines to run.
+A cut at a region boundary is therefore a cut at a character boundary by
+construction.
 
-**Stop-word lists are process-global, per language.** English lives in
-`verbora_core::stopwords` and is shared with `verbora-phonetics`, so a word
-added through `PorterStemmer` is also seen by `LancasterStemmer`. Not every
-stemmer exposes mutators:
+**Stop-word lists are process-global, per language.** English is
+`verbora-core`'s own list, reached through `verbora_core::is_global_stopword`
+and mutated through `add_global_stopword`/`remove_global_stopword` (re-exported
+by `verbora-util`), so a word added through `PorterStemmer` is also seen by
+`LancasterStemmer`. Not every stemmer exposes mutators:
 
 | Stemmer | `add_stop_word(s)` | `remove_stop_word(s)` |
 |---|:--:|:--:|
@@ -118,6 +126,13 @@ stemmer exposes mutators:
 | `PorterStemmerNo`, `PorterStemmerSv` | ✅ | ❌ |
 | `PorterStemmerPt` | ✅ (`add_stop_words` only) | ❌ |
 | all others | ❌ | ❌ |
+
+A stemmer that exposes no mutator does not make its list immutable. Every
+non-English list is reachable through `verbora_stemmers::Language`, whose
+thirteen variants each carry `defaults`, `words`, `contains`, `add`, `add_all`,
+`remove`, `remove_all` and `reset`. Those lists are process-global too, so
+`Language::De.add("foo")` changes the answer every `PorterStemmerDe` in the
+process gives for the rest of the process, and `reset` is the only way back.
 
 <div class="callout callout-warn">
 <strong>Careful.</strong> <code>PorterStemmerNl</code> is stateful. Its

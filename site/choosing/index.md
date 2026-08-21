@@ -53,7 +53,7 @@ you like.
 |---|---|---|
 | [`PreparedPattern`](../features/distance.md#preparedpattern) | one pattern string | `levenshtein`, `osa` against each candidate |
 | [`FuzzyIndex`](../features/spellcheck.md) | a word list, via `FuzzyIndexBuilder` | `neighbors(query, max_distance)` |
-| [`DeletionIndex`](../features/spellcheck.md) | a word list, via `DeletionIndexBuilder` | `candidates(query)` |
+| [`DeletionIndex`](../features/spellcheck.md) | a word list, via `DeletionIndexBuilder` | `neighbors(query, max_distance)` — `Err(DistanceBeyondIndex)` past the ceiling it was built for |
 | [`PhoneticIndex`](../features/phonetic-index.md) | a word list plus an encoder, via `PhoneticIndexBuilder` | `neighbors(query)` |
 | `FrozenTrie` | a `Trie`, once insertion is done | prefix and membership queries |
 
@@ -123,10 +123,17 @@ pool; this site shows you how to write it at your own call site with your own
 - **Batch APIs are minimal.** `verbora_core::Tokenizer::tokenize_batch` and
   `verbora_core::Stemmer::stem_batch` are provided trait methods with sequential
   default bodies. No other crate has a batch entry point.
-- **`_into` variants are rare.** Only tokenizers (`tokenize_into`,
-  `tokenize_borrowed_into`), inflectors (`pluralize_into`, `singularize_into`),
-  the `Stemmer` trait (`stem_into`) and `CaseMode::apply_into` have one. Distance,
-  phonetics, normalizers and n-grams do not.
+- **`_into` variants are rare, and they are not where you would guess.** The
+  whole list: `Tokenizer::tokenize_into` and
+  `BorrowingTokenizer::tokenize_borrowed_into`; `Stemmer::stem_into`; every
+  inflector's `pluralize_into` / `singularize_into`, plus
+  `OrdinalInflector::nth_into` and `CaseMode::apply_into`;
+  `SoundEx::process_into` and `Metaphone::process_into` — the two phonetic
+  encoders whose keys are most often accumulated in bulk;
+  `BrillTagger::tag_into` / `annotate_into`; `transliterate_ja_into`; and
+  `verbora_tfidf::Tokenize::tokenize_into` on that crate's tokenizer trait.
+  Distance, normalizers and n-grams have none — the first has nothing hoistable
+  to write into, and the other two allocate nothing to begin with.
 - **No scratch-buffer API.** No function anywhere in Verbora takes mutable
   working memory you lend it for the duration of a call — there is no
   `levenshtein_with_scratch`, and the Levenshtein family builds its own

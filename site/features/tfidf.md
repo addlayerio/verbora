@@ -28,8 +28,8 @@ construction, the analyzer, ingestion, removal, every statistic and query, both
 published orderings, serialization and the compatibility stamp, and the
 empty-corpus case — is documented and test-pinned, with no external data
 required. <code>cargo test -p verbora-tfidf --all-features</code> runs
-<strong>95</strong> tests (75 unit, 15 contract, 5 parallel-equivalence) and
-<strong>10</strong> doctests.
+<strong>97</strong> tests (75 unit, 17 contract, 5 parallel-equivalence) and
+<strong>12</strong> doctests.
 </div>
 
 ## When to use it

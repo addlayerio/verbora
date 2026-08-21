@@ -252,6 +252,14 @@ dictionary — at realistic sizes that costs milliseconds, not seconds (see
 
 ## Performance characteristics
 
+<div class="callout callout-warn">
+<strong>Pending re-measurement.</strong> Every number below was recorded before
+0.2.0, and no run has been made against the code as it now stands. They are
+retained only until a fresh full-precision run replaces them — no number here
+should be quoted as the library's present performance, and the shape of each
+table, not the values, is the part worth reading.
+</div>
+
 <div class="callout callout-note">
 <strong>Machine-dependent.</strong> Every number below came from
 <code>cargo bench -p verbora-phonetics --bench phonetic_index</code> on one
@@ -389,13 +397,14 @@ behind `Arc`, and query it as many times as you need.
 
 ## Related
 
-- [Phonetics](phonetics.md) — the four core encoders this index is
-  built from, and how to choose between them, including
+- [Phonetics](phonetics.md) — the three encoders this index can be built
+  from (`SoundEx`, `Metaphone`, `DoubleMetaphone`), the nine it cannot, and
+  how to choose between them, including
   [by language](phonetics.md#choosing-a-phonetic-algorithm).
 - [Language](language.md) — one layer up the pipeline: detects script and
-  language, then recommends which of the four core encoders above actually
-  fits. Useful when you don't yet know which encoder to build this index
-  with.
+  language, then recommends an encoder — which may be one of the three above,
+  or `DaitchMokotoff`, `Cologne` or `BeiderMorse`, none of which this index
+  accepts. Useful when you don't yet know which encoder you want.
 - [String distance](distance.md) — the scoring step that runs on
   `neighbors()`'s output.
 - [Fuzzy name matching](../recipes/fuzzy-matching.md) — the bucket → rank →

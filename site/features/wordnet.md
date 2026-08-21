@@ -16,8 +16,9 @@ something open, Verbora's choice is stated and pinned by a test.
 sense addressing, the reader's handling of malformed records and
 <code>index_key</code>'s normalisation are all documented and test-pinned, with
 no external data required. <code>cargo test -p verbora-wordnet</code> runs
-<strong>86</strong> unit tests, <strong>4</strong> enumeration tests and
-<strong>13</strong> doctests.
+<strong>87</strong> unit tests, <strong>5</strong> enumeration tests — two of
+them <code>#[ignore]</code>d until you point the suite at the real database —
+and <strong>14</strong> doctests.
 </div>
 
 ## The database is separately licensed

@@ -28,8 +28,8 @@ case handling, insertion and every query are documented and test-pinned,
 interleaved mutation/query sequences included; the contract suite additionally
 walks the whole shared 20,000-word benchmark list rather than a sample, checking
 every entry for membership and every prefix of every entry against a sorted
-reference. <code>cargo test -p verbora-trie</code> runs <strong>78</strong>
-tests (66 unit, 12 contract) and <strong>17</strong> doctests.
+reference. <code>cargo test -p verbora-trie</code> runs <strong>80</strong>
+tests (67 unit, 13 contract) and <strong>18</strong> doctests.
 </div>
 
 ## When to use it

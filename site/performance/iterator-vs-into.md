@@ -143,10 +143,12 @@ Not every subsystem has both. Reading a name is not enough — check the page.
 | Tokenizers | `tokens()` on every tokenizer | `tokenize_into`, `tokenize_borrowed_into` |
 | N-grams | `ngrams()`, `Padded::ngrams()`, `char_ngrams()` — all lazy already | — (nothing is allocated to write into) |
 | Trie | `iter_keys_with_prefix()`, `keys()`, `iter_prefix_matches()` | — (`for_each_key_with_prefix` is the allocation-free enumeration) |
-| Inflectors | — | `pluralize_into`, `singularize_into` |
+| Inflectors | — | `pluralize_into`, `singularize_into`, `OrdinalInflector::nth_into`, `CaseMode::apply_into` |
 | Core traits | — | `stem_into` (clears first) |
 | Distance | — | — |
-| Phonetics | — | — |
+| Phonetics | — | `SoundEx::process_into`, `Metaphone::process_into` — those two encoders only |
+| Transliterators | — | `transliterate_ja_into` |
+| Tagger | `BrillTagger::tag_stream` | `tag_into`, `annotate_into` |
 | Normalizers | — | — (they return `Cow`, which is the analogous saving) |
 
 <div class="callout callout-note">

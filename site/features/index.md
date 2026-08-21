@@ -41,24 +41,24 @@ you want to *do*, or from the crate map further down.
 | [Tokenizers](tokenizers.md) | `verbora-tokenizers` | `WordTokenizer`, `SegmentTokenizer`, `SentenceTokenizer` — UAX #29 boundaries, borrowed tokens |
 | [String distance](distance.md) | `verbora-distance` | 7 metrics; the three edit distances also in weighted and substring-search forms, plus `PreparedPattern` |
 | [Phonetics](phonetics.md) | `verbora-phonetics` | 12 encoders: SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff, Beider–Morse, Cologne, Nysiis, Caverphone 1/2, Phonex, Refined Soundex, Match Rating |
-| [Phonetic neighbors](phonetic-index.md) | `verbora-phonetics` | `PhoneticIndex` — dictionary-wide candidate generation over any of the four core encoders |
+| [Phonetic neighbors](phonetic-index.md) | `verbora-phonetics` | `PhoneticIndex` — dictionary-wide candidate generation over `SoundEx`, `Metaphone` or `DoubleMetaphone` |
 | [Beider-Morse](beider-morse.md) | `verbora-phonetics` | Cross-language surname matching over up to 18 languages at once, with auto-detection |
 | [Language](language.md) | `verbora-language` | Script detection, optional statistical language detection, and `recommend()` — language → phonetic encoder |
 | [N-grams](ngrams.md) | `verbora-ngrams` | `ngrams`, `Padded` boundary symbols, `char_ngrams` |
 | [Normalizers](normalizers.md) | `verbora-normalizers` | the four Unicode normalization forms plus `remove_diacritics` |
 | [Inflectors](inflectors.md) | `verbora-inflectors` | 6 inflectors, runtime rules |
 | [Trie](trie.md) | `verbora-trie` | prefix tree, prefix and path queries |
-| [Transliterators](transliterators.md) | `verbora-transliterators` | Japanese kana → romaji, five-phase pipeline |
+| [Transliterators](transliterators.md) | `verbora-transliterators` | Japanese kana → romaji, one left-to-right pass over a generated mora index |
 | [WordNet](wordnet.md) | `verbora-wordnet` | lexical database, synsets, relation traversal, 4 storage strategies |
-| [TF-IDF](tfidf.md) | `verbora-tfidf` | term interning, incremental idf cache, `listTerms`/`tfidf`/`tfidfs` |
+| [TF-IDF](tfidf.md) | `verbora-tfidf` | term interning, incremental idf cache, `list_terms`/`tfidf`/`tfidfs` |
 | [Sentiment](sentiment.md) | `verbora-sentiment` | 14 lexicons across 10 languages, sticky negation |
 | [Classifiers](classifiers.md) | `verbora-classifiers` | Bayes, logistic regression, MaxEnt + GIS |
-| [Stemmers](stemmers.md) | `verbora-stemmers` | 16 stemmers: Porter/Snowball across 12 languages, Lancaster, Japanese, Indonesian |
+| [Stemmers](stemmers.md) | `verbora-stemmers` | 16 stemmers: Porter/Snowball across 12 languages, plus Carry (French), Lancaster, Japanese, Indonesian |
 | [Spellcheck](spellcheck.md) | `verbora-spellcheck` | frequency-ranked correction, BK-tree and deletion indexes |
 | [POS tagger](tagger.md) | `verbora-tagger` | Brill tagging, training and evaluation; English and Dutch data |
 | [Sentence analyzers](analyzers.md) | `verbora-analyzers` | phrase annotation, subject/predicate splitting, sentence type |
-| [Utilities](util.md) | `verbora-util` | stop words, abbreviations, weighted graphs and storage backends |
-| [Core vocabulary](core.md) | `verbora-core` | 6 traits, `Token`, `StopWords`, whitespace helpers |
+| [Utilities](util.md) | `verbora-util` | stop words, abbreviations, weighted graphs, topological ordering and path trees |
+| [Core vocabulary](core.md) | `verbora-core` | 5 traits, `StopWordLanguage`, `StopWords`, the process-global stop-word list |
 
 ## Language support
 

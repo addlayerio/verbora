@@ -1075,7 +1075,9 @@ impl DamerauCosts {
     // four const accessors
 }
 
-pub enum Operation { Insertion, Deletion, Substitution, Transposition }
+pub enum Operation {          // #[non_exhaustive]
+    Insertion, Deletion, Substitution, Transposition,
+}
 pub enum CostError {          // Display + std::error::Error
     NotFinite { operation: Operation, value: f64 },
     Negative { operation: Operation, value: f64 },

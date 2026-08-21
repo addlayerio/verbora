@@ -3,10 +3,14 @@
 A per-API reference for one question: **does this allocate, and how much?**
 
 <div class="callout callout-warn">
-<strong>Read from the source, not from a profiler.</strong> Allocation counting
-and peak-RSS instrumentation are planned but not yet in the repository. Every
-entry below describes what the code does structurally — stable and checkable —
-rather than a measured count.
+<strong>Read from the source, not from a profiler.</strong> Every entry below
+describes what the code does structurally — stable and checkable — rather than a
+measured count. No per-API allocation-count table exists in the repository. The
+one instrument that does is <code>verbora-spellcheck</code>'s
+<code>counting_alloc</code>, a <code>#[cfg(test)]</code> global allocator its own
+memory-bound tests measure peak bytes with; it is scoped to that crate's test
+build, is not compiled into any published library, and no figure on this page
+comes from it.
 </div>
 
 ## Tokenizers

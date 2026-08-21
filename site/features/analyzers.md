@@ -103,10 +103,13 @@ English. A prepositional phrase here is the flat `IN … noun` span above, not a
 nested constituent, and attachment is never resolved.
 
 `analyze` is a constant number of linear passes over the sentence, none nested,
-with two allocations: one `Vec<Role>` of exactly `sentence.len()` elements and one
-`Vec<Range<usize>>` sized to the number of prepositional phrases, not allocated
-when there are none. `benches/analyzers.rs` measures the pipeline, but no run
-exists against it, so this crate publishes no timing figures.
+with three allocations for a sentence that contains a prepositional phrase and
+two for one that does not: a `Vec<bool>` of `body.len()` marking which body
+words fall inside a phrase, a growable `Vec<Range<usize>>` of the phrases
+themselves — not allocated at all when there are none — and one `Vec<Role>` of
+exactly `sentence.len()` elements. An empty sentence allocates nothing.
+`benches/analyzers.rs` measures the pipeline, but no run exists against it, so
+this crate publishes no timing figures.
 
 ## Related
 

@@ -80,7 +80,8 @@ fn main() {
     assert!(!code.spellings.is_empty());
 
     // Skip auto-detection when you already know the language -- smaller
-    // candidate set, and roughly 2x cheaper per the benchmarks below.
+    // candidate set, and less work per call (the figures below are pending
+    // re-measurement, so they are not a current cost claim).
     let generic = BeiderMorse::new(NameType::Generic, RuleType::Approx);
     let code = generic.encode_language("Rodriguez", "spanish").unwrap();
     assert!(!code.spellings.is_empty());
@@ -142,6 +143,16 @@ fn main() {
 
 ## Performance characteristics
 
+<div class="callout callout-warn">
+<strong>Pending re-measurement.</strong> The figures in this section are not
+current: they were recorded before 0.2.0 and no run has been made against the
+code as it now stands. They are retained only until a fresh full-precision run
+replaces them — no number here should be quoted as the library's present
+performance, and the shape of the table, not the values, is the part worth
+reading. Reproduce with
+<code>cargo bench -p verbora-phonetics --bench beider_morse</code>.
+</div>
+
 Measured with `cargo bench -p verbora-phonetics --bench beider_morse` on one
 development machine, over 16-surname batches. Treat the exact figures as
 machine-dependent and the orders of magnitude as the reproducible part.
@@ -187,8 +198,9 @@ candidate sets you get before relying on them.
 
 The 127 embedded rule files (`crates/verbora-phonetics/data/beider-morse/`)
 are Apache-2.0-licensed data, sourced exclusively from the Apache-2.0
-provenance chain. Every file keeps its own license header, and a top-level
-`NOTICE.md` records that chain in full. The engine and parser reading the data
+provenance chain. Every file keeps its own license header, and a `NOTICE.md`
+alongside them in that same directory records that chain in full. The engine
+and parser reading the data
 (`crates/verbora-phonetics/src/beider_morse/{engine,rule,lang}.rs`) are
 Verbora's own MIT-licensed Rust.
 
