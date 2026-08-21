@@ -79,18 +79,25 @@ lingua = { version = "=1.8.0", default-features = false, features = [
 # accounted for explicitly in the accuracy report, not silently ignored.
 whichlang = "=0.1.1"
 # §1.15-1.17 WordNet / POS Tagging / Spellcheck. WordNet gets no competitor
-# dependency here (matrix: NO FAIR COMPETITOR FOUND (Rust) — see
-# docs/COMPETITIVE_BENCHMARKS.md §1.15); its Verbora-side TIMING numbers come
-# from `crates/verbora-wordnet`'s own in-workspace Criterion suite instead.
+# dependency here — see the `wordnet-db` pin under [dev-dependencies] for the
+# later finding that reopened §1.15's "NO FAIR COMPETITOR FOUND (Rust)"
+# verdict, and `benches/wordnet.rs` for what is and is not compared.
 # `verbora-wordnet` itself IS a normal dependency here (not a competitor —
 # Verbora's own crate, added for `examples/memory_report.rs`'s internal-only
-# storage-strategy memory comparison, per §1.15's "internal-only" note).
+# storage-strategy memory comparison, per §1.15's "internal-only" note, and
+# now also for `benches/wordnet.rs`'s Verbora side).
 verbora-tagger = { path = "../../../crates/verbora-tagger" }
 verbora-spellcheck = { path = "../../../crates/verbora-spellcheck" }
 verbora-wordnet = { path = "../../../crates/verbora-wordnet" }
 # §1.12-1.14 TF-IDF / Classifiers / Sentiment.
 verbora-tfidf = { path = "../../../crates/verbora-tfidf" }
 verbora-classifiers = { path = "../../../crates/verbora-classifiers" }
+# §1.14 Sentiment — Verbora's own crate, for `benches/sentiment.rs` and
+# `tests/sentiment_correctness.rs`. The competitor it is measured against is
+# `sentiment` (mount-research), pinned under [dev-dependencies] below; read
+# that pin's comment before reading a number out of this module, because the
+# input domain it is fair over is a narrow, enumerated one.
+verbora-sentiment = { path = "../../../crates/verbora-sentiment" }
 
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
@@ -491,6 +498,23 @@ smartcore = "=0.6.5"
 # §1.13 Classifiers — Naive Bayes, second major Rust ML framework per the
 # spec's "don't limit to one rival" (matrix: Partial, selected cases). Same
 # pre-built-matrix situation as smartcore.
+#
+# `linfa-bayes` is RETIRED FROM TIMING and kept only as an accuracy/memory
+# oracle — the same split `eddie` gets above, for a different fault. Its
+# `MultinomialNb::fit_with` training loop ships a `dbg!` in non-test code
+# (`linfa-bayes-0.8.1/src/multinomial_nb.rs:78`) that dumps a whole
+# `ClassHistogram` to stderr once per class on every `.fit()`; a Criterion
+# group calls `fit` millions of times, and one campaign produced a **1.5 GB
+# log file** that could not be pushed to GitHub. It cannot be measured as
+# published, and vendoring the crate to delete the `dbg!` would produce a
+# number describing code nobody can install. `benches/classifiers.rs` emits no
+# `linfa_bayes` row in either Bayes group and
+# `scripts/competitive-benchmarks.sh`'s `MODULE_SPECS` collects none;
+# `tests/classifiers_accuracy.rs` (fits once per corpus size) and
+# `examples/memory_report.rs` (fits once) still use it, which is why the
+# dependency stays. See `../README.md`'s "Retired: `linfa-bayes` 0.8.1 cannot
+# be timed as published" section. `linfa-logistic` below is a DIFFERENT crate
+# and is untouched by any of this.
 linfa = "=0.8.1"
 linfa-bayes = "=0.8.1"
 # `linfa`'s `DatasetView`/`Array2` construction for the count-matrix adapter
@@ -548,6 +572,108 @@ rustlearn = "=0.5.0"
 # The matrix's optimistic build assessment was not re-verified by compiling
 # it; this implementation pass did, and found it broken. Recorded here rather
 # than silently dropped — see `benches/classifiers.rs`'s own doc comment.
+#
+# §1.14 Sentiment — `sentiment` (mount-research) 0.1.1, the only Rust crate
+# found that scores text against an AFINN-family lexicon. Published once,
+# 2017-04-20; it is the only release, so "pin a newer one" does not exist.
+#
+# The matrix marks this row `Partial` for algorithmic equivalence and **`No`**
+# for "benchmarked", on the grounds that it diverges from Verbora three ways
+# at once — older lexicon, no negation handling, its own non-swappable
+# tokenizer — "with no shared input domain where all three become moot". That
+# reasoning is sound about *arbitrary* text and wrong about *this* text: the
+# three divergences are simultaneously narrowable, and `benches/sentiment.rs`
+# narrows them, by construction and then by assertion in
+# `tests/sentiment_correctness.rs`:
+#
+#   * **Lexicon.** It embeds AFINN-111 as `src/afinn.json` (2,462 entries);
+#     Verbora ships AFINN-165 (3,382). Reading both tables shows AFINN-111 is
+#     a strict *subset* by key — 0 keys are unique to it — and the two assign
+#     the same polarity to every shared key but four (`damn`, `exasperated`,
+#     `futile`, `irresponsible`). The benchmark corpus is drawn from the
+#     2,438-word agreeing intersection, so on it the two lexicons are the
+#     same function, not merely the same family.
+#   * **Negation.** Verbora flips the sign for the rest of the input after
+#     `not`/`no`/`never`/`neither`; `sentiment` has no negation rule at all
+#     (its own `test_positivity` scores "I do not like jam tarts" at +2). The
+#     corpus contains none of the four words, so the rule never fires.
+#   * **Tokenizer.** `sentiment` tokenizes internally and the tokenizer is not
+#     swappable: strip `[^a-zA-Z0 -]+`, collapse runs of spaces, lowercase,
+#     `split(" ")`. On lowercase ASCII words joined by single spaces — which
+#     is what the corpus is — that yields exactly the token list
+#     `WordTokenizer` yields, so both sides tokenize the same text into the
+#     same tokens and divide by the same denominator.
+#
+# What is NOT narrowed away, and must be published beside any number: its
+# `analyze()` calls `negativity()` and `positivity()` on separate clones of
+# the input, so it tokenizes twice and compiles **four** `Regex`es per call,
+# and it collects the matched words into two `Vec<String>`s that Verbora's
+# `Option<f64>` never builds. Those are real costs of its published API — it
+# offers no score-only entry point — but they are a fixed per-call constant,
+# so the small sizes in the sweep measure regex construction and the large
+# ones measure scoring. See `benches/sentiment.rs`'s own doc comment.
+sentiment = "=0.1.1"
+# §1.15 WordNet — `wordnet-db` 0.1.3 (johanneswd), a reader for the same
+# Princeton `index.*`/`data.*` files `verbora-wordnet` reads, from the same
+# directory, answering the same questions. §1.15's "NO FAIR COMPETITOR FOUND
+# (Rust)" verdict predates it (it was published 2026-01, the matrix's
+# candidates were `wordnet` 0.1.2 and `wordnet-ls`, both dormant/archived);
+# §3's own competitor-shortlist already names it "the interesting one".
+#
+# It is the mechanically *opposite* design, which is exactly why it is worth
+# measuring: `WordNet::load` mmaps (or reads) all eight files and then eagerly
+# parses every index line and every data record into `HashMap`s, so startup is
+# a full parse and a query is a hash hit; `verbora-wordnet` reads bytes and
+# binary-searches the index file on demand, so startup is at most a read and a
+# query is a search. Build-cost against query-cost, the same axis
+# `benches/trie.rs` already reports as separate groups — and the reason
+# `benches/wordnet.rs` publishes its `open` and `lookup` groups together, and
+# a combined one-shot `cold` group besides. It also puts a number on
+# `verbora-wordnet`'s `unsafe_code = "deny"` policy, which forbids mmap and
+# offers `Storage::LazyResident` as the stand-in: that trade is today an
+# assertion in `AGENTS.md` with no figure attached.
+wordnet-db = "=0.1.3"
+# `wordnet-db` 0.1.3 does not re-export the types its own API takes and
+# returns (`Pos`, `SynsetId`, `Synset`) — it `use`s them privately from
+# `wordnet-types`. Naming `Pos::Noun` at a call site therefore needs the
+# type crate pinned directly, at the exact version `wordnet-db`'s own
+# `^0.1.3` requirement resolves to (0.1.3 is the latest), so Cargo unifies
+# the two into one copy rather than compiling two incompatible `Pos` types.
+wordnet-types = "=0.1.3"
+#
+# NOT pinned here: `thesaurus` (grantshandy) 0.5.2, despite §3's shortlist
+# naming it the strongest WordNet-adjacent competitor by adoption and
+# proposing synonym lookup as the fair overlapping operation. Reading
+# `thesaurus-0.5.2/src/lib.rs` before writing a bench for it, which is what
+# this workspace's process requires, found that no published entry point can
+# answer a synonym query without rebuilding or copying the entire dictionary:
+#
+#   pub fn synonyms(word: impl AsRef<str>) -> Vec<String> {
+#       let mut s = dict().get(word.as_ref()) ...
+#   pub fn dict() -> HashMap<String, Vec<String>> {
+#       ... dict.extend(DICT.to_owned());   // `static` feature
+#       if dict.is_empty() { dict.extend(parse_dict()); }   // otherwise
+#
+# `synonyms()` calls `dict()`, and `dict()` deep-clones the whole
+# `HashMap<String, Vec<String>>` — 125,701 WordNet keys averaging 3.4
+# synonyms, so upwards of half a million `String` clones and a full rehash,
+# **per lookup**. Without the `static` feature the same call re-decompresses
+# and re-parses the embedded corpus instead, which is worse. A timing row
+# built on that API would measure `HashMap::clone`, not synonym retrieval,
+# and would report a defect in one crate as a speed difference between two —
+# precisely what `../README.md`'s "Fairness discipline" section forbids.
+# Hoisting `dict()` out of the timed region was considered and rejected on
+# the `eddie` precedent (see that pin above): a timing row calls the
+# published API as published, and lifting a cost out of one side's loop is
+# the same manoeuvre in the opposite direction.
+#
+# So: no dependency, no bench, and no row — with the reason recorded here,
+# where the next person to reach for the crate will look for it. This is a
+# statement about `thesaurus` 0.5.2's API, not about the comparison: if a
+# release ever exposes a borrowing lookup (`&'static HashMap`, or a `get`
+# that does not clone), the synonym-set comparison against
+# `verbora_wordnet::WordNet::lookup` becomes fair immediately and should be
+# added. See `benches/wordnet.rs`'s "Not benchmarked, and why" section.
 
 [[bench]]
 name = "distance"
@@ -603,6 +729,14 @@ harness = false
 
 [[bench]]
 name = "classifiers"
+harness = false
+
+[[bench]]
+name = "sentiment"
+harness = false
+
+[[bench]]
+name = "wordnet"
 harness = false
 
 # Accuracy report for §1.9's three real language detectors, over

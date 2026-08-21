@@ -30,9 +30,12 @@ a compile error.
 </div>
 
 <div class="callout callout-note">
-<strong>Pre-1.0.</strong> The examples on this site are written against
-<code>0.2</code>. If the version you want is not on crates.io yet, use the git or
-path form below — the code is identical either way.
+<strong>Pre-1.0, and versioned per crate.</strong> The examples on this site
+are written against <code>0.2</code>, which is where eighteen of the nineteen
+crates are. <code>verbora-wordnet</code> is at <code>0.3</code>: a crate moves
+only when <em>its own</em> API does, so the numbers are deliberately not in
+lockstep. If the version you want is not on crates.io yet, use the git or path
+form below — the code is identical either way.
 </div>
 
 From git:

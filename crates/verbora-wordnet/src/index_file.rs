@@ -431,7 +431,14 @@ mod tests {
     /// by hand: `node n 8 5 ! @ ~ #p ; …` is lemma `node`, category `n`,
     /// eight synsets, five pointer symbols, then the redundant sense count,
     /// the tagged-sense count and eight offsets.
-    const NODE_LINE: &str = "node n 8 5 ! @ ~ #p ;c 8 0 13934060 13918679 13174985 08515608 08515452 05437672 05272412 03832647  ";
+    /// Copied verbatim from WordNet 3.1's `index.noun`, `;` and all.
+    ///
+    /// This constant used to read `;c`, written from the symbol table rather
+    /// than from the file. No index file writes `;c` -- the class letter
+    /// belongs to the sense, so it appears only in `data.*` -- and that single
+    /// wrong character is why 13,606 of the dictionary's 155,467 index entries
+    /// were unparseable while every test stayed green.
+    const NODE_LINE: &str = "node n 8 5 ! @ ~ #p ; 8 0 13934060 13918679 13174985 08515608 08515452 05437672 05272412 03832647  ";
 
     #[test]
     fn parses_a_real_index_line_field_by_field() {
@@ -445,7 +452,7 @@ mod tests {
                 PointerSymbol::Hypernym,
                 PointerSymbol::Hyponym,
                 PointerSymbol::PartHolonym,
-                PointerSymbol::DomainOfTopic,
+                PointerSymbol::Domain,
             ]
         );
         assert_eq!(e.tagged_sense_count, 0);
@@ -498,6 +505,21 @@ mod tests {
             parse_index_line(NODE_LINE, PartOfSpeech::Verb).unwrap_err(),
             RecordError::InvalidField { field: "pos", .. }
         ));
+    }
+
+    /// The two symbols an index writes and a data record may not.
+    ///
+    /// Pinned against a fixture rather than against a downloaded dictionary,
+    /// because the real-dictionary test that would also have caught this is
+    /// `#[ignore]`d for want of the data, and so had never run.
+    #[test]
+    fn an_index_entry_carries_the_unqualified_domain_pointers() {
+        for (symbol, want) in [(";", PointerSymbol::Domain), ("-", PointerSymbol::Member)] {
+            let line = format!("thing n 1 1 {symbol} 1 0 00001740  ");
+            let e = parse_index_line(&line, PartOfSpeech::Noun).unwrap();
+            assert_eq!(e.pointer_symbols, [want], "index entry with {symbol:?}");
+            assert_eq!(want.symbol(), symbol, "round-trip");
+        }
     }
 
     #[test]

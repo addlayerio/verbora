@@ -26,6 +26,10 @@ use crate::synset::SynsetOffset;
 /// assert_eq!(PointerSymbol::Hypernym.symbol(), "@");
 /// assert_eq!(PointerSymbol::from_symbol("??"), None);
 /// ```
+/// Sealed, because this enum has already had to grow once: `wndb(5WN)`'s
+/// symbol table is what a WordNet release ships, not what this crate decides,
+/// and a release that adds a relation must not break every downstream `match`.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PointerSymbol {
     /// `!` — antonym. The only lexical relation in the core noun set.
@@ -66,6 +70,25 @@ pub enum PointerSymbol {
     DomainOfUsage,
     /// `-u` — member of this domain, usage.
     MemberOfUsage,
+    /// `;` — a domain pointer with no class letter.
+    ///
+    /// Only an **index** file writes this. An index entry lists which relations
+    /// the lemma's senses carry, and the topic/region/usage distinction is a
+    /// property of the individual sense, so the class letter appears only in
+    /// the data record. Measured over WordNet 3.1's shipped `index.*` files:
+    /// 8,936 bare `;` and zero `;c`, against 4,109 `;c` in `data.noun` alone.
+    ///
+    /// Reading it as "one of [`DomainOfTopic`](Self::DomainOfTopic),
+    /// [`DomainOfRegion`](Self::DomainOfRegion) or
+    /// [`DomainOfUsage`](Self::DomainOfUsage), which one is in the data record"
+    /// is what the format means. Collapsing it into any single one of them
+    /// would state a class the index does not.
+    Domain,
+    /// `-` — a member-of-domain pointer with no class letter.
+    ///
+    /// The inverse of [`Domain`](Self::Domain), and index-only for the same
+    /// reason. 1,295 occurrences in WordNet 3.1's `index.*`.
+    Member,
     /// `*` — entailment (verbs).
     Entailment,
     /// `>` — cause (verbs).
@@ -84,7 +107,7 @@ pub enum PointerSymbol {
 
 impl PointerSymbol {
     /// All twenty-six, in the order `wninput(5WN)` tabulates them.
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 28] = [
         Self::Antonym,
         Self::Hypernym,
         Self::InstanceHypernym,
@@ -104,6 +127,8 @@ impl PointerSymbol {
         Self::MemberOfRegion,
         Self::DomainOfUsage,
         Self::MemberOfUsage,
+        Self::Domain,
+        Self::Member,
         Self::Entailment,
         Self::Cause,
         Self::AlsoSee,
@@ -135,6 +160,8 @@ impl PointerSymbol {
             "%p" => Self::PartMeronym,
             "=" => Self::Attribute,
             "+" => Self::DerivationallyRelatedForm,
+            ";" => Self::Domain,
+            "-" => Self::Member,
             ";c" => Self::DomainOfTopic,
             "-c" => Self::MemberOfTopic,
             ";r" => Self::DomainOfRegion,
@@ -175,6 +202,8 @@ impl PointerSymbol {
             Self::MemberOfRegion => "-r",
             Self::DomainOfUsage => ";u",
             Self::MemberOfUsage => "-u",
+            Self::Domain => ";",
+            Self::Member => "-",
             Self::Entailment => "*",
             Self::Cause => ">",
             Self::AlsoSee => "^",
@@ -219,6 +248,8 @@ impl PointerSymbol {
             Self::MemberOfTopic => "member of this domain - topic",
             Self::DomainOfRegion => "domain of synset - region",
             Self::MemberOfRegion => "member of this domain - region",
+            Self::Domain => "domain of synset - class unstated",
+            Self::Member => "member of this domain - class unstated",
             Self::DomainOfUsage => "domain of synset - usage",
             Self::MemberOfUsage => "member of this domain - usage",
             Self::Entailment => "entailment",
@@ -294,8 +325,8 @@ mod tests {
     use super::*;
 
     /// Walks the whole table rather than sampling it: every symbol must round
-    /// trip, all twenty-six spellings must be distinct, and nothing outside the
-    /// table may parse.
+    /// trip, all twenty-eight spellings must be distinct, and nothing outside
+    /// the table may parse.
     #[test]
     fn every_symbol_round_trips_and_the_table_is_injective() {
         let mut spellings: Vec<&str> = Vec::with_capacity(PointerSymbol::ALL.len());
@@ -304,7 +335,7 @@ mod tests {
             assert_eq!(s.to_string(), s.symbol());
             spellings.push(s.symbol());
         }
-        assert_eq!(spellings.len(), 26);
+        assert_eq!(spellings.len(), 28);
         spellings.sort_unstable();
         let before = spellings.len();
         spellings.dedup();
@@ -312,10 +343,10 @@ mod tests {
     }
 
     /// Enumerates every one- and two-character ASCII string — 128 + 16 384
-    /// candidates — and checks that exactly the twenty-six documented ones
+    /// candidates — and checks that exactly the twenty-eight documented ones
     /// parse. A sampled test would not have caught a stray arm.
     #[test]
-    fn exactly_twenty_six_ascii_strings_parse_as_symbols() {
+    fn exactly_twenty_eight_ascii_strings_parse_as_symbols() {
         let mut accepted = Vec::new();
         for a in 0u8..=127 {
             let one = (a as char).to_string();

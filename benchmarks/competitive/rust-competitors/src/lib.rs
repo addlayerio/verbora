@@ -15,6 +15,11 @@
 //! every allocation any bench file or example makes, on both sides of every
 //! comparison equally.
 //!
+//! [`sentiment_corpus`] is the third: the §1.14 corpus, shared by
+//! `benches/sentiment.rs` and `tests/sentiment_correctness.rs` so that the
+//! text the test proves fair is literally the text the benchmark measures,
+//! rather than a copy of it that can drift.
+//!
 //! [`double_metaphone_cpp`] is the one non-Rust competitor in this
 //! workspace: an FFI binding to a vendored C++11 library, compiled by
 //! `build.rs`. See that module's own doc comment.
@@ -28,6 +33,7 @@
 pub mod double_metaphone_cpp;
 pub mod language_support;
 pub mod memory;
+pub mod sentiment_corpus;
 
 /// Installed process-wide so [`memory::measure`] sees every allocation any
 /// benchmark or example in this crate makes — Verbora's and every

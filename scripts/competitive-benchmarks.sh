@@ -96,8 +96,29 @@ LOGS="$COMPETITIVE/results/logs"
 # in `rust-competitors/tests/distance_correctness.rs`. See
 # `benchmarks/competitive/README.md`'s "Resolved: `eddie` 0.4.2 is unsound"
 # section.
+#
+# `linfa_bayes` is absent from `classifiers`' `bayes_train`/`bayes_predict` id
+# lists, and must stay absent — the same retirement, for a different fault.
+# `linfa-bayes` 0.8.1 ships a `dbg!` in non-test code: its
+# `MultinomialNb::fit_with` training loop
+# (`linfa-bayes-0.8.1/src/multinomial_nb.rs:78`) writes a whole
+# `ClassHistogram` to stderr once per class on every `.fit()`, and a Criterion
+# group calls `fit` millions of times. One campaign produced a **1.5 GB log
+# file** that could not be pushed to GitHub. It cannot be measured as
+# published; and patching a competitor locally to measure it would make the
+# comparison unfair, because the number would then describe code nobody can
+# install. So it is retired from timing and kept for correctness, exactly as
+# `eddie` is: `benches/classifiers.rs` no longer emits a `linfa_bayes` row in
+# either group, while `tests/classifiers_accuracy.rs` (which fits once per
+# corpus size, not per iteration) still reports its accuracy. `smartcore` and
+# `naivebayes` remain as the module's Naive Bayes timing competitors. See
+# `benchmarks/competitive/README.md`'s "Retired: `linfa-bayes` 0.8.1 cannot be
+# timed as published" section.
+#
+# `linfa_logistic` is a DIFFERENT crate and stays in the two `logistic_*` id
+# lists below. Nothing above applies to it.
 declare -A MODULE_SPECS=(
-  [classifiers]="bayes_train:verbora,smartcore,linfa_bayes,naivebayes bayes_predict:verbora,smartcore,linfa_bayes,naivebayes logistic_train:verbora,smartcore,linfa_logistic,rustlearn logistic_predict:verbora,smartcore,linfa_logistic,rustlearn"
+  [classifiers]="bayes_train:verbora,smartcore,naivebayes bayes_predict:verbora,smartcore,naivebayes logistic_train:verbora,smartcore,linfa_logistic,rustlearn logistic_predict:verbora,smartcore,linfa_logistic,rustlearn"
   [distance]="levenshtein:verbora,strsim,rapidfuzz,stringmetrics,triple_accel,editdistancek damerau_levenshtein_unrestricted:verbora,strsim,rapidfuzz damerau_levenshtein_restricted_osa:verbora,strsim,rapidfuzz,triple_accel jaro:verbora,strsim,rapidfuzz,eddie jaro_winkler:verbora,strsim,rapidfuzz,eddie hamming:verbora,strsim,rapidfuzz,stringmetrics,triple_accel fuzzy_substring_search:verbora,triple_accel"
   [inflectors]="count_inflector_nth:verbora,ordinal count_inflector_nth_str:verbora,inflector noun_inflector_pluralize:verbora,pluralizer,inflector noun_inflector_singularize:verbora,pluralizer,inflector"
   [language]="whatlang_wrapper_overhead:verbora_wrapper,raw_whatlang language_detection_by_length:verbora,lingua,whichlang language_detection_by_language:verbora,lingua,whichlang script_detection_by_length:verbora,whatlang script_detection_by_language:verbora,whatlang transliteration_ja:verbora,wana_kana"
@@ -105,6 +126,37 @@ declare -A MODULE_SPECS=(
   [normalizers]="remove_diacritics_ascii:verbora,diacritics-crate remove_diacritics_accented:verbora,diacritics-crate ja_hiragana_to_katakana:verbora,unicode-jp ja_katakana_to_hiragana:verbora,unicode-jp ja_katakana_halfwidth_to_fullwidth:verbora,kana-converter"
   [phonetics]="soundex:verbora,rphonetic metaphone:verbora,rphonetic double_metaphone:verbora,rphonetic dm_soundex:verbora,rphonetic"
   [pos_tagging]="pos_cold_start:verbora,postagger,rust_bert pos_tag_sentence:verbora,postagger,rust_bert pos_tag_batch:verbora,postagger,rust_bert"
+  # §1.14 Sentiment. One group only, and its input domain is deliberately
+  # narrow: `sentiment` 0.1.1 embeds AFINN-111 where Verbora ships AFINN-165,
+  # implements no negation rule, and tokenizes internally. The corpus is built
+  # from the 2,438 keys the two tables agree on exactly, contains no negation
+  # word, and is lowercase ASCII words joined by single spaces so both
+  # tokenizers cut it identically — `rust-competitors/tests/
+  # sentiment_correctness.rs` asserts all three, and the two crates return the
+  # same number on every document this group times. Do not widen the corpus
+  # without re-reading `benches/sentiment.rs`'s doc comment: on arbitrary
+  # English these two do not compute the same function.
+  [sentiment]="sentiment_score_document:verbora,sentiment"
+  # §1.15 WordNet. Needs the separately-licensed Princeton database —
+  # `benchmarks/competitive/scripts/fetch-models.sh wordnet-en`, or
+  # $WORDNET_DB_PATH. Every group skips cleanly without it, so this module
+  # collects nothing rather than failing.
+  #
+  # Six ids per group: Verbora's four `Storage` strategies against
+  # `wordnet-db` 0.1.3's two `LoadMode`s. The like-for-like pair is
+  # `verbora_resident` against `wordnet_db_owned` (both read the files into
+  # owned buffers); `wordnet_db_mmap` is the competitor's default and
+  # `verbora_lazy` is Verbora's no-`unsafe` answer to the same problem.
+  # `wordnet_open` and `wordnet_lookup` are a build-cost/query-cost pair and
+  # must be published together — `wordnet-db` parses the whole database at
+  # load so its queries are hash hits, Verbora binary-searches on demand.
+  #
+  # These rows describe the ~91% of the dictionary Verbora can currently read:
+  # `verbora-wordnet` rejects the 13,606 index entries (8.8%) whose
+  # `ptr_symbol` list uses the bare `;`/`-` domain pointers Princeton's index
+  # files actually write. See `benches/wordnet.rs`'s "A Verbora defect narrows
+  # this benchmark's domain" section — the defect is in `crates/`, not here.
+  [wordnet]="wordnet_open:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned wordnet_cold:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned wordnet_lookup:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned wordnet_index_entry:verbora_pread,verbora_lazy,verbora_resident,verbora_indexed,wordnet_db_mmap,wordnet_db_owned"
   [spellcheck]="spellcheck_new:verbora,harper_core,symspell,fast_symspell spellcheck_get_corrections_d1:verbora,harper_core,symspell,fast_symspell spellcheck_get_corrections_d2:verbora,harper_core,symspell,fast_symspell spellcheck_is_correct:verbora,harper_core,symspell,fast_symspell spellcheck_spellbook_is_correct:spellbook,verbora_own_corpus spellcheck_spellbook_suggest:spellbook,verbora_own_corpus spellcheck_batch_correction:verbora,harper_core,symspell,fast_symspell spellcheck_fuzzyindex_construction:fuzzy_index,fast_symspell spellcheck_fuzzyindex_query:fuzzy_index,fast_symspell fst_fuzzy_construction:fuzzy_index,fst fst_fuzzy_query:fuzzy_index,fst"
   [stemmers]="porter_de:verbora,rust-stemmers,snowball-stemmers-rs porter_en:verbora,nltk-porter,porter-stemmer porter_es:verbora,rust-stemmers,snowball-stemmers-rs porter_fr:verbora,rust-stemmers,snowball-stemmers-rs porter_it:verbora,rust-stemmers,snowball-stemmers-rs porter_nl:verbora,rust-stemmers,snowball-stemmers-rs porter_no:verbora,rust-stemmers,snowball-stemmers-rs porter_pt:verbora,rust-stemmers,snowball-stemmers-rs porter_ru:verbora,rust-stemmers,snowball-stemmers-rs porter_sv:verbora,rust-stemmers,snowball-stemmers-rs stemmer_id:verbora,sastrawi stemmer_ja:verbora,lindera"
   [tfidf]="build:verbora,afshinm idf:verbora,afshinm,rust_tfidf tfidf:verbora,afshinm,rust_tfidf"
