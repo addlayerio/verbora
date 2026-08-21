@@ -28,7 +28,7 @@ fold, an already-composed string handed to `nfc`. Every function returns
 entry point and one version accessor — the crate root is the whole public
 surface, and nothing here is fallible.
 <code>cargo test -p verbora-normalizers --all-features</code> runs
-<strong>31</strong> tests and <strong>9</strong> doctests, including a
+<strong>31</strong> tests and <strong>10</strong> doctests, including a
 conformance suite that replays the Unicode Character Database's own
 <code>NormalizationTest.txt</code>.
 </div>

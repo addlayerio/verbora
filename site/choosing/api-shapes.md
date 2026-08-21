@@ -12,8 +12,11 @@ a function does — and what it costs — from its name alone.
 
 <div class="callout callout-note">
 <strong>Naming is a promise, not a guarantee of existence.</strong> Not every
-subsystem has all four. Phonetics has only the eager shape; distance has only
-eager scalars. The feature pages say exactly which exist.
+subsystem has all four. Distance has only eager scalars — no lazy shape, no
+buffer, no sequential batch. Phonetics is eager except for
+<code>SoundEx::process_into</code> and <code>Metaphone::process_into</code>, the
+two encoders whose keys are most often accumulated in bulk. The feature pages say
+exactly which exist.
 </div>
 
 ## 1. Eager — `tokenize_borrowed()`, `process()`, `pluralize()`, `keys_with_prefix()`

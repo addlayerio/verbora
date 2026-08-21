@@ -20,10 +20,15 @@ feature-gated separately. See
 ## Stability
 
 The workspace version is `0.2.0`, and public APIs may still be refined before a
-stable release. Documented behavior and test fixtures are treated as deliberate
-contracts in the meantime: changing one means changing its tests and its
-documentation in the same step, so a behavior you build on will not move
-silently between releases.
+stable release. Pre-1.0, a minor bump is where that refinement lands: 0.2.0 is a
+**breaking** release relative to 0.1.0 — signatures moved, several public error
+and payload enums became `#[non_exhaustive]`, and a number of behaviors were
+corrected — so upgrading is a code change, not a version-number change.
+
+Documented behavior and test fixtures are treated as deliberate contracts in the
+meantime: changing one means changing its tests and its documentation in the
+same step, so a behavior you build on does not move *silently* — it moves in a
+release that says it moved.
 
 ## Deliberate boundaries
 
@@ -36,5 +41,6 @@ Verbora is an NLP toolkit, not a search engine or a hosted service. Concretely:
 - parallel APIs use your Rayon environment and never configure a global thread
   pool.
 
-Where a capability is out of scope, the pages say so plainly in their "When not
-to use it" section rather than leaving you to discover it.
+Where a capability is out of scope, its page says so plainly rather than leaving
+you to discover it — most under a "When not to use it" heading, the rest in
+whichever section states that crate's own contract.

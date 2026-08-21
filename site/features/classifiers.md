@@ -15,10 +15,10 @@ persistence pair per design, and a fixed floating-point evaluation order pinned
 by <code>tests/train_parity.rs</code> and <code>tests/predict_parity.rs</code> —
 see <a href="#api-reference">API reference</a> below for the full public surface.
 <code>cargo test -p verbora-classifiers --all-features</code> runs
-<strong>166</strong> tests across the crate's unit tests and its
-<code>tests/</code> suite (edge cases, parity, and the maximum-entropy
-contract) plus <strong>12</strong> doctests — <strong>178 tests, 0
-failures</strong>.
+<strong>170</strong> tests across the crate's unit tests and its
+<code>tests/</code> suite (edge cases, train and predict parity, the
+maximum-entropy contract, the stemmer stamp, and the parallel entry point)
+plus <strong>13</strong> doctests — <strong>183 tests, 0 failures</strong>.
 </div>
 
 ## When to use it
@@ -112,6 +112,11 @@ pub struct Classifier<E: Engine> {
     stemmer: Arc<dyn Stemmer + Send + Sync>,
     last_added: usize,
     keep_stops: Option<bool>,
+    // A `token -> stem` memo. Not classifier state in any observable sense:
+    // it changes no answer, is never serialised, and starts empty in a
+    // `restore`d classifier. The lock exists only because `classify` takes
+    // `&self`, and it is only ever *tried*, never waited on.
+    stem_cache: Mutex<StemCache>,
 }
 
 pub type BayesClassifier = Classifier<BayesEngine>;
@@ -289,6 +294,43 @@ One difference between the `Classifier<E>` shape and `MaxEntClassifier`'s:
 - **JSON shape.** `Classifier<E>::to_json` is compact (`{"a":1,"b":2}`);
   `MaxEntClassifier::to_json` pretty-prints with a 2-space indent, opening with
   the same compatibility stamp every classifier in this crate writes.
+
+### Restoring is version-locked, and the stemmer is part of the lock
+
+Every artifact this crate writes opens with a `_verbora` compatibility stamp,
+because a model's feature keys are derived from text — so a build whose word
+boundaries, case mapping or stemmer differ would read the same weights under
+different features and mispredict silently:
+
+```json
+{"_verbora":{"schema":4,"unicode":"17.0.0",
+             "lowercase":"63e0f1a00f3be510","stemmer":"95e8a9a16e95e535"}}
+```
+
+`restore` and `load` compare that stamp against this build's for exact equality
+and refuse any mismatch with `LoadError::Stamp(StampError)`, which names both
+stamps. An artifact carrying no `_verbora` member is refused for the same reason
+with `StampError::Missing`: absence means the build behind its features is
+unknown, and guessing is the failure the stamp exists to prevent. Past the
+stamp, missing or wrongly typed fields fall back to their empty values — the
+stamp is what decides whether an artifact may be read at all.
+
+<div class="callout callout-warn">
+<strong>A model trained through <code>with_stemmer</code> does not come back
+through <code>restore</code>.</strong> <code>restore</code> and <code>load</code>
+rebuild with <code>default_stemmer()</code>, and the stamp records which stemmer
+keyed the features, so a custom-stemmer model is refused rather than silently
+rekeyed. Read it back with
+<code>restore_with(json, stemmer)</code> or
+<code>load_with(path, stemmer)</code>, naming the same stemmer — only you know
+which one it was.
+</div>
+
+`LoadError` is `#[non_exhaustive]` with three variants today — `Io` (the file
+could not be read; impossible from `restore`, which takes a string),
+`Parse` (not the JSON this crate writes) and `Stamp` — so a `match` on it needs
+a wildcard arm. A corrupt download and a stale model need opposite responses,
+which is why they are never collapsed into one variant.
 
 <div class="callout callout-note">
 <strong><code>MaxEntClassifier::restore</code> restores the fit, not just the
@@ -532,16 +574,19 @@ crate. See [Allocation](../performance/allocation).
 
 The default stemmer (English Porter, used whenever you construct a classifier
 with `new()` rather than `with_stemmer`) tests stop words with
-`verbora_core::stopwords::is_default_stopword`, backed by a process-wide
-`LazyLock<RwLock<StopWords>>` — the same shared state
-[Core vocabulary](../features/core) describes.
+`verbora_core::is_global_stopword`, backed by a process-wide
+`LazyLock<RwLock<StopWords>>` behind a has-ever-been-mutated flag — the same
+shared state [Core vocabulary](../features/core) describes.
 
 <div class="callout callout-warn">
-<strong>Careful.</strong> Any <code>add_stop_word</code>/<code>remove_stop_word</code>
-call anywhere in the process — including from an unrelated
-<code>verbora-stemmers</code> or <code>verbora-phonetics</code> caller — changes
-how every classifier in that process tokenises string documents from that point
-on, retroactively affecting classifiers already constructed. A classifier fed
+<strong>Careful.</strong> Any write to that list anywhere in the process — a
+<code>verbora-stemmers</code> <code>add_stop_word</code>/<code>remove_stop_word</code>
+call on <code>PorterStemmer</code> or <code>LancasterStemmer</code>, or a bare
+<code>verbora_core</code>/<code>verbora_util</code>
+<code>add_global_stopword</code> — changes how every classifier in that process
+tokenises string documents from that point on, retroactively affecting
+classifiers already constructed. (<code>verbora-phonetics</code> does not read
+it: its helpers take an explicit <code>&amp;StopWords</code>.) A classifier fed
 token slices (<code>Observation::Tokens</code>) never touches this state.
 </div>
 
@@ -574,6 +619,7 @@ cargo doc -p verbora-classifiers --no-deps --open
 | `Classifier<E>`, `Engine`, `Observation`, `Document`, `TrainingEvent`, `Classification`, `ClassifierError`, `LoadError` | `verbora_classifiers::{Classifier, Engine, Observation, Document, TrainingEvent, Classification, ClassifierError, LoadError}` |
 | `Classifier::par_classify_batch` (requires `parallel`) | same path as `Classifier<E>` |
 | `MaxEntClassifier`, `RestoreError`, `MaxEntError` | `verbora_classifiers::{MaxEntClassifier, RestoreError, MaxEntError}` |
+| Compatibility stamp | `verbora_classifiers::{ArtifactStamp, StampError, StampMismatch, SCHEMA, STAMP_PROPERTY, CONTEXT_PROBES, STEMMER_PROBES, lowercase_fingerprint, stemmer_fingerprint, verify_stamp, verify_stamp_against}` |
 | `Event`, `Sample` | `verbora_classifiers::{Event, Sample}` |
 | `Gis`, `StopReason`, `TrainingReport` | `verbora_classifiers::{Gis, StopReason, TrainingReport}` |
 | `MaxEntModel`, `ModelDefect` | `verbora_classifiers::{MaxEntModel, ModelDefect}` |

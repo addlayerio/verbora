@@ -20,12 +20,19 @@ character database, and `verbora-ngrams` has no dependencies at all.
 verbora-tokenizers = "0.2"
 ```
 
+<div class="callout callout-warn">
+<strong>Upgrading from 0.1?</strong> <code>0.2.0</code> is a breaking release: a
+caret requirement of <code>"0.1"</code> will not resolve to it, every module
+path is gone in favour of the crate root, and several results changed without
+changing type. <a href="upgrading">Upgrading from 0.1 to 0.2</a> is the
+old-signature-to-new-signature guide, including the changes that do not produce
+a compile error.
+</div>
+
 <div class="callout callout-note">
-<strong>Pre-1.0.</strong> The crates are at <code>0.2.0</code>, which is a
-breaking release relative to <code>0.1.0</code>: a caret requirement of
-<code>"0.1"</code> will not resolve to it, and the examples on this site are
-written against the newer API. If the version you want is not on crates.io yet,
-use the git or path form below — the code is identical either way.
+<strong>Pre-1.0.</strong> The examples on this site are written against
+<code>0.2</code>. If the version you want is not on crates.io yet, use the git or
+path form below — the code is identical either way.
 </div>
 
 From git:
@@ -121,3 +128,5 @@ unoptimised debug build makes them unusably slow.
   split the way they are.
 - [Cargo features](cargo-features.md) — parallel batch APIs and the other
   opt-ins.
+- [Upgrading from 0.1 to 0.2](upgrading.md) — what broke, what silently changed,
+  and what to write instead.

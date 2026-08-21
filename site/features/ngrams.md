@@ -18,7 +18,7 @@ It is four public items and no dependencies:
 <strong>Specification status.</strong> Every item is documented and test-pinned,
 and <strong>no function in this crate panics on any input</strong>, in debug or
 in release. <code>cargo test -p verbora-ngrams --all-features</code> runs
-<strong>34</strong> tests and <strong>22</strong> doctests.
+<strong>34</strong> tests and <strong>23</strong> doctests.
 </div>
 
 ## When to use it

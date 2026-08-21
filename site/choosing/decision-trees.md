@@ -66,7 +66,7 @@ need and just want the answer. Each section links to the page that explains it.
 | American surnames, US-census rules | `Nysiis` | letters |
 | German-language names and words | `Cologne` | digits |
 | Names whose language of origin is itself uncertain | `BeiderMorse` | a candidate list, per language set |
-| "Which encoder should I even use for this text?" | `verbora_language::recommend` | a recommendation, or `None` rather than a guess |
+| "Which encoder should I even use for this text?" | `verbora_language::recommend` | a `PhoneticStrategy`, whose `primary` is `None` rather than a guess when nothing fits |
 
 Twelve encoders ship in all — the eight rows above are the common answers.
 → [Phonetics](../features/phonetics.md) · [Language](../features/language.md)

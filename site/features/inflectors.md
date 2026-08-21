@@ -9,8 +9,8 @@ exact and stable rather than approximate.
 <div class="callout callout-spec">
 <strong>Specification status.</strong> All <strong>6</strong> inflector APIs are
 documented and test-pinned, tables included.
-<code>cargo test -p verbora-inflectors</code> runs <strong>67</strong> tests
-and <strong>11</strong> doctests.
+<code>cargo test -p verbora-inflectors</code> runs <strong>68</strong> tests
+and <strong>12</strong> doctests.
 </div>
 
 ## The six public types

@@ -21,7 +21,8 @@ can produce the answer asked for:
 | `osa`, weighted costs | **3 rows** | transposition reaches back to row − 2 |
 | `damerau_levenshtein`, unit cost | **3 rolling rows + 1 saved-cell row** | Zhao–Sahni's linear-space algorithm: two remembered cells stand in for the arbitrarily-earlier row the textbook recurrence would read |
 | `damerau_levenshtein`, weighted costs | **full matrix** | a weighted transposition reaches an arbitrary earlier row |
-| search, any variant | **full matrix** | the match start is recovered by walking parents |
+| `levenshtein_search`, unit cost | **two `Vec<u64>` of per-column deltas** | the parent of every cell is a pure function of its neighbours' costs, and unit-cost cell costs are recoverable from Myers' `Pv`/`Mv` words — so the backtrack recomputes them instead of storing a matrix |
+| every other search | **full cost + parent matrix** | a transposition's parent depends on state cell costs cannot recover, and a weighted cell has no delta-bit form at all |
 
 The cost difference between those rows is the point. On identical 64-unit
 inputs:
@@ -31,7 +32,7 @@ inputs:
 | `levenshtein` | bit-vector | 166.1 ns |
 | `osa` | bit-vector | 179.4 ns |
 | `damerau_levenshtein` | 3 rolling rows | 7.75 µs |
-| `levenshtein_search` | full cost + parent matrix | 12.79 µs |
+| `levenshtein_search` | per-column bit-vector deltas | 12.79 µs |
 
 † Every figure in this table is **pending re-measurement** and left as recorded
 rather than replaced with a guess. The working-set ranking they illustrate is a
@@ -44,10 +45,10 @@ pending with them — is the practical point: asking only for a distance is far
 cheaper than asking for a match position on the same input, because the answer
 you asked for fits in a fundamentally smaller structure.
 
-When the full matrix genuinely is required — search mode has to backtrack — it
-is stored as two flat vectors rather than one vector of pairs, so the hot cost
-sweep never drags parent entries through cache; the parents are paged in once,
-at the end, when the backtrace runs.
+When the full matrix genuinely is required — the Damerau and OSA searches, and
+every weighted search — it is stored as two flat vectors rather than one vector
+of pairs, so the hot cost sweep never drags parent entries through cache; the
+parents are paged in once, at the end, when the backtrace runs.
 
 ## 2. Flat arenas instead of one node per object
 
@@ -84,12 +85,13 @@ Most trie nodes have one or two children, so child lists are held inline in a
 `SmallVec` and only spill to the heap for nodes that genuinely branch. A bulk
 load therefore does not make one heap allocation per node.
 
-The same instinct appears in `verbora-distance`. Jaro–Winkler's scalar kernel
-keeps its two match-flag arrays in `[bool; 128]` stack buffers rather than
-allocating them per call, so **`jaro` and `jaro_winkler` allocate nothing at all
-for inputs up to 128 units** — and words are short, so that is the common
-path. Longer inputs go further: the bit-parallel kernels pack match flags into
-`u64` words.
+The same instinct appears in `verbora-distance`. Jaro–Winkler's scalar kernel —
+the production path for operands of at most 16 units — keeps its two match-flag
+arrays in `[bool; 128]` stack buffers rather than allocating them per call. The
+bit-parallel kernels that take over above that pack the same flags one bit per
+position, in stack arrays holding 16 `u64` words, so **the match flags stay off
+the heap up to 1024 units per side**. What does reach the heap past one word is
+the packed pattern-match table, as a single `Vec<u64>`.
 
 ## 4. Cheaper keys, not cheaper hashing alone
 
