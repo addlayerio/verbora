@@ -1,19 +1,44 @@
 //! Brill transformation-based part-of-speech tagging.
 //!
-//! ```
-//! use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
+//! # No dictionary ships with this crate. Bring your own.
 //!
-//! let lexicon = Lexicon::bundled(Language::English);
-//! let rules = RuleSet::bundled(Language::English);
+//! This is a tagger **engine**, not a tagger. Versions before 0.3 embedded
+//! English and Dutch dictionaries; those files could not be redistributed under
+//! this crate's licence and were removed (`data/NOTICE.md` records which and
+//! why). What ships now is the algorithm, the rule language, the
+//! [`Trainer`] — and [`RuleSet::brill_1992`], the ten published rules of Brill
+//! (1992), Table 1.
+//!
+//! The lexicon is yours to supply, from any source you have the right to use:
+//!
+//! ```
+//! use verbora_tagger::{BrillTagger, Corpus, RuleSet, Tag};
+//!
+//! // An annotated corpus in Brown `token_TAG` form — a few lines here, a real
+//! // corpus in practice.
+//! let corpus = Corpus::parse_brown(
+//!     "the_DT dog_NN barks_VBZ\n\
+//!      the_DT book_NN is_VBZ good_JJ\n\
+//!      I_PRP would_MD book_VB a_DT flight_NN",
+//! )?;
+//!
+//! // Tag frequencies become the initial-state annotator, most frequent first.
+//! let lexicon = corpus.build_lexicon(Tag::new("NN")?)?;
+//! assert_eq!(lexicon.tag_of("book").as_str(), "NN"); // noun twice, verb once
+//!
+//! // One rule, in the tag set the corpus itself uses.
+//! let rules: RuleSet = "NN VB PREV-TAG MD".parse()?;
 //! let tagger = BrillTagger::new(&lexicon, &rules);
 //!
-//! let tagged = tagger.tag("would book a flight".split(' '));
+//! let tagged = tagger.tag("I would book a flight".split(' '));
 //! let tags: Vec<&str> = tagged.iter().map(|w| w.tag().as_str()).collect();
-//! assert_eq!(tags, ["MD", "VB", "DT", "NN"]);
+//! assert_eq!(tags, ["PRP", "MD", "VB", "DT", "NN"]);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! `book` is a noun in the lexicon; the rule `NN VB PREV-WORD-IS would` is what
-//! makes it a verb here.
+//! `book` is a noun in the lexicon; the rule `NN VB PREV-TAG MD` is what makes
+//! it a verb here. [`Lexicon::new`] plus [`Lexicon::insert`] is the other way
+//! in, when the entries are yours to write down rather than to count.
 //!
 //! # How it works
 //!
@@ -29,19 +54,34 @@
 //!    (1994), plus three Verbora-defined token-shape tests.
 //!
 //! [`Trainer`] learns a rule set from an annotated [`Corpus`] using the
-//! error-driven procedure of Brill (1995) §2.
+//! error-driven procedure of Brill (1995) §2 — which, with no bundled rules to
+//! fall back on, is the main way to get a rule set that fits your tag set.
+//!
+//! # The tag set is whatever your data says it is
+//!
+//! Verbora attaches no meaning to a tag beyond string identity, so a lexicon and
+//! a rule set agree only if they were written against the same tag set. That is
+//! not a formality: a rule whose condition names a tag nothing produces is not
+//! an error, it simply never fires, and a tagger built from a mismatched pair
+//! runs to completion and returns the initial-state annotation unchanged.
+//!
+//! [`RuleSet::brill_1992`] is the one place this crate can trip you up, and it
+//! says so in its own documentation: those rules are written in **Brown** corpus
+//! tags (`AT`, `PPS`, `PPO`, `HVD`, `NP`), so they do nothing to a Penn Treebank
+//! lexicon.
 //!
 //! # The token contract
 //!
 //! **This crate never tokenizes.** A token is a non-empty string containing no
 //! scalar with the Unicode `White_Space` property, and the caller decides what
-//! produced them. That matters more than it sounds: the bundled dictionaries are
-//! keyed by whitespace-delimited corpus tokens, so `well-known` and `A.A.U.` are
-//! single keys, and a tokenizer that splits inside them cannot reach them —
-//! measured at **15,543 of 92,538 English keys (16.8%)** for a [UAX #29] word
-//! tokenizer such as `verbora_tokenizers::WordTokenizer`. [`Lexicon`]'s module
-//! documentation gives the full table and the guidance that follows from it;
-//! `tests/tokenization.rs` walks every bundled key and pins the numbers.
+//! produced them. Which keys a program can reach therefore depends on the
+//! tokenizer: a dictionary keyed by whitespace-delimited corpus tokens holds
+//! `well-known` and `A.A.U.` as single keys, and a [UAX #29] word tokenizer such
+//! as `verbora_tokenizers::WordTokenizer` splits inside both, so those entries
+//! can never be looked up. Key the lexicon with the producer that will tokenize
+//! the text — [`Corpus::build_lexicon`] does that for you — and the question
+//! does not arise. [`Lexicon`]'s own documentation states the rule in full;
+//! `tests/tokenization.rs` demonstrates both the matched pair and the mismatch.
 //!
 //! Nothing here rewrites a token. Case folding, trimming and normalisation are
 //! the caller's explicit choice; tokens come out of the tagger byte-identical to
@@ -81,29 +121,7 @@
 //! be written into a rule but never read back out of one. [`Corpus::parse_brown`]
 //! inherits it — a corpus line tagging a token `*` is rejected as
 //! [`CorpusParseError::WildcardTag`], not silently accepted. [`Word::new`] accepts
-//! `"*"`, because there it is an ordinary token — the bundled English lexicon
-//! keys it.
-//!
-//! # Bundled data
-//!
-//! | Language | Lexicon entries | Rules |
-//! |---|---|---|
-//! | [`Language::English`] | 92,538 | 18 |
-//! | [`Language::Dutch`] | 11,699 | 273 |
-//!
-//! Plus [`brill_paper_rule_strings`], the ten rules of Brill (1992), Table 1.
-//! All of it is packed at build time and read in place from the executable, so
-//! constructing a [`Lexicon`] parses nothing and allocates nothing.
-//!
-//! The English source JSON holds 92,662 entries and 124 of them are not
-//! bundled. Its keys are written in the escaped notation of the tagged corpus
-//! they came from, where a `/` inside a token appears as `\/` because a bare `/`
-//! separates a token from its tag, and an asterisk appears as `\*` because a
-//! bare `*` marks a null element; `build.rs` decodes that, so `Asia\/Pacific`
-//! ships as the key `Asia/Pacific` and `\*` as the key `*`. 123 keys turn out to
-//! be markup rather than tokens and are dropped, and one (the key `""`, whose
-//! tag list was also empty) violates the entry contract. Each count is a
-//! constant `data::tests` asserts, per language and per reason.
+//! `"*"`, because there it is an ordinary token.
 //!
 //! # References
 //!
@@ -128,7 +146,6 @@
 mod condition;
 mod corpus;
 mod data;
-mod language;
 mod lexicon;
 mod parse;
 mod rule;
@@ -141,7 +158,6 @@ mod trainer;
 
 pub use condition::Condition;
 pub use corpus::{Corpus, CorpusParseError};
-pub use language::{Language, brill_paper_rule_strings};
 pub use lexicon::{Entries, Lexicon, LexiconError, Tags};
 pub use parse::RuleParseError;
 pub use rule::{Rule, TagPattern};

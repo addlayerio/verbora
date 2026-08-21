@@ -44,7 +44,7 @@ verbora-normalizers = { path = "crates/verbora-normalizers", version = "0.2.0" }
 verbora-analyzers = { path = "crates/verbora-analyzers", version = "0.2.0" }
 verbora-spellcheck = { path = "crates/verbora-spellcheck", version = "0.2.0" }
 verbora-stemmers = { path = "crates/verbora-stemmers", version = "0.2.0" }
-verbora-tagger = { path = "crates/verbora-tagger", version = "0.2.0" }
+verbora-tagger = { path = "crates/verbora-tagger", version = "0.3.0" }
 verbora-transliterators = { path = "crates/verbora-transliterators", version = "0.2.0" }
 verbora-util = { path = "crates/verbora-util", version = "0.2.0" }
 verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.3.0" }

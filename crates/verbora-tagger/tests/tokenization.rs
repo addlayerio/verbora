@@ -1,190 +1,129 @@
-//! The token contract, checked against a real tokenizer by enumeration.
+//! The token contract, and the tokenizer coupling it makes explicit.
 //!
 //! `verbora-tagger` never tokenizes, so which lexicon keys a program can ever
-//! reach is decided by whatever produced its tokens. These tests walk **every**
-//! bundled key — 104,237 of them across the two languages — through two
-//! producers and pin the result, so the coupling breaks a test rather than
-//! silently costing hits.
+//! reach is decided by whatever produced its tokens. That is a real trap and it
+//! fails silently — a key the tokenizer never emits is not an error, it is just
+//! an entry that never matches — so both halves of it are demonstrated here:
 //!
-//! The two producers are:
+//! * the **mismatch**: a lexicon keyed by whitespace-delimited corpus tokens
+//!   paired with a [UAX #29] word tokenizer, which splits inside those keys;
+//! * the **matched pair**: a lexicon built with
+//!   `Corpus::build_lexicon` from a corpus tokenized by the same producer that
+//!   will tokenize the text, where every key is reachable by construction.
 //!
-//! * `str::split_whitespace`, the conforming producer the bundled dictionaries
-//!   are keyed for;
-//! * [UAX #29] word segmentation (`unicode_segmentation::unicode_words`), which
-//!   is exactly what `verbora_tokenizers::WordTokenizer` runs.
+//! The tokenizer used below is `unicode_segmentation::unicode_words`, which is
+//! exactly what `verbora_tokenizers::WordTokenizer` runs.
 //!
 //! [UAX #29]: https://www.unicode.org/reports/tr29/
 
 use unicode_segmentation::UnicodeSegmentation;
-use verbora_tagger::{Language, Lexicon};
+use verbora_tagger::{Corpus, Lexicon, Tag, TaggedToken};
 
-/// Every bundled key is a conforming token: it survives `split_whitespace` as
-/// exactly one field. This is the contract [`Lexicon::insert`] enforces, checked
-/// here against the data rather than against the code that filtered it.
-#[test]
-fn every_bundled_key_is_one_whitespace_delimited_token() {
-    for language in [Language::English, Language::Dutch] {
-        let lexicon = Lexicon::bundled(language);
-        let mut checked = 0usize;
-        for (key, _) in lexicon.entries() {
-            let fields: Vec<&str> = key.split_whitespace().collect();
-            assert_eq!(fields, [key], "{language:?} key {key:?} is not one token");
-            checked += 1;
-        }
-        assert_eq!(checked, lexicon.len());
-    }
+/// Keys of the shape a whitespace-delimited corpus produces: compounds,
+/// abbreviations and symbol-bearing tokens that a UAX #29 tokenizer will not
+/// hand back whole.
+const CORPUS_STYLE_KEYS: &[&str] = &[
+    "well-known",
+    "government-to-government",
+    "A&P",
+    "A.A.U.",
+    "%CHG",
+    "Asia/Pacific",
+];
+
+fn tag(s: &'static str) -> Tag {
+    Tag::new(s).expect("a conforming tag")
 }
 
-/// The measured cost of pairing the bundled dictionaries with a UAX #29 word
-/// tokenizer.
+/// Every key a lexicon accepts is a conforming token: it survives
+/// `split_whitespace` as exactly one field. This is the contract
+/// `Lexicon::insert` enforces, checked here on the way back out.
+#[test]
+fn every_key_is_one_whitespace_delimited_token() {
+    let mut lexicon = Lexicon::new(tag("NN"));
+    for key in CORPUS_STYLE_KEYS {
+        lexicon
+            .insert(key, vec![tag("NN")])
+            .expect("a conforming key");
+    }
+    let mut checked = 0usize;
+    for (key, _) in lexicon.entries() {
+        let fields: Vec<&str> = key.split_whitespace().collect();
+        assert_eq!(fields, [key], "key {key:?} is not one token");
+        checked += 1;
+    }
+    assert_eq!(checked, lexicon.len());
+
+    // ...and a key that is not one token cannot be inserted at all.
+    assert!(lexicon.insert("two words", vec![tag("NN")]).is_err());
+    assert!(lexicon.insert("", vec![tag("NN")]).is_err());
+}
+
+/// The mismatch, on the concrete keys that cause it.
 ///
-/// A key is *reachable* from such a tokenizer only if the tokenizer emits it as
-/// a single token when fed the key alone. Anything else — dropped because it is
+/// A key is *reachable* from a tokenizer only if the tokenizer emits it as a
+/// single token when fed the key alone. Anything else — dropped because it is
 /// pure punctuation, or split into pieces — can never be looked up, whatever the
-/// surrounding text.
-///
-/// The counts below are enumerated, not sampled, and are exact. They are pinned
-/// so that a change to either side (a new lexicon entry, a Unicode version bump
-/// in `unicode-segmentation`) shows up as a failure with a number attached
-/// instead of as a quietly worse tagger.
+/// surrounding text. Every key below fails that test under UAX #29 and passes it
+/// under `split_whitespace`, which is the whole of the coupling.
 #[test]
-fn uax29_word_segmentation_cannot_reach_one_english_key_in_six() {
-    let expected = [
-        // (language, dropped entirely, split, hyphen-caused splits)
-        (Language::English, 34usize, 15_509usize, 14_417usize),
-        (Language::Dutch, 19, 294, 230),
-    ];
-    // The headline figures the crate documentation and the README quote. Each is
-    // the *sum* the loop below arrives at, so updating a row of `expected`
-    // without updating the published figure fails here rather than silently
-    // leaving three documents quoting a number the data no longer supports.
-    let published_unreachable = [(Language::English, 15_543usize), (Language::Dutch, 313)];
-
-    for (language, want_dropped, want_split, want_hyphen) in expected {
-        let lexicon = Lexicon::bundled(language);
-        let (mut dropped, mut split, mut hyphen) = (0usize, 0usize, 0usize);
-        for (key, _) in lexicon.entries() {
-            let tokens: Vec<&str> = key.unicode_words().collect();
-            if tokens.is_empty() {
-                dropped += 1;
-            } else if tokens.len() > 1 || tokens[0] != key {
-                split += 1;
-                if key.contains('-') {
-                    hyphen += 1;
-                }
-            }
-        }
-        assert_eq!(dropped, want_dropped, "{language:?}: keys dropped entirely");
-        assert_eq!(split, want_split, "{language:?}: keys split or trimmed");
-        assert_eq!(
-            hyphen, want_hyphen,
-            "{language:?}: splits caused by U+002D HYPHEN-MINUS"
-        );
-
-        let (_, published) = published_unreachable
-            .iter()
-            .copied()
-            .find(|(l, _)| *l == language)
-            .expect("every measured language publishes a headline figure");
-        assert_eq!(
-            dropped + split,
-            published,
-            "{language:?}: the documented unreachable count is stale -- \
-             crates/verbora-tagger/src/lib.rs and README.md quote it"
-        );
+fn corpus_style_keys_are_unreachable_from_a_uax29_tokenizer() {
+    let mut lexicon = Lexicon::new(tag("NN"));
+    for key in CORPUS_STYLE_KEYS {
+        lexicon
+            .insert(key, vec![tag("JJ")])
+            .expect("a conforming key");
     }
 
-    // The denominators the same documents quote alongside those figures.
-    assert_eq!(Lexicon::bundled(Language::English).len(), 92_538);
-    assert_eq!(Lexicon::bundled(Language::Dutch).len(), 11_699);
-
-    // And the percentage, which is what the prose actually leads with. Computed
-    // rather than restated, so a lexicon change moves it here first.
-    let (english_len, english_unreachable) = (92_538f64, 15_543f64);
-    let percent = (english_unreachable / english_len * 1000.0).round() / 10.0;
-    assert!(
-        (percent - 16.8).abs() < f64::EPSILON,
-        "documented as 16.8%, measures {percent}%"
-    );
-}
-
-/// What actually causes the English splits, counted rather than asserted.
-///
-/// The hyphen dominates, but it is not the whole story, and the shorthand "it is
-/// the hyphens" hides more than half of the remainder. Every split key is
-/// attributed to exactly one cause here — the first that applies, in the order
-/// below — so the buckets sum to the split count above.
-#[test]
-fn the_english_splits_are_attributed_to_a_cause_each() {
-    let english = Lexicon::bundled(Language::English);
-    let (mut hyphen, mut dot, mut slash, mut ampersand, mut dollar, mut rest) =
-        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
-    for (key, _) in english.entries() {
-        let tokens: Vec<&str> = key.unicode_words().collect();
-        if tokens.is_empty() || (tokens.len() == 1 && tokens[0] == key) {
-            continue;
-        }
-        if key.contains('-') {
-            hyphen += 1;
-        } else if key.contains('&') {
-            ampersand += 1;
-        } else if key.contains('$') {
-            dollar += 1;
-        } else if key.contains('/') {
-            slash += 1;
-        } else if key.contains('.') {
-            dot += 1;
-        } else {
-            rest += 1;
-        }
-    }
-    assert_eq!(
-        [hyphen, dot, slash, ampersand, dollar, rest],
-        [14_417, 864, 151, 49, 9, 19]
-    );
-    assert_eq!(hyphen + dot + slash + ampersand + dollar + rest, 15_509);
-}
-
-/// The mechanism, spelled out on the concrete keys the counts above are made of.
-#[test]
-fn the_split_keys_are_the_ones_the_documentation_names() {
-    let en = Lexicon::bundled(Language::English);
-    for key in [
-        "well-known",
-        "government-to-government",
-        "A&P",
-        "A.A.U.",
-        "%CHG",
-    ] {
-        assert!(en.contains(key), "{key:?} is a real English key");
+    for key in CORPUS_STYLE_KEYS {
+        assert!(lexicon.contains(key), "{key:?} is a key of this lexicon");
         let tokens: Vec<&str> = key.unicode_words().collect();
         assert!(
-            tokens.len() > 1 || tokens.first() != Some(&key),
+            tokens.len() > 1 || tokens.first() != Some(key),
             "{key:?} unexpectedly survives UAX #29 whole: {tokens:?}"
         );
         // ...and it does survive the conforming producer.
-        assert_eq!(key.split_whitespace().collect::<Vec<_>>(), [key]);
+        assert_eq!(key.split_whitespace().collect::<Vec<_>>(), [*key]);
     }
-    // `U+002D` is `Word_Break=Other`, which is what splits the hyphenated keys.
+
+    // `U+002D` is `Word_Break=Other`, which is what splits the hyphenated keys —
+    // the single most common cause, since hyphenated compounds are common in
+    // corpus vocabularies.
     assert_eq!(
         "well-known".unicode_words().collect::<Vec<_>>(),
         ["well", "known"]
     );
+
+    // The consequence, stated as behaviour rather than as arithmetic: tagging
+    // the UAX #29 tokenization of a sentence never reaches the compound entry,
+    // so its `JJ` is never assigned and both halves take the default.
+    let text = "a well-known problem";
+    for token in text.unicode_words() {
+        assert_ne!(
+            lexicon.tag_of(token),
+            tag("JJ"),
+            "{token:?} unexpectedly reached a compound entry"
+        );
+    }
+    assert_eq!(
+        lexicon.tag_of("well-known"),
+        tag("JJ"),
+        "whole, it is found"
+    );
 }
 
-/// A lexicon built from a corpus tokenized by UAX #29 is fully reachable from
-/// UAX #29 output — the escape hatch the crate documentation points at.
+/// The matched pair: a lexicon built from a corpus tokenized by UAX #29 is fully
+/// reachable from UAX #29 output — the escape hatch the crate documentation
+/// points at, and the one this crate now recommends by default.
 #[test]
 fn a_corpus_built_lexicon_is_reachable_from_its_own_tokenizer() {
-    use verbora_tagger::{Corpus, Tag, TaggedToken};
-
     let text = "The well-known and/or don't 3.14 node_js café";
     let sentence: Vec<TaggedToken<'_>> = text
         .unicode_words()
-        .map(|t| TaggedToken::new(t, Tag::new("NN").unwrap()))
+        .map(|t| TaggedToken::new(t, tag("NN")))
         .collect();
     let corpus = Corpus::from_sentences(vec![sentence]);
-    let lexicon = corpus.build_lexicon(Tag::new("NN").unwrap()).unwrap();
+    let lexicon = corpus.build_lexicon(tag("NN")).expect("conforming tokens");
 
     let mut seen = 0usize;
     for token in text.unicode_words() {

@@ -126,9 +126,10 @@ own, behind a fast, idiomatic Rust API.
 Everything on the map ships today; none of it is roadmap. The two entries marked
 **native** — the phonetic index and language detection — are Verbora's own
 designs rather than implementations of a published algorithm, and are tested and
-benchmarked like the rest. One thing to know before you plan around it:
+benchmarked like the rest. Two things to know before you plan around it:
 [WordNet](features/wordnet)'s database is separately licensed and not bundled
-with the crate.
+with the crate, and the [POS tagger](features/tagger) is an engine — it ships no
+dictionary, so you supply the lexicon.
 
 ## One operation, four shapes
 

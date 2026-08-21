@@ -55,7 +55,7 @@ you want to *do*, or from the crate map further down.
 | [Classifiers](classifiers.md) | `verbora-classifiers` | Bayes, logistic regression, MaxEnt + GIS |
 | [Stemmers](stemmers.md) | `verbora-stemmers` | 16 stemmers: Porter/Snowball across 12 languages, plus Carry (French), Lancaster, Japanese, Indonesian |
 | [Spellcheck](spellcheck.md) | `verbora-spellcheck` | frequency-ranked correction, BK-tree and deletion indexes |
-| [POS tagger](tagger.md) | `verbora-tagger` | Brill tagging, training and evaluation; English and Dutch data |
+| [POS tagger](tagger.md) | `verbora-tagger` | Brill tagging, training and evaluation over a lexicon you supply |
 | [Sentence analyzers](analyzers.md) | `verbora-analyzers` | phrase annotation, subject/predicate splitting, sentence type |
 | [Utilities](util.md) | `verbora-util` | stop words, abbreviations, weighted graphs, topological ordering and path trees |
 | [Core vocabulary](core.md) | `verbora-core` | 5 traits, `StopWordLanguage`, `StopWords`, the process-global stop-word list |
@@ -84,10 +84,11 @@ combining-mark fold defined over `Canonical_Combining_Class`, so
 without a per-language rule set — read [Normalizers](normalizers.md) before
 applying it to Thai or Devanagari.
 
-Stemmers, sentiment lexicons, part-of-speech data and Beider-Morse each have
-their own language axis; see [Stemmers](stemmers.md),
-[Sentiment](sentiment.md), [POS tagger](tagger.md) and
-[Beider-Morse](beider-morse.md).
+Stemmers, sentiment lexicons and Beider-Morse each have their own language
+axis; see [Stemmers](stemmers.md), [Sentiment](sentiment.md) and
+[Beider-Morse](beider-morse.md). The [POS tagger](tagger.md) has none of its
+own: it ships no dictionary, so its language is whichever one the lexicon and
+rule set you give it were written for.
 
 ## Where else to look
 

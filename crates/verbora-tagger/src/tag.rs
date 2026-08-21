@@ -28,7 +28,7 @@ pub enum LiteralError {
     /// Only a [`Tag`] produces this. A `*` written where a rule's old tag goes
     /// reads back as "any tag", so a tag `*` could be written but never read,
     /// and a rule over it would silently widen into a rule over everything. A
-    /// [`Word`] is unaffected: `*` is an ordinary token, and the bundled English
+    /// [`Word`] is unaffected: `*` is an ordinary token, and a corpus-derived
     /// lexicon keys it.
     Wildcard,
 }
@@ -74,9 +74,9 @@ macro_rules! literal_type {
         impl $name {
             /// Builds the literal, checking the contract.
             ///
-            /// Passing a `&'static str` borrows it; every tag the bundled data
-            /// produces is a `&'static str` embedded in the binary, so tagging a
-            /// document allocates nothing for its tags.
+            /// Passing a `&'static str` borrows it rather than copying, so a tag
+            /// set written as string literals costs no allocation, and cloning
+            /// such a tag onto a token costs none either.
             ///
             /// # Errors
             ///
@@ -165,8 +165,8 @@ macro_rules! literal_type {
 /// A part-of-speech label, such as `NN` or `Adj(attr,stell,onverv)`.
 ///
 /// Verbora attaches no meaning to a tag beyond string identity: the tag set is
-/// whatever the lexicon and the rules agree on. See [`Language`](crate::Language)
-/// for what each bundled lexicon actually holds.
+/// whatever the lexicon and the rules agree on. This crate ships no lexicon, so
+/// that agreement is entirely yours to arrange — see [`Lexicon`](crate::Lexicon).
 ///
 /// # The literal contract
 ///
@@ -183,8 +183,9 @@ macro_rules! literal_type {
 /// two; `*` in the old-tag position would read back as [`TagPattern::Any`],
 /// turning a rule over one tag into a rule over every tag. Both constructors
 /// return [`Result`], so neither value can be built in the first place.
-/// [`RuleSet`](crate::RuleSet)'s round-trip test asserts the property over all
-/// 301 bundled rules, and `rule::tests` asserts it over constructed ones.
+/// [`RuleSet`](crate::RuleSet)'s round-trip test asserts the property over the
+/// ten rules of [`RuleSet::brill_1992`](crate::RuleSet::brill_1992), and
+/// `rule::tests` asserts it over constructed ones.
 ///
 /// ```
 /// use verbora_tagger::{LiteralError, Tag, Word};
@@ -213,20 +214,6 @@ macro_rules! literal_type {
 pub struct Tag(Cow<'static, str>);
 
 literal_type!(Tag, "Tag", check_tag, "[`LiteralError::Wildcard`] for `*`.");
-
-impl Tag {
-    /// Borrows a `&'static str` **without checking the literal contract**.
-    ///
-    /// Crate-private, and used only for two families of value whose conformance
-    /// is established elsewhere: the tags packed by `build.rs`, which rejects
-    /// any that would violate the contract and whose output
-    /// `data::tests::every_packed_entry_satisfies_the_contract` re-checks entry
-    /// by entry, and the four default tags named in `language.rs`, checked by
-    /// `language::tests::bundled_defaults_satisfy_the_literal_contract`.
-    pub(crate) const fn from_static(value: &'static str) -> Self {
-        Self(Cow::Borrowed(value))
-    }
-}
 
 /// A literal token fragment a [`Condition`](crate::Condition) compares against.
 ///
@@ -342,8 +329,8 @@ mod tests {
     }
 
     /// `*` is the wildcard pattern in a rule string, so it is not available as a
-    /// tag. It stays a perfectly ordinary [`Word`]: the bundled English lexicon
-    /// keys an asterisk token.
+    /// tag. It stays a perfectly ordinary [`Word`], because a tokenizer really
+    /// can hand you an asterisk as a token.
     #[test]
     fn the_wildcard_is_not_a_tag_but_is_a_word() {
         assert_eq!(Tag::new("*"), Err(LiteralError::Wildcard));

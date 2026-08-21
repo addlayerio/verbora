@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use rustc_hash::FxHashSet;
 
-use crate::language::Language;
+use crate::data;
 use crate::parse::RuleParseError;
 use crate::rule::Rule;
 
@@ -58,8 +58,9 @@ impl std::error::Error for RuleSetParseError {}
 /// A rule already present — same pattern, same new tag, same condition — is not
 /// added a second time, and the first occurrence keeps its position. Identity is
 /// structural, on the three fields; there is no string key to collide, which
-/// matters because Dutch tags contain commas and a comma-joined key really can
-/// merge two different rules.
+/// matters because a [`Tag`](crate::Tag) may contain a comma — morphological tag
+/// sets routinely do, as in `N(soort,ev,neut)` — and a comma-joined key really
+/// can merge two different rules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuleSet {
     rules: Vec<Rule>,
@@ -73,16 +74,57 @@ impl RuleSet {
         Self::default()
     }
 
-    /// The rules Verbora bundles for `language`.
+    /// The ten transformations of Brill (1992), Table 1 — **written in Brown
+    /// corpus tags**.
+    ///
+    /// # These rules are Brown-tagged, and that is the whole caveat
+    ///
+    /// They name `AT`, `PPS`, `PPO`, `HVD` and `NP`, which are Brown corpus
+    /// tags, not Penn Treebank ones. Pair them with a lexicon whose tags are
+    /// Penn (`DT`, `PRP`, `VBD`, `NNP`, …) and almost nothing matches: the
+    /// tagger runs, costs a pass per rule, and returns the initial-state
+    /// annotation unchanged. That failure is silent — a rule whose condition is
+    /// never true is indistinguishable from a rule that never needed to fire —
+    /// so it is stated here rather than left to be discovered.
+    ///
+    /// The thirteen tags the ten rules mention, in full, are `.`, `AT`, `HVD`,
+    /// `IN`, `MD`, `NN`, `NP`, `PPO`, `PPS`, `TO`, `VB`, `VBD` and `VBN`. A
+    /// lexicon that produces those is one these rules can work on; anything else
+    /// wants its own rule set, learned from its own corpus with
+    /// [`Trainer`](crate::Trainer).
+    ///
+    /// # What they are good for
+    ///
+    /// Three things, all real: a worked example of the rule-string format that
+    /// is not invented for the occasion; a published, citable rule set to check
+    /// an implementation against; and a starting point for anyone tagging
+    /// Brown-annotated text. They are **not** a general-purpose English tagger,
+    /// and this crate no longer ships one — see the crate documentation for how
+    /// to bring your own lexicon.
+    ///
+    /// ```
+    /// use verbora_tagger::RuleSet;
+    ///
+    /// let rules = RuleSet::brill_1992();
+    /// assert_eq!(rules.len(), 10);
+    /// // Brown `AT` (article), not Penn `DT`.
+    /// assert_eq!(rules.rules()[0].to_string(), "TO IN NEXT-TAG AT");
+    /// ```
+    ///
+    /// # Provenance
+    ///
+    /// Eric Brill, *A Simple Rule-Based Part of Speech Tagger*, ANLC '92,
+    /// 152–155, Table 1: the first ten transformations his learner acquired from
+    /// the Brown corpus. `data/NOTICE.md` records the citation in full.
     ///
     /// # Panics
     ///
-    /// Never: every bundled rule string is parsed by
-    /// `tests::every_bundled_rule_parses`, which enumerates all 301 of them.
+    /// Never: all ten rule strings are parsed by
+    /// `tests::the_brill_1992_rules_parse_and_round_trip`.
     #[must_use]
-    pub fn bundled(language: Language) -> Self {
-        Self::parse_lines(language.rule_strings())
-            .unwrap_or_else(|e| panic!("bundled rule set does not parse: {e}"))
+    pub fn brill_1992() -> Self {
+        Self::parse_lines(data::BRILL_1992_RULES)
+            .unwrap_or_else(|e| panic!("the Brill 1992 rule set does not parse: {e}"))
     }
 
     /// Parses one rule string per element, in order.
@@ -215,20 +257,15 @@ impl FromIterator<Rule> for RuleSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::language::brill_paper_rule_strings;
+    use crate::tag::Tag;
 
-    /// Every bundled rule string parses, and every one of them round-trips
-    /// through its canonical form. Enumerated over all 301 strings, which is
-    /// what makes `RuleSet::bundled`'s `# Panics` note true.
+    /// Every Brill 1992 rule string parses, and every one of them round-trips
+    /// through its canonical form. Enumerated over all ten, which is what makes
+    /// [`RuleSet::brill_1992`]'s `# Panics` note true.
     #[test]
-    fn every_bundled_rule_parses() {
+    fn the_brill_1992_rules_parse_and_round_trip() {
         let mut checked = 0;
-        for source in Language::English
-            .rule_strings()
-            .iter()
-            .chain(Language::Dutch.rule_strings())
-            .chain(brill_paper_rule_strings())
-        {
+        for source in data::BRILL_1992_RULES {
             let rule: Rule = source
                 .parse()
                 .unwrap_or_else(|e| panic!("{source:?} does not parse: {e}"));
@@ -237,11 +274,110 @@ mod tests {
                 rule,
                 "{source:?} does not round-trip"
             );
+            // The source spelling is already canonical, so the whole set can be
+            // recovered from a `RuleSet` without consulting the JSON.
+            assert_eq!(&rule.to_string(), source);
             checked += 1;
         }
-        assert_eq!(checked, 18 + 273 + 10);
-        assert_eq!(RuleSet::bundled(Language::English).len(), 18);
-        assert_eq!(RuleSet::bundled(Language::Dutch).len(), 273);
+        assert_eq!(checked, 10);
+        assert_eq!(RuleSet::brill_1992().len(), 10);
+        assert_eq!(
+            RuleSet::brill_1992().to_string().lines().count(),
+            10,
+            "no rule was dropped as a duplicate"
+        );
+    }
+
+    /// The Brill 1992 rules are written in **Brown** tags, and this is the exact
+    /// set of them.
+    ///
+    /// Pinned because [`RuleSet::brill_1992`], `README.md` and `data/NOTICE.md`
+    /// all state it, and because it is the one fact that decides whether the set
+    /// does anything at all against a given lexicon: a Penn-tagged lexicon
+    /// produces `DT`, `PRP` and `NNP`, none of which appear below, so the rules
+    /// silently match nothing. A claim that is the difference between "works"
+    /// and "no-op" is not left to prose alone.
+    #[test]
+    fn the_brill_1992_tag_set_is_brown() {
+        use crate::rule::TagPattern;
+        use std::collections::BTreeSet;
+
+        let set = RuleSet::brill_1992();
+        let mut tags: BTreeSet<&str> = BTreeSet::new();
+        for rule in set.rules() {
+            if let TagPattern::Is(t) = &rule.from {
+                tags.insert(t.as_str());
+            }
+            tags.insert(rule.to.as_str());
+            for t in rule.condition.tag_arguments().into_iter().flatten() {
+                tags.insert(t.as_str());
+            }
+        }
+        assert_eq!(
+            tags.iter().copied().collect::<Vec<_>>(),
+            [
+                ".", "AT", "HVD", "IN", "MD", "NN", "NP", "PPO", "PPS", "TO", "VB", "VBD", "VBN"
+            ]
+        );
+        // The five that make the set Brown rather than Penn.
+        for brown_only in ["AT", "PPS", "PPO", "HVD", "NP"] {
+            assert!(tags.contains(brown_only), "{brown_only} is missing");
+        }
+        // ...and the Penn spellings of the same categories appear nowhere, which
+        // is exactly why a Penn lexicon gets nothing out of these rules.
+        for penn_only in ["DT", "PRP", "NNP"] {
+            assert!(
+                !tags.contains(penn_only),
+                "{penn_only} unexpectedly present"
+            );
+        }
+    }
+
+    /// No Brill 1992 rule names a token or a suffix — every condition is over
+    /// tags or over token *shape*.
+    ///
+    /// That is what makes the set usable with any Brown-tagged lexicon rather
+    /// than only with the Brown corpus itself: nothing in it is keyed to a
+    /// vocabulary. It is also why the set survived the removal of this crate's
+    /// bundled dictionaries intact, while a lexicalised rule set would not have.
+    #[test]
+    fn no_brill_1992_rule_is_keyed_to_a_vocabulary() {
+        let set = RuleSet::brill_1992();
+        for rule in set.rules() {
+            assert_eq!(
+                rule.condition.word_arguments(),
+                [None, None],
+                "{rule} names a token"
+            );
+            assert_eq!(
+                rule.condition.suffix_argument(),
+                None,
+                "{rule} names a suffix"
+            );
+        }
+    }
+
+    /// The reach of the published set, which is what
+    /// [`BrillTagger::tag_stream`](crate::BrillTagger::tag_stream) must buffer.
+    #[test]
+    fn the_brill_1992_set_reads_in_both_directions() {
+        let (left, right) = RuleSet::brill_1992().context_span();
+        assert!(left > 0 && right > 0, "reads both ways: ({left}, {right})");
+    }
+
+    /// A rule set survives `Display` and re-parsing unchanged, including tags
+    /// that contain the separator a naive string key would have used.
+    #[test]
+    fn display_round_trips() {
+        let mut rs = RuleSet::brill_1992();
+        rs.push(Rule::new(
+            crate::rule::TagPattern::Is(Tag::new("N(soort,ev,neut)").unwrap()),
+            Tag::new("N(eigen,ev,neut)").unwrap(),
+            crate::condition::Condition::CurrentWordIsCapitalized(true),
+        ));
+        let text = rs.to_string();
+        assert_eq!(text.parse::<RuleSet>().unwrap(), rs);
+        assert_eq!(text.lines().count(), 11);
     }
 
     #[test]
@@ -265,9 +401,9 @@ mod tests {
     ///
     /// Both rules below flatten to the same key `A,B,WORD-AND-PREV-TAG,x,y,z`
     /// when their five fields are concatenated with commas, which is how the
-    /// pre-migration implementation deduplicated — and Dutch tags such as
-    /// `N(soort,mv,neut)` contain commas, so the collision is reachable from
-    /// real data rather than only from a contrived one.
+    /// pre-migration implementation deduplicated. The collision is not contrived:
+    /// morphological tag sets spell a tag as a feature bundle — `N(soort,mv,neut)`
+    /// — so a comma inside a tag is ordinary, not exotic.
     #[test]
     fn comma_bearing_tags_do_not_collide() {
         let mut rs = RuleSet::new();
@@ -275,14 +411,6 @@ mod tests {
         assert!(rs.push("A B WORD-AND-PREV-TAG x y,z".parse().unwrap()));
         assert_eq!(rs.len(), 2);
         assert_ne!(rs.rules()[0], rs.rules()[1]);
-    }
-
-    #[test]
-    fn display_round_trips() {
-        let rs = RuleSet::bundled(Language::Dutch);
-        let text = rs.to_string();
-        assert_eq!(text.parse::<RuleSet>().unwrap(), rs);
-        assert_eq!(text.lines().count(), 273);
     }
 
     #[test]
@@ -311,10 +439,6 @@ mod tests {
             .unwrap();
         assert_eq!(rs.context_span(), (3, 1));
         assert_eq!(RuleSet::new().context_span(), (0, 0));
-        // Both bundled sets stay small enough to stream comfortably.
-        assert_eq!(RuleSet::bundled(Language::English).context_span(), (4, 0));
-        let (l, r) = RuleSet::bundled(Language::Dutch).context_span();
-        assert!(l > 0 && r > 0, "Dutch reads in both directions");
     }
 
     #[test]

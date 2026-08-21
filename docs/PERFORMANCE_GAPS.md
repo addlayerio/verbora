@@ -536,6 +536,31 @@ against.
 | **Profiling evidence** | Read `crates/verbora-tagger/src/data.rs`'s `StaticLexicon::find` (binary search, `u32_at` unaligned reads, byte-slice `Ord::cmp`) and `crates/verbora-tagger/src/lexicon.rs`'s `first_category` (the ASCII-uppercase guard deciding whether to retry lowercase) directly, plus `lib/natural/brill_pos_tagger/lib/Lexicon`'s `tagWord` (the unconditional lowercase retry on any falsy result, `typeof categories === 'function'` prototype-pollution guard included) directly. Real benchmark run: `cargo bench -p verbora-tagger`; both scripts read the identical hard-coded word lists (the reference harness's own doc comment on why they are copied rather than shared via JSON). |
 | **Optimization opportunity** | A hash map (`FxHashMap<&str, Categories>`, matching this crate's own `Spellcheck`'s choice of `FxHashMap` for a similar keyed-lookup problem) would restore `O(1)` lookup, but it is a real trade-off, not a strict improvement: the packed binary index's entire purpose (per its own module doc comment's comparison table) is **zero-cost startup** — no allocation, no hashing, no parse step, the dictionary is read directly out of the compiled binary. A `HashMap` alternative would need to be built at first use (paying real time and allocating real memory, the exact cost the packed index exists to avoid — see this crate's own comparison of "JSON at first use" vs. "packed index" startup cost) or shipped as a second, larger, differently-encoded binary asset. Given the absolute scale involved (tens of nanoseconds per lookup, in a pipeline where the *rule* pass — not the lexicon pass — dominates `tag`'s total cost for every non-trivial rule set, where Verbora wins 1.6×–15.5× against the reference), this is flagged as a real but low-priority opportunity for a **future, separate, dedicated phase** that would need its own startup-cost/lookup-cost trade-off analysis before committing to a specific data structure — not implemented in Fase 6. |
 
+**Update, tagger data removal (2026-08) — the packed lexicon this entry is
+about no longer exists.** `verbora-tagger` 0.3.0 removed the four dictionary
+files it shipped: the English lexicon and rule set were LGPL-3.0 and could not
+be redistributed under this workspace's MIT licence, and no terms could be
+located for the Dutch pair. With them went the machinery built to serve them —
+`src/data.rs`'s `StaticLexicon`/`StaticTags` and the packed LEX2 format,
+`Lexicon`'s base/overlay split, and the `build.rs` stage that produced the
+sorted-string arena and offset tables. `Lexicon` is now a single `BTreeMap` the
+caller fills, and the crate ships no dictionary at all.
+
+⚠ **Every figure in this entry is retired, and not pending re-measurement.**
+The 159.4/100.7 ns construction figures, all six bare-lookup medians, the four
+`tag_with_lexicon` medians and every ratio derived from them measured the
+English and Dutch packed indexes. Those are gone, so there is nothing left to
+re-measure against — a `BTreeMap` the caller built is a different subject, not a
+newer reading of the same one. The optimization opportunity this entry flagged —
+whether an `FxHashMap` should replace the binary search — is **withdrawn** with
+it: the trade it weighed was `O(log n)` probes against zero-cost startup, and
+zero-cost startup was a property of the packed index specifically. What the
+right structure is for a caller-built lexicon is a new question against a new
+subject, and `BTreeMap` was chosen for it on ordering grounds (`Lexicon::entries`
+guarantees ascending key order so a built lexicon can be written out and
+diffed), not on lookup-latency grounds. The competitor's own figures are
+unaffected but have nothing left to compare against.
+
 ## 13. TF-IDF ingestion — Verbora vs. `tfidf` (afshinm, Rust)
 
 | | |

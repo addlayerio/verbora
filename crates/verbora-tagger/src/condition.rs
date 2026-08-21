@@ -16,12 +16,13 @@
 //!   AAAI-94 — the **lexicalised** templates, which test tokens instead of, or
 //!   alongside, tags.
 //!
-//! Three conditions are Verbora's own rather than Brill's, because the bundled
-//! English rule set uses them: [`Condition::CurrentWordIsNumeral`],
+//! Three conditions are Verbora's own rather than Brill's, and test the *shape*
+//! of a token rather than its identity: [`Condition::CurrentWordIsNumeral`],
 //! [`Condition::CurrentWordLooksLikeUrl`] and
-//! [`Condition::CurrentWordEndsWith`]. Each carries its own full definition on
-//! the variant itself, because a rule written against one has to keep meaning
-//! the same thing across versions.
+//! [`Condition::CurrentWordEndsWith`]. They exist because the categories they
+//! pick out — numbers, URLs, suffixes — are ones no lexicon can enumerate. Each
+//! carries its own full definition on the variant itself, because a rule written
+//! against one has to keep meaning the same thing across versions.
 //!
 //! # Every condition is total
 //!
@@ -57,11 +58,11 @@ use crate::text;
 ///   Tagging*, AAAI-94 — the **lexicalised** templates, which test tokens
 ///   instead of, or alongside, tags.
 ///
-/// Three conditions are Verbora's own, because the bundled English rule set
-/// uses them: [`Condition::CurrentWordIsNumeral`],
-/// [`Condition::CurrentWordLooksLikeUrl`] and
-/// [`Condition::CurrentWordEndsWith`]. Each defines itself in full on its own
-/// variant.
+/// Three conditions are Verbora's own, and test the *shape* of a token rather
+/// than its identity — the categories no lexicon can enumerate:
+/// [`Condition::CurrentWordIsNumeral`], [`Condition::CurrentWordLooksLikeUrl`]
+/// and [`Condition::CurrentWordEndsWith`]. Each defines itself in full on its
+/// own variant.
 ///
 /// # Every condition is total
 ///
@@ -73,7 +74,8 @@ use crate::text;
 ///
 /// # Rule-string spelling
 ///
-/// Every variant has one canonical name, plus the aliases the bundled data uses.
+/// Every variant has one canonical name, plus the aliases published Brill rule
+/// files are conventionally written with.
 /// [`Display`](fmt::Display) always writes the canonical name;
 /// [`FromStr`](std::str::FromStr) on [`Rule`](crate::Rule) accepts both.
 /// `i` below is the site the rule is being tested at.
@@ -111,10 +113,11 @@ use crate::text;
 /// | `CURRENT-WORD-ENDS-WITH` | — | word | `token(i).ends_with(w)` |
 ///
 /// Note the argument order of the four mixed word/tag conditions: two of them
-/// take the tag first and two take the word first. That is the order the bundled
-/// Dutch rules are written in, and it is preserved rather than normalised
-/// because normalising it would silently invert 21 shipped rules. The field
-/// names make it unambiguous in Rust.
+/// take the tag first and two take the word first. That asymmetry is the
+/// convention of the Brill rule files this syntax reads, and it is preserved
+/// rather than normalised, because normalising it would silently invert every
+/// such rule in every file already written against it. The field names make it
+/// unambiguous in Rust.
 ///
 /// # Comparison is exact
 ///
@@ -292,8 +295,9 @@ pub enum Condition {
     /// URL-like when one of its `U+002E FULL STOP`s **joins two word-shaped
     /// labels**, where a label is a dot-separated segment and it is word-shaped
     /// when it begins with two ASCII letters. That is the whole rule. It is not
-    /// an implementation of [RFC 3986]; it exists so that the bundled
-    /// `NN URL CURRENT-WORD-IS-URL YES` rule has a definition to point at.
+    /// an implementation of [RFC 3986]; it is spelled out here so that a rule
+    /// written as `NN URL CURRENT-WORD-IS-URL YES` has a definition that will
+    /// not move under it between versions.
     ///
     /// The shape is structural: a hostname is word-shaped labels joined by dots
     /// (`example` · `com`), an abbreviation is initials joined by dots
@@ -556,12 +560,10 @@ impl Condition {
 
     /// The word arguments this condition compares a **whole token** against.
     ///
-    /// A word argument says nothing about reachability on *caller* text — the
-    /// caller supplies the tokens and no bundled data constrains them. It says a
-    /// great deal about a **bundled** rule: the bundled rule sets and the bundled
-    /// lexicons were derived from the same corpora, so a bundled rule naming a
-    /// word its own language's lexicon has never seen is naming corpus markup
-    /// that leaked out of the training data rather than a word.
+    /// Reported so that a rule set can be audited against the lexicon it is
+    /// meant to run with: a rule naming a token that lexicon has never seen is
+    /// usually corpus markup that leaked out of the training data rather than a
+    /// word, and it will never fire.
     ///
     /// [`Condition::CurrentWordEndsWith`] is excluded because its argument is a
     /// suffix, not a token; it is reported by [`Condition::suffix_argument`].

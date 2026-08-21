@@ -777,6 +777,21 @@ machine-enforced containment test
 | `BrillPosTagger` | rust-bert (`POSModel` pipeline) | Rust | 0.23.0 | Partial | Selected cases | BERT-family transformer POS pipeline, by far the most widely adopted general Rust NLP crate found (254K downloads, 3,077 stars) — only fair with model-load cost isolated from steady-state latency. |
 | `BrillPosTagger` | `viterbi_pos_tagger` | Rust | 0.1.0 | No | No | Investigated and rejected — ships no pretrained model (caller must train per invocation), near-zero adoption (1 star), GPL-3.0. |
 
+**Update, tagger data removal (2026-08) — the Verbora side of this comparison
+is withdrawn.** `verbora-tagger` 0.3.0 removed the English and Dutch lexicons
+and rule sets it shipped (LGPL-3.0 for the English pair, no locatable terms for
+the Dutch), so `BrillPosTagger` no longer names any language: the lexicon is a
+caller-supplied input. Every Verbora POS figure recorded in this campaign
+measured the bundled English configuration and is retired, not pending
+re-measurement. The competitor selections and their `Partial`/`No` ratings above
+are unaffected — those are judgements about `postagger`, rust-bert and
+`viterbi_pos_tagger`, which did not move. Reinstating the comparison is a
+measurement-design decision first: `benchmarks/competitive/rust-competitors`
+must choose a lexicon and hand the same one to every side, and until that is
+settled it does not compile against 0.3.0 (six call sites of
+`Lexicon::bundled`/`RuleSet::bundled` across `benches/pos_tagging.rs` and
+`tests/pos_tagging_smoke.rs`).
+
 ## 1.17 Spellcheck
 
 | Verbora capability | Competitor | Language | Version | Equivalent? | Benchmarkable? | Notes |

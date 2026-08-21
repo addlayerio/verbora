@@ -24,7 +24,7 @@ one costs.
 | `verbora-classifiers` | Naive Bayes, logistic regression, MaxEnt | [Classifiers](../features/classifiers.md) | <a href="../api/verbora_classifiers/">API</a> |
 | `verbora-stemmers` | Porter/Snowball, Lancaster, Japanese, Indonesian | [Stemmers](../features/stemmers.md) | <a href="../api/verbora_stemmers/">API</a> |
 | `verbora-spellcheck` | Norvig correction, a BK-tree `FuzzyIndex` and a `DeletionIndex` | [Spellcheck](../features/spellcheck.md) | <a href="../api/verbora_spellcheck/">API</a> |
-| `verbora-tagger` | Brill POS tagger, trainer and evaluation | [POS tagger](../features/tagger.md) | <a href="../api/verbora_tagger/">API</a> |
+| `verbora-tagger` | Brill POS tagging engine, trainer and evaluation | [POS tagger](../features/tagger.md) | <a href="../api/verbora_tagger/">API</a> |
 | `verbora-analyzers` | Sentence structure analysis | [Sentence analyzers](../features/analyzers.md) | <a href="../api/verbora_analyzers/">API</a> |
 | `verbora-language` | Script detection, optional language detectors, phonetic recommendations | [Language](../features/language.md) | <a href="../api/verbora_language/">API</a> |
 | `verbora-util` | Stop-word re-exports, abbreviations, graphs, path trees, topological ordering | [Utilities](../features/util.md) | <a href="../api/verbora_util/">API</a> |
