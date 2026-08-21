@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 479023.6875,
-      "upper_bound": 485245.51953125
+      "lower_bound": 464320.28419234435,
+      "upper_bound": 465297.8129951682
     },
-    "point_estimate": 482134.603515625,
-    "standard_error": 2195.0519059961944
+    "point_estimate": 464784.61538862466,
+    "standard_error": 248.86831059288113
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 479023.6875,
-      "upper_bound": 485245.51953125
+      "lower_bound": 464089.18813131313,
+      "upper_bound": 464599.1414141414
     },
-    "point_estimate": 482134.603515625,
-    "standard_error": 2195.0519059961944
+    "point_estimate": 464377.27100122103,
+    "standard_error": 141.41197748684326
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 4612.244002881926
+      "lower_bound": 949.45551466175,
+      "upper_bound": 2095.210087399973
     },
-    "point_estimate": 4612.244002881926,
-    "standard_error": 2306.1126066459883
+    "point_estimate": 1356.163187279555,
+    "standard_error": 285.0483708537464
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 479023.6875,
-      "upper_bound": 485245.51953125
+      "lower_bound": 464091.23473986425,
+      "upper_bound": 464843.7399371455
     },
-    "point_estimate": 484001.153125,
-    "standard_error": 2389.468190144082
+    "point_estimate": 464464.1690724595,
+    "standard_error": 191.9286314955032
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 4399.499620700546
+      "lower_bound": 1754.6673701160985,
+      "upper_bound": 3271.091463583812
     },
-    "point_estimate": 4399.499620700546,
-    "standard_error": 2199.740848902146
+    "point_estimate": 2503.6754005470452,
+    "standard_error": 396.5584658903581
   }
 }

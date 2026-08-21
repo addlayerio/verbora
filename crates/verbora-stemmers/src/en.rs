@@ -1,37 +1,48 @@
-//! The English Porter stemmer, ported from the reference `porter_stemmer`.
+//! The English Porter stemmer — Porter (1980).
 //!
 //! # Three things a careful reading gets wrong
 //!
-//! **`measure` is a floating-point number.** It is `categorizeGroups(token)`
-//! with a leading `C` and a trailing `V` stripped, divided by two — and that
-//! string can have odd length, because the `V` the second pass injects is not
-//! itself in `[aeiou]` and so cannot merge with a later vowel run. `measure("sya")`
-//! is **0.5**, `measure("syaing")` is 1.5, `measure("fifugyed")` is 3.5. Every
-//! guard in the algorithm is `> 0`, `> 1` or `=== 1`, and an integer port changes
-//! all of them.
+//! **[`PorterStemmer::measure`] is a floating-point number.** It is the
+//! consonant/vowel grouping of the token with a leading `C` and a trailing `V`
+//! stripped, divided by two — and that grouping can have odd length, because
+//! the `V` the second pass injects is not itself in `[aeiou]` and so cannot
+//! merge with a later vowel run. `measure("sya")` is **0.5**,
+//! `measure("syaing")` is 1.5, `measure("fifugyed")` is 3.5. Every guard in the
+//! algorithm is `> 0`, `> 1` or `== 1`, and reading `m` as an integer changes
+//! all of them. See [`PorterStemmer::measure`] for why this diverges from
+//! Porter's own integer `m`.
 //!
-//! **`attemptReplacePatterns` is not "first match wins".** It walks the *whole*
-//! table with no early exit, evaluates each rule's measure guard against the
+//! **A rewrite step is not "first match wins".** It walks the *whole* table
+//! with no early exit, evaluates each rule's measure guard against the
 //! **original** token (with the suffix stripped, which is classic Porter), and
 //! applies the replacement to an **accumulator**. So `step3("formalizeful")` is
 //! `"formalize"`: the `alize` rule is skipped because its guard is tested against
 //! `"formalizeful"`, even though the accumulator ends in `alize` by the time the
 //! rule is reached.
 //!
-//! **Empty strings are falsy.** `attemptReplace` skips its callback when the
-//! result is `""`, and `|| replacement` discards an empty result, so
-//! `step1b("ed")` is `"ed"` rather than `""`.
+//! **An empty rewrite is discarded.** A rule that would leave nothing behind
+//! leaves the token alone instead, so `step1b("ed")` is `"ed"` rather than `""`.
 //!
-//! The `\1` backreference in `endsWithDoublCons` has no equivalent in the Rust
-//! `regex` crate; it is a two-code-unit comparison here. Note that `y` counts as
-//! a consonant for *that* test but as a vowel-former in `categorizeGroups`.
+//! The double-consonant test compares the last two characters directly. Note
+//! that `y` counts as a consonant for *that* test but as a vowel-former in the
+//! grouping.
+//!
+//! # The unit
+//!
+//! Porter's three-letter entry gate, the `[C,V,C]` window step 1b and step 5a
+//! read off the per-character categorisation's tail, and every suffix position
+//! count **Unicode scalar values** — the unit [`crate::units`] states for the
+//! whole crate. Porter (1980) §2 writes a word as `[C](VC){m}[V]` over
+//! *letters*, so this is the reading the algorithm is published in. The visible
+//! consequence is at the gate: `stem("😀s")` is `"😀s"`, because two characters
+//! is short of three.
 
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
-use verbora_tokenizers::classes;
-
+use crate::among::{AmongTable, Buf, UnionTable};
 use crate::base::{Casing, TokenizeAndStem};
-use crate::units::{at, ends_with, slen, text, truncate_by, u, units};
+use crate::units::{at, ends_with, push_str, slen, text, truncate_by};
 
 /// The English Porter stemmer.
 ///
@@ -39,7 +50,7 @@ use crate::units::{at, ends_with, slen, text, truncate_by, u, units};
 /// use verbora_stemmers::PorterStemmer;
 /// let s = PorterStemmer::new();
 /// assert_eq!(s.stem("running"), "run");
-/// // Tokens shorter than three UTF-16 code units are returned WITHOUT
+/// // Tokens shorter than three characters are returned WITHOUT
 /// // lowercasing — the fold happens only on the other branch.
 /// assert_eq!(s.stem("AB"), "AB");
 /// assert_eq!(s.stem("ABC"), "abc");
@@ -48,32 +59,39 @@ use crate::units::{at, ends_with, slen, text, truncate_by, u, units};
 pub struct PorterStemmer;
 
 #[inline]
-const fn is_aeiou(c: u16) -> bool {
-    matches!(c, 0x61 | 0x65 | 0x69 | 0x6F | 0x75) // a e i o u
+const fn is_aeiou(c: char) -> bool {
+    matches!(c, 'a' | 'e' | 'i' | 'o' | 'u')
 }
 
 #[inline]
-const fn is_aeiouy(c: u16) -> bool {
-    is_aeiou(c) || c == 0x79 // y
+const fn is_aeiouy(c: char) -> bool {
+    is_aeiou(c) || c == 'y'
 }
 
-/// The characters the reference's `.` refuses to match.
+/// The characters a regex `.` refuses to match.
 #[inline]
-const fn is_line_terminator(c: u16) -> bool {
-    matches!(c, 0x0A | 0x0D | 0x2028 | 0x2029)
+const fn is_line_terminator(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 
-const C: u16 = 0x43;
-const V: u16 = 0x56;
+/// The consonant-group and vowel-group symbols the categorisations emit.
+///
+/// They are the literal letters `C` and `V`, which the three chained rewrites
+/// below write into the word itself — which is why a word that already contains
+/// a literal `C` or `V` flows through the same arms a written symbol does.
+/// Nothing here depends on that, but nothing hides it either.
+const C: char = 'C';
+const V: char = 'V';
 
-/// `token.replace(/[^aeiouy]+y/g,'CV').replace(/[aeiou]+/g,'V').replace(/[^V]+/g,'C')`
+/// The grouping, as three global rewrites: `/[^aeiouy]+y/ -> CV`, then
+/// `/[aeiou]+/ -> V`, then `/[^V]+/ -> C`.
 ///
 /// The three passes run in order over each other's output, which is why the
 /// result can contain adjacent `VV`: the `V` written by pass two is outside
 /// `[aeiou]`, so a following vowel run starts a *new* group.
-fn categorize_groups(w: &[u16]) -> Vec<u16> {
+fn categorize_groups(w: &[char]) -> Vec<char> {
     // Pass 1: a run of non-[aeiouy] followed by a literal `y` becomes "CV".
-    let mut a: Vec<u16> = Vec::with_capacity(w.len());
+    let mut a: Vec<char> = Vec::with_capacity(w.len());
     let mut i = 0;
     while i < w.len() {
         if is_aeiouy(w[i]) {
@@ -87,7 +105,7 @@ fn categorize_groups(w: &[u16]) -> Vec<u16> {
         while i < w.len() && !is_aeiouy(w[i]) {
             i += 1;
         }
-        if at(w, i) == Some(u('y')) {
+        if at(w, i) == Some('y') {
             a.push(C);
             a.push(V);
             i += 1;
@@ -97,7 +115,7 @@ fn categorize_groups(w: &[u16]) -> Vec<u16> {
     }
 
     // Pass 2: runs of [aeiou] become a single `V`.
-    let mut b: Vec<u16> = Vec::with_capacity(a.len());
+    let mut b: Vec<char> = Vec::with_capacity(a.len());
     let mut i = 0;
     while i < a.len() {
         if is_aeiou(a[i]) {
@@ -112,7 +130,7 @@ fn categorize_groups(w: &[u16]) -> Vec<u16> {
     }
 
     // Pass 3: runs of non-`V` become a single `C`.
-    let mut out: Vec<u16> = Vec::with_capacity(b.len());
+    let mut out: Vec<char> = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == V {
@@ -130,13 +148,15 @@ fn categorize_groups(w: &[u16]) -> Vec<u16> {
 
 /// `token.replace(/[^aeiouy]y/g,'CV').replace(/[aeiou]/g,'V').replace(/[^V]/g,'C')`
 ///
-/// Length preserving, unlike [`categorize_groups`]: every input code unit maps to
-/// exactly one output unit.
-fn categorize_chars(w: &[u16]) -> Vec<u16> {
-    let mut out: Vec<u16> = Vec::with_capacity(w.len());
+/// Length preserving, unlike [`categorize_groups`]: every input character maps
+/// to exactly one output symbol. That is what makes it sensitive to the text
+/// unit — the `[C,V,C]` window step 1b and step 5a read off its tail is a
+/// window over *positions*.
+fn categorize_chars(w: &[char]) -> Vec<char> {
+    let mut out: Vec<char> = Vec::with_capacity(w.len());
     let mut i = 0;
     while i < w.len() {
-        if !is_aeiouy(w[i]) && at(w, i + 1) == Some(u('y')) {
+        if !is_aeiouy(w[i]) && at(w, i + 1) == Some('y') {
             out.push(C);
             out.push(V);
             i += 2;
@@ -151,90 +171,283 @@ fn categorize_chars(w: &[u16]) -> Vec<u16> {
     out
 }
 
-/// The Porter measure `m`, as an `f64`.
+/// What [`categorize_groups`] would produce, as the four facts every caller
+/// actually reads: how long it is, what its first and last symbols are, and
+/// how many `V`s it contains.
 ///
-/// `-1` for a falsy token, which in the reference covers `''`, `null` and
-/// `undefined` alike — reproduced here as "the empty buffer".
-fn measure_units(w: &[u16]) -> f64 {
-    if w.is_empty() {
-        return -1.0;
+/// # Why this exists
+///
+/// `measure` is the innermost loop of the whole English stemmer — step 2
+/// alone evaluates it twenty-two times per word, once per rewrite rule — and
+/// [`categorize_groups`] is three chained passes each building a string. Three
+/// allocations times thirty-odd calls dominated the per-word cost. Nothing
+/// downstream ever indexes the categorisation, though: `measure` needs its
+/// length and its two ends, step 1b asks whether it contains a `V`, and step
+/// 1c asks whether its *head* does. All four fall out of a single streaming
+/// scan, so the strings never need to exist.
+///
+/// The scan reproduces the three passes exactly. Pass 1 is the loop below
+/// (a maximal non-`[aeiouy]` run followed by a literal `y` becomes `CV`;
+/// anything else passes through). Passes 2 and 3 are the two merge rules in
+/// [`GroupScan::feed`]: consecutive `[aeiou]` collapse into one `V`, and
+/// consecutive non-`V` symbols collapse into one `C`. `groups_agree_with_the
+/// _string_form` fuzzes the two forms against each other.
+#[derive(Default)]
+struct GroupScan {
+    len: usize,
+    first: char,
+    last: char,
+    vowels: usize,
+    /// Whether the previous pass-1 symbol was an `[aeiou]` character, which
+    /// is pass 2's run state.
+    vowel_run: bool,
+}
+
+impl GroupScan {
+    /// Feeds one symbol of the pass-1 stream.
+    #[inline]
+    fn feed(&mut self, s: char) {
+        if is_aeiou(s) {
+            // Pass 2: a maximal `[aeiou]` run becomes a single `V`.
+            if !self.vowel_run {
+                self.vowel_run = true;
+                self.push(V);
+            }
+            return;
+        }
+        self.vowel_run = false;
+        if s == V {
+            self.push(V);
+        } else if self.last == C && self.len > 0 {
+            // Pass 3: this symbol joins the `C` already emitted.
+        } else {
+            self.push(C);
+        }
     }
-    let g = categorize_groups(w);
-    let start = usize::from(g.first() == Some(&C));
-    let end = g.len() - usize::from(g.last() == Some(&V) && g.len() > start);
+
+    #[inline]
+    fn push(&mut self, sym: char) {
+        if self.len == 0 {
+            self.first = sym;
+        }
+        self.last = sym;
+        self.len += 1;
+        if sym == V {
+            self.vowels += 1;
+        }
+    }
+
+    /// Runs pass 1 over `w`, feeding every symbol it produces.
+    fn scan(w: &[char]) -> GroupScan {
+        let mut g = GroupScan::default();
+        let mut i = 0;
+        while i < w.len() {
+            if is_aeiouy(w[i]) {
+                g.feed(w[i]);
+                i += 1;
+                continue;
+            }
+            // Greedy run; `y` is excluded from the class, so a shorter run
+            // could never be followed by `y` either — no backtracking.
+            let start = i;
+            while i < w.len() && !is_aeiouy(w[i]) {
+                i += 1;
+            }
+            if at(w, i) == Some('y') {
+                g.feed(C);
+                g.feed(V);
+                i += 1;
+            } else {
+                for &c in &w[start..i] {
+                    g.feed(c);
+                }
+            }
+        }
+        g
+    }
+}
+
+/// The Porter measure `m` of `w`.
+///
+/// # The empty word
+///
+/// `measure_units(&[])` is `0.0`. Porter (1980) §2 writes any word as
+/// `[C](VC){m}[V]`, so the empty word is the `m = 0` case with every part
+/// empty; there is no such thing as "no measure", and the function has no
+/// sentinel to return.
+///
+/// No caller can tell `0.0` apart from a negative sentinel in any case: the
+/// algorithm compares `m` against exactly three predicates — `> 0.0`, `> 1.0`
+/// and `== 1.0` — and any value at or below zero answers all three identically,
+/// which `the_empty_word_measures_zero_and_nothing_else_changes` enumerates
+/// rather than asserts.
+fn measure_units(w: &[char]) -> f64 {
+    if w.is_empty() {
+        return 0.0;
+    }
+    let g = GroupScan::scan(w);
+    let start = usize::from(g.first == C && g.len > 0);
+    let end = g.len - usize::from(g.last == V && g.len > start);
     (end - start) as f64 / 2.0
 }
 
-/// `token.match(/([^aeiou])\1$/)` — the hand-written backreference.
-fn ends_with_double_cons(w: &[u16]) -> bool {
+/// The double-consonant test `/([^aeiou])\1$/`: the last two characters are
+/// equal and are not in `[aeiou]`.
+fn ends_with_double_cons(w: &[char]) -> bool {
     w.len() >= 2 && w[w.len() - 1] == w[w.len() - 2] && !is_aeiou(w[w.len() - 1])
 }
 
-/// `attemptReplace` for a literal-string pattern.
+/// Strips `pattern` from the end of `w` and appends `replacement`.
 ///
-/// Returns `None` when the pattern is not a suffix, mirroring the reference
-/// `null`. An empty *result* is returned as `Some(vec![])`; callers apply the
-/// falsy check themselves, because the two call sites treat it differently.
-fn attempt_replace(w: &[u16], pattern: &str, replacement: &str) -> Option<Vec<u16>> {
+/// Returns `None` when `pattern` is not a suffix of `w`. An empty *result* is
+/// returned as `Some(vec![])`; callers decide what to do with it themselves,
+/// because the two call sites treat it differently.
+fn attempt_replace(w: &[char], pattern: &str, replacement: &str) -> Option<Vec<char>> {
     if !ends_with(w, pattern) {
         return None;
     }
     let mut out = w[..w.len() - slen(pattern)].to_vec();
-    out.extend(replacement.encode_utf16());
+    out.extend(replacement.chars());
     Some(out)
 }
 
-/// `attemptReplacePatterns`: walk the entire table, guard against the original,
-/// apply to the accumulator, never break.
+/// Walks the entire table: each rule's guard is evaluated against the original
+/// token, each replacement is applied to the accumulator, and no hit breaks the
+/// walk.
 fn attempt_replace_patterns(
-    token: &[u16],
+    token: &[char],
     rules: &[(&str, &str, &str)],
     threshold: Option<f64>,
-) -> Vec<u16> {
+) -> Vec<char> {
     let mut replacement = token.to_vec();
-    for &(pattern, guard_replacement, real_replacement) in rules {
-        let passes = match threshold {
-            None => true,
-            Some(t) => {
-                let guarded = attempt_replace(token, pattern, guard_replacement);
-                // `measure(null)` is -1, and so is `measure('')`.
-                guarded.as_deref().map_or(-1.0, measure_units) > t
-            }
-        };
-        if passes
-            && let Some(next) = attempt_replace(&replacement, pattern, real_replacement)
-            && !next.is_empty()
-        {
-            replacement = next;
-        }
-    }
+    let table = if std::ptr::eq(rules, STEP2) {
+        Some(&TABLES.step2)
+    } else if std::ptr::eq(rules, STEP3) {
+        Some(&TABLES.step3)
+    } else {
+        None
+    };
+    apply_patterns(token, &mut replacement, rules, threshold, table);
     replacement
 }
 
-/// `replaceRegex(token, /^(.+?)(alt|…)$/, [1], min)` — the step-4 shape.
+/// [`attempt_replace_patterns`] with the accumulator supplied by the caller.
+///
+/// `token` is the string the measure guards are evaluated against — every
+/// guard reads the step's *input*, never the accumulator — and `acc` starts as
+/// a copy of it. Splitting the two lets
+/// `stem` keep one working buffer for the whole word and take the guard
+/// token as a stack snapshot, instead of allocating a fresh accumulator per
+/// step.
+fn apply_patterns(
+    token: &[char],
+    replacement: &mut Vec<char>,
+    rules: &[(&str, &str, &str)],
+    threshold: Option<f64>,
+    table: Option<&UnionTable<char>>,
+) {
+    // Two suffix questions per rule — "is this rule's pattern a suffix of the
+    // step's input?" (the guard) and "of the accumulator?" (the rewrite) —
+    // and walking the whole table asks both. One merged search answers all
+    // twenty-two of the first kind at once, and a second
+    // answers all of the second; the accumulator's answers only go stale when
+    // a rule actually rewrites it, which happens at most once or twice per
+    // word. `union_masks_agree_with_ends_with` pins the equivalence.
+    let mut guard_hit = [0u32; MAX_RULES];
+    let mut acc_hit = [0u32; MAX_RULES];
+    if let Some(t) = table {
+        t.length_masks(token, token.len(), &mut guard_hit);
+        acc_hit = guard_hit;
+    }
+    for (i, &(pattern, guard_replacement, real_replacement)) in rules.iter().enumerate() {
+        let guard_matches = table.map_or_else(|| ends_with(token, pattern), |_| guard_hit[i] != 0);
+        let passes = match threshold {
+            None => true,
+            Some(t) => {
+                // `measure(null)` is -1, and so is `measure('')`. When the
+                // guard replacement is empty — which it is for every shipped
+                // rule — the guarded string is a *prefix slice* of the token,
+                // so the measure can be taken without building it. Only a
+                // future non-empty guard would need the allocation.
+                let m: Option<f64> = if !guard_matches {
+                    None
+                } else if guard_replacement.is_empty() {
+                    Some(measure_units(&token[..token.len() - slen(pattern)]))
+                } else {
+                    attempt_replace(token, pattern, guard_replacement)
+                        .as_deref()
+                        .map(measure_units)
+                };
+                m.is_some_and(|m| m > t)
+            }
+        };
+        // The replacement is applied in place: [`attempt_replace`] returning a
+        // fresh string per rule was one allocation per rule, on a
+        // twenty-two-rule table, for a rewrite that fires at most once.
+        let acc_matches =
+            table.map_or_else(|| ends_with(replacement, pattern), |_| acc_hit[i] != 0);
+        if passes && acc_matches {
+            let keep = replacement.len() - slen(pattern);
+            // `if (result)` — an empty result is falsy and is discarded.
+            if keep > 0 || !real_replacement.is_empty() {
+                replacement.truncate(keep);
+                push_str(replacement, real_replacement);
+                if let Some(t) = table {
+                    acc_hit = [0u32; MAX_RULES];
+                    t.length_masks(replacement, replacement.len(), &mut acc_hit);
+                }
+            }
+        }
+    }
+}
+
+/// The largest rule table's length, and so the size of the mask arrays
+/// [`apply_patterns`] fills.
+const MAX_RULES: usize = 22;
+
+/// The sorted search tables, built once from the rule tables below — those
+/// stay the single source of truth. Each rule contributes its pattern as a
+/// one-entry table, so a rule's slot in the mask array is its index in the
+/// chain and `mask != 0` is exactly "this rule's pattern is a suffix".
+struct EnTables {
+    step2: UnionTable<char>,
+    step3: UnionTable<char>,
+    /// Step 4's alternation, which is a plain longest-match.
+    step4: AmongTable<char>,
+    /// The `(s|t)ion` alternation of step 4's second rule.
+    sion_tion: AmongTable<char>,
+}
+
+static TABLES: LazyLock<EnTables> = LazyLock::new(|| EnTables {
+    step2: UnionTable::build(STEP2_PATTERNS),
+    step3: UnionTable::build(STEP3_PATTERNS),
+    step4: AmongTable::build(STEP4),
+    sion_tion: AmongTable::build(SION_TION),
+});
+
+/// `/^(.+?)(alt|…)$/`, keeping group 1 — the step-4 shape.
 ///
 /// Lazy `.+?` plus a `$`-anchored alternation means "the shortest non-empty
 /// prefix whose remainder is one of the alternatives", i.e. the **longest**
 /// matching suffix. `.` cannot cross a line terminator, so a prefix containing
 /// one blocks the match entirely.
 fn strip_longest_alternative(
-    w: &[u16],
-    alternatives: &[&str],
+    w: &[char],
+    table: &AmongTable<char>,
     keep_extra: usize,
-) -> Option<Vec<u16>> {
-    let mut best: Option<usize> = None;
-    for alt in alternatives {
-        let n = slen(alt);
-        if n < w.len() && ends_with(w, alt) && best.is_none_or(|b| n > b) {
-            best = Some(n);
-        }
+) -> Option<usize> {
+    // `.+?` is non-empty, so an alternative as long as the whole token cannot
+    // match — hence the strict `n < w.len()` the link walk applies.
+    let n = table.longest_where(w, w.len(), 0, |n| n < w.len());
+    if n == 0 {
+        return None;
     }
-    let n = best?;
     let cut = w.len() - n;
     if w[..cut].iter().copied().any(is_line_terminator) {
         return None;
     }
-    Some(w[..cut + keep_extra].to_vec())
+    // The kept length, not the kept string: every caller truncates.
+    Some(cut + keep_extra)
 }
 
 impl PorterStemmer {
@@ -244,47 +457,74 @@ impl PorterStemmer {
         Self
     }
 
-    /// `PorterStemmer.categorizeGroups`, exported by the reference for tests.
+    /// The consonant/vowel group string of `token`: `C` for each maximal
+    /// consonant group, `V` for each vowel group.
+    ///
+    /// This is the `[C](VC){m}[V]` decomposition of Porter (1980) §2, and
+    /// [`Self::measure`] is derived from it. Exposed because the measure is
+    /// exposed and this is what explains it — including the adjacent `VV`
+    /// that makes the measure fractional (see [`Self::measure`]).
     pub fn categorize_groups(token: &str) -> String {
-        text(&categorize_groups(&units(token)))
+        let w: Vec<char> = token.chars().collect();
+        text(&categorize_groups(&w))
     }
 
-    /// `PorterStemmer.measure` — the Porter measure `m`, which is **not** an
-    /// integer (see the module documentation).
+    /// The Porter measure `m` of `token` — the `m` of `[C](VC){m}[V]`,
+    /// Porter (1980) §2.
+    ///
+    /// `measure("")` is `0.0`, the empty word's own measure; the function has
+    /// no sentinel and returns no value outside the range a word can have.
+    ///
+    /// # This `m` is not always an integer
+    ///
+    /// Porter's `m` is a non-negative integer. This implementation's is a
+    /// multiple of `0.5`, because the grouping it is derived from can emit two
+    /// adjacent vowel groups: a consonant run followed by a literal `y` is
+    /// rewritten to `CV` before vowel runs are collapsed, and the `V` that
+    /// rewrite writes is not itself a vowel, so a vowel immediately after it
+    /// starts a *second* group. `measure("sya")` is `0.5`, `measure("canyon")`
+    /// is `2.5`, `measure("syaing")` is `1.5`.
+    ///
+    /// This is a divergence from the published algorithm rather than a
+    /// feature, and it is not yet resolved: every guard in the stemmer is
+    /// `> 0`, `> 1` or `== 1`, so correcting the grouping changes those guards
+    /// for every word in the affected class at once, and this crate carries no
+    /// vocabulary to validate the result against. Until it does, the value is
+    /// documented as what it is rather than described as Porter's.
+    #[must_use]
     pub fn measure(token: &str) -> f64 {
-        measure_units(&units(token))
+        let w: Vec<char> = token.chars().collect();
+        measure_units(&w)
     }
 
     /// Step 1a: plural `s` removal.
     pub fn step1a(token: &str) -> String {
-        let mut w = units(token);
+        let mut w: Vec<char> = token.chars().collect();
         Self::step1a_units(&mut w);
         text(&w)
     }
 
-    fn step1a_units(w: &mut Vec<u16>) {
+    fn step1a_units(w: &mut Vec<char>) {
         // `/(ss|i)es$/ -> '$1'` reduces to "drop the trailing `es`" for both
         // alternatives, because the captured group is what precedes it.
-        if ends_with(w, "sses") || ends_with(w, "ies") {
+        if STEP1A.iter().any(|p| ends_with(w, p)) {
             truncate_by(w, 2);
             return;
         }
-        if w.len() > 2 && w[w.len() - 1] == u('s') && w[w.len() - 2] != u('s') {
+        if w.len() > 2 && w[w.len() - 1] == 's' && w[w.len() - 2] != 's' {
             truncate_by(w, 1);
         }
     }
 
     /// Step 1b: `eed`, `ed` and `ing`.
     pub fn step1b(token: &str) -> String {
-        let mut w = units(token);
+        let mut w: Vec<char> = token.chars().collect();
         Self::step1b_units(&mut w);
         text(&w)
     }
 
-    fn step1b_units(w: &mut Vec<u16>) {
-        // `token.substr(-3) === 'eed'` needs the token to be at least three units
-        // long — a shorter `substr(-3)` returns the whole token, which can never
-        // equal a three-character literal.
+    fn step1b_units(w: &mut Vec<char>) {
+        // A token shorter than three characters cannot end in `eed`.
         if ends_with(w, "eed") {
             if measure_units(&w[..w.len() - 3]) > 0.0 {
                 truncate_by(w, 1); // eed -> ee
@@ -299,44 +539,36 @@ impl PorterStemmer {
             None
         };
         let Some(t) = stripped else { return };
-        // The callback returns null when the stripped stem has no vowel group.
+        // No rewrite at all when the stripped stem has no vowel group.
         let Some(result) = Self::step1b_callback(&t) else {
             return;
         };
-        // `if (result)` — an empty result is falsy and leaves the token alone.
+        // An empty result is discarded and leaves the token alone.
         if !result.is_empty() {
             *w = result;
         }
     }
 
-    fn step1b_callback(t: &[u16]) -> Option<Vec<u16>> {
-        if !categorize_groups(t).contains(&V) {
+    fn step1b_callback(t: &[char]) -> Option<Vec<char>> {
+        if GroupScan::scan(t).vowels == 0 {
             return None;
         }
         // No measure threshold here: every rule fires unconditionally.
-        let r = attempt_replace_patterns(
-            t,
-            &[("at", "", "ate"), ("bl", "", "ble"), ("iz", "", "ize")],
-            None,
-        );
+        let r = attempt_replace_patterns(t, STEP1B, None);
         if r.as_slice() != t {
             return Some(r);
         }
-        if ends_with_double_cons(t)
-            && t.last()
-                .is_some_and(|&c| c != u('l') && c != u('s') && c != u('z'))
-        {
+        if ends_with_double_cons(t) && t.last().is_some_and(|&c| c != 'l' && c != 's' && c != 'z') {
             return Some(t[..t.len() - 1].to_vec());
         }
         let cc = categorize_chars(t);
         let tail3 = &cc[cc.len().saturating_sub(3)..];
         if measure_units(t) == 1.0
             && tail3 == [C, V, C]
-            && t.last()
-                .is_some_and(|&c| c != u('w') && c != u('x') && c != u('y'))
+            && t.last().is_some_and(|&c| c != 'w' && c != 'x' && c != 'y')
         {
             let mut out = t.to_vec();
-            out.push(u('e'));
+            out.push('e');
             return Some(out);
         }
         Some(t.to_vec())
@@ -344,81 +576,95 @@ impl PorterStemmer {
 
     /// Step 1c: terminal `y` becomes `i` when the stem has a vowel group.
     pub fn step1c(token: &str) -> String {
-        let mut w = units(token);
+        let mut w: Vec<char> = token.chars().collect();
         Self::step1c_units(&mut w);
         text(&w)
     }
 
-    fn step1c_units(w: &mut [u16]) {
-        let g = categorize_groups(w);
-        // `g.substr(0, g.length - 1)` drops one character of the COMPRESSED
-        // categorisation, whose length has nothing to do with the token's.
-        let head = &g[..g.len().saturating_sub(1)];
-        if w.last() == Some(&u('y')) && head.contains(&V) {
+    fn step1c_units(w: &mut [char]) {
+        let g = GroupScan::scan(w);
+        // The rule drops one symbol of the COMPRESSED categorisation, whose
+        // length has nothing to do with the token's.
+        // That head contains a `V` unless the only `V` was the dropped last
+        // symbol.
+        let head_has_v = g.vowels > usize::from(g.last == V);
+        if w.last() == Some(&'y') && head_has_v {
             let n = w.len();
-            w[n - 1] = u('i');
+            w[n - 1] = 'i';
         }
     }
 
     /// Step 2: the twenty-two long-suffix rewrites.
     pub fn step2(token: &str) -> String {
-        text(&Self::step2_units(&units(token)))
+        let w: Vec<char> = token.chars().collect();
+        text(&Self::step2_units(&w))
     }
 
-    fn step2_units(w: &[u16]) -> Vec<u16> {
+    fn step2_units(w: &[char]) -> Vec<char> {
         attempt_replace_patterns(w, STEP2, Some(0.0))
     }
 
     /// Step 3: the seven `-icate`/`-ful`/`-ness` rewrites.
     pub fn step3(token: &str) -> String {
-        text(&Self::step3_units(&units(token)))
+        let w: Vec<char> = token.chars().collect();
+        text(&Self::step3_units(&w))
     }
 
-    fn step3_units(w: &[u16]) -> Vec<u16> {
+    fn step3_units(w: &[char]) -> Vec<char> {
         attempt_replace_patterns(w, STEP3, Some(0.0))
     }
 
     /// Step 4: suffix removal for stems of measure greater than one.
     pub fn step4(token: &str) -> String {
-        text(&Self::step4_units(&units(token)))
+        let w: Vec<char> = token.chars().collect();
+        text(&Self::step4_units(&w))
     }
 
-    fn step4_units(w: &[u16]) -> Vec<u16> {
-        if let Some(r) = strip_longest_alternative(w, STEP4, 0)
-            && measure_units(&r) > 1.0
+    fn step4_units(w: &[char]) -> Vec<char> {
+        let mut out = w.to_vec();
+        Self::step4_in_place(&mut out);
+        out
+    }
+
+    /// Step 4 as a truncation, which is all it ever is: both alternations
+    /// keep a prefix of the token.
+    fn step4_in_place(w: &mut Vec<char>) {
+        if let Some(keep) = strip_longest_alternative(w, &TABLES.step4, 0)
+            && measure_units(&w[..keep]) > 1.0
         {
-            return r;
+            w.truncate(keep);
+            return;
         }
         // `/^(.+?)(s|t)(ion)$/` keeps groups 1 AND 2, i.e. everything but `ion`.
-        if let Some(r) = strip_longest_alternative(w, &["sion", "tion"], 1)
-            && measure_units(&r) > 1.0
+        if let Some(keep) = strip_longest_alternative(w, &TABLES.sion_tion, 1)
+            && measure_units(&w[..keep]) > 1.0
         {
-            return r;
+            w.truncate(keep);
         }
-        w.to_vec()
     }
 
     /// Step 5a: terminal `e` removal.
     pub fn step5a(token: &str) -> String {
-        let mut w = units(token);
+        let mut w: Vec<char> = token.chars().collect();
         Self::step5a_units(&mut w);
         text(&w)
     }
 
-    fn step5a_units(w: &mut Vec<u16>) {
+    fn step5a_units(w: &mut Vec<char>) {
         // `token.replace(/e$/, '')` — a no-op when the token does not end in `e`,
         // which is why this step can fire on tokens that have no `e` to remove.
-        let keep = w.len() - usize::from(w.last() == Some(&u('e')));
+        let keep = w.len() - usize::from(w.last() == Some(&'e'));
         let m = measure_units(&w[..keep]);
-        // `categorizeChars(token).substr(-4, 3)`: a negative start clamps to 0,
-        // so a three-unit token yields its whole categorisation.
+        // The last-four-minus-one window of the per-character categorisation:
+        // the start clamps to 0, so a three-character token yields all of it.
         let cc = categorize_chars(w);
         let start = cc.len().saturating_sub(4);
         let end = (start + 3).min(cc.len());
         let cvc = cc[start..end] == [C, V, C];
-        // `/[^wxy].$/` needs two units, and `.` refuses a line terminator.
+        // `/[^wxy].$/` needs two characters, and `.` refuses a line
+        // terminator.
         let short_e = w.len() >= 2
-            && !matches!(w[w.len() - 2], c if c == u('w') || c == u('x') || c == u('y'))
+            && !matches!(w[w.len() - 2], 'w' | 'x' | 'y')
             && !is_line_terminator(w[w.len() - 1]);
         if m > 1.0 || (m == 1.0 && !(cvc && short_e)) {
             w.truncate(keep);
@@ -427,43 +673,109 @@ impl PorterStemmer {
 
     /// Step 5b: `ll` becomes `l` for stems of measure greater than one.
     pub fn step5b(token: &str) -> String {
-        let mut w = units(token);
+        let mut w: Vec<char> = token.chars().collect();
         Self::step5b_units(&mut w);
         text(&w)
     }
 
-    fn step5b_units(w: &mut Vec<u16>) {
-        if measure_units(w) > 1.0 && ends_with(w, "ll") {
+    fn step5b_units(w: &mut Vec<char>) {
+        if measure_units(w) > 1.0 && ends_with(w, STEP5B[0]) {
             truncate_by(w, 1);
         }
     }
 
     /// Stems one token.
     ///
-    /// Returns the input unchanged — and **uncased** — when it is shorter than
-    /// three UTF-16 code units, which is what the reference's `token.length < 3`
-    /// guard does before the `toLowerCase()` on the other branch.
+    /// # Short tokens keep their case
+    ///
+    /// A token shorter than three **characters** is returned **exactly as it
+    /// arrived**, uncased: the length gate is tested before the fold, so
+    /// `stem("AB")` is `"AB"` while `stem("ABC")` is `"abc"`. This is Porter
+    /// (1980)'s own three-letter minimum, and it counts letters — so
+    /// `stem("😀s")` is `"😀s"`, two characters being short of three. The
+    /// asymmetry is visible through this method and not through
+    /// [`TokenizeAndStem::tokenize_and_stem`], which lowercases the whole
+    /// document before tokenizing.
     pub fn stem<'a>(&self, token: &'a str) -> Cow<'a, str> {
         if slen(token) < 3 {
             return Cow::Borrowed(token);
         }
-        let mut w = units(&token.to_lowercase());
+        let mut w: Vec<char> = Vec::with_capacity(token.len());
+        crate::units::for_each_lowercase_unit(token, |c| w.push(c));
         Self::step1a_units(&mut w);
         Self::step1b_units(&mut w);
         Self::step1c_units(&mut w);
-        w = Self::step2_units(&w);
-        w = Self::step3_units(&w);
-        w = Self::step4_units(&w);
+        // Steps 2 and 3 rewrite `w` in place; their measure guards read the
+        // step's input, taken here as a stack snapshot rather than as a
+        // freshly allocated accumulator.
+        let snapshot = Buf::<char>::from_slice(&w);
+        apply_patterns(
+            snapshot.as_slice(),
+            &mut w,
+            STEP2,
+            Some(0.0),
+            Some(&TABLES.step2),
+        );
+        let snapshot = Buf::<char>::from_slice(&w);
+        apply_patterns(
+            snapshot.as_slice(),
+            &mut w,
+            STEP3,
+            Some(0.0),
+            Some(&TABLES.step3),
+        );
+        Self::step4_in_place(&mut w);
         Self::step5a_units(&mut w);
         Self::step5b_units(&mut w);
         Cow::Owned(text(&w))
     }
 }
 
-/// Step 2's rewrite table, in the reference's exact order.
+/// Step 2's rewrite table, in the order the step applies it.
 ///
 /// Each entry is `(suffix, guard replacement, real replacement)`. The guard
 /// replacement is always `''`: the measure test is `m(stem without the suffix) > 0`.
+/// One one-entry table per rule of [`STEP2`], in the same order, so a
+/// rule's index in the chain is its slot in the merged mask array.
+/// `rule_pattern_tables_track_their_rule_tables` keeps the two in step.
+/// Step 1a's two four/three-unit plural patterns; both reduce to "drop the
+/// trailing `es`", because the captured group is what precedes it.
+static STEP1A: &[&str] = &["sses", "ies"];
+
+/// Step 1b's unconditional rewrites, in table order.
+static STEP1B: &[(&str, &str, &str)] = &[("at", "", "ate"), ("bl", "", "ble"), ("iz", "", "ize")];
+
+/// The `(s|t)ion` alternation of step 4's second rule.
+static SION_TION: &[&str] = &["sion", "tion"];
+
+/// Step 5b's doubled `l`.
+static STEP5B: &[&str] = &["ll"];
+
+static STEP2_PATTERNS: &[&[&str]] = &[
+    &["ational"],
+    &["tional"],
+    &["enci"],
+    &["anci"],
+    &["izer"],
+    &["abli"],
+    &["bli"],
+    &["alli"],
+    &["entli"],
+    &["eli"],
+    &["ousli"],
+    &["ization"],
+    &["ation"],
+    &["ator"],
+    &["alism"],
+    &["iveness"],
+    &["fulness"],
+    &["ousness"],
+    &["aliti"],
+    &["iviti"],
+    &["biliti"],
+    &["logi"],
+];
+
 static STEP2: &[(&str, &str, &str)] = &[
     ("ational", "", "ate"),
     ("tional", "", "tion"),
@@ -489,7 +801,20 @@ static STEP2: &[(&str, &str, &str)] = &[
     ("logi", "", "log"),
 ];
 
-/// Step 3's rewrite table, in the reference's exact order.
+/// Step 3's rewrite table, in the order the step applies it.
+/// One one-entry table per rule of [`STEP3`], in the same order, so a
+/// rule's index in the chain is its slot in the merged mask array.
+/// `rule_pattern_tables_track_their_rule_tables` keeps the two in step.
+static STEP3_PATTERNS: &[&[&str]] = &[
+    &["icate"],
+    &["ative"],
+    &["alize"],
+    &["iciti"],
+    &["ical"],
+    &["ful"],
+    &["ness"],
+];
+
 static STEP3: &[(&str, &str, &str)] = &[
     ("icate", "", "ic"),
     ("ative", "", ""),
@@ -500,8 +825,8 @@ static STEP3: &[(&str, &str, &str)] = &[
     ("ness", "", ""),
 ];
 
-/// Step 4's alternation, in the reference's exact order (which does not matter:
-/// the `$` anchor makes the longest suffix win regardless).
+/// Step 4's alternation (the listed order does not matter: the `$` anchor makes
+/// the longest suffix win regardless).
 static STEP4: &[&str] = &[
     "al", "ance", "ence", "er", "ic", "able", "ible", "ant", "ement", "ment", "ent", "ou", "ism",
     "ate", "iti", "ous", "ive", "ize",
@@ -511,10 +836,6 @@ impl TokenizeAndStem for PorterStemmer {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Raw;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_en(c)
-    }
-
     /// The whole document is lowercased before tokenizing, so the stop-word test
     /// and `stem` both see an already-folded token.
     fn prepare(t: &str) -> Cow<'_, str> {
@@ -522,12 +843,48 @@ impl TokenizeAndStem for PorterStemmer {
     }
 
     fn is_stop_word(word: &str) -> bool {
-        verbora_core::stopwords::is_default_stopword(word)
+        verbora_core::is_global_stopword(word)
     }
 
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    /// Every rule table, named. The three rewrite tables are flattened to
+    /// their patterns, which is the half a word is matched against.
+    pub(crate) fn tables() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
+            ("STEP1A", super::STEP1A.to_vec()),
+            (
+                "STEP1B",
+                super::STEP1B.iter().map(|r| r.0).collect::<Vec<_>>(),
+            ),
+            (
+                "STEP2",
+                super::STEP2.iter().map(|r| r.0).collect::<Vec<_>>(),
+            ),
+            (
+                "STEP3",
+                super::STEP3.iter().map(|r| r.0).collect::<Vec<_>>(),
+            ),
+            ("STEP4", super::STEP4.to_vec()),
+            ("SION_TION", super::SION_TION.to_vec()),
+            ("STEP5B", super::STEP5B.to_vec()),
+        ]
+    }
+
+    /// The prelude `stem` runs before any table is consulted: lowercasing,
+    /// and nothing else.
+    pub(crate) fn prelude(token: &str) -> String {
+        token.to_lowercase()
+    }
+
+    /// The prelude writes no marker unit.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[];
 }
 
 impl verbora_core::Stemmer for PorterStemmer {
@@ -540,7 +897,7 @@ impl PorterStemmer {
     /// Appends a stop word to the **process-global English list**, which
     /// `LancasterStemmer` and the phonetics helpers also read.
     pub fn add_stop_word(&self, word: impl Into<String>) {
-        verbora_core::stopwords::add_global_stopword(word);
+        verbora_core::add_global_stopword(word);
     }
 
     /// Appends several stop words to the process-global English list.
@@ -549,12 +906,12 @@ impl PorterStemmer {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        verbora_core::stopwords::add_global_stopwords(words);
+        verbora_core::add_global_stopwords(words);
     }
 
     /// Removes the first occurrence of `word` from the process-global list.
     pub fn remove_stop_word(&self, word: &str) {
-        verbora_core::stopwords::remove_global_stopword(word);
+        verbora_core::remove_global_stopword(word);
     }
 
     /// Removes the first occurrence of each of `words`.
@@ -562,7 +919,7 @@ impl PorterStemmer {
     where
         I: IntoIterator<Item = &'a str>,
     {
-        verbora_core::stopwords::remove_global_stopwords(words);
+        verbora_core::remove_global_stopwords(words);
     }
 }
 
@@ -570,15 +927,51 @@ impl PorterStemmer {
 mod tests {
     use super::*;
 
+    /// A working buffer, the way `stem` builds one.
+    fn scalars(t: &str) -> Vec<char> {
+        t.chars().collect()
+    }
+
     #[test]
     fn measure_is_fractional() {
-        assert_eq!(PorterStemmer::measure(""), -1.0);
+        assert_eq!(PorterStemmer::measure(""), 0.0);
         assert_eq!(PorterStemmer::measure("a"), 0.0);
         assert_eq!(PorterStemmer::measure("syllog"), 2.0);
         assert_eq!(PorterStemmer::measure("sya"), 0.5);
         assert_eq!(PorterStemmer::measure("syaing"), 1.5);
         assert_eq!(PorterStemmer::measure("oypvyegg"), 2.5);
         assert_eq!(PorterStemmer::measure("fifugyed"), 3.5);
+    }
+
+    /// The empty word measures 0, and switching it from `-1` to `0` changed
+    /// nothing else — enumerated over every predicate the algorithm applies to
+    /// a measure, not argued.
+    ///
+    /// The three predicates below are the *only* ways `m` is ever read: the
+    /// step-2 and step-3 thresholds (`> 0`), step 4 and steps 5a/5b (`> 1`),
+    /// and step 1b's `== 1`. `grep -n "measure_units" src/en.rs` finds no
+    /// other shape, and this test walks all three against both values.
+    #[test]
+    fn the_empty_word_measures_zero_and_nothing_else_changes() {
+        assert_eq!(measure_units(&[]), 0.0);
+        assert_eq!(PorterStemmer::measure(""), 0.0);
+        const OLD_SENTINEL: f64 = -1.0;
+        for threshold in [0.0, 1.0] {
+            assert_eq!(
+                OLD_SENTINEL > threshold,
+                measure_units(&[]) > threshold,
+                "the `> {threshold}` guard changed for the empty word"
+            );
+        }
+        assert_eq!(
+            (OLD_SENTINEL - 1.0).abs() < f64::EPSILON,
+            (measure_units(&[]) - 1.0).abs() < f64::EPSILON,
+            "step 1b's `== 1` guard changed for the empty word"
+        );
+        // No word other than the empty one ever measured below zero, so no
+        // other value moved: a measure is `(end - start) / 2` over unsigned
+        // group counts.
+        assert!(measure_units(&scalars("bcd")) >= 0.0);
     }
 
     #[test]
@@ -600,11 +993,104 @@ mod tests {
         assert_eq!(s.stem("ABC"), "abc");
     }
 
+    /// An astral character is **one** character, so `"😀s"` is a two-character
+    /// token and the entry gate returns it untouched.
+    ///
+    /// Derived, not recorded. `stem`'s gate is Porter (1980)'s three-letter
+    /// minimum, written here as *"a token shorter than three characters is
+    /// returned exactly as it arrived"*. `U+1F600` is one Unicode scalar value
+    /// and `s` is another, so `"😀s"` measures 2; `2 < 3`, and the algorithm
+    /// never runs. The three-character forms below do clear the gate, and
+    /// there step 1a's `/[^s]s$/` plural rule fires.
+    ///
+    /// Counting code units instead would measure `"😀s"` as *three*, clear the
+    /// gate, and return `"😀"` with the `s` stripped.
     #[test]
-    fn astral_input_counts_as_two_code_units() {
-        // "😀s".length is 3 in the reference, so the algorithm runs and step 1a
-        // strips the `s`. A char-counting port would see 2 and bail out.
-        assert_eq!(PorterStemmer::new().stem("😀s"), "😀");
+    fn an_astral_character_is_one_character() {
+        let s = PorterStemmer::new();
+        assert_eq!(s.stem("😀s"), "😀s");
+        assert_eq!(s.stem("😀as"), "😀a");
+        // The Basic Multilingual Plane control: one scalar value, one code
+        // unit, and the same two answers either way.
+        assert_eq!(s.stem("中s"), "中s");
+        assert_eq!(s.stem("中as"), "中a");
+    }
+
+    /// The two characters this file cannot tell apart.
+    ///
+    /// `U+1F600` is one Unicode scalar value and two UTF-16 code units;
+    /// `U+4E2D` is one of each. Nothing in this file distinguishes them:
+    /// [`categorize_groups`] and [`categorize_chars`] test `[aeiou]`, `[aeiouy]` and
+    /// a literal `y`, the `C`/`V` sentinels are the letters `C` and `V`, the
+    /// doubled-consonant test compares two *adjacent* characters, every rule
+    /// table is ASCII, and `str::to_lowercase` leaves both alone. Neither is
+    /// in any of those sets, so the only thing about either that can influence
+    /// the result is a position or a length — which is the unit under test.
+    ///
+    /// [`categorize_chars`] is where that bites: it is length-preserving, so a
+    /// character worth two positions shifts the `[C,V,C]` window step 1b and
+    /// step 5a read off its tail.
+    const ASTRAL: char = '😀';
+    /// The Basic Multilingual Plane twin of [`ASTRAL`]; see there.
+    const BMP_TWIN: char = '中';
+
+    /// Every entry of the English stop-word list and of every rule table, with
+    /// one inert character inserted at every character position, paired with
+    /// the same insertion of its BMP twin.
+    fn inert_placements() -> Vec<(String, String)> {
+        let mut corpus: Vec<&str> = verbora_core::StopWordLanguage::En.stopwords().to_vec();
+        for (_, table) in audit::tables() {
+            corpus.extend_from_slice(&table);
+        }
+        let mut out = Vec::new();
+        for w in corpus {
+            for at in w.char_indices().map(|(i, _)| i).chain([w.len()]) {
+                let (mut astral, mut bmp) = (w.to_owned(), w.to_owned());
+                astral.insert(at, ASTRAL);
+                bmp.insert(at, BMP_TWIN);
+                out.push((astral, bmp));
+            }
+        }
+        out
+    }
+
+    /// An inert character occupies **one** position, whichever plane it lives
+    /// on — enumerated over the whole stop-word list and every rule table
+    /// rather than sampled.
+    #[test]
+    fn an_astral_character_occupies_one_position() {
+        let st = PorterStemmer::new();
+        let cases = inert_placements();
+        let twin = BMP_TWIN.to_string();
+        // Pinned so an enumeration that quietly walked nothing cannot pass:
+        // 168 stop words and 55 rule-table entries, each probed at every one of its
+        // `len + 1` character positions.
+        assert_eq!(cases.len(), 1007, "the enumerated corpus changed size");
+        let mut diverged: Vec<(String, String, String)> = Vec::new();
+        let mut invented: Vec<String> = Vec::new();
+        for (astral, bmp) in &cases {
+            let got = st.stem(astral).into_owned();
+            if got.contains('\u{FFFD}') {
+                invented.push(astral.clone());
+            }
+            let want = st.stem(bmp).into_owned();
+            if got.replace(ASTRAL, &twin) != want {
+                diverged.push((astral.clone(), got, want));
+            }
+        }
+        // One assertion for both defects, so a failing run reports both counts
+        // rather than stopping at the first.
+        assert!(
+            invented.is_empty() && diverged.is_empty(),
+            "of {} placements, {} come back carrying a replacement character \
+             the caller never supplied ({:?}) and {} measure an astral \
+             character as more than one position ({:?})",
+            cases.len(),
+            invented.len(),
+            &invented[..invented.len().min(3)],
+            diverged.len(),
+            &diverged[..diverged.len().min(3)]
+        );
     }
 
     #[test]
@@ -666,5 +1152,291 @@ mod tests {
         assert_eq!(s.stem("..."), "...");
         let long = "a".repeat(500);
         assert_eq!(s.stem(&long), long);
+    }
+
+    // -----------------------------------------------------------------------
+    // Differential oracles for the three allocation-free rewrites.
+    //
+    // `GroupScan` claims to compute the four facts callers read off the
+    // grouping *string*, and `attempt_replace_patterns` claims to apply its
+    // table in place exactly as a per-rule fresh-string form would. Both string
+    // forms are still present — `categorize_groups` because it is part of the
+    // public API, `attempt_replace` because a non-empty guard replacement would
+    // still need it — so both claims are checkable directly, and the third test
+    // replays whole words through an allocating, string-per-step transcription
+    // of the same steps.
+    // -----------------------------------------------------------------------
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    fn random_word(rng: &mut Rng) -> String {
+        const ALPHA: &[char] = &[
+            'a', 'b', 'c', 'd', 'e', 'f', 'g', 'i', 'l', 'm', 'n', 'o', 'p', 'r', 's', 't', 'u',
+            'v', 'y', 'z', 'w', 'x', 'k', 'h',
+        ];
+        const SUFFIXES: &[&str] = &[
+            "ational", "tional", "enci", "anci", "izer", "abli", "alli", "entli", "eli", "ousli",
+            "ization", "ation", "ator", "alism", "iveness", "fulness", "ousness", "aliti", "iviti",
+            "biliti", "icate", "ative", "alize", "iciti", "ical", "ful", "ness", "sses", "ies",
+            "eed", "ed", "ing", "ement", "ment", "ent", "ion", "sion", "tion", "ou", "ism", "ate",
+            "iti", "ous", "ive", "ize", "e", "ll", "y", "s",
+        ];
+        let mut s = String::new();
+        for _ in 0..rng.below(9) {
+            s.push(ALPHA[rng.below(ALPHA.len())]);
+        }
+        if rng.below(10) < 8 {
+            s.push_str(SUFFIXES[rng.below(SUFFIXES.len())]);
+            if rng.below(3) == 0 {
+                s.push_str(SUFFIXES[rng.below(SUFFIXES.len())]);
+            }
+        }
+        match rng.below(40) {
+            0 => s = s.to_uppercase(),
+            1 => s.push('😀'),
+            2 => s.insert(0, '日'),
+            3 => s.push_str("123"),
+            4 => s.push('\n'),
+            _ => {}
+        }
+        s
+    }
+
+    /// The one-entry pattern tables the merged search is built from must
+    /// stay in lockstep with the rule tables they mirror.
+    #[test]
+    fn rule_pattern_tables_track_their_rule_tables() {
+        for (rules, patterns) in [(STEP2, STEP2_PATTERNS), (STEP3, STEP3_PATTERNS)] {
+            assert_eq!(rules.len(), patterns.len());
+            for (rule, pattern) in rules.iter().zip(patterns) {
+                assert_eq!([rule.0], *pattern);
+            }
+            assert!(rules.len() <= MAX_RULES, "MAX_RULES is too small");
+        }
+    }
+
+    /// The merged search must answer "is this rule's pattern a suffix?"
+    /// exactly as the per-rule `ends_with` walk did.
+    #[test]
+    fn union_masks_agree_with_ends_with() {
+        let check = |word: &str| {
+            let w = scalars(word);
+            for (rules, table) in [(STEP2, &TABLES.step2), (STEP3, &TABLES.step3)] {
+                let mut hit = [0u32; MAX_RULES];
+                table.length_masks(&w, w.len(), &mut hit);
+                for (i, rule) in rules.iter().enumerate() {
+                    assert_eq!(
+                        hit[i] != 0,
+                        ends_with(&w, rule.0),
+                        "{word:?} rule {}",
+                        rule.0
+                    );
+                }
+            }
+        };
+        for w in [
+            "",
+            "rational",
+            "formalizeful",
+            "ational",
+            "tional",
+            "ness",
+            "ful",
+        ] {
+            check(w);
+        }
+        let mut rng = Rng(0x3C79_AB61_1D2E_0F55);
+        for _ in 0..40_000 {
+            let w = random_word(&mut rng);
+            check(&w);
+        }
+    }
+
+    #[test]
+    fn groups_agree_with_the_string_form() {
+        let check = |word: &str| {
+            let w = scalars(word);
+            let g = categorize_groups(&w);
+            let scan = GroupScan::scan(&w);
+            assert_eq!(scan.len, g.len(), "len for {word:?} ({g:?})");
+            assert_eq!(
+                scan.vowels,
+                g.iter().filter(|&&c| c == V).count(),
+                "vowel count for {word:?}"
+            );
+            if !g.is_empty() {
+                assert_eq!(scan.first, g[0], "first for {word:?}");
+                assert_eq!(scan.last, g[g.len() - 1], "last for {word:?}");
+            }
+            // The two facts derived from the scan at its call sites.
+            let start = usize::from(g.first() == Some(&C));
+            let end = g.len() - usize::from(g.last() == Some(&V) && g.len() > start);
+            // The empty word's groups are empty, so `end - start` is 0 and the
+            // general formula already yields its measure; there is no special
+            // case left to state.
+            let want = (end - start) as f64 / 2.0;
+            assert_eq!(measure_units(&w), want, "measure for {word:?}");
+            assert_eq!(
+                GroupScan::scan(&w).vowels > usize::from(scan.last == V),
+                g[..g.len().saturating_sub(1)].contains(&V),
+                "head-contains-V for {word:?}"
+            );
+        };
+        for w in [
+            "", "a", "y", "sya", "syllog", "gypsy", "xyz", "syaing", "fifugyed", "yy", "aey",
+        ] {
+            check(w);
+        }
+        let mut rng = Rng(0x51ED_270B_2FA4_9B1D);
+        for _ in 0..80_000 {
+            let w = random_word(&mut rng);
+            check(&w);
+        }
+    }
+
+    /// The allocating form of [`attempt_replace_patterns`], building a fresh string
+    /// per rule.
+    fn oracle_replace_patterns(
+        token: &[char],
+        rules: &[(&str, &str, &str)],
+        threshold: Option<f64>,
+    ) -> Vec<char> {
+        let mut replacement = token.to_vec();
+        for &(pattern, guard_replacement, real_replacement) in rules {
+            let passes = match threshold {
+                None => true,
+                Some(t) => {
+                    let guarded = attempt_replace(token, pattern, guard_replacement);
+                    guarded.as_deref().map_or(-1.0, measure_units) > t
+                }
+            };
+            if passes
+                && let Some(next) = attempt_replace(&replacement, pattern, real_replacement)
+                && !next.is_empty()
+            {
+                replacement = next;
+            }
+        }
+        replacement
+    }
+
+    #[test]
+    fn in_place_rewrites_agree_with_the_fresh_string_form() {
+        let check = |word: &str| {
+            let w = scalars(word);
+            for (rules, threshold) in [(STEP2, Some(0.0)), (STEP3, Some(0.0)), (STEP1B, None)] {
+                assert_eq!(
+                    attempt_replace_patterns(&w, rules, threshold),
+                    oracle_replace_patterns(&w, rules, threshold),
+                    "{word:?}"
+                );
+            }
+        };
+        for w in [
+            "",
+            "formalizeful",
+            "rationalization",
+            "at",
+            "bl",
+            "iz",
+            "ed",
+            "ing",
+        ] {
+            check(w);
+        }
+        let mut rng = Rng(0x7F4A_7C15_9E37_79B9);
+        for _ in 0..80_000 {
+            let w = random_word(&mut rng);
+            check(&w);
+        }
+    }
+
+    /// The pre-rewrite `stem`: `to_lowercase` through a `String`, and every
+    /// step exactly as it was.
+    fn oracle_stem(token: &str) -> String {
+        if slen(token) < 3 {
+            return token.to_owned();
+        }
+        let mut w: Vec<char> = token.to_lowercase().chars().collect();
+        PorterStemmer::step1a_units(&mut w);
+        PorterStemmer::step1b_units(&mut w);
+        PorterStemmer::step1c_units(&mut w);
+        w = oracle_replace_patterns(&w, STEP2, Some(0.0));
+        w = oracle_replace_patterns(&w, STEP3, Some(0.0));
+        w = PorterStemmer::step4_units(&w);
+        PorterStemmer::step5a_units(&mut w);
+        PorterStemmer::step5b_units(&mut w);
+        text(&w)
+    }
+
+    #[test]
+    fn differential_against_the_allocating_oracle() {
+        let stemmer = PorterStemmer::new();
+        let check = |input: &str| {
+            assert_eq!(
+                stemmer.stem(input).as_ref(),
+                oracle_stem(input),
+                "stem({input:?})"
+            );
+        };
+        for w in crate::test_support::bench_words("en") {
+            check(&w);
+        }
+        for w in [
+            "",
+            "a",
+            "AB",
+            "IS",
+            "ABC",
+            "😀s",
+            "running",
+            "formalizeful",
+            "rationalization",
+            "caresses",
+            "ponies",
+            "ties",
+            "feed",
+            "agreed",
+            "plastered",
+            "bled",
+            "motoring",
+            "sing",
+            "conflated",
+            "troubled",
+            "sized",
+            "hopping",
+            "tanned",
+            "falling",
+            "hissing",
+            "fizzed",
+            "failing",
+            "filing",
+            "happy",
+            "sky",
+            "\n",
+            "controll",
+            "roll",
+        ] {
+            check(w);
+        }
+        let long = "nationalization".repeat(6);
+        check(&long);
+        let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+        for _ in 0..80_000 {
+            let w = random_word(&mut rng);
+            check(&w);
+        }
     }
 }

@@ -15,26 +15,34 @@ can produce the answer asked for:
 
 | Mode | Working set | Why |
 |---|---|---|
-| distance, no Damerau, unit cost | **bit-vector** | bit-parallel: `O(nm/64)` bitwise operations, one `u64` word per 64 units, no DP row at all |
-| distance, no Damerau, weighted costs | **1 row** | a cell needs only `up`, `left`, `diag` |
-| distance, restricted Damerau, unit cost | **bit-vector** | the transposition extension of the same bit-parallel family |
-| distance, restricted Damerau, weighted costs | **3 rows** | transposition reaches back to row − 2 |
-| distance, unrestricted Damerau | **2 rows + per-symbol snapshots** | transposition reaches an arbitrary earlier row, so the kernel snapshots the last row where each symbol occurred |
+| `levenshtein`, unit cost | **bit-vector** | bit-parallel: `O(nm/64)` bitwise operations, one `u64` word per 64 units, no DP row at all |
+| `levenshtein`, weighted costs | **1 row** | a cell needs only `up`, `left`, `diag` |
+| `osa`, unit cost | **bit-vector** | the transposition extension of the same bit-parallel family |
+| `osa`, weighted costs | **3 rows** | transposition reaches back to row − 2 |
+| `damerau_levenshtein`, unit cost | **3 rolling rows + 1 saved-cell row** | Zhao–Sahni's linear-space algorithm: two remembered cells stand in for the arbitrarily-earlier row the textbook recurrence would read |
+| `damerau_levenshtein`, weighted costs | **full matrix** | a weighted transposition reaches an arbitrary earlier row |
 | search, any variant | **full matrix** | the match start is recovered by walking parents |
 
 The cost difference between those rows is the point. On identical 64-unit
 inputs:
 
-| Call | Working set | Time |
+| Call | Working set | Time † |
 |---|---|--:|
 | `levenshtein` | bit-vector | 166.1 ns |
-| `damerau_levenshtein` (restricted) | bit-vector | 179.4 ns |
-| `damerau_levenshtein` (unrestricted) | 2 rows + snapshots | 7.75 µs |
+| `osa` | bit-vector | 179.4 ns |
+| `damerau_levenshtein` | 3 rolling rows | 7.75 µs |
 | `levenshtein_search` | full cost + parent matrix | 12.79 µs |
 
-Asking only for a distance is roughly **77× cheaper** than asking for a match
-position on the same input, because the answer you asked for fits in a
-fundamentally smaller structure.
+† Every figure in this table is **pending re-measurement** and left as recorded
+rather than replaced with a guess. The working-set ranking they illustrate is a
+property of the algorithms, not of the run: a bit-vector kernel, three rolling
+rows and a full cost-plus-parent matrix are three different amounts of memory to
+touch per cell, in that order.
+
+The ratio between the first and last rows — roughly **77×** as recorded, and
+pending with them — is the practical point: asking only for a distance is far
+cheaper than asking for a match position on the same input, because the answer
+you asked for fits in a fundamentally smaller structure.
 
 When the full matrix genuinely is required — search mode has to backtrack — it
 is stored as two flat vectors rather than one vector of pairs, so the hot cost
@@ -47,16 +55,28 @@ at the end, when the backtrace runs.
 indices, rather than allocating a reference-style object per node. Three
 consequences you can observe through the API:
 
-- **Building a trie is one allocation plus amortised growth**, not one
-  allocation per node. `Trie` is `{ nodes: Vec<Node>, folds: bool }` — a single
-  heap buffer for the whole tree.
-- **`get_size()` is `O(1)`**, because it is the arena's own length rather than a
-  walk that counts as it goes. It is safe to call in a metrics loop.
+- **Building a trie is one arena allocation plus amortised growth**, not one
+  allocation per node — one heap buffer holds the whole tree, alongside the hash
+  membership set that answers `contains`.
+- **`node_count()` is `O(1)`**, because it is the arena's own length rather than
+  a walk that counts as it goes, and **`len()` is `O(1)` too**, because each node
+  maintains the number of stored words in its subtree and the root's is the
+  answer. Both are safe to call in a metrics loop.
+- **A prefix count is `O(1)` after the descent.** The same maintained subtree
+  counts make `iter_keys_with_prefix(p).count()` a descent plus one read, rather
+  than a traversal of everything under `p`.
 - **Traversal is iterative**, so a 100 kB input cannot overflow the stack the way
-  per-code-unit recursion does.
+  per-scalar recursion does.
 
 `u32` indices rather than pointers also halve the size of a link on 64-bit
-targets, so more of the tree fits in each cache line.
+targets, so more of the tree fits in each cache line. `Node` is 32 bytes, and the
+subtree counter occupies bytes that were already padding — a test in the crate
+pins that.
+
+`FrozenTrie` takes the same idea one step further for an index that stops
+changing: runs of single-child, non-word nodes collapse into one edge label, and
+the words themselves are precomputed into one contiguous, enumeration-ordered
+table, so a prefix query is a descent and a range rather than a walk.
 
 ## 3. Inline storage for small collections
 
@@ -67,17 +87,17 @@ load therefore does not make one heap allocation per node.
 The same instinct appears in `verbora-distance`. Jaro–Winkler's scalar kernel
 keeps its two match-flag arrays in `[bool; 128]` stack buffers rather than
 allocating them per call, so **`jaro` and `jaro_winkler` allocate nothing at all
-for inputs up to 128 code units** — and words are short, so that is the common
+for inputs up to 128 units** — and words are short, so that is the common
 path. Longer inputs go further: the bit-parallel kernels pack match flags into
 `u64` words.
 
 ## 4. Cheaper keys, not cheaper hashing alone
 
-The Dice coefficient counts shared bigrams. Verbora hashes a `(u16, u16)` tuple
-with `FxHashMap` rather than building a `String` per bigram: no allocation, a
+The Dice coefficient counts shared bigrams. Verbora hashes a `(char, char)` tuple
+with `FxHashSet` rather than building a `String` per bigram: no allocation, a
 smaller key, and a faster hash function.
 
-| Benchmark | Input length | Time |
+| Benchmark | Input length | Time † |
 |---|--:|--:|
 | `dice/4` | 4 | 106.9 ns |
 | `dice/16` | 16 | 308.1 ns |
@@ -85,26 +105,26 @@ smaller key, and a faster hash function.
 | `dice/256` | 256 | 3.17 µs |
 | `dice/1024` | 1024 | 10.61 µs |
 
-Cost stays close to linear in input length, because the per-bigram work is a
-tuple hash and a map probe with no allocator involved.
+† Pending re-measurement, on the same terms as the table above. What holds
+without a run is the shape: cost stays close to linear in input length, because
+the per-bigram work is a tuple hash and a map probe with no allocator involved.
 
-## 5. Monomorphised predicates
+## 5. Monomorphised iterators
 
-Twelve of the thirteen character-class tokenizers share one scanner (`WordRuns`),
-generic over a zero-sized `CharClass` type rather than taking a function
-pointer, so each tokenizer's predicate inlines into its own copy of the loop and
-the ASCII branch stays predictable. The thirteenth, `AggressiveTokenizerFa`, has
-its own hand-written iterator, because Persian's rules need a bracket-aware
-pre-pass the shared scanner has no hook for.
+`BorrowingTokenizer::tokens` returns `impl Iterator` rather than a boxed trait
+object, so each tokenizer's boundary scan inlines into the caller's loop with no
+virtual call and no allocation. The same shape carries into `verbora-ngrams`,
+whose `ngrams` returns `std::slice::Windows` directly — a struct the optimiser
+already knows how to unroll.
 
 ## Applying this to your own code
 
 **Process contiguous data.** A `Vec<String>` of documents scattered across the
 heap is worse than one big `String` with offsets, if you control the ingest.
 
-**Do not build what you will not read.** The n-gram engine has both
-`ngrams_iter` and `ngrams` for this reason: taking the first five windows of a
-long document should not materialise all of them.
+**Do not build what you will not read.** `ngrams` is lazy for this reason:
+taking the first five windows of a long document should not materialise all of
+them, and `.take(5)` is the whole difference.
 
 **Pre-size.** `Vec::with_capacity`, `Trie::reserve`. Growth reallocation is
 copying.

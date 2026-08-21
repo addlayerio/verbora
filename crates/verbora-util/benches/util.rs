@@ -5,29 +5,32 @@
 
 //! Criterion benchmarks for `verbora-util`.
 //!
-//! Four things are measured, chosen because they are what a caller actually
+//! Three things are measured, chosen because they are what a caller actually
 //! spends time in:
 //!
-//! * **graph construction and traversal** — `add`, `edges`, `Topological`, and
+//! * **graph construction and traversal** — `add`, `edges`, `Topological` and
 //!   both path trees, over chains, layered DAGs and complete DAGs, so the shape
 //!   of the graph (long-and-thin versus short-and-wide) is visible;
-//! * **the numeric primitives** `snap_2` and `format_s`, which the relaxation
-//!   loop and `toString` respectively call once per edge;
-//! * **stop-word and abbreviation membership**, where the port replaces a linear
-//!   `indexOf` over a 428-entry array with a binary search;
-//! * nothing from `storage` — a file round trip measures the filesystem, not
-//!   this crate, and would leave tens of thousands of files behind.
+//! * **string-labelled construction**, which is the shape that pays for
+//!   interning: a label is cloned only when its vertex is new, so a graph whose
+//!   vertices repeat allocates far less than one whose vertices are all
+//!   distinct. Both shapes are measured;
+//! * **stop-word and abbreviation membership**, a binary search over a
+//!   de-duplicated view built on first use.
 //!
 //! Graphs are generated from the same LCG every other harness uses, so all
 //! numbers describe byte-identical inputs without needing a shared data file.
 //! `benches/data/words.json` — shared with the other crates — supplies the
-//! membership inputs.
+//! membership and string-label inputs.
+//!
+//! Nothing here has been run since the crate's Rust-native migration; the
+//! figures any previous run produced described a different implementation and a
+//! different API, and none of them is carried forward.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use verbora_util::numfmt::{format_s, snap_2};
 use verbora_util::{
-    AbbreviationLanguage, DirectedEdge, EdgeWeightedDigraph, Language, LongestPathTree,
-    ShortestPathTree, Topological, Vertex,
+    AbbreviationLanguage, EdgeWeightedDigraph, Language, LongestPathTree, ShortestPathTree,
+    Topological,
 };
 
 /// The deterministic 64-bit LCG shared with `tools/bench-data/generate.py`.
@@ -47,7 +50,7 @@ impl Lcg {
     }
 
     /// A weight in `0.00..=9.99`, two decimals — the shape real edge weights
-    /// have, and the shape `snap_2` is applied to.
+    /// have.
     fn weight(&mut self) -> f64 {
         (self.next() % 1000) as f64 / 100.0
     }
@@ -85,7 +88,6 @@ fn complete_dag(n: u32) -> Vec<(u32, u32, f64)> {
     edges
 }
 
-/// The benchmark graphs, by label.
 /// A named benchmark graph: edges as (from, to, weight).
 type BenchGraph = (&'static str, Vec<(u32, u32, f64)>);
 
@@ -97,10 +99,10 @@ fn graphs() -> Vec<BenchGraph> {
     ]
 }
 
-fn build(edges: &[(u32, u32, f64)]) -> EdgeWeightedDigraph {
+fn build(edges: &[(u32, u32, f64)]) -> EdgeWeightedDigraph<u32> {
     let mut g = EdgeWeightedDigraph::new();
     for &(a, b, w) in edges {
-        g.add(a, b, w);
+        g.add(&a, &b, w).expect("finite weights");
     }
     g
 }
@@ -113,52 +115,66 @@ fn bench_digraph_build(c: &mut Criterion) {
             b.iter(|| build(black_box(edges)));
         });
     }
-    // The pre-built-edge path, which skips one `Vertex` construction per edge.
-    let edges: Vec<DirectedEdge> = chain(1000)
-        .into_iter()
-        .map(|(a, b, w)| DirectedEdge::new(a, b, w))
-        .collect();
+
+    // Preallocated: the same edges into a graph told how big it will be, which
+    // is the only knob `with_capacity` turns.
+    let edges = complete_dag(64);
+    let vertices = 64;
     g.throughput(Throughput::Elements(edges.len() as u64));
     g.bench_with_input(
-        BenchmarkId::from_parameter("add_edge/1000"),
+        BenchmarkId::from_parameter("complete-64/with_capacity"),
         &edges,
         |b, edges| {
             b.iter(|| {
-                let mut graph = EdgeWeightedDigraph::new();
-                for e in edges {
-                    graph.add_edge(e.clone());
+                let mut graph = EdgeWeightedDigraph::with_capacity(vertices, edges.len());
+                for &(a, bb, w) in black_box(edges) {
+                    graph.add(&a, &bb, w).expect("finite weights");
                 }
                 graph
             });
         },
     );
+    g.finish();
+}
 
-    // String-vertex edges: the shape that pays for `add_edge`'s tail clone —
-    // a `Vertex::Str` clone allocates and copies, where a numeric one is a
-    // stack copy. Chained words from the shared corpus, `word[i] -> word[i+1]`,
-    // almost all distinct, so nearly every `add_edge` takes the
-    // new-vertex path. 20,000 edges rather than 1,000 so the allocation this
-    // measures is a large enough share of the total to clear this machine's
-    // scheduling noise.
+/// String labels, in the two shapes that differ in allocation behaviour.
+///
+/// Interning clones a label only when its vertex is new, so:
+///
+/// * `distinct` chains the corpus word by word — `word[i] -> word[i+1]`, almost
+///   all distinct — so nearly every `add` mints a vertex and pays two `String`
+///   clones;
+/// * `repeated` draws both endpoints from a small pool, so almost every `add`
+///   finds an existing vertex and clones nothing.
+///
+/// The gap between the two is the cost interning avoids on the common shape; a
+/// design that stored a label per edge endpoint would pay the `distinct` price
+/// on both.
+fn bench_string_labels(c: &mut Criterion) {
     let words = words();
-    let string_edges: Vec<DirectedEdge> = words
+    let distinct: Vec<(String, String)> = words
         .windows(2)
-        .map(|w| DirectedEdge::new(w[0].as_str(), w[1].as_str(), 1.0))
+        .map(|w| (w[0].clone(), w[1].clone()))
         .collect();
-    g.throughput(Throughput::Elements(string_edges.len() as u64));
-    g.bench_with_input(
-        BenchmarkId::from_parameter("add_edge_string/20000"),
-        &string_edges,
-        |b, edges| {
+    let pool: Vec<String> = words.iter().take(64).cloned().collect();
+    let repeated: Vec<(String, String)> = (0..distinct.len())
+        .map(|i| (pool[i % 63].clone(), pool[(i % 63) + 1].clone()))
+        .collect();
+
+    let mut g = c.benchmark_group("digraph_build_string");
+    for (label, pairs) in [("distinct", &distinct), ("repeated", &repeated)] {
+        g.throughput(Throughput::Elements(pairs.len() as u64));
+        g.bench_with_input(BenchmarkId::from_parameter(label), pairs, |b, pairs| {
             b.iter(|| {
-                let mut graph = EdgeWeightedDigraph::new();
-                for e in edges {
-                    graph.add_edge(e.clone());
+                let mut graph: EdgeWeightedDigraph<String> = EdgeWeightedDigraph::new();
+                for (from, to) in black_box(pairs) {
+                    // Cyclic input is fine: only construction is timed.
+                    graph.add(from.as_str(), to.as_str(), 1.0).expect("finite");
                 }
                 graph
             });
-        },
-    );
+        });
+    }
     g.finish();
 }
 
@@ -168,8 +184,13 @@ fn bench_digraph_traversal(c: &mut Criterion) {
         let graph = build(&edges);
         g.throughput(Throughput::Elements(edges.len() as u64));
         g.bench_with_input(BenchmarkId::new("iterate", label), &graph, |b, graph| {
-            // The lazy primitive: no intermediate Vec, no Bag copies.
-            b.iter(|| black_box(graph).edges().map(|e| e.weight()).sum::<f64>());
+            b.iter(|| {
+                black_box(graph)
+                    .edges()
+                    .iter()
+                    .map(verbora_util::DirectedEdge::weight)
+                    .sum::<f64>()
+            });
         });
         g.bench_with_input(BenchmarkId::new("to_string", label), &graph, |b, graph| {
             b.iter(|| black_box(graph).to_string());
@@ -184,7 +205,7 @@ fn bench_topological(c: &mut Criterion) {
         let graph = build(&edges);
         g.throughput(Throughput::Elements(edges.len() as u64));
         g.bench_with_input(BenchmarkId::from_parameter(label), &graph, |b, graph| {
-            b.iter(|| Topological::new(black_box(graph)).unwrap());
+            b.iter(|| Topological::new(black_box(graph)).expect("acyclic"));
         });
     }
     g.finish();
@@ -196,46 +217,31 @@ fn bench_path_trees(c: &mut Criterion) {
         let graph = build(&edges);
         g.throughput(Throughput::Elements(edges.len() as u64));
         g.bench_with_input(BenchmarkId::new("shortest", label), &graph, |b, graph| {
-            b.iter(|| ShortestPathTree::new(black_box(graph), 0).unwrap());
+            b.iter(|| ShortestPathTree::new(black_box(graph), &0).expect("acyclic"));
         });
         g.bench_with_input(BenchmarkId::new("longest", label), &graph, |b, graph| {
-            b.iter(|| LongestPathTree::new(black_box(graph), 0).unwrap());
+            b.iter(|| LongestPathTree::new(black_box(graph), &0).expect("acyclic"));
         });
     }
 
     // Path extraction on a built tree: the chain's last vertex is 1000 edges
-    // from the source, so this is the worst case the walk can face.
+    // from the source, so this is the worst case the walk can face. Both the id
+    // form and the label form are timed, since the pair is a documented choice.
     let graph = build(&chain(1000));
-    let tree = ShortestPathTree::new(&graph, 0).unwrap();
-    let target = Vertex::from(1000);
+    let tree = ShortestPathTree::new(&graph, &0).expect("acyclic");
+    let target = graph.vertex_id(&1000).expect("built above");
     g.throughput(Throughput::Elements(1000));
-    g.bench_function("path_to/chain-1000", |b| {
-        b.iter(|| black_box(&tree).path_to(black_box(&target)));
+    g.bench_function("path/chain-1000", |b| {
+        b.iter(|| black_box(&tree).path(black_box(target)));
     });
-    g.finish();
-}
-
-fn bench_refnum(c: &mut Criterion) {
-    let mut g = c.benchmark_group("numfmt");
-
-    // The values the relaxation loop actually snaps: a running distance plus an
-    // edge weight, so mostly two-decimal sums with binary noise.
-    let mut rng = Lcg::new(7);
-    let values: Vec<f64> = (0..1024)
-        .map(|_| rng.weight() + rng.weight() / 3.0)
-        .collect();
-
-    g.throughput(Throughput::Elements(values.len() as u64));
-    g.bench_with_input("snap_2", &values, |b, values| {
-        b.iter(|| black_box(values).iter().map(|v| snap_2(*v)).sum::<f64>());
+    g.bench_function("path_labels/chain-1000", |b| {
+        b.iter(|| black_box(&tree).path_labels(black_box(target)));
     });
-    g.bench_with_input("format_s", &values, |b, values| {
-        b.iter(|| {
-            black_box(values)
-                .iter()
-                .map(|v| format_s(*v).len())
-                .sum::<usize>()
-        });
+    g.bench_function("distance_of/chain-1000", |b| {
+        b.iter(|| black_box(&tree).distance_of(&1000u32));
+    });
+    g.bench_function("distance/chain-1000", |b| {
+        b.iter(|| black_box(&tree).distance(black_box(target)));
     });
     g.finish();
 }
@@ -245,7 +251,7 @@ fn words() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .unwrap()
+        .expect("crate is two levels below the workspace root")
         .join("benches/data/words.json");
     let body = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
@@ -258,72 +264,8 @@ fn words() -> Vec<String> {
         .as_array()
         .expect("words array")
         .iter()
-        .map(|w| w.as_str().unwrap().to_owned())
+        .map(|w| w.as_str().expect("a string").to_owned())
         .collect()
-}
-
-/// Isolates the cost `EdgeWeightedDigraph::add_edge` removed a clone of: a
-/// `Vertex::Str` clone allocates and copies its `String`, where a
-/// `Vertex::Num` clone is a stack copy. The end-to-end `add_edge_string`
-/// benchmark above is too small a share of total graph-build work to clear
-/// this machine's scheduling noise; this isolates exactly the operation in
-/// question.
-fn bench_vertex_clone(c: &mut Criterion) {
-    let words = words();
-    let string_vertices: Vec<Vertex> = words.iter().map(|w| Vertex::from(w.as_str())).collect();
-    let num_vertices: Vec<Vertex> = (0..words.len() as u32).map(Vertex::from).collect();
-
-    let mut g = c.benchmark_group("vertex_clone");
-    g.throughput(Throughput::Elements(string_vertices.len() as u64));
-    g.bench_function("str", |b| {
-        b.iter(|| {
-            for v in &string_vertices {
-                black_box(v.clone());
-            }
-        });
-    });
-    g.bench_function("num", |b| {
-        b.iter(|| {
-            for v in &num_vertices {
-                black_box(v.clone());
-            }
-        });
-    });
-    g.finish();
-}
-
-/// Isolates the cost `SparseArray::set` removed for a newly-seen string key: a
-/// `Box<str>` clone (allocate + copy the bytes) versus an `Rc<str>` clone
-/// (bump a reference count). `SparseArray` is crate-private, so this measures the
-/// two allocation strategies directly on the same corpus rather than through
-/// the graph's public API, which — like `add_edge_string` above — is too
-/// noisy at this scale to isolate one allocation inside a much larger
-/// end-to-end call.
-fn bench_named_key_clone(c: &mut Criterion) {
-    let words = words();
-    let boxed: Vec<Box<str>> = words.iter().map(|w| w.as_str().into()).collect();
-    let rc: Vec<std::rc::Rc<str>> = words
-        .iter()
-        .map(|w| std::rc::Rc::from(w.as_str()))
-        .collect();
-
-    let mut g = c.benchmark_group("named_key_clone");
-    g.throughput(Throughput::Elements(boxed.len() as u64));
-    g.bench_function("box_str", |b| {
-        b.iter(|| {
-            for s in &boxed {
-                black_box(s.clone());
-            }
-        });
-    });
-    g.bench_function("rc_str", |b| {
-        b.iter(|| {
-            for s in &rc {
-                black_box(std::rc::Rc::clone(s));
-            }
-        });
-    });
-    g.finish();
 }
 
 fn bench_membership(c: &mut Criterion) {
@@ -347,12 +289,13 @@ fn bench_membership(c: &mut Criterion) {
                 .count()
         });
     });
-    // Swedish is the longest list (428 entries), where a linear scan hurts most.
-    g.bench_with_input("stopwords/sv", &probes, |b, probes| {
+    // Indonesian is the longest list (809 entries), where a linear scan would
+    // hurt most.
+    g.bench_with_input("stopwords/id", &probes, |b, probes| {
         b.iter(|| {
             black_box(probes)
                 .iter()
-                .filter(|w| Language::Sv.is_stopword(w))
+                .filter(|w| Language::Id.is_stopword(w))
                 .count()
         });
     });
@@ -370,12 +313,10 @@ fn bench_membership(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_digraph_build,
+    bench_string_labels,
     bench_digraph_traversal,
     bench_topological,
     bench_path_trees,
-    bench_refnum,
-    bench_vertex_clone,
-    bench_named_key_clone,
     bench_membership
 );
 criterion_main!(benches);

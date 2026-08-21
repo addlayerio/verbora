@@ -35,25 +35,25 @@ categories = ["text-processing", "science"]
 
 [workspace.dependencies]
 # --- internal ---
-verbora-core = { path = "crates/verbora-core", version = "0.1.0" }
-verbora-distance = { path = "crates/verbora-distance", version = "0.1.0" }
-verbora-inflectors = { path = "crates/verbora-inflectors", version = "0.1.0" }
-verbora-language = { path = "crates/verbora-language", version = "0.1.0" }
-verbora-ngrams = { path = "crates/verbora-ngrams", version = "0.1.0" }
-verbora-normalizers = { path = "crates/verbora-normalizers", version = "0.1.0" }
-verbora-analyzers = { path = "crates/verbora-analyzers", version = "0.1.0" }
-verbora-spellcheck = { path = "crates/verbora-spellcheck", version = "0.1.0" }
-verbora-stemmers = { path = "crates/verbora-stemmers", version = "0.1.0" }
-verbora-tagger = { path = "crates/verbora-tagger", version = "0.1.0" }
-verbora-transliterators = { path = "crates/verbora-transliterators", version = "0.1.0" }
-verbora-util = { path = "crates/verbora-util", version = "0.1.0" }
-verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.1.0" }
-verbora-classifiers = { path = "crates/verbora-classifiers", version = "0.1.0" }
-verbora-sentiment = { path = "crates/verbora-sentiment", version = "0.1.0" }
-verbora-tfidf = { path = "crates/verbora-tfidf", version = "0.1.0" }
-verbora-phonetics = { path = "crates/verbora-phonetics", version = "0.1.0" }
-verbora-tokenizers = { path = "crates/verbora-tokenizers", version = "0.1.0" }
-verbora-trie = { path = "crates/verbora-trie", version = "0.1.0" }
+verbora-core = { path = "crates/verbora-core", version = "0.2.0" }
+verbora-distance = { path = "crates/verbora-distance", version = "0.2.0" }
+verbora-inflectors = { path = "crates/verbora-inflectors", version = "0.2.0" }
+verbora-language = { path = "crates/verbora-language", version = "0.2.0" }
+verbora-ngrams = { path = "crates/verbora-ngrams", version = "0.2.0" }
+verbora-normalizers = { path = "crates/verbora-normalizers", version = "0.2.0" }
+verbora-analyzers = { path = "crates/verbora-analyzers", version = "0.2.0" }
+verbora-spellcheck = { path = "crates/verbora-spellcheck", version = "0.2.0" }
+verbora-stemmers = { path = "crates/verbora-stemmers", version = "0.2.0" }
+verbora-tagger = { path = "crates/verbora-tagger", version = "0.2.0" }
+verbora-transliterators = { path = "crates/verbora-transliterators", version = "0.2.0" }
+verbora-util = { path = "crates/verbora-util", version = "0.2.0" }
+verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.2.0" }
+verbora-classifiers = { path = "crates/verbora-classifiers", version = "0.2.0" }
+verbora-sentiment = { path = "crates/verbora-sentiment", version = "0.2.0" }
+verbora-tfidf = { path = "crates/verbora-tfidf", version = "0.2.0" }
+verbora-phonetics = { path = "crates/verbora-phonetics", version = "0.2.0" }
+verbora-tokenizers = { path = "crates/verbora-tokenizers", version = "0.2.0" }
+verbora-trie = { path = "crates/verbora-trie", version = "0.2.0" }
 
 # --- external ---
 # Kept deliberately small. Every dependency here must be justified by a
@@ -66,6 +66,21 @@ smallvec = { version = "1", features = ["union", "const_generics"] }
 rustc-hash = "2"
 criterion = { version = "0.5", features = ["html_reports"] }
 rayon = "1"
+# UAX #29 text segmentation. `verbora-tokenizers` is defined in terms of the
+# standard, and a standard whose property assignments change with every Unicode
+# release cannot be served by a frozen hand table (see
+# `docs/design/text-shaping-contract.md` §4.2). 1.13.3 implements Unicode 17.0.0
+# and is dual-licensed MIT OR Apache-2.0.
+unicode-segmentation = "1.13.3"
+# UAX #15 normalization forms plus the `Canonical_Combining_Class` lookup
+# `verbora-normalizers::remove_diacritics` is defined over. Same reasoning as
+# above: normalization *is* a UCD operation, so the alternative is a hand table
+# that is wrong for every character encoded after it was frozen. 0.1.25
+# implements Unicode 17.0.0 — the same version as `unicode-segmentation`
+# 1.13.3, which is what lets the two crates agree — and is dual-licensed
+# MIT OR Apache-2.0 with one transitive dependency, `tinyvec`
+# (Zlib OR Apache-2.0 OR MIT). Both are maintained by the unicode-rs project.
+unicode-normalization = "0.1.25"
 
 [workspace.lints.rust]
 missing_docs = "warn"

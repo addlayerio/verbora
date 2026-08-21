@@ -7,9 +7,9 @@ you want to *do*, or from the crate map further down.
 
 | I want to… | Use |
 |---|---|
-| Split text into words | [Tokenizers](tokenizers.md) — start with `AggressiveTokenizer` |
+| Split text into words | [Tokenizers](tokenizers.md) — `WordTokenizer` |
 | Split text into sentences | [`SentenceTokenizer`](tokenizers.md) |
-| Tokenize a language other than English | [Tokenizers](tokenizers.md) — 16 language variants |
+| Keep the whitespace and punctuation too, so the pieces re-assemble | [`SegmentTokenizer`](tokenizers.md) |
 | Measure how similar two strings are | [String distance](distance.md) |
 | Correct a typo | [`levenshtein`](distance.md), usually after narrowing candidates |
 | Correct spelling against a corpus | [Spellcheck](spellcheck.md) |
@@ -21,8 +21,8 @@ you want to *do*, or from the crate map further down.
 | Build an autocomplete index | [Trie](trie.md) |
 | Find repeated phrases | [N-grams](ngrams.md) |
 | Strip accents before comparing | [`remove_diacritics`](normalizers.md) |
-| Expand English contractions | [`normalize`](normalizers.md) |
-| Normalise Japanese width and kana | [`normalize_ja`](normalizers.md) |
+| Put text in one canonical spelling before storing or hashing it | [`nfc`](normalizers.md) |
+| Fold halfwidth katakana and fullwidth Latin onto one form | [`nfkc`](normalizers.md) |
 | Romanise Japanese kana | [Transliterators](transliterators.md) |
 | Pluralise a noun, or write "23rd" | [Inflectors](inflectors.md) |
 | Reduce words to a stem | [Stemmers](stemmers.md) |
@@ -38,14 +38,14 @@ you want to *do*, or from the crate map further down.
 
 | Subsystem | Crate | Public surface |
 |---|---|---|
-| [Tokenizers](tokenizers.md) | `verbora-tokenizers` | 25 tokenizers, `Tokenize`, `Utf16Token` |
-| [String distance](distance.md) | `verbora-distance` | 8 metrics, 5 `StringMetric` impls |
-| [Phonetics](phonetics.md) | `verbora-phonetics` | 11 encoders: SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff ×2, Cologne, Nysiis, Caverphone 1/2, Phonex, Refined Soundex, Match Rating |
+| [Tokenizers](tokenizers.md) | `verbora-tokenizers` | `WordTokenizer`, `SegmentTokenizer`, `SentenceTokenizer` — UAX #29 boundaries, borrowed tokens |
+| [String distance](distance.md) | `verbora-distance` | 7 metrics; the three edit distances also in weighted and substring-search forms, plus `PreparedPattern` |
+| [Phonetics](phonetics.md) | `verbora-phonetics` | 12 encoders: SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff, Beider–Morse, Cologne, Nysiis, Caverphone 1/2, Phonex, Refined Soundex, Match Rating |
 | [Phonetic neighbors](phonetic-index.md) | `verbora-phonetics` | `PhoneticIndex` — dictionary-wide candidate generation over any of the four core encoders |
 | [Beider-Morse](beider-morse.md) | `verbora-phonetics` | Cross-language surname matching over up to 18 languages at once, with auto-detection |
 | [Language](language.md) | `verbora-language` | Script detection, optional statistical language detection, and `recommend()` — language → phonetic encoder |
-| [N-grams](ngrams.md) | `verbora-ngrams` | window engine, stats, Chinese n-grams |
-| [Normalizers](normalizers.md) | `verbora-normalizers` | 6 normalizers, 17 Japanese converters |
+| [N-grams](ngrams.md) | `verbora-ngrams` | `ngrams`, `Padded` boundary symbols, `char_ngrams` |
+| [Normalizers](normalizers.md) | `verbora-normalizers` | the four Unicode normalization forms plus `remove_diacritics` |
 | [Inflectors](inflectors.md) | `verbora-inflectors` | 6 inflectors, runtime rules |
 | [Trie](trie.md) | `verbora-trie` | prefix tree, prefix and path queries |
 | [Transliterators](transliterators.md) | `verbora-transliterators` | Japanese kana → romaji, five-phase pipeline |
@@ -62,33 +62,32 @@ you want to *do*, or from the crate map further down.
 
 ## Language support
 
-| Language | Tokenizer | Normalizer | Inflector | Phonetics |
-|---|:--:|:--:|:--:|:--:|
-| English | ✅ | ✅ | ✅ nouns, verbs, ordinals | ✅ all four core encoders |
-| French | ✅ | | ✅ nouns, ordinals | |
-| German | ✅ | | | |
-| Spanish | ✅ | | | |
-| Italian | ✅ | | | |
-| Portuguese | ✅ | | | |
-| Dutch | ✅ | | | |
-| Norwegian | ✅ | ✅ | | |
-| Swedish | ✅ | ✅ | | |
-| Danish/Nordic | | ✅ | | |
-| Russian | ✅ | | | |
-| Ukrainian | ✅ | | | |
-| Polish | ✅ | | | |
-| Persian | ✅ | | | |
-| Hindi | ✅ | | | |
-| Indonesian | ✅ | | | |
-| Vietnamese | ✅ | | | |
-| Finnish | ✅ `OrthographyTokenizer` | | | |
-| Japanese | ✅ | ✅ + 17 converters | ✅ nouns | |
-| Chinese | ✅ n-grams | | | |
+Tokenization and normalization are not per-language axes any more: both follow
+the Unicode standard and therefore cover the whole character repertoire at once.
+The columns that *do* vary by language are the ones backed by per-language data.
 
-Latin-script diacritic folding via `remove_diacritics` applies far more broadly
-than the Normalizer column suggests — it is a table over 820 non-ASCII
-characters, not a per-language rule set. Stemmers cover 12 languages on their
-own axis; see [Stemmers](stemmers.md).
+| Language | Inflector | Phonetics |
+|---|:--:|:--:|
+| English | ✅ nouns, verbs, ordinals | ✅ all four core encoders |
+| French | ✅ nouns, ordinals | |
+| Japanese | ✅ nouns | |
+
+**Tokenization** is [UAX #29](https://www.unicode.org/reports/tr29/) word and
+sentence boundaries, so every language that separates words with spaces is
+covered by the same three tokenizers — with one stated limitation: the standard's
+default rules do not segment Thai, Lao, Khmer, Myanmar, Chinese or Japanese, and
+Verbora ships no dictionary segmenter for them.
+
+**Normalization** is the four Unicode normalization forms plus a
+combining-mark fold defined over `Canonical_Combining_Class`, so
+`remove_diacritics` handles Latin, Greek, Cyrillic, Hebrew and Arabic script
+without a per-language rule set — read [Normalizers](normalizers.md) before
+applying it to Thai or Devanagari.
+
+Stemmers, sentiment lexicons, part-of-speech data and Beider-Morse each have
+their own language axis; see [Stemmers](stemmers.md),
+[Sentiment](sentiment.md), [POS tagger](tagger.md) and
+[Beider-Morse](beider-morse.md).
 
 ## Where else to look
 

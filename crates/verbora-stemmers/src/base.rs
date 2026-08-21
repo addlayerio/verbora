@@ -1,85 +1,160 @@
-//! `tokenizeAndStem`, expressed once.
+//! `tokenize_and_stem`, expressed once.
 //!
-//! Every stemmer in the reference inherits a `tokenizeAndStem(text, keepStops)`
-//! from its language's base class, and the thirteen base classes are almost —
-//! but not quite — copies of one another. The differences are small, undocumented
-//! and load-bearing:
-//!
-//! | | lowercase the text first | stop-word test reads | `stem()` receives | gate regex |
-//! |---|---|---|---|---|
-//! | en, id | **yes** | the token | the token | none |
-//! | de, es, it, nl, ru, uk | no | the **raw** token | the lowercased token | yes |
-//! | fr, Carry | no | the **lowercased** token | the lowercased token | yes |
-//! | fa | no | the raw token | the raw token | none |
-//! | no, sv, pt | no | the lowercased token | the **raw** token | none |
-//! | ja | no | the raw token | the lowercased token | none |
-//!
-//! A port that picks one policy and applies it everywhere changes the token
-//! stream for eight of the thirteen: German keeps a capitalised `"Das"` because
-//! its stop-word list is consulted with the raw token, while lowercase `"ist"`,
-//! `"und"` and `"die"` are dropped.
-//!
-//! The three axes — which text is tokenized, which string is filtered on, which
-//! string is stemmed — are the only degrees of freedom, so [`TokenizeAndStem`]
-//! names them and [`Stems`] implements all six variants once.
-//!
-//! # Laziness
-//!
-//! [`Stems`] is the primitive; `tokenize_and_stem` is `stems(..).collect()`. The
-//! iterator holds the prepared text (borrowed when no rewrite was needed) and one
-//! byte cursor, so a caller that only wants the first few stems of a large
-//! document pays for only those.
+//! The module is private and its whole contract lives on [`TokenizeAndStem`],
+//! [`Stems`] and [`Casing`], which the crate root re-exports. Read the trait.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
+
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 /// Which form of a token a step looks at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Casing {
     /// The token exactly as the tokenizer produced it.
     Raw,
-    /// `token.toLowerCase()`.
+    /// The token lowercased.
     Lower,
 }
 
-/// The next maximal run of word characters in `s` at or after `from`.
+/// The next UAX #29 word of `s` at or after byte offset `from`, as a byte
+/// range, optionally extended across word-internal hyphens.
 ///
-/// The reference's aggressive tokenizers all reduce to this: `split` on a run of
-/// non-word characters, then drop the empty strings the split leaves at the
-/// edges. A maximal-run scan produces the same list without materialising the
-/// separators, and — unlike `split` — without allocating.
-fn next_run(s: &str, from: usize, is_word: fn(char) -> bool) -> Option<(usize, usize)> {
-    let mut idx = from;
-    let bytes = s.as_bytes();
-    // Skip separators.
-    while idx < s.len() {
-        let c = next_char(s, idx);
-        if is_word(c) {
-            break;
+/// Restarting the boundary scan at `from` is sound because `from` is always
+/// either `0` or the end of a previously yielded word, and both are UAX #29
+/// break positions: no rule spans a break, and the one rule with unbounded
+/// lookbehind (WB15/WB16's regional-indicator parity) restarts its count at
+/// every break. `stems_walk_agrees_with_one_whole_tokenizer_pass` checks that
+/// claim against a single full pass, over input carrying regional indicators,
+/// ZWJ sequences and combining marks.
+///
+/// `join_hyphens` is [`TokenizeAndStem::HYPHEN_JOINS_LETTERS`]; see there for
+/// the rule and why exactly one language sets it.
+fn next_word(s: &str, from: usize, join_hyphens: bool) -> Option<(usize, usize)> {
+    let rest = s.get(from..)?;
+    let token = WordTokenizer.tokens(rest).next()?;
+    // `token` is a slice of `rest`, so its address gives its offset.
+    let offset = token.as_ptr() as usize - rest.as_ptr() as usize;
+    let mut end = offset + token.len();
+    if join_hyphens {
+        while let Some(extended) = hyphen_continuation(rest, end) {
+            end = extended;
         }
-        idx += c.len_utf8();
     }
-    if idx >= s.len() {
+    Some((from + offset, from + end))
+}
+
+/// If the word ending at `end` is continued through a hyphen, where the
+/// continuation ends.
+///
+/// The hyphen must sit directly between two `Alphabetic` scalars — no spaces,
+/// no digits on either side — so `anak-anak` is one word while `12-05-2020`,
+/// `-leading` and `trailing-` keep the untailored UAX #29 boundaries.
+fn hyphen_continuation(rest: &str, end: usize) -> Option<usize> {
+    if !rest[end..].starts_with('-') {
         return None;
     }
-    let start = idx;
-    while idx < bytes.len() {
-        let c = next_char(s, idx);
-        if !is_word(c) {
-            break;
-        }
-        idx += c.len_utf8();
+    if !rest[..end]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_alphabetic)
+    {
+        return None;
     }
-    Some((start, idx))
+    let after = end + '-'.len_utf8();
+    let tail = rest.get(after..)?;
+    if !tail.chars().next().is_some_and(char::is_alphabetic) {
+        return None;
+    }
+    let next = WordTokenizer.tokens(tail).next()?;
+    // The continuation must begin at the hyphen, not somewhere past it.
+    let start = next.as_ptr() as usize - tail.as_ptr() as usize;
+    (start == 0).then(|| after + next.len())
 }
 
-#[inline]
-fn next_char(s: &str, at: usize) -> char {
-    s[at..].chars().next().expect("at is a char boundary")
-}
-
-/// A stemmer that can also tokenize text, following its language's recipe.
+/// Turning text into stems: tokenize, filter stop words, stem what is left.
+///
+/// Fifteen types in this crate implement this trait, and their recipes are
+/// almost — but not quite — copies of one another. The differences are small
+/// and load-bearing, so they are named as associated constants rather than
+/// buried in fifteen near-identical loops:
+///
+/// | | [`prepare`] rewrites the text to | stop-word test reads | `stem` receives | gate |
+/// |---|---|---|---|---|
+/// | en, Lancaster, id | **its lowercase** | the token | the token | none |
+/// | fa | itself minus one literal run | the token | the token | none |
+/// | de, es, it, nl, ru, uk | itself | the **raw** token | the lowercased token | yes |
+/// | fr, Carry | itself | the **lowercased** token | the lowercased token | yes |
+/// | no, sv, pt | itself | the lowercased token | the **raw** token | none |
+///
+/// Fifteen rows collapse to five because the four axes are the only degrees of
+/// freedom there are: which text is tokenized, which string is filtered on,
+/// which string is stemmed, and whether a gate exempts the token from
+/// stemming. [`Stems`] implements the five recipes once.
+///
+/// A single policy applied to all fifteen would change the token stream for
+/// most of them, and silently. German keeps a capitalised `"Das"` because its
+/// stop-word list is consulted with the **raw** token, while lowercase `"ist"`,
+/// `"und"` and `"die"` are dropped.
+///
+/// Two rows carry a caveat the table cannot hold. `en`, `Lancaster` and `id`
+/// lowercase the *document*, not each token, because `to_lowercase` can change
+/// a string's length and therefore move token boundaries. And Norwegian and
+/// Swedish do **not** fold diacritics here, because `å ä ö` and `æ ø å` are
+/// letters of those alphabets rather than accents — see
+/// [`crate::PorterStemmerSv`] and [`crate::PorterStemmerNo`] for the decision
+/// and the 124 stop words the fold had made unreachable.
+///
+/// [`prepare`]: TokenizeAndStem::prepare
+///
+/// # Tokenization
+///
+/// Every language uses [`verbora_tokenizers::WordTokenizer`] — the UAX #29 word
+/// segments containing a letter or a digit. There is no per-language character
+/// class: a repertoire of accented Latin letters and Cyrillic ranges is a
+/// character repertoire rather than a linguistic rule, and `Word_Break` covers
+/// the whole repertoire at once. The visible consequences are that
+/// `"well-known"` and `"and/or"` stem as two tokens each while `"don't"`,
+/// `"3.14"`, `"1,000"` and `"node_js"` stem as one, and that accented and
+/// non-Latin text is not cut at every character some per-language class
+/// happened to omit.
+///
+/// The one tailoring is [`Self::HYPHEN_JOINS_LETTERS`], which Indonesian sets.
+/// UAX #29 §4 presents its rules as a *default* that languages are expected to
+/// tailor, and Indonesian marks reduplication with `U+002D` inside what its
+/// orthography treats as one word — `buku-buku`, `malaikat-malaikat-nya`.
+/// Leaving that at the default breaks a single lexeme into pieces none of
+/// which is the lexeme.
+///
+/// # Choosing the right entry point
+///
+/// Four methods turn text into stems. They compute the same token stream and
+/// differ only in what they allocate and when.
+///
+/// | | Returns | Allocates | Use when |
+/// |---|---|---|---|
+/// | [`stems`](Self::stems) | a lazy iterator | one `String` per stem, on demand | you want the first few stems of a large document, or you are feeding another iterator |
+/// | [`tokenize_and_stem`](Self::tokenize_and_stem) | `Vec<String>` | the above plus one `Vec` | **the default.** You want all the stems and you want them in a collection |
+/// | [`tokenize_and_stem_cached`](Self::tokenize_and_stem_cached) | `Vec<String>` | the above, minus one `stem` call per repeated token | you process many documents over a small vocabulary and own a cache to hand in |
+/// | [`par_tokenize_and_stem_batch`](Self::par_tokenize_and_stem_batch) | `Vec<Vec<String>>` | one `Vec` per document plus the outer one | you have dozens or more independent documents, each at least paragraph-sized (`parallel` feature) |
+///
+/// [`stems`](Self::stems) is the primitive and the other three are built from
+/// it; `tokenize_and_stem` is literally `stems(..).collect()`. Start there. The
+/// cached form is worth its extra argument only when tokens actually repeat —
+/// it is the same walk with one `HashMap` probe substituted for one `stem`
+/// call, so on all-distinct tokens it is strictly slower. The parallel form
+/// measurably *regresses* a handful of short documents; see its own
+/// documentation for the crossover.
+///
+/// A caller who has already tokenized should skip all four and call the
+/// stemmer's own inherent `stem` per token.
+///
+/// # Laziness
+///
+/// [`Stems`] holds the prepared text (borrowed when no rewrite was needed) and
+/// one byte cursor, so a caller that only wants the first few stems of a large
+/// document pays for only those.
 pub trait TokenizeAndStem {
     /// Which string the stop-word list is consulted with.
     const FILTER_ON: Casing;
@@ -104,16 +179,46 @@ pub trait TokenizeAndStem {
     /// cache must clear it when they reconfigure the stemmer it was filled by.
     const PURE_STEM: bool = true;
 
-    /// The language's word-character class.
-    fn is_word_char(c: char) -> bool;
+    /// Whether `U+002D` between two letters continues a word instead of ending
+    /// it — a UAX #29 §4 tailoring, off by default.
+    ///
+    /// When `true`, a hyphen that is immediately preceded *and* immediately
+    /// followed by an `Alphabetic` scalar does not break a word, so
+    /// `"anak-anak"` is one token. Everything else keeps the untailored
+    /// boundaries: `"12-05-2020"` is three tokens (the sides are digits),
+    /// `"-leading"`, `"trailing-"` and `"a - b"` are unaffected, and a run of
+    /// hyphens is never a word at all.
+    ///
+    /// # Why this exists, and why only Indonesian sets it
+    ///
+    /// UAX #29 presents its word rules as a *default* that languages are
+    /// expected to tailor, and Indonesian orthography writes reduplication —
+    /// its plural — as one word joined by a hyphen: `buku-buku` ("books"),
+    /// `malaikat-malaikat-nya` ("his angels"). The crate's own data agrees:
+    /// 335 of the 29,932 Indonesian roots and 22 of the 809 Indonesian stop
+    /// words are single lexemes spelled with a hyphen, and
+    /// [`crate::StemmerId`]'s entire plural branch takes a hyphenated token as
+    /// its input. Under the untailored default none of that is reachable
+    /// through this pipeline: the lexeme arrives as two tokens, neither of
+    /// which is in the dictionary or on the list.
+    ///
+    /// No other language in this crate carries a hyphenated entry in either
+    /// its dictionary or its stop-word list, and in English, German, French
+    /// and the rest a hyphen joins two words that each mean something on their
+    /// own — `well-known` really is `well` and `known`. Turning this on for
+    /// them would merge tokens that ought to stay apart, so it stays off.
+    const HYPHEN_JOINS_LETTERS: bool = false;
 
     /// Rewrites the text before tokenizing.
     ///
-    /// English and Indonesian lowercase the whole document here, which is *not*
-    /// the same as lowercasing each token afterwards: `toLowerCase` can change a
-    /// string's length (`'İ'` becomes `i` + U+0307, and U+0307 is a separator in
-    /// every one of these classes), so it moves token boundaries. Norwegian and
-    /// Swedish strip diacritics here instead. Everything else borrows unchanged.
+    /// English, Lancaster and Indonesian lowercase the whole document here,
+    /// which is *not* the same as lowercasing each token afterwards:
+    /// `to_lowercase` can change a string's length (`'İ'` becomes `i` +
+    /// U+0307), so it can move token boundaries. Persian replaces one literal
+    /// run with a space. Everything else — Norwegian and Swedish included —
+    /// borrows unchanged; see [`crate::PorterStemmerSv`] and
+    /// [`crate::PorterStemmerNo`] for why folding their diacritics here was
+    /// wrong.
     fn prepare(text: &str) -> Cow<'_, str> {
         Cow::Borrowed(text)
     }
@@ -196,7 +301,7 @@ pub trait TokenizeAndStem {
         let mut out = Vec::new();
         let mut pos = 0;
         // The same walk as `Stems::next`, with the `stem_token` call memoized.
-        while let Some((start, end)) = next_run(&buf, pos, Self::is_word_char) {
+        while let Some((start, end)) = next_word(&buf, pos, Self::HYPHEN_JOINS_LETTERS) {
             pos = end;
             let raw = &buf[start..end];
             let lowered: Option<String> =
@@ -287,7 +392,7 @@ pub trait TokenizeAndStem {
     /// collects them; rayon's `par_iter().map().collect()` is order-preserving,
     /// so `out[i]` is always `docs[i]`'s result. `Self` must be `Sync`, because
     /// every task borrows it: this is why [`crate::PorterStemmerNl`], whose sticky
-    /// `suffixeRemoved` flag lives in a `Cell`, does not get this method —
+    /// `suffix_e_removed` flag lives in a `Cell`, does not get this method —
     /// running it from multiple threads at once would make that stemmer's output
     /// depend on scheduling order, and the type system refuses it instead of
     /// letting that happen silently. Construct one [`PorterStemmerNl`][crate::PorterStemmerNl]
@@ -297,6 +402,7 @@ pub trait TokenizeAndStem {
     /// rayon pool is already active (or the default one, created lazily on first
     /// use).
     #[cfg(feature = "parallel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
     fn par_tokenize_and_stem_batch(&self, docs: &[&str], keep_stops: bool) -> Vec<Vec<String>>
     where
         Self: Sized + Sync,
@@ -323,7 +429,7 @@ impl<S: TokenizeAndStem> Iterator for Stems<'_, S> {
 
     fn next(&mut self) -> Option<String> {
         loop {
-            let (start, end) = next_run(&self.buf, self.pos, S::is_word_char)?;
+            let (start, end) = next_word(&self.buf, self.pos, S::HYPHEN_JOINS_LETTERS)?;
             self.pos = end;
             let raw = &self.buf[start..end];
 
@@ -356,19 +462,18 @@ impl<S: TokenizeAndStem> Iterator for Stems<'_, S> {
 
 #[cfg(test)]
 mod tests {
-    use verbora_tokenizers::{
-        AggressiveTokenizer, AggressiveTokenizerDe, AggressiveTokenizerFr, AggressiveTokenizerId,
-        AggressiveTokenizerRu, Tokenize, classes,
-    };
-
     use super::*;
 
-    /// Collects the runs `next_run` finds, so they can be compared with the
-    /// tokenizers crate's own (already parity-verified) output.
-    fn runs(text: &str, is_word: fn(char) -> bool) -> Vec<&str> {
+    /// Collects the words `next_word` finds by walking, so they can be compared
+    /// with a single whole-input pass of the same tokenizer.
+    fn walk(text: &str) -> Vec<&str> {
+        walk_with(text, false)
+    }
+
+    fn walk_with(text: &str, join_hyphens: bool) -> Vec<&str> {
         let mut out = Vec::new();
         let mut pos = 0;
-        while let Some((a, b)) = next_run(text, pos, is_word) {
+        while let Some((a, b)) = next_word(text, pos, join_hyphens) {
             out.push(&text[a..b]);
             pos = b;
         }
@@ -418,6 +523,19 @@ mod tests {
             ru.tokenize_and_stem_cached(texts[2], false, &mut cache),
             ru.tokenize_and_stem(texts[2], false)
         );
+        // Indonesian is the one stemmer whose walk is tailored, so the cached
+        // walk has to carry the tailoring too.
+        let mut cache = HashMap::new();
+        let id = crate::StemmerId::new();
+        for text in ["buku-buku itu dibaca", "malaikat-malaikat-nya", "a-b 12-05"] {
+            for keep_stops in [false, true] {
+                assert_eq!(
+                    id.tokenize_and_stem_cached(text, keep_stops, &mut cache),
+                    id.tokenize_and_stem(text, keep_stops),
+                    "id: {text:?}"
+                );
+            }
+        }
     }
 
     /// The cache is trusted: a pre-seeded entry is served verbatim. This pins
@@ -465,49 +583,203 @@ mod tests {
         );
     }
 
+    /// The lazy walk must agree, token for token, with a single whole-input
+    /// pass of the same tokenizer.
+    ///
+    /// `next_word` restarts the UAX #29 boundary scan at the end of the
+    /// previous word rather than carrying one iterator across the whole
+    /// document, which is only sound because every restart point is a break
+    /// position. The samples carry the constructs where that could fail:
+    /// regional-indicator pairs (WB15/WB16 count parity backwards without
+    /// bound), ZWJ emoji sequences (WB3c), combining marks attaching under WB4,
+    /// and `CR LF` (WB3). A whitespace-and-ASCII sample set reaches none of
+    /// them.
     #[test]
-    fn run_scanning_agrees_with_the_verified_tokenizers() {
+    fn stems_walk_agrees_with_one_whole_tokenizer_pass() {
         let samples = [
             "",
             "   ",
             "The quick brown fox",
-            "it's a-b c/d",
+            "it's a-b c/d 3.14 1,000 node_js a:b",
             "Das Haus ist schön und die Häuser sind schöner.",
             "Le petit cheval de manège",
             "мама мыла раму",
             "buku-buku itu dibaca",
             "a😀b emoji",
             "tabs\tand\nnewlines",
+            "a\r\nb",
             "!!!",
             "-leading and trailing-",
+            "\u{301}leading combining mark",
+            "trailing combining mark\u{301}",
+            "🇦🇧🇨 flags 🇦 lone",
+            "a🇦🇧🇨🇩b",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦 family",
+            "日本語 と ภาษาไทย と العربية",
+            "١٢٣ ½ \u{2160}",
         ];
         for s in samples {
             assert_eq!(
-                runs(s, classes::is_word_en),
-                AggressiveTokenizer::new().tokenize(s),
-                "en: {s:?}"
-            );
-            assert_eq!(
-                runs(s, classes::is_word_de),
-                AggressiveTokenizerDe::new().tokenize(s),
-                "de: {s:?}"
-            );
-            assert_eq!(
-                runs(s, classes::is_word_fr),
-                AggressiveTokenizerFr::new().tokenize(s),
-                "fr: {s:?}"
-            );
-            assert_eq!(
-                runs(s, classes::is_word_ru),
-                AggressiveTokenizerRu::new().tokenize(s),
-                "ru: {s:?}"
-            );
-            let lower = s.to_lowercase();
-            assert_eq!(
-                runs(&lower, classes::is_word_id),
-                AggressiveTokenizerId::new().tokenize(&lower),
-                "id: {s:?}"
+                walk(s),
+                WordTokenizer.tokenize_borrowed(s),
+                "walk disagrees with one pass on {s:?}"
             );
         }
+    }
+
+    /// The moved boundaries, at the level a stemmer consumer sees them: the
+    /// token stream `Stems` walks is UAX #29's, so hyphens and slashes split
+    /// and apostrophes, decimal points, thousands separators, colons and
+    /// underscores do not.
+    #[test]
+    fn the_stemmer_token_stream_is_uax29() {
+        use crate::PorterStemmer;
+
+        let en = PorterStemmer::new();
+        // `keep_stops = true` so the stop-word list cannot hide a boundary.
+        assert_eq!(
+            en.tokenize_and_stem("well-known and/or don't 3.14 1,000 node_js a:b", true),
+            [
+                "well", "known", "and", "or", "don't", "3.14", "1,000", "node_j", "a:b"
+            ]
+        );
+        // Non-ASCII letters are letters, not separators.
+        assert_eq!(en.tokenize_and_stem("café naïve", true), ["café", "naïv"]);
+    }
+
+    /// Six languages consult the stop-word list with the **raw** token, so a
+    /// tokenizer that folded case would start dropping capitalised stop words
+    /// with no compile error. The tokenizer does not fold, and this is the
+    /// tripwire that fires if that ever changes.
+    #[test]
+    fn the_tokenizer_does_not_fold_case() {
+        use crate::PorterStemmerDe;
+
+        let de = PorterStemmerDe::new();
+        // German is FILTER_ON = Raw, STEM_ON = Lower: the stop-word list is
+        // consulted with the token exactly as the tokenizer produced it, and
+        // the emitted value is the lowercased stem. "das" and "ist" are stop
+        // words; capitalised "Das" is a different string, so it survives the
+        // filter and is then emitted folded.
+        assert_eq!(
+            de.tokenize_and_stem("Das ist das Haus", false),
+            ["das", "haus"]
+        );
+        // Lowercase "das" in the same position *is* dropped — which is only
+        // observable because the tokenizer handed the filter the raw token.
+        assert_eq!(de.tokenize_and_stem("das ist das Haus", false), ["haus"]);
+    }
+
+    /// `HYPHEN_JOINS_LETTERS` is a tailoring of exactly one rule, and the
+    /// boundary cases are where a tailoring turns into a second tokenizer.
+    /// Both sides of the hyphen must be `Alphabetic` and the hyphen must be
+    /// adjacent to both.
+    #[test]
+    fn hyphen_joining_is_narrow_and_off_by_default() {
+        // Letters on both sides, ASCII and not, and any number of hyphens.
+        assert_eq!(walk_with("buku-buku", true), ["buku-buku"]);
+        assert_eq!(
+            walk_with("malaikat-malaikat-nya", true),
+            ["malaikat-malaikat-nya"]
+        );
+        assert_eq!(walk_with("blå-bær", true), ["blå-bær"]);
+        // Digits are not letters, so a date keeps the default boundaries.
+        assert_eq!(walk_with("12-05-2020", true), ["12", "05", "2020"]);
+        assert_eq!(walk_with("a-1", true), ["a", "1"]);
+        assert_eq!(walk_with("1-a", true), ["1", "a"]);
+        // The hyphen must touch both words.
+        assert_eq!(walk_with("a - b", true), ["a", "b"]);
+        assert_eq!(walk_with("a- b", true), ["a", "b"]);
+        assert_eq!(walk_with("a -b", true), ["a", "b"]);
+        assert_eq!(walk_with("a--b", true), ["a", "b"]);
+        // Nothing on one side at all.
+        assert_eq!(walk_with("-leading", true), ["leading"]);
+        assert_eq!(walk_with("trailing-", true), ["trailing"]);
+        assert_eq!(walk_with("---", true), Vec::<&str>::new());
+        // Off, the same inputs are exactly UAX #29's.
+        for s in [
+            "buku-buku",
+            "malaikat-malaikat-nya",
+            "blå-bær",
+            "12-05-2020",
+            "a--b",
+            "-leading",
+            "trailing-",
+            "---",
+        ] {
+            assert_eq!(
+                walk_with(s, false),
+                WordTokenizer.tokenize_borrowed(s),
+                "the untailored walk moved on {s:?}"
+            );
+        }
+    }
+
+    /// Whatever the tailoring, tokens stay contiguous, non-overlapping slices
+    /// of the input in increasing order — the invariant every offset consumer
+    /// depends on, and the one a hand-rolled extension is most likely to break.
+    #[test]
+    fn joined_tokens_are_still_ordered_slices_of_the_input() {
+        for s in [
+            "buku-buku itu dibaca",
+            "a-b-c-d",
+            "kira-kira 12-05-2020 well-known",
+            "-a-",
+            "é-è",
+            "a-\u{301}b",
+            "🇦🇧-🇨",
+            "",
+        ] {
+            let mut end = 0;
+            let mut pos = 0;
+            while let Some((a, b)) = next_word(s, pos, true) {
+                assert!(a >= end, "{s:?}: token at {a} overlaps the previous end");
+                assert!(a < b && b <= s.len(), "{s:?}: bad range {a}..{b}");
+                assert!(s.is_char_boundary(a) && s.is_char_boundary(b));
+                end = b;
+                pos = b;
+            }
+        }
+    }
+
+    /// Only Indonesian tailors the hyphen; the default must stay off for
+    /// everything else, or `well-known` silently becomes one English token.
+    #[test]
+    fn only_indonesian_joins_hyphens() {
+        use crate::{
+            CarryStemmerFr, LancasterStemmer, PorterStemmer, PorterStemmerDe, PorterStemmerEs,
+            PorterStemmerFa, PorterStemmerFr, PorterStemmerIt, PorterStemmerNl, PorterStemmerNo,
+            PorterStemmerPt, PorterStemmerRu, PorterStemmerSv, PorterStemmerUk, StemmerId,
+        };
+
+        const fn joins<S: TokenizeAndStem>() -> bool {
+            S::HYPHEN_JOINS_LETTERS
+        }
+        const {
+            assert!(joins::<StemmerId>());
+            assert!(!joins::<PorterStemmer>());
+            assert!(!joins::<LancasterStemmer>());
+            assert!(!joins::<CarryStemmerFr>());
+            assert!(!joins::<PorterStemmerDe>());
+            assert!(!joins::<PorterStemmerEs>());
+            assert!(!joins::<PorterStemmerFa>());
+            assert!(!joins::<PorterStemmerFr>());
+            assert!(!joins::<PorterStemmerIt>());
+            assert!(!joins::<PorterStemmerNl>());
+            assert!(!joins::<PorterStemmerNo>());
+            assert!(!joins::<PorterStemmerPt>());
+            assert!(!joins::<PorterStemmerRu>());
+            assert!(!joins::<PorterStemmerSv>());
+            assert!(!joins::<PorterStemmerUk>());
+        }
+        // The same text, one tailoring apart.
+        assert_eq!(
+            PorterStemmer::new().tokenize_and_stem("well-known", true),
+            ["well", "known"]
+        );
+        assert_eq!(
+            StemmerId::new().tokenize_and_stem("buku-buku", true),
+            ["buku"]
+        );
     }
 }

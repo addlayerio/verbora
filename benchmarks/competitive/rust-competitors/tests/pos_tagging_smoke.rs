@@ -20,7 +20,7 @@ use rust_bert::pipelines::token_classification::{
 };
 use rust_bert::resources::LocalResource;
 use tch::Device;
-use verbora_tagger::{BrillPosTagger, Language, Lexicon, RuleSet};
+use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
 
 const SENTENCE: &str = "the quick brown fox jumps over the lazy dog";
 
@@ -35,20 +35,29 @@ fn model_dir(name: &str) -> Option<PathBuf> {
 
 #[test]
 fn verbora_tags_every_token() {
-    let lexicon = Lexicon::detached(Some("EN"), Some("NN"), Some("NNP"));
-    let rules = RuleSet::for_language(Language::English);
-    let tagger = BrillPosTagger::new(&lexicon, &rules);
+    let lexicon = Lexicon::bundled(Language::English);
+    let rules = RuleSet::bundled(Language::English);
+    let tagger = BrillTagger::new(&lexicon, &rules);
     let tokens: Vec<&str> = SENTENCE.split_whitespace().collect();
 
-    let tagged = tagger
-        .tag(tokens.iter().copied())
-        .expect("no failing predicate");
-    let tags: Vec<_> = tagged.pairs().collect();
-    assert_eq!(tags.len(), tokens.len());
-    assert!(
-        tags.iter().all(|(_, t)| t.is_some()),
-        "every token should receive a tag: {tags:?}"
-    );
+    let tagged = tagger.tag(tokens.iter().copied());
+
+    // `tag` returns `Vec<TaggedToken>` directly now — it used to return a
+    // `Result` whose error was a failing rule predicate, and `TaggedToken::tag`
+    // used to be `Option<Tag>`. Both are gone: `tag.rs` documents the tag as
+    // "Always present: the initial-state annotator assigns a lexicon tag or the
+    // lexicon's default, never nothing." The old test asserted `is_some()` on
+    // every tag; that is now a type-level guarantee, so what is left to check
+    // is that no token is dropped, that each keeps its own text, and that no
+    // tag is empty.
+    assert_eq!(tagged.len(), tokens.len());
+    for (tagged_token, original) in tagged.iter().zip(&tokens) {
+        assert_eq!(tagged_token.token(), *original);
+        assert!(
+            !tagged_token.tag.as_str().is_empty(),
+            "empty tag for {original:?}"
+        );
+    }
 }
 
 #[test]

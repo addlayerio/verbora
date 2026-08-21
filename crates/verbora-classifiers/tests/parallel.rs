@@ -88,6 +88,38 @@ fn many_items() {
     assert_parity(&trained_bayes(), &texts);
 }
 
+/// Each `rayon` worker warms its own stem memo, so a batch big enough to be
+/// split across workers must still agree with a sequential loop that shares
+/// the classifier's single memo — and with a run where the classifier's memo
+/// is cold, warm, or contended.
+///
+/// The batch mixes texts that repeat (memo hits) with texts unique to one
+/// position (memo misses), so both sides of every worker's memo are exercised
+/// rather than only the hot path.
+#[test]
+fn per_worker_memos_agree_with_the_shared_one() {
+    let classifier = trained_bayes();
+    let unique: Vec<String> = (0..600)
+        .map(|i| format!("document number {i} about testing programs and drives"))
+        .collect();
+    let mut texts: Vec<&str> = Vec::new();
+    for (i, u) in unique.iter().enumerate() {
+        texts.push(u.as_str());
+        // Interleave a repeated probe, which every worker will see.
+        texts.push(if i % 2 == 0 {
+            "did the tests pass?"
+        } else {
+            "the program is buggy"
+        });
+    }
+    // Cold: neither the shared memo nor any worker's has seen these tokens.
+    assert_parity(&classifier, &texts);
+    // Warm: the sequential half of `assert_parity` has now filled the shared
+    // memo, so the second run compares a warm shared memo against fresh
+    // per-worker ones.
+    assert_parity(&classifier, &texts);
+}
+
 /// Reruns `tests/edge_cases.rs`'s `categories()` (accented Latin, Cyrillic,
 /// Greek, CJK, astral-plane emoji, punctuation, digits, combining marks) as
 /// text `classify` tokenises itself, instead of the pre-split token slices

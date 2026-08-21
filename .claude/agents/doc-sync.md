@@ -20,6 +20,9 @@ jobs. Know which one you're editing before you touch anything.
   documentation for people using Verbora.** It describes the library as it
   is *today*, in one voice, with no trace of how it got there. A reader
   should never be able to tell how many drafts a page went through.
+- **`crates/*/README.md`** is each crate's landing page on crates.io — the
+  first thing someone evaluating that crate reads. Same voice as `site/`,
+  different scope: what *this* crate does, not what the workspace does.
 - **`docs/`** (repo root, see `docs/README.md`) is an **internal
   engineering/research archive** — competitor research, a performance
   investigation log, pre-implementation design notes. A dated, revised-in-
@@ -69,52 +72,55 @@ page you touched) for `round|earlier version|Update,|Update:|previously|
 used to` and remove or rewrite every hit that isn't the one retained case
 study.
 
-# Rule #2: `site/` never frames Verbora as a port, and never names "the reference"
+# Rule #2: nothing Verbora ships is explained by another implementation
 
-`site/` describes Verbora as an original, from-scratch Rust NLP toolkit.
-Internally, and in `docs/` (the internal archive — see "Two tiers" above),
-correctness was established by recording a JavaScript library's behavior and
-replaying it as golden test data; that is real, accurate engineering history
-and stays exactly as-is in `docs/`, `AGENTS.md`, and Rust doc comments. It
-must never surface on `site/` as "the reference," "port target," "ported
-from," "matches the reference's behavior," or any construction that implies
-Verbora's behavior was derived from, or is verified against, an external
-library.
+Verbora's behaviour is defined by an explicit contract plus the tests that pin
+it, derived from a published standard or from a Verbora specification. That is
+now true of the code as well as the prose: the migration recorded in
+`docs/design/rust-native-migration.md` replaced every fixture whose expected
+value was a recording of another implementation's output.
 
-**Correctness claims get restated in Verbora's own absolute terms.** Don't
-say a function "matches the reference's `-1`-for-length-mismatch behavior" —
-say what the function does: "returns `-1` when the lengths differ." Don't
-say a table row is "verified against the reference" — say it's "pinned by
-Verbora's own regression suite" (the real number — 526,341 recorded cases,
-per `site/index.md` — is the fact worth citing, not what it was checked
-against). If a passage's only content is explaining that something is *not*
-a port, delete the passage rather than rewrite it: even a denial ("this is
-not a ported feature") raises the concept of porting, which is exactly what
-must not appear. State what the feature is and how its correctness is
-verified; say nothing about what it isn't.
+**So this rule applies to every surface a user can read** — `site/` pages,
+`crates/*/README.md`, and the `//!` and `///` doc comments that render on
+docs.rs. An earlier version of this file exempted Rust doc comments; it no
+longer does, because those comments *are* published documentation, and a
+contract explained by reference to something the reader cannot see is not a
+contract.
 
-**Benchmark comparisons against that JavaScript library are not banned —
-they're reframed as an ordinary competitor.** `site/benchmarks/*.md` and the
-scattered "N× faster than the reference" lines throughout the feature pages
-may keep their real, measured numbers. Change only the framing: describe it
-the same way the Rust-crate competitors in `benchmarks/competitive.md` are
-described — a widely-used JavaScript NLP library Verbora is benchmarked
-against, full stop, with zero implication that Verbora was ported from it,
-derived from it, or verified against it as ground truth. "The reference" the
-noun phrase (implying "the thing we're measured against/derived from") does
-not appear anywhere on `site/`; a plain descriptive phrase like "a
-widely-used JavaScript NLP library" (adjust to fit the sentence) does the
-same job without the port-target connotation.
+What must not appear on any of those surfaces: "the reference", "ported from",
+"reference implementation", "matches X's behaviour", "a port must reproduce
+this", or a table column headed with another library's name. Replace each with
+what the code does and what makes that correct.
 
-**This is a hard boundary, exactly like Rule #1.** When pulling a number or
-a behavioral fact from `docs/` (where it's legitimately described in terms
-of the JS library it was recorded from) onto a `site/` page, restate it —
-never copy the `docs/`-side phrasing across.
+**Restate correctness in absolute terms.** Not "matches the `-1`-for-mismatch
+behaviour" but "returns `None` when the lengths differ". Not "verified against
+X" but the real basis — the publication, the property, or the test that pins
+it. A published algorithm gets a citation: Lowrance & Wagner (1975), Postel
+(1969), Darroch & Ratcliff (1972). Where an algorithm genuinely has no
+publication and a distribution is its reference of record — Refined Soundex is
+the one real case — say exactly that, plainly. Citing the only standard that
+exists is not the same as having copied a test suite, and pretending otherwise
+would be its own dishonesty.
 
-Before finishing any edit to a file under `site/`, grep the page (and any
-page you touched) for `the reference|\bport(s|ed|ing)?\b|reference
-implementation|reference behaviour|reference behavior` and rewrite or delete
-every hit per the rules above.
+**Deleting beats denying.** If a passage's only content is explaining that
+something is *not* derived from elsewhere, remove it. A denial still raises the
+concept.
+
+**`docs/` is the exception, and only `docs/`.** It is the internal engineering
+archive; provenance is the point of keeping it, so dated history like "this
+was recorded from X before being re-derived from the publication" is correct
+there and must not be scrubbed. What may not happen is that phrasing being
+copied onto a user-facing surface. When you carry a fact across, restate it.
+
+**Competitors appear in exactly one place: `site/benchmarks/`.** There they are
+named with version, methodology, measured result and comparability limits —
+that is what makes a benchmark honest. A competitor never defines correctness,
+and never appears outside those pages.
+
+Before finishing any edit to a file under `site/`, `crates/*/README.md`, or a
+Rust doc comment, grep what you touched for `the reference|\bport(s|ed|ing)?\b|
+reference implementation|reference behaviour|reference behavior|must reproduce`
+and resolve every hit.
 
 # Scope
 
@@ -124,12 +130,13 @@ every hit per the rules above.
   "Results", the latter backed by the pages physically at `site/benchmarks/`),
   recipes/, reference/. All of it is user-facing; all of it is held to Rule
   #1 above, not just the benchmark pages.
-- `site/benchmarks/*.md` — the measured-numbers pages specifically
-  (competitive.md compares Verbora against Rust crates; distance.md and
-  similar compare Verbora against the reference runtime). These are what
-  visitors actually read — treat their numbers as load-bearing, and hold
-  them to Rule #1 with extra care: they're the pages that have historically
-  accumulated the most revision-history residue.
+- `site/benchmarks/*.md` — the measured-numbers pages, and the only place a
+  competitor may be named. These are what visitors actually read, so treat
+  their numbers as load-bearing: every figure carries a `measured_at` and a
+  commit in `benchmarks/competitive/results/results.json`, and a figure you
+  cannot trace to a row there is not publishable. Hold these pages to Rule #1
+  with extra care — they have historically accumulated the most
+  revision-history residue.
 - `docs/COMPETITIVE_BENCHMARKS.md` — the research matrix (every competitor
   considered, selected/rejected, and why). Internal archive — see "Two
   tiers" above. Keep it accurate; do not try to make it read like a `site/`
@@ -142,6 +149,23 @@ every hit per the rules above.
 - `docs/design/` — pre-implementation design and research docs. Internal
   archive; each one already states plainly that it describes a proposal,
   not shipped behavior — keep that framing intact.
+- `crates/*/README.md` — **one per crate, and each one is that crate's
+  landing page on crates.io.** This is the first thing anyone evaluating the
+  crate reads, and if the file is missing crates.io says so in place of the
+  description. Each answers what *this* crate does, not what the workspace
+  does: one paragraph of purpose, the contract in two or three sentences
+  (unit of text, what it guarantees never to do), one minimal example that
+  compiles, and a link to the crate's page on the site for the rest. The
+  root `README.md` is the project's front door and is a different document —
+  never point a crate's readme at it, and never let a crate readme grow into
+  a second copy of the site page.
+
+  **These go stale silently.** A crate readme is not compiled, not linked
+  from the site, and not read by any gate, so a renamed type or a changed
+  return value survives there long after the code moved. Whenever a crate's
+  public API changes — a signature, a removed item, a changed guarantee, a
+  new default — its readme is part of that change, not follow-up work.
+
 - `AGENTS.md`, `README.md`, and module-level doc comments (`//!`, `///`) —
   keep these in sync with what the code actually does, not what it used to
   do. `README.md` and doc comments are read by people evaluating or using
@@ -151,33 +175,42 @@ every hit per the rules above.
 
 # Non-negotiable rules
 
-1. **Never publish a number you didn't just measure or can't trace to a real
-   `cargo bench`/`cargo test` run.** If a doc claims "verbora is now Nx
-   faster," find or run the benchmark that proves it. Prefer full default
-   Criterion settings (no `--sample-size`/`--measurement-time` overrides)
-   for anything that will be published — reduced settings are fine for a
-   quick internal check, not for a number that ships.
-2. **Don't run benchmarks concurrently with other CPU-heavy work** (another
-   `cargo build`/`test`/`bench`) — on a shared machine this contaminates the
-   measurement. Wait for one to finish before starting another.
-3. **When a change affects one metric, check whether it silently affects
+1. **Never publish a number you can't trace to a real `cargo bench` run.**
+   If a doc claims "verbora is now Nx faster," find the run that proves it.
+   Only full default Criterion settings count (no `--sample-size`/
+   `--measurement-time` overrides) — reduced settings never ship.
+2. **Never launch a benchmark yourself.** Benchmarks in this repo cost
+   hours, and code that is still changing invalidates them, so they are run
+   deliberately and in batches — see the benchmark section of `CLAUDE.md`.
+   If a page needs a number no existing run provides, leave the page's
+   current claim untouched, and report exactly which measurement is missing
+   so the main session can schedule it. Reporting a documentation gap is a
+   successful outcome; a stale number left in place with the gap flagged is
+   strictly better than a fresh number that cost four hours nobody asked
+   for, and far better than an estimated one.
+3. **Don't run any CPU-heavy command while a benchmark is running elsewhere**
+   (`cargo build`/`test`/`check`/`clippy`/`bench`, `npm run`) — on a shared
+   machine this contaminates the measurement silently rather than failing.
+   If your brief says a benchmark is in flight, restrict yourself to reads
+   and Markdown edits.
+4. **When a change affects one metric, check whether it silently affects
    others nearby.** A Levenshtein algorithm change can make an old
    "gap widens with length" narrative wrong, or flip which competitor is
    fastest in a summary table — reread the surrounding prose, not just the
    table cells, after updating numbers.
-4. **Cross-check docs against each other.** `docs/PERFORMANCE_GAPS.md` and
+5. **Cross-check docs against each other.** `docs/PERFORMANCE_GAPS.md` and
    `site/benchmarks/*.md` often describe the same fact from different
    angles (an entry number, a ratio, a "the least flattering comparison"
    framing) — if you update one, check whether the other now contradicts it.
    Remember they can disagree in *style* (archive vs. product doc) while
    agreeing in *fact* — don't "fix" a style difference by importing the
    archive's narrative voice into the site page.
-5. **Verify your own arithmetic.** A claimed ratio ("Nx faster") must equal
+6. **Verify your own arithmetic.** A claimed ratio ("Nx faster") must equal
    (slower time) / (faster time) computed from the actual numbers in the
    same paragraph or table, not copied from an earlier draft. If you're
    unsure whether an existing claim is still correct, compute it yourself
    before trusting it.
-6. **Preserve established structure and tone — subject to Rule #1.** These
+7. **Preserve established structure and tone — subject to the voice rules.** These
    pages already have a consistent style — tables with a `Library | Version
    | Language | Time | Throughput | Relative` header for capability
    summaries, `<div class="callout callout-warn|callout-note|callout-good">`
@@ -186,16 +219,16 @@ every hit per the rules above.
    format. But never preserve a "this round"/"Update:"/patch-note
    construction just because it was already there — Rule #1 wins that
    conflict every time.
-7. **Never silently touch files that look like they belong to an in-flight,
+8. **Never silently touch files that look like they belong to an in-flight,
    unrelated process** (e.g. a benchmark-tooling migration, a large
    find-and-replace pass someone else is running) — if a file has changed
    underneath you in a way you didn't expect, re-read it before editing
    further rather than assuming your last-known content is still there.
-8. **After editing a `.md` file with tables, verify structural sanity**
+9. **After editing a `.md` file with tables, verify structural sanity**
    (grep for duplicate headings, check every `|`-row has a consistent
    column count) — a partial `old_string` match in a find-and-replace-style
    edit can silently leave old content duplicated below the new content.
-9. **Do not implement features or fix bugs.** If you find a real
+10. **Do not implement features or fix bugs.** If you find a real
    correctness or performance issue while reading code, report it — don't
    silently patch source. Your writes are scoped to documentation and
    comments.
@@ -205,8 +238,11 @@ every hit per the rules above.
 1. Read the relevant source change (or ask what changed, if not obvious).
 2. Find every doc/site page that references the affected function, module,
    or comparison.
-3. Run the real benchmark/test needed to get current numbers — don't reuse
-   numbers from before the change.
+3. Locate the measurement that backs each number you touch. Never reuse a
+   number taken before the change it describes — but never launch a
+   benchmark to replace it either (Rule #2). If no current run covers it,
+   leave the existing claim alone and list the missing measurement in your
+   report.
 4. Update each affected page, keeping prose and numbers consistent with
    each other across all of them — and keeping `site/` pages in Rule #1's
    and Rule #2's voice regardless of how the underlying `docs/` source

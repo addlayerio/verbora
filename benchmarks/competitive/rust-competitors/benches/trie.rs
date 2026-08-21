@@ -87,7 +87,7 @@
 //!   asymmetry: `Set::from_iter`/`SetBuilder::insert` require strictly
 //!   increasing input (`Err(DuplicateKey)`/`Err(OutOfOrder)` otherwise; see
 //!   `raw::Builder::check_last_key` in `fst`'s own source), where
-//!   `Trie::add_strings` accepts any order, including duplicates, for free.
+//!   `Trie::insert_all` accepts any order, including duplicates, for free.
 //!   `build_fst` performs the sort *and* dedup **inside** the timed `build`
 //!   closure specifically so this asymmetry shows up as real measured
 //!   nanoseconds in the `build` group rather than being hidden by
@@ -155,7 +155,7 @@
 //!   generated word starts with an uppercase letter). See the `# Derived
 //!   input shapes` section below.
 //! - `common_prefix_search` — throughput of "which stored words are
-//!   prefixes of this query" (`Trie::find_matches_on_path` /
+//!   prefixes of this query" (`Trie::prefix_matches` /
 //!   `trie_rs::Trie::common_prefix_search` /
 //!   `fast_radix_trie::GenericRadixMap::common_prefixes`). **`qp-trie` is
 //!   excluded from this group**: it has no native operation that answers
@@ -373,7 +373,7 @@ fn distinct_prefixes(words: &[String], n: usize) -> Vec<String> {
 
 fn build_verbora(words: &[String]) -> Trie {
     let mut t = Trie::new();
-    t.add_strings(words.iter().map(String::as_str));
+    t.insert_all(words.iter().map(String::as_str));
     t
 }
 
@@ -382,7 +382,7 @@ fn build_verbora(words: &[String]) -> Trie {
 /// added after this file's own `predictive_search` group first measured
 /// Verbora losing to it (`docs/PERFORMANCE_GAPS.md` entry 32). `build` here
 /// is intentionally not timed as a `build` group entry: the "build" this
-/// file measures is a single `add_strings` bulk load, which every other
+/// file measures is a single `insert_all` bulk load, which every other
 /// implementation in this group must also do from scratch; `freeze()` is a
 /// SEPARATE, additional step only `verbora_frozen`'s own rows pay for, timed
 /// on its own in `crates/verbora-trie/benches/trie.rs`'s `freeze` group
@@ -421,7 +421,7 @@ fn build_fast_radix_trie(words: &[String]) -> StringRadixMap<()> {
 /// Sorts and deduplicates `words`, then streams the result into an
 /// `fst::Set`. `fst::SetBuilder`/`Set::from_iter` requires strictly
 /// increasing input — a real, disclosed asymmetry against Verbora's
-/// arbitrary-order `add_strings`, see the module doc comment's `fst`
+/// arbitrary-order `insert_all`, see the module doc comment's `fst`
 /// section. The sort (and dedup — `fst` errors on an exact duplicate key,
 /// the same reason `verbora_spellcheck::FuzzyIndexBuilder`'s own bench
 /// dedupes this corpus) happens **inside** this function, and is therefore
@@ -447,7 +447,7 @@ fn bench_build(c: &mut Criterion) {
     let sorted = sorted_words(&words);
     let short = short_words(&words);
     let long = long_words(&words);
-    let mut g = c.benchmark_group("build");
+    let mut g = c.benchmark_group("trie_build");
 
     for (label, set) in [
         ("random", &words),
@@ -459,7 +459,12 @@ fn bench_build(c: &mut Criterion) {
         g.throughput(Throughput::Elements(set.len() as u64));
 
         g.bench_with_input(BenchmarkId::new("verbora", label), set, |b, set| {
-            b.iter(|| black_box(build_verbora(black_box(set)).get_size()));
+            // `len()` (word count, O(1)) is the sink, matching the
+            // `qp_trie` row's `.count()` below. It replaces the pre-migration
+            // `get_size()`; the migration split that one method into `len()`
+            // (words) and `node_count()` (arena nodes), and words are what the
+            // other rows' sinks count.
+            b.iter(|| black_box(build_verbora(black_box(set)).len()));
         });
         g.bench_with_input(BenchmarkId::new("trie_rs", label), set, |b, set| {
             b.iter(|| black_box(build_trie_rs(black_box(set))));
@@ -585,7 +590,7 @@ fn bench_contains(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// common_prefix_search (Verbora: find_matches_on_path) -- verbora + trie_rs +
+// common_prefix_search (Verbora: prefix_matches) -- verbora + trie_rs +
 // fast_radix_trie; see the module doc comment for why qp-trie has no native
 // equivalent and fast_radix_trie is benchmarked as a `StringRadixMap<()>`
 // rather than a `StringRadixSet`. `fst` is excluded for the same reason as
@@ -622,7 +627,7 @@ fn bench_common_prefix_search(c: &mut Criterion) {
             b.iter(|| {
                 probes
                     .iter()
-                    .map(|w| verbora.iter_matches_on_path(black_box(w)).count())
+                    .map(|w| verbora.iter_prefix_matches(black_box(w)).count())
                     .sum::<usize>()
             });
         });

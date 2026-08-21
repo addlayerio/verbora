@@ -15,11 +15,12 @@ therefore shows the measured workload, the result and its limits.
 | 314 timed comparisons | 13 capabilities with a fair Rust comparison |
 | 3 capabilities without a fair peer | WordNet, sentence analysis and sentiment are documented on their feature pages instead |
 | 1 primary metric | Criterion median, single-threaded, on the hardware below |
+| 9 capabilities awaiting a re-run | [Distance](#distance), [Tokenizers](#tokenizers), [N-Grams](#n-grams), [Stemmers](#stemmers), [Normalizers](#normalizers), [Trie](#trie), [POS tagging](#pos-tagging), [TF-IDF](#tf-idf) and [Spellcheck](#spellcheck) carry Verbora-side figures that no longer describe the code that runs — each section says so at its head. For [Trie](#trie) and [POS tagging](#pos-tagging) it is part of the section, not all of it: the trie's read path and the tagger's cold start still stand |
 
-Start with [String distance](#distance), [Tokenizers](#tokenizers),
-[Stemmers](#stemmers), or [Spellcheck](#spellcheck). Exact harnesses and raw
-data are linked from each section; [reproduction instructions](#reproducing-these-numbers)
-are at the end.
+Start with [Phonetics](#phonetics), [Trie](#trie),
+[Language detection](#language-detection) or [POS tagging](#pos-tagging). Exact
+harnesses and raw data are linked from each section;
+[reproduction instructions](#reproducing-these-numbers) are at the end.
 
 <details>
 <summary>Methodology and audit details</summary>
@@ -40,7 +41,7 @@ are at the end.
 | Metric | **Median**, per Criterion's own robust-statistics estimate — not mean, per this project's own `PRIMARY METRIC` policy |
 | Threads | **1 (single-threaded)** for every benchmark on this page — no parallel API is exercised anywhere in this audit; see [Thread counts](#thread-counts) |
 | Source | [`benchmarks/competitive/rust-competitors/benches/*.rs`](https://github.com/addlayerio/verbora/tree/main/benchmarks/competitive/rust-competitors/benches) (one file per module), raw Criterion output under [`benchmarks/competitive/results/raw/`](https://github.com/addlayerio/verbora/tree/main/benchmarks/competitive/results/raw), joined into [`results/results.json`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/results/results.json) |
-| Date | Results captured 2026-08-15/17 (`results/metadata.json`'s timestamp: `2026-08-15T23:50:55Z`; the Metaphone, unrestricted-Damerau, N-Grams, and the eight byte-exact phonetics groups are the freshest, from 2026-08-17) |
+| Date | Results captured 2026-08-15/17 (`results/metadata.json`'s timestamp: `2026-08-15T23:50:55Z`; the Metaphone, N-Grams, and the eight byte-exact phonetics groups are the freshest, from 2026-08-17). Unrestricted Damerau-Levenshtein is the one group with no current timing on this page — its measurement is pending, and no stale figure stands in for it. |
 
 Every number on this page is read from Criterion's own saved estimates —
 joined into that `results.json` file for most modules, and read directly
@@ -92,6 +93,16 @@ different question from this one.
   different dictionary, a different corpus), no Relative column is shown at
   all, and the table says so — see [Spellcheck](#spellcheck) for the two
   cases this applies to.
+- A figure is published only while the code it measured is the code that
+  runs. When a Verbora implementation changes underneath a measurement, that
+  measurement is **withdrawn**, and the page distinguishes two cases. A
+  section marked **pending re-measurement** still has a live comparison and a
+  benchmark group waiting to answer it; its recorded medians stay visible,
+  flagged, so the next run has something to diff against, and they must not be
+  quoted as current. A capability marked **withdrawn** has no Verbora side
+  left, so there is nothing to re-measure and no table at all. Neither is ever
+  filled in with an estimate, an interpolation, or an inference from the
+  direction of the change.
 
 ## How these numbers were audited
 
@@ -139,16 +150,16 @@ Verbora's edit-distance functions (`docs/COMPETITIVE_BENCHMARKS.md`
 against [strsim](https://github.com/rapidfuzz/strsim-rs) 0.11.1 and
 [rapidfuzz](https://github.com/rapidfuzz/rapidfuzz-rs) 0.5.0 — the Rust
 ecosystem's de-facto-standard string-similarity crate (strsim: ~990M
-downloads) and the tightest single-crate algorithm match found. Both are
-char-indexed like Verbora's UTF-16-unit indexing (BMP-equivalent), and
-restricted to ASCII input here specifically so that distinction cannot
-matter. Unlike the heuristic encoders elsewhere on this page, Levenshtein,
+downloads) and the tightest single-crate algorithm match found. Both index by
+Unicode scalar value, exactly as Verbora does, and are restricted to ASCII
+input here in any case. Unlike the heuristic encoders elsewhere on this page, Levenshtein,
 Damerau-Levenshtein, Hamming, Jaro and Jaro-Winkler are exact, well-specified
-integer/float functions with a single correct answer per input — their
-equivalence is established by the matrix's own algorithm research
-(`docs/COMPETITIVE_BENCHMARKS.md` §1.8) rather than a dedicated runtime
-correctness test, the same way the rest of this page uses one wherever a
-variant could plausibly disagree.
+integer/float functions with a single correct answer per input. Their
+equivalence is nonetheless pinned by a runtime correctness suite, not by
+algorithm research alone: every timed implementation is asserted against
+Verbora on the shared corpus, on the near-identical and planted-needle
+derived shapes, and on a seeded randomized sweep, before any timing number
+on this page is accepted.
 
 `rapidfuzz` implements Myers/Hyyrö bit-parallel Levenshtein (`O(nm/64)`).
 Verbora matches that algorithmic class with a single-word bit-vector fast
@@ -162,26 +173,45 @@ covers 1–64 units. Bit-parallelism extends beyond plain Levenshtein too:
 restricted-Damerau/OSA kernels (Hyyrö's 2003 transposition extension of
 Myers, single-word and multi-word block, gated to unit costs), and
 Jaro/Jaro-Winkler match-flagging kernels in Verbora's own greedy
-orientation. Unrestricted Damerau has no bit-vector formulation, so it runs
-on scalar kernels dispatched by operand length — a table-free stack matrix
-for tiny inputs, then register- and memory-carried
-two-rows-plus-per-symbol-snapshot kernels — instead of the full `f64`
-cost+parent matrices. Every kernel is parity-verified by differential tests
-against the retained scalar implementations, plus an independent
-adversarial audit with mutation testing, before being trusted; Hamming has
-no bit-parallel kernel.
+orientation. Unrestricted Damerau-Levenshtein has no bit-vector
+formulation, so it runs Zhao–Sahni's linear-space algorithm instead of a
+full cost+parent matrix: three rows and a last-occurrence table, kept on
+the stack for short operands, with a table-free stack matrix for byte
+operands of at most 8 units. Common-prefix/suffix trimming runs ahead of
+the unrestricted-Damerau and OSA kernels alike. Every kernel is
+parity-verified by differential tests against the retained scalar
+implementations, plus an independent adversarial audit with mutation
+testing, before being trusted; Hamming has no bit-parallel kernel.
 
 <div class="callout callout-good">
 <strong>Plain Levenshtein beats all five Rust competitors at every size
 from 4 to 1024 characters</strong> (Verbora is 1.09× faster at 1024
 characters, 1.77× at 16). Restricted Damerau/OSA beats every competitor at
-every size, and Jaro/Jaro-Winkler wins every size too. Unrestricted Damerau
-beats <code>rapidfuzz</code> at every size and <code>strsim</code> at four
-of five, with one ~2% loss at 1024 characters — see its own section below.
-See
+every size, and Jaro/Jaro-Winkler wins every size too. Unrestricted
+Damerau-Levenshtein is being re-measured against its current kernels; no
+timing claim is made for it here until that run lands — see its own
+section below. See
 <a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#26-levenshtein-distance--verbora-vs-stringmetrics-triple_accel-and-editdistancek-rust">PERFORMANCE_GAPS.md
 entry 26</a> for the mechanism and verification story these kernels build
 on.
+</div>
+
+<div class="callout callout-note">
+<strong>Levenshtein below is freshly measured; the rest of this section is not.</strong>
+The Levenshtein tables were taken on 2026-08-20 against commit
+<code>313d025</code>, on the machine described in <a href="#benchmark-methodology">Methodology</a>.
+Every other Verbora median in this section still predates two changes: the cost
+dispatch in front of the kernels was removed, and the text unit moved from the
+UTF-16 code unit to the Unicode scalar. The kernels themselves are unchanged —
+the flat <code>BitPeq</code> tables, the 1–64-unit single-word gate and the
+multi-word block path are the same code — so the conclusion those figures
+support (bit-parallel beats scalar dynamic programming, by margins that widen
+with length) does not depend on them; the per-call medians do. Competitor
+figures are unaffected, since no competitor version moved. Those medians stay
+visible so the next run has something to diff against, and none may be quoted
+as current. See
+<a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md">PERFORMANCE_GAPS.md</a>
+entries 1 and 26–29.
 </div>
 
 #### Levenshtein
@@ -195,32 +225,54 @@ not merely unused, genuinely uncompiled).
 
 | Library | Version | Language | Time (median, 1024 chars) | Throughput | Relative |
 |---|---|---|---:|---:|---:|
-| Verbora | 0.1.0 | Rust | 29.07 µs | 34.4K/s | **1.00×** |
-| rapidfuzz | 0.5.0 | Rust | 31.72 µs | 31.5K/s | 1.09× slower |
-| strsim | 0.11.1 | Rust | 625.21 µs | 1.6K/s | 21.51× slower |
-| stringmetrics | 2.2.2 | Rust | 915.47 µs | 1.1K/s | 31.49× slower |
+| Verbora | 0.1.0 | Rust | 27.74 µs | 36.1K/s | **1.00×** |
+| rapidfuzz | 0.5.0 | Rust | 33.01 µs | 30.3K/s | 1.19× slower |
+| strsim | 0.11.1 | Rust | 636.72 µs | 1.6K/s | 22.96× slower |
+| stringmetrics | 2.2.2 | Rust | 919.33 µs | 1.1K/s | 33.15× slower |
 
-| Input / shape | Verbora | rapidfuzz | strsim | stringmetrics |
+**Random pairs** — two independently generated strings, so the edit script is
+long and every implementation does its full work:
+
+| Input | Verbora | rapidfuzz | strsim | stringmetrics |
 |---:|--:|--:|--:|--:|
-| 4 random | 14.8 ns | 32.0 ns | 20.6 ns | 26.0 ns |
-| 16 random | 41.9 ns | 74.3 ns | 271.3 ns | 169.7 ns |
-| 64 random | 164.7 ns | 247.8 ns | 2.86 µs | 2.91 µs |
-| 256 random | 2.09 µs | 3.30 µs | 41.83 µs | 55.70 µs |
-| 1024 random | 29.07 µs | 31.72 µs | 625.21 µs | 915.47 µs |
-| 1024 near (`d = 1`) | **306 ns** | 806 ns | 655 µs | 580 ns |
+| 4 | **10.2 ns** | 37.2 ns | 18.6 ns | 25.3 ns |
+| 16 | **41.2 ns** | 74.1 ns | 171.2 ns | 162.3 ns |
+| 64 | **160.2 ns** | 247.6 ns | 2.79 µs | 2.99 µs |
+| 256 | **2.04 µs** | 3.27 µs | 39.76 µs | 56.00 µs |
+| 1024 | **27.74 µs** | 33.01 µs | 636.72 µs | 919.33 µs |
 
-Verbora is the **fastest implementation at every size** — against all four
-char-indexed competitors here and the two byte-level ones below. Against
-`rapidfuzz`, the closest competitor and the only other bit-parallel
-implementation in the table: **2.16× faster at 4 characters, 1.77× at 16,
-1.50× at 64, 1.58× at 256, and 1.09× at 1024** — the margin is widest at
-small sizes, where the flat `[u64; 256]`/packed-distinct-rows Peq tables
-and the 1–64-unit single-word gate keep per-call setup cost low, and
-narrowest at 1024, where both sides run the same class of multi-word block
-algorithm. Against
-`strsim` the win is 1.39× (4 chars) up to 21.5× (1024); against
-`stringmetrics` 1.76× up to 31.5× — neither scalar design has a bit-vector
-formulation to close the gap with.
+**Near-identical pairs** (`d = 1`) — the shape spell-checking and deduplication
+actually feed a distance metric, and the one where the implementations diverge
+most:
+
+| Input | Verbora | rapidfuzz | strsim | stringmetrics |
+|---:|--:|--:|--:|--:|
+| 4 | **10.2 ns** | 20.6 ns | 17.8 ns | 16.0 ns |
+| 16 | **11.3 ns** | 38.2 ns | 171.0 ns | 19.9 ns |
+| 64 | **13.2 ns** | 138.3 ns | 2.74 µs | 47.0 ns |
+| 256 | **20.4 ns** | 258.8 ns | 40.03 µs | 162.3 ns |
+| 1024 | **40.9 ns** | 804.0 ns | 620.52 µs | 564.0 ns |
+
+Verbora is the **fastest implementation at every size and both shapes** —
+against all four char-indexed competitors here and the two byte-level ones
+below. But the two tables answer different questions, and the result only has
+its real shape if you read both.
+
+On random pairs the lead over `rapidfuzz` — the closest competitor and the
+only other bit-parallel implementation here — runs **3.65× at 4 characters,
+1.80× at 16, 1.55× at 64, 1.61× at 256 and 1.19× at 1024**. It is widest at
+small sizes, where the flat `[u64; 256]` Peq tables and the 1–64-unit
+single-word gate keep per-call setup low, and narrowest at 1024, where both
+sides run the same class of multi-word block algorithm. Against `strsim` the
+win is 1.82× (4) up to 22.96× (1024), against `stringmetrics` 2.48× up to
+33.15× — neither scalar design has a bit-vector formulation to close with.
+
+On near-identical pairs the margin moves the other way: it *widens* with
+length, from 1.6× to 5.0× against the best competitor at each size. Common
+prefixes and suffixes are trimmed before the kernel runs, so Verbora's cost
+rises only from 10.2 ns to 40.9 ns across a 256-fold increase in input length,
+while `strsim` — which evaluates the full matrix regardless of how similar the
+inputs are — rises to 620 µs, a factor of 15,000.
 
 The random rows are intentionally retained as their own workload. They do
 not show the common-affix optimization: independent strings have almost no
@@ -229,20 +281,25 @@ pair with one central substitution (`1024-near`):
 
 | Library | Median (`1024-near`) | Relative to Verbora |
 |---|---:|---:|
-| Verbora | **306 ns** | **1.00×** |
-| `editdistancek` | 182 ns | 1.68× faster |
-| `stringmetrics` | 580 ns | 1.89× slower |
-| `rapidfuzz` | 806 ns | 2.63× slower |
-| `triple_accel` | 541 µs | 1,766× slower |
-| `strsim` | 655 µs | 2,141× slower |
+| Verbora | **40.9 ns** | **1.00×** |
+| `editdistancek` | 184.7 ns | 4.52× slower |
+| `stringmetrics` | 564.0 ns | 13.79× slower |
+| `rapidfuzz` | 804.0 ns | 19.66× slower |
+| `triple_accel` | 509.75 µs | 12,463× slower |
+| `strsim` | 620.52 µs | 15,172× slower |
 
-These are the current local competitive medians (30 samples, release build,
-Intel i9-14900KF). The important comparison is within this row: Verbora's
-previous near-1024 result was about 30.8 µs, so the affix path reduces it to
-about 306 ns (roughly 101×). `editdistancek` remains faster on this specific
-near-match shape because its bounded-edit algorithm is designed for small
-distances; that is a legitimate workload-specific result, not hidden by the
-aggregate random table.
+Two different designs sit behind those numbers, and the spread separates them
+cleanly. `editdistancek` is the only competitor built for this shape — its
+bounded-edit algorithm stops early when the distance is small, which is why it
+lands two orders of magnitude ahead of the full-matrix implementations.
+`triple_accel` and `strsim` evaluate the whole matrix whether the inputs differ
+by one character or by a thousand, so similarity buys them nothing.
+
+Verbora reaches 40.9 ns by removing the common prefix and suffix before the
+kernel sees anything: on a 1,024-unit pair differing in one position, the
+kernel runs over what is left, not over the pair. The cost is therefore set by
+the size of the difference rather than the size of the input — 10.2 ns at 4
+units, 40.9 ns at 1,024.
 
 #### Competitive shape suite
 
@@ -274,53 +331,47 @@ cargo bench --bench distance -- levenshtein_edge_shapes
 
 #### Damerau–Levenshtein (unrestricted)
 
-| Library | Version | Language | Time (median, 1024 chars) | Throughput | Relative |
-|---|---|---|---:|---:|---:|
-| strsim | 0.11.1 | Rust | 1.87 ms | 535.8/s | **1.00×** |
-| Verbora | 0.1.0 | Rust | 1.91 ms | 524.6/s | 1.02× slower |
-| rapidfuzz | 0.5.0 | Rust | 2.12 ms | 472.0/s | 1.14× slower |
+`damerau_levenshtein` computes canonical unrestricted
+Damerau-Levenshtein — the Lowrance–Wagner distance, where a transposed
+pair of adjacent characters costs one edit and may be edited again
+afterwards. It is a true metric: symmetric, and satisfying the triangle
+inequality. `strsim`'s `damerau_levenshtein` and `rapidfuzz`'s
+`distance::damerau_levenshtein` compute the same function, so agreement
+between the three is a property of the algorithm rather than of the corpus
+they were compared on — and it is checked that way: **202,000 randomized
+pairs**, zero divergences, across alphabets of 2, 3, 4 and 26 letters,
+lengths 1–25 including unequal and empty operands, and mutation chains of
+up to eight edits over a binary alphabet (the shape that actually
+separates unrestricted Damerau from OSA). Reproduce it with:
 
-| Input size | Verbora | rapidfuzz | strsim |
-|---:|--:|--:|--:|
-| 4 | 29.5 ns | 70.6 ns | 55.5 ns |
-| 16 | 396.6 ns | 530.7 ns | 441.6 ns |
-| 64 | 4.65 µs | 7.51 µs | 6.95 µs |
-| 256 | 116.22 µs | 133.43 µs | 120.04 µs |
-| 1024 | 1.91 ms | 2.12 ms | 1.87 ms |
+```bash
+cd benchmarks/competitive/rust-competitors
+cargo test --release --test distance_correctness \
+  unrestricted_damerau_agrees_with_both_competitors_over_a_wide_randomized_sweep
+```
 
-Verbora **beats `rapidfuzz` at every size** (2.39× at 4 characters, 1.34×
-at 16, 1.61× at 64, 1.15× at 256, 1.11× at 1024) and **beats `strsim` at
-four of the five** (1.88× at 4, 1.11× at 16, 1.49× at 64, 1.03× at 256).
-The one remaining loss in this comparison is ~2% to `strsim` at
-1024 characters (1.91 ms vs. 1.87 ms) — shown as a loss, and a structural
-one rather than an open tuning gap: a probe evaluating nothing but the
-bare loop-carried min-chain of Verbora's pinned recurrence already costs
-1.86–1.88 ms at this size, and the recurrence's divergence from textbook
-DL (next paragraph) rules out the Zhao–Sahni candidate pruning `strsim`
-uses to get under that floor. Distance mode never builds the full `f64`
-cost+parent matrices: the byte path dispatches across three measured
-tiers — a table-free stack-matrix kernel for operands of at most 8 bytes,
-a register-carried two-rows-plus-per-symbol-snapshot kernel up to 128
-bytes, and a memory-carried variant beyond (integer cells: `u16` while
-the combined input length fits, `u32` after) — and UTF-16 input runs the
-generic snapshot kernel. Every tier evaluates the same recurrence
-exactly, differentially verified against the retained full-matrix oracle
-and against the neighbouring tiers on their shared domains.
+Verbora runs Zhao–Sahni's linear-space formulation of that recurrence:
+three rows plus a last-occurrence table rather than a full cost+parent
+matrix, on the stack for short operands and a single allocation beyond,
+with a table-free stack matrix for byte operands of at most 8 units.
+Because the distance is symmetric, the shorter operand becomes the column
+operand, which is what sets the row width and therefore the kernel's whole
+memory footprint. Operands are stripped of their maximal common prefix and
+suffix first — a genuine algorithmic reduction rather than a
+micro-optimisation, since a pair differing in one interior position
+collapses to work proportional to the differing region alone. Weighted
+(non-unit-cost) calls take the full-matrix path instead, which evaluates
+the same recurrence with per-operation weights and doubles as the
+differential oracle for every fast path.
 
-One structural caveat, documented rather than glossed over: `strsim` and
-`rapidfuzz` implement textbook (Lowrance–Wagner/Zhao–Sahni) unrestricted
-Damerau-Levenshtein, while Verbora computes its pinned reference
-recurrence, which is deliberately **not** textbook DL — it measurably
-diverges (on 38.6% of random small-alphabet pairs: `"bb"` → `"abbb"` is 1
-under Verbora's recurrence, 2 under the textbook algorithm, and the
-recurrence is not even symmetric; see
-`crates/verbora-distance/src/levenshtein.rs`'s own doc comment). That
-divergence is also exactly what structurally forbids Verbora
-from adopting the competitors' linear-space algorithm or common-affix
-trimming. Read this table as a same-shape-of-work comparison over the same
-shared ASCII corpus, not as three implementations of one identical function
-on all inputs — a weaker equivalence than the `Yes`/`Yes` rows above, in
-the same spirit as the phonetics module's `Partial` rows.
+<div class="callout callout-warn">
+<strong>No timing comparison is published for this metric yet.</strong>
+Every figure on this page is read from a Criterion run against the code
+that ships, and the run covering these kernels is still outstanding — so
+this one section carries no table rather than an approximate one. The
+correctness result above is measured and current; so is every other table
+on this page.
+</div>
 
 #### Damerau–Levenshtein (restricted / OSA)
 
@@ -416,7 +467,7 @@ benchmarks and every row it deliberately does not.
 
 Kept separate from every table above rather than merged into them:
 `triple_accel` and `editdistancek` operate on raw `&[u8]` bytes, not
-chars/UTF-16 code units like Verbora/`strsim`/`rapidfuzz`/`stringmetrics` —
+Unicode scalars like Verbora/`strsim`/`rapidfuzz`/`stringmetrics` —
 numerically identical to the char-indexed approach on the ASCII-only corpus
 this whole module shares, but genuinely different on non-ASCII input,
 which the research matrix marks `Partial`/`Selected cases` rather than the
@@ -425,32 +476,55 @@ genuinely SIMD-accelerated (AVX2/SSE4.1); `editdistancek` is a Myers-style
 banded/diagonal algorithm over `isize` buffers. Byte-identical correctness
 against Verbora verified in
 [`tests/distance_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/distance_correctness.rs)
-before any number below was trusted — including a check that this
-benchmark calls `triple_accel::rdamerau`, not the crate's separate
-`rdamerau_exp` function, which carries a real, independently-confirmed
-upstream bug (see [Upstream bugs found](#upstream-bugs-found)) unrelated to
-the plain `rdamerau` used here.
+before any number below was trusted — with one deliberate exception. The
+restricted-Damerau equality is asserted only on the shared corpus and not
+on randomized input, because `triple_accel`'s restricted Damerau carries a
+real, independently-confirmed upstream defect (see [Upstream bugs
+found](#upstream-bugs-found)) that the corpus happens never to trigger. The
+timing row stays: both sides do the same shape of work on the pairs
+actually benchmarked. The correctness claim is scoped to match.
 
 **Levenshtein** — the same bit-vector kernels above win here too, by wider
 margins than against `rapidfuzz`/`strsim`:
 
 | Library | Version | Time (median, 1024 chars) | Relative |
 |---|---|---:|---:|
-| Verbora | 0.1.0 | 29.07 µs | **1.00×** |
-| triple_accel | 0.4.0 | 497.94 µs | 17.13× slower |
-| editdistancek | 1.0.2 | 1.06 ms | 36.46× slower |
+| Verbora | 0.1.0 | 27.74 µs | **1.00×** |
+| triple_accel | 0.4.0 | 497.89 µs | 17.95× slower |
+| editdistancek | 1.0.2 | 1.06 ms | 38.19× slower |
+
+Random pairs:
 
 | Input size | Verbora | triple_accel | editdistancek |
 |---:|--:|--:|--:|
-| 4 | 14.8 ns | 66.3 ns | 44.0 ns |
-| 16 | 41.9 ns | 229.1 ns | 373.2 ns |
-| 64 | 164.7 ns | 1.63 µs | 4.79 µs |
-| 256 | 2.09 µs | 36.67 µs | 69.80 µs |
-| 1024 | 29.07 µs | 497.94 µs | 1.06 ms |
+| 4 | **10.2 ns** | 64.0 ns | 45.7 ns |
+| 16 | **41.2 ns** | 221.3 ns | 372.9 ns |
+| 64 | **160.2 ns** | 1.64 µs | 4.79 µs |
+| 256 | **2.04 µs** | 35.56 µs | 72.31 µs |
+| 1024 | **27.74 µs** | 497.89 µs | 1.06 ms |
 
-Verbora wins **at every size, outright** — a clean 5.5× win at 16
-characters (41.9 ns vs. 229.1 ns), the flat-table Peq setup and 1–64-unit
-single-word gate keeping per-call overhead low.
+Near-identical pairs (`d = 1`), where `editdistancek`'s banded algorithm is at
+its strongest and `triple_accel`'s SIMD full-matrix pass gains nothing:
+
+| Input size | Verbora | triple_accel | editdistancek |
+|---:|--:|--:|--:|
+| 4 | **10.2 ns** | 64.0 ns | 21.7 ns |
+| 16 | **11.3 ns** | 221.4 ns | 22.1 ns |
+| 64 | **13.2 ns** | 1.64 µs | 69.4 ns |
+| 256 | **20.4 ns** | 36.08 µs | 101.1 ns |
+| 1024 | **40.9 ns** | 509.75 µs | 184.7 ns |
+
+Verbora wins **at every size and both shapes, outright** — 5.4× at 16
+characters on random pairs (41.2 ns vs. 221.3 ns), the flat-table Peq setup and
+1–64-unit single-word gate keeping per-call overhead low.
+
+The near-identical rows are worth reading beside the random ones, because they
+separate the two competitors rather than confirming the first table.
+`triple_accel` is unmoved by similarity — it runs the same vectorized full
+matrix either way, so 1024 costs it ~500 µs regardless — while
+`editdistancek`'s banded algorithm is built for exactly this case and drops to
+184.7 ns. Verbora is faster still at 40.9 ns, but against a competitor doing
+the right thing rather than one doing the wrong thing quickly.
 
 **Restricted Damerau-Levenshtein** — Verbora's OSA bit-parallel kernels win
 **at every size, by a margin that widens with input**: 4.80× faster at 4
@@ -467,112 +541,72 @@ loop — **18.6× faster** at 1024 characters (**14.7 ns** vs. Verbora's
 
 ### Tokenizers
 
-Verbora's `RegexpTokenizer(\s+)` and `WordTokenizer`
-(`docs/COMPETITIVE_BENCHMARKS.md`
-[§1.1](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#11-tokenizers))
-against [tantivy](https://github.com/quickwit-oss/tantivy) 0.26.1's
-`WhitespaceTokenizer`/`SimpleTokenizer` and [Hugging Face
-`tokenizers`](https://github.com/huggingface/tokenizers) 0.23.1's
-`WhitespaceSplit`/`Whitespace` pre-tokenizers, called in isolation (never
-through HF's full BPE pipeline). Narrowed to punctuation-free ASCII text,
-where all three character classes are provably identical — boundary-exact
-agreement (not just token-count agreement) proven in
-[`tests/tokenizers_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/tokenizers_correctness.rs)
-before any number below was trusted.
-
-#### Whitespace tokenization
-
-| Library | Version | Language | Time (median, 77,684 B) | Throughput | Relative |
-|---|---|---|---:|---:|---:|
-| Verbora | 0.1.0 | Rust | 49.82 µs | 20.1K/s | **1.00×** |
-| tantivy | 0.26.1 | Rust | 98.31 µs | 10.2K/s | 1.97× slower |
-| tokenizers (Hugging Face) | 0.23.1 | Rust | 1.65 ms | 606.1/s | 33.12× slower |
-
-| Input size (bytes) | Verbora | tantivy | tokenizers (HF) |
-|---:|--:|--:|--:|
-| 123 | 101.3 ns | 112.3 ns | 1.90 µs |
-| 1,187 | 567.6 ns | 962.9 ns | 15.99 µs |
-| 9,709 | 4.27 µs | 10.06 µs | 133.89 µs |
-| 77,684 | 49.82 µs | 98.31 µs | 1.65 ms |
-
-<div class="callout callout-good">
-<strong>Verbora beats tantivy at every size</strong>
-(1.11× at 123 B, 1.70× at 1,187 B, 2.36× at 9,709 B, 1.97× at 77,684 B). See
-<a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#3-whitespace-tokenization--verbora-vs-tantivywhitespacetokenizer-rust">PERFORMANCE_GAPS.md
-entry 3</a> for the mechanism: <code>RegexpTokenizer</code> drives
-capture-free patterns through <code>find_iter</code> instead of the general
-<code>regex</code> crate's capture machinery, and the exact <code>\s+</code>
-pattern gets a dedicated ASCII-first SWAR whitespace scanner — proven
-identical to the regex engine's <code>\s</code> by an exhaustive test over
-every Unicode scalar value (~1.1M values, checking <code>regex</code>'s
-<code>\s</code> against <code>char::is_whitespace</code>). The win comes
-while matching <em>full Unicode</em> whitespace, where tantivy's
-<code>WhitespaceTokenizer</code> tests only
-<code>c.is_ascii_whitespace()</code> — a strictly more general character
-class winning anyway. Verbora also beats Hugging Face's pre-tokenizer at
-every size in the same table (18.8×–33.1×).
+<div class="callout callout-warn">
+<strong>No Verbora tokenizer figure is currently backed.</strong> Verbora
+exposes three tokenizers over one token shape — <code>WordTokenizer</code>,
+<code>SegmentTokenizer</code>, <code>SentenceTokenizer</code>, every token a
+borrowed <code>&amp;str</code> substring of the input — and both benchmarked
+tokenizers were rebuilt on <a href="../features/tokenizers">UAX #29</a>
+segmentation. That is a different algorithm on the timed path, not a
+constant-factor change, so every figure this section carried was measured
+against a scanner Verbora no longer runs, and all of them are withdrawn. Competitor figures are
+unaffected; no competitor version moved. Nothing is estimated in their place,
+and the direction of the change must not be inferred — a re-run has to
+produce the new numbers. See
+<a href="https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#11-tokenizers">COMPETITIVE_BENCHMARKS.md
+§1.1</a> for the per-row reasoning.
 </div>
 
-#### Word tokenization
+#### Whitespace tokenization — capability withdrawn
 
-| Library | Version | Language | Time (median, 77,684 B) | Throughput | Relative |
-|---|---|---|---:|---:|---:|
-| Verbora | 0.1.0 | Rust | 115.12 µs | 8.7K/s | **1.00×** |
-| tantivy | 0.26.1 | Rust | 124.91 µs | 8.0K/s | 1.09× slower |
-| tokenizers (Hugging Face) | 0.23.1 | Rust | 1.85 ms | 541.1/s | 16.05× slower |
+Verbora performs no whitespace or pattern-based tokenization at any API. The
+comparison against [tantivy](https://github.com/quickwit-oss/tantivy)
+0.26.1's `WhitespaceTokenizer` and [Hugging Face
+`tokenizers`](https://github.com/huggingface/tokenizers) 0.23.1's
+`WhitespaceSplit` pre-tokenizer has no Verbora side left, so the group is
+gone rather than pending: there is nothing to re-measure. A caller who wants
+whitespace splitting should use `regex` or `str::split_whitespace` directly.
 
-| Input size (bytes) | Verbora | tantivy | tokenizers (HF) |
-|---:|--:|--:|--:|
-| 123 | 182.9 ns | 136.6 ns | 2.22 µs |
-| 1,187 | 1.28 µs | 1.15 µs | 19.08 µs |
-| 9,709 | 9.45 µs | 11.66 µs | 166.89 µs |
-| 77,684 | 115.12 µs | 124.91 µs | 1.85 ms |
+#### Word tokenization — pending re-measurement
 
-A genuine **crossover**, reported in both directions per this project's
-no-cherry-picking rule: tantivy's hand-written `SimpleTokenizer` is slightly
-ahead at the two smallest sizes, Verbora's hand-written `WordRuns` scanner
-pulls ahead at the two largest — see
-[`PERFORMANCE_GAPS.md` entry 4](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#4-word-tokenization--verbora-vs-tantivysimpletokenizer-rust-a-size-dependent-crossover-not-a-one-sided-loss).
-Both scanners do the same shape of work here — the same
-hand-written-scanner-vs-hand-written-scanner matchup as the whitespace row
-above — so every ratio in this table stays under 1.5×.
-
-#### Sentence tokenization
-
-`SentenceTokenizer` against
-[unicode-segmentation](https://github.com/unicode-rs/unicode-segmentation)
-1.13.3's `unicode_sentences()`/`split_sentence_bounds()`, on the narrowed
-plain-declarative-sentence domain both sides provably agree on (no
-abbreviations/URIs/digits/quotes/brackets — the boundary-exact agreement is
-proven in
+`WordTokenizer` against tantivy 0.26.1's `SimpleTokenizer` and Hugging Face
+`tokenizers` 0.23.1's `Whitespace` pre-tokenizer, called in isolation (never
+through HF's full BPE pipeline). This is still a genuine rival comparison and
+the harness still runs it: the workload is narrowed to punctuation-free ASCII
+text, and boundary-exact agreement (not just token-count agreement) is
+re-proved against the current implementation in
 [`tests/tokenizers_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/tokenizers_correctness.rs)
-before any number below was trusted).
+before any timing is trusted.
 
-| Library | Version | Language | Time (median, 118,588 B) | Throughput | Relative |
-|---|---|---|---:|---:|---:|
-| Verbora | 0.1.0 | Rust | 1.17 ms | 854.7/s | **1.00×** |
-| unicode-sentences | 1.13.3 | Rust | 1.36 ms | 735.3/s | 1.16× slower |
-| unicode-bounds | 1.13.3 | Rust | 1.35 ms | 740.7/s | 1.15× slower |
+Only Verbora's side of it changed, and it changed categorically:
+`WordTokenizer` now performs full UAX #29 word segmentation (WB1–WB999)
+rather than a character-class test, so it does strictly more work per
+boundary than the scanner the recorded medians measured. The
+`word_tokenization` group is **pending re-measurement**
+([`PERFORMANCE_GAPS.md` entry 4](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#4-word-tokenization--verbora-vs-tantivysimpletokenizer-rust-a-size-dependent-crossover-not-a-one-sided-loss));
+no table is published for it here until that run happens.
 
-| Input size (bytes) | Verbora | unicode-sentences | unicode-bounds |
-|---:|--:|--:|--:|
-| 200 | 2.05 µs | 2.37 µs | 2.37 µs |
-| 1,836 | 17.44 µs | 21.02 µs | 20.99 µs |
-| 14,806 | 146.16 µs | 172.11 µs | 174.95 µs |
-| 118,588 | 1.17 ms | 1.36 ms | 1.35 ms |
+#### Sentence tokenization — pending re-measurement
 
-Verbora **wins at every size, by a flat 1.15×–1.21×**, and the gap does not
-widen with document size: 2048 sentences is 8× the document size of 256
-sentences and roughly 8× the wall-clock too — the linear scaling a
-single-pass algorithm should have, with no `O(sentences²)` term in the
-placeholder-restoration pass. See
-[PERFORMANCE_GAPS.md entry 23](https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#23-sentence-tokenization-at-large-document-sizes--verbora-vs-unicode-segmentation-rust)
-for the placeholder-restoration mechanism in full. The residual ~1.15×–1.21×
-is a flat, size-independent constant factor consistent with
-`unicode-segmentation`'s single forward-scan design still being a genuinely
-leaner data path than Verbora's placeholder-mask-and-restore one — closing
-it further would need a different, non-placeholder-based algorithm, a much
-larger change not attempted here.
+`SentenceTokenizer` against [segtok](https://github.com/xamgore/segtok)
+0.1.5, on the narrowed plain-declarative-sentence domain both sides agree on
+(no abbreviations/URIs/digits/quotes/brackets), with boundary-exact agreement
+proven in the same correctness test before any timing is trusted. The
+`sentence_tokenization` and `sentence_tokenization_boundary_density` groups
+are **pending re-measurement**: `SentenceTokenizer` is now built directly on
+`split_sentence_bound_indices()` with no placeholder mask, no unmask pass and
+no trimming, and every recorded figure measured the mask-and-restore
+algorithm that replaced.
+
+The `unicode-segmentation` pairing that used to appear here is not pending —
+it is gone, and for a reason worth stating plainly. `SentenceTokenizer` is
+built on `unicode-segmentation`, so timing the two against each other
+measures Verbora against its own dependency, which is a wrapper-overhead
+question rather than a competitive one. Those rows moved to a
+`sentence_tokenization_wrapper_overhead` group whose numbers state what the
+wrapper costs over the primitive, and they may never be reported as Verbora
+beating or losing to `unicode-segmentation`. The same applies to
+`WordTokenizer`, which *is* `str::unicode_words()`.
 
 ---
 
@@ -590,6 +624,18 @@ slide an identical window over every word in the shared 20,000-word list;
 byte-identical `(gram, count)` output is proven at arity 2 and arity 3 in
 [`tests/ngrams_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/ngrams_correctness.rs)
 before any number below was trusted.
+
+<div class="callout callout-warn">
+<strong>Both groups' Verbora figures are pending re-measurement.</strong>
+<code>verbora-ngrams</code> was rebuilt on borrowed windows:
+<code>ngrams</code> now yields sub-slices of the caller's own slice with
+nothing allocated per window, where the timed path used to build a
+<code>Vec&lt;Cow&lt;[char]&gt;&gt;</code> and fold each gram into a
+<code>String</code>. That accumulation shape is exactly what the split-by-arity reading
+below rests on, so whether trigrams remain a loss at all is an open question
+rather than a recorded result. Competitor figures are unaffected; no
+competitor version moved.
+</div>
 
 <div class="callout callout-note">
 <strong>A genuine split by arity, not a clean sweep.</strong> Verbora wins
@@ -650,118 +696,58 @@ sticky cross-call state, `porter-stemmer`'s single isolated `"sky"`→`"ski"`
 bug).
 
 <div class="callout callout-warn">
-<strong>The least flattering comparison on this page.</strong> Both
-Snowball competitors beat Verbora on seven of the nine shared languages, at
-every batch size measured; German is a clean win and Dutch is a genuine
-split (Verbora beats <code>rust-stemmers</code>, loses to
-<code>snowball_stemmers_rs</code>). Both competitors compile their suffix
-rules to a binary-search <code>find_among</code> via the official Snowball
-compiler; Verbora's stemmer does a literal linear scan through the same rule
-tables, guarded by a cheap last-code-unit reject in the shared
-suffix-matching helper (<code>ends_with</code>) before it commits to a full
-comparison. See
+<strong>No Verbora Snowball figure is currently backed.</strong> Verbora's
+suffix matching is the Snowball runtime's own
+<code>find_among</code>/<code>find_among_b</code> binary search
+(<code>crates/verbora-stemmers/src/among.rs</code>): a table sorted by
+reversed code-unit sequence, <code>common_i</code>/<code>common_j</code>
+prefix tracking so no unit is compared twice, and
+<code>substring_i</code>-style links so one search replaces a whole guarded
+else-if chain. Ten of the eleven language modules route through it —
+<code>de</code>, <code>en</code>, <code>es</code>, <code>fr</code>,
+<code>it</code>, <code>nl</code>, <code>no</code>, <code>pt</code>,
+<code>ru</code>, <code>sv</code>. That is the same algorithm both competitors
+get from the official Snowball compiler, so the per-language ratios this
+section carried were measured against a linear scan the crate no longer runs,
+and all of them are withdrawn. Competitor figures are unaffected; no competitor version
+moved. Which rows flip, and by how much, must not be inferred from the
+direction of the change — a re-run has to produce them. See
 <a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#34-snowball-stemmers-per-language--verbora-vs-rust-stemmers-and-snowball_stemmers_rs-rust">PERFORMANCE_GAPS.md
-entry 34</a> for the full mechanism and the alternative approaches
-considered.
+entry 34</a>.
 </div>
 
-| Language | Verbora (1024-word batch) | rust-stemmers (1024-word batch) | Faster |
-|---|--:|--:|--:|
-| de | 136.97 µs | 141.95 µs | **Verbora, 1.04×** |
-| nl | 128.99 µs | 217.56 µs | **Verbora, 1.69×** |
-| es | 640.01 µs | 125.94 µs | rust-stemmers, 5.08× |
-| fr | 481.95 µs | 188.55 µs | rust-stemmers, 2.56× |
-| it | 532.07 µs | 229.00 µs | rust-stemmers, 2.32× |
-| no | 249.77 µs | 50.06 µs | rust-stemmers, 4.99× |
-| pt | 614.10 µs | 155.92 µs | rust-stemmers, 3.94× |
-| ru | 588.00 µs | 89.87 µs | rust-stemmers, 6.54× |
-| sv | 261.10 µs | 56.53 µs | rust-stemmers, 4.62× |
-
-Scaling from 4 to 1024 words per batch (Verbora ÷ rust-stemmers speedup;
-**bold** = Verbora ahead):
-
-| Language | 4 | 16 | 64 | 256 | 1024 |
-|---|--:|--:|--:|--:|--:|
-| de | 0.96× | **1.02×** | **1.02×** | **1.03×** | **1.04×** |
-| nl | **1.65×** | **1.75×** | **1.61×** | **1.61×** | **1.69×** |
-| es | 0.18× | 0.19× | 0.20× | 0.19× | 0.20× |
-| fr | 0.32× | 0.38× | 0.40× | 0.42× | 0.39× |
-| it | 0.41× | 0.40× | 0.44× | 0.42× | 0.43× |
-| no | 0.18× | 0.20× | 0.19× | 0.20× | 0.20× |
-| pt | 0.21× | 0.25× | 0.26× | 0.25× | 0.25× |
-| ru | 0.17× | 0.15× | 0.15× | 0.15× | 0.15× |
-| sv | 0.21× | 0.21× | 0.22× | 0.21× | 0.22× |
+What the retirement does not touch is the correctness record, which is what
+made the comparison admissible in the first place: byte-exact agreement per
+language against both ports, re-proved before any timing is accepted.
 
 #### `snowball_stemmers_rs` — a second, independently-generated Snowball port
 
-Languages are never averaged together, so this is a second, independent
-data point on the same
-compiler-generated-binary-search-vs.-Verbora's-linear-scan question above,
-not a repeat of it. Agreement is even stronger than the `rust-stemmers` row
-in one case: `snowball_stemmers_rs`'s `russian.sbl` carries the same
-ё→е fold Verbora's stemmer does, so Russian agrees 100% byte-exact *including*
-`ёлка` — `rust-stemmers` does not. Dutch needs
-`Algorithm::DutchPorter` specifically; the crate's plainly-named
-`Algorithm::Dutch` is actually Kraaij–Pohlmann, a different, non-canonical
-stemmer, confirmed by reading the crate's own algorithm list rather than
-assumed from the name.
-
-| Language | Verbora (1024-word batch) | snowball_stemmers_rs (1024-word batch) | Faster |
-|---|--:|--:|--:|
-| de | 136.97 µs | 185.61 µs | **Verbora, 1.36×** |
-| es | 640.01 µs | 94.54 µs | snowball_stemmers_rs, 6.77× |
-| fr | 481.95 µs | 154.71 µs | snowball_stemmers_rs, 3.12× |
-| it | 532.07 µs | 177.07 µs | snowball_stemmers_rs, 3.00× |
-| nl | 128.99 µs | 95.27 µs | snowball_stemmers_rs, 1.35× |
-| no | 249.77 µs | 33.67 µs | snowball_stemmers_rs, 7.42× |
-| pt | 614.10 µs | 88.64 µs | snowball_stemmers_rs, 6.93× |
-| ru | 588.00 µs | 86.06 µs | snowball_stemmers_rs, 6.83× |
-| sv | 261.10 µs | 38.73 µs | snowball_stemmers_rs, 6.74× |
-
-Scaling from 4 to 1024 words per batch (Verbora ÷ snowball_stemmers_rs
-speedup; **bold** = Verbora ahead) — Dutch is the one language where the two
-Snowball competitors split, since it beats `rust-stemmers` above but loses
-here:
-
-| Language | 4 | 16 | 64 | 256 | 1024 |
-|---|--:|--:|--:|--:|--:|
-| de | **1.34×** | **1.38×** | **1.34×** | **1.28×** | **1.36×** |
-| es | 0.13× | 0.14× | 0.14× | 0.14× | 0.15× |
-| fr | 0.27× | 0.30× | 0.31× | 0.33× | 0.32× |
-| it | 0.34× | 0.32× | 0.35× | 0.32× | 0.33× |
-| nl | 0.72× | 0.77× | 0.71× | 0.71× | 0.74× |
-| no | 0.12× | 0.13× | 0.13× | 0.13× | 0.13× |
-| pt | 0.15× | 0.14× | 0.14× | 0.14× | 0.14× |
-| ru | 0.17× | 0.15× | 0.15× | 0.15× | 0.15× |
-| sv | 0.15× | 0.15× | 0.15× | 0.15× | 0.15× |
+Languages are never averaged together, so this is a second, independent data
+point rather than a repeat of the `rust-stemmers` comparison — and its
+timings are withdrawn on exactly the same ground. What it establishes without
+reference to any measurement is a correctness finding:
+`snowball_stemmers_rs`'s `russian.sbl` carries the same ё→е fold Verbora's
+stemmer does, so Russian agrees 100% byte-exact *including* `ёлка`, where
+`rust-stemmers` does not. Dutch needs `Algorithm::DutchPorter` specifically;
+the crate's plainly-named `Algorithm::Dutch` is actually Kraaij–Pohlmann, a
+different, non-canonical stemmer, confirmed by reading the crate's own
+algorithm list rather than assumed from the name.
 
 #### English — `nltk-porter` and `porter-stemmer`
 
 Two independent original-1980-Porter ports, since `rust-stemmers`' own
 "English" is Snowball Porter2, a different algorithm (excluded from the
-Snowball tables above).
+Snowball comparison above). Verbora's English module routes through
+`among.rs` like the other ten, so this group's timings are withdrawn with
+them and no table stands in for them until the re-run
+(<a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md">PERFORMANCE_GAPS.md</a>
+entry 24).
 
-| Library | Version | Time (median, 1024-word batch) | Throughput | Relative |
-|---|---|---:|---:|---:|
-| Verbora | 0.1.0 | 522.48 µs | 1.9K/s | **1.00×** |
-| nltk-porter | 0.1.0 | 1.92 ms | 520.9/s | 3.67× slower |
-| porter-stemmer | 0.1.2 | 310.13 µs | 3.2K/s | **1.68× faster** |
-
-The `nltk-porter` win is the one clean, consistent Verbora win in this
-module — narrowing gently with batch size. `porter-stemmer` is the
-opposite: a real Verbora **loss**, operating on grapheme clusters rather
-than code units, an architecture question that turns out not to matter on
-this plain-ASCII corpus (63 of 64 benchmarked words agree byte-exact, the
-one mismatch a real, isolated `porter-stemmer` bug — `"sky"`→`"ski"` —
-unrelated to graphemes and excluded from the sample).
-
-| Input size | Verbora | nltk-porter | porter-stemmer |
-|---:|--:|--:|--:|
-| 4 | 1.53 µs | 6.85 µs (**4.49× faster**) | 881.33 ns (1.73× slower) |
-| 16 | 7.15 µs | 28.56 µs (**4.00× faster**) | 3.76 µs (1.90× slower) |
-| 64 | 32.54 µs | 115.31 µs (**3.54× faster**) | 20.11 µs (1.62× slower) |
-| 256 | 138.33 µs | 498.36 µs (**3.60× faster**) | 77.32 µs (1.79× slower) |
-| 1024 | 522.48 µs | 1.92 ms (**3.67× faster**) | 310.13 µs (1.68× slower) |
+The correctness finding stands on its own: `porter-stemmer` operates on
+grapheme clusters rather than code units, an architectural difference that
+turns out not to matter on this plain-ASCII corpus — 63 of 64 benchmarked
+words agree byte-exact, the one mismatch a real, isolated `porter-stemmer`
+bug (`"sky"`→`"ski"`), unrelated to graphemes and excluded from the sample.
 
 #### Japanese — `lindera-analysis`
 
@@ -805,7 +791,7 @@ prefix-stripping pass — 13 of 16 benchmarked words still agree byte-exact.
 | 1024 | 3.97 ms | 583.38 µs | sastrawi, 6.80× |
 
 <div class="callout callout-note">
-The one clear loss in this module. `sastrawi`'s own one-time
+A real, decisive loss on per-word time. <code>sastrawi</code>'s own one-time
 <code>Dictionary::new()</code> + <code>Stemmer::new()</code> construction
 cost (~47K allocations, ~21 MB) is real but paid once; Verbora's
 <code>StemmerId::new()</code> is a zero-sized unit struct backed entirely by
@@ -836,6 +822,18 @@ before any timing was trusted — one real divergence found and deliberately
 excluded from the benchmarked domain: `diacritics` silently strips standalone
 Unicode combining marks, which `remove_diacritics` never decomposes and so
 leaves untouched.
+
+<div class="callout callout-warn">
+<strong>Both groups' Verbora figures are pending re-measurement.</strong>
+Every function in <code>verbora-normalizers</code> was reimplemented, so the
+medians below were taken against code the crate no longer runs. Competitor
+figures are unaffected; no competitor version moved. The medians stay visible
+so the next run has something to diff against, and none may be quoted as
+current. What does not depend on a timing, and is therefore stated as fact
+rather than measured, is the shape of the ASCII path: <code>remove_diacritics</code>
+returns <code>Cow::Borrowed</code> immediately for pure-ASCII input, with no
+scan and no allocation.
+</div>
 
 #### Pure-ASCII input
 
@@ -886,7 +884,7 @@ measurement floor.
 
 ### Inflectors
 
-`CountInflector::nth` — English ordinal suffixing (1st/2nd/3rd/…) —
+`OrdinalInflector::nth` — English ordinal suffixing (1st/2nd/3rd/…) —
 against [ordinal](https://github.com/heaths/ordinal-rs) 0.4.0
 (`docs/COMPETITIVE_BENCHMARKS.md`
 [§1.5](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#15-inflectors)),
@@ -922,9 +920,13 @@ pre-sized buffer.
 
 ### Trie
 
-Generic prefix-search throughput (never output/ordering equivalence — no
-Rust crate replicates Verbora's UTF-16-code-unit keying or its own
-numeric-keys-first child enumeration order) against
+Generic prefix-search throughput. Verbora's trie keys one node per Unicode
+scalar and enumerates in ascending scalar order, which for well-formed Rust
+strings is `<str as Ord>`; competitors key by byte or by nybble and order their
+own way, so the comparison is timed on equal work rather than asserted
+element-for-element.
+
+The competitors are
 [trie-rs](https://github.com/laysakura/trie-rs) 0.4.2 (highest download
 count of any competitor in the whole audit: 5.9M) and
 [qp-trie](https://github.com/sdleffler/qp-trie-rs) 0.8.2
@@ -934,6 +936,24 @@ Order-blind set-equality of every operation's result proven in
 [`tests/trie_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/trie_correctness.rs)
 before any timing was trusted; "build" is timed as push-then-compile for
 `trie-rs`'s LOUDS architecture, matching how that crate is actually used.
+
+<div class="callout callout-warn">
+<strong>Verbora's <code>build</code> medians are pending re-measurement.</strong>
+<code>insert_all</code> now clamps the reservation it takes from the iterator's
+<code>size_hint</code> at 4,096 nodes, so this 20,000-word bulk load pre-sizes
+for 4,096 and reaches the rest by amortised growth, where the recorded medians
+were taken against a build that reserved the whole hint up front. The clamp is
+there because a <code>size_hint</code> is a hint and not a bound: an iterator
+that overstates it could otherwise turn a bulk load into an unbounded
+allocation. This applies to every <code>build</code> row in this section — the
+<code>qp-trie</code>/<code>trie-rs</code> table below, the
+<code>fast_radix_trie</code> table, and the <code>fst</code> comparison. The
+read-path figures — <code>contains</code>, <code>common_prefix_search</code>,
+<code>predictive_search</code> — are unaffected, and no competitor version
+moved. The build medians stay visible so the next run has something to diff
+against, and none may be quoted as current; the direction of the change must
+not be inferred either.
+</div>
 
 | Library | Version | Language | Time (median, 20,000-word build, random) | Throughput | Relative |
 |---|---|---|---:|---:|---:|
@@ -961,7 +981,7 @@ entry 2</a>: <code>qp-trie</code> is a crit-bit/PATRICIA-style radix trie with
 path compression (lookup depth bounded by <em>distinguishing</em> nybbles
 between stored keys, not key length) and stores each key whole at its leaf
 (no reconstruction cost on enumeration); Verbora's arena trie has neither —
-one hop per UTF-16 code unit, and every enumerated word is rebuilt one unit
+one hop per Unicode scalar, and every enumerated word is rebuilt one scalar
 at a time. The same two properties invert for <code>build</code>, which is
 why Verbora wins there instead.
 </div>
@@ -1055,20 +1075,18 @@ verified in
 [`tests/phonetics_correctness.rs`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/rust-competitors/tests/phonetics_correctness.rs)
 before any number was trusted:
 
-- **Four variant encoders — throughput-only (`Partial`, never `Yes`).**
-  `SoundEx`, `Metaphone`, `DoubleMetaphone` and `SoundExDM` implement
-  Verbora's own documented variants (condense-before-drop Soundex, a
-  documented Metaphone stage-ordering quirk, single-branch Daitch–Mokotoff),
-  rphonetic the textbook originals — byte-exact output is never asserted,
-  only that both sides do the same *shape* of work.
-- **Seven byte-exact encoders — full output equivalence (`Yes`).**
+- **Three variant encoders — throughput-only (`Partial`, never `Yes`).**
+  `SoundEx`, `Metaphone` and `DoubleMetaphone` implement Verbora's own
+  documented variants (condense-before-drop Soundex, a documented Metaphone
+  stage-ordering quirk), rphonetic the textbook originals — byte-exact output
+  is never asserted, only that both sides do the same *shape* of work.
+- **Eight byte-exact encoders — full output equivalence (`Yes`).**
   `Cologne`, `Nysiis`, `Caverphone1`/`Caverphone2`, `Phonex`,
-  `RefinedSoundex`, `MatchRatingApproach` and the branching `DaitchMokotoff`
-  are Verbora-native extensions whose output is **byte-identical** to
-  rphonetic's on every input rphonetic handles without panicking — a
-  stronger claim than any `Partial` row on this page carries.
+  `RefinedSoundex`, `MatchRatingApproach` and `DaitchMokotoff` produce output
+  **byte-identical** to rphonetic's on every input rphonetic handles without
+  panicking — a stronger claim than any `Partial` row on this page carries.
 
-#### The four variant encoders — throughput only
+#### The three variant encoders — throughput only
 
 rphonetic's Metaphone/Double Metaphone default to a 4-character max code
 length; both are reconfigured to `Some(32)` here to match Verbora's real
@@ -1080,10 +1098,22 @@ rphonetic's output length, not silently still capped at 4.
 | Soundex | **2.79× faster** | **2.17× faster** | **2.08× faster** |
 | Metaphone | **1.43× faster** | **1.03× faster** | **1.10× faster** |
 | Double Metaphone | **3.27× faster** | **2.18× faster** | **4.22× faster** |
-| SoundExDM (Daitch–Mokotoff) | **7.52× faster** | **9.55× faster** | **5.12× faster** |
 
-Verbora wins all four algorithms at every benchmarked size. Metaphone is
-the closest of the four:
+<div class="callout callout-warn">
+<strong>A fourth row is retired rather than re-labelled.</strong> This group
+used to carry a non-branching Daitch–Mokotoff encoder measured against
+rphonetic's non-branching <code>encode()</code>. Verbora has one
+Daitch–Mokotoff type, and it branches: <code>DaitchMokotoff::process</code>
+returns every reading of an ambiguous spelling, pipe-joined, and
+<code>DaitchMokotoff::codes</code> returns the same list structured. There is
+no separate single-branch encoder for that row to describe, so the row is gone
+rather than pointed at a different algorithm — its figures measured work
+Verbora no longer does in that shape. The branching comparison, which is a
+different pairing and a stronger claim, is in the byte-exact table below.
+</div>
+
+Verbora wins all three algorithms at every benchmarked size. Metaphone is
+the closest of the three:
 
 | Library | Version | Language | Time (median, 100,000 names) | Throughput | Relative |
 |---|---|---|---:|---:|---:|
@@ -1109,11 +1139,11 @@ See
 entry 6</a> for the full mechanism.
 </div>
 
-Full per-algorithm, per-size data for these four groups:
+Full per-algorithm, per-size data for these groups:
 [`results/results.json`](https://github.com/addlayerio/verbora/blob/main/benchmarks/competitive/results/results.json)
 (module `"phonetics"`).
 
-#### The seven byte-exact encoders
+#### The eight byte-exact encoders
 
 Verification for this table goes beyond the shape-parity check above,
 because here byte-exact equality **is** the claim:
@@ -1163,9 +1193,8 @@ Rating at 100,000).
 
 The Daitch–Mokotoff row compares Verbora's branching
 `DaitchMokotoff::process` against rphonetic's own pipe-joined `soundex()` —
-output-format identical, unlike the `SoundExDM` row above, which is
-Verbora's separate single-branch type benchmarked against rphonetic's
-non-branching `encode()`. Four rphonetic Daitch–Mokotoff behavioral quirks
+output-format identical, which is what makes byte-exact equality the claim
+here rather than shape parity. Four rphonetic Daitch–Mokotoff behavioral quirks
 are reproduced deliberately for byte-parity and documented in
 `crates/verbora-phonetics/src/daitch_mokotoff.rs`'s own module
 documentation. Raw Criterion estimates for these eight groups live in the
@@ -1413,7 +1442,7 @@ not merely asserted.
 
 ### POS tagging
 
-`BrillPosTagger` (transformation-based, English) against
+`BrillTagger` (transformation-based, English) against
 [postagger](https://github.com/shubham0204/postagger.rs) 0.0.3 (a pretrained
 averaged-perceptron model, NLTK weights) and
 [rust-bert](https://github.com/guillaume-be/rust-bert) 0.23.0's `POSModel`
@@ -1426,11 +1455,31 @@ transformer forward pass, not rival implementations of the same rule table —
 so this is reported as a technique comparison, with cold start and steady
 state kept strictly separate.
 
+<div class="callout callout-warn">
+<strong>Verbora's steady-state medians are pending re-measurement.</strong>
+Four of the eighteen bundled English rules test whether the current token looks
+like a URL, and that predicate was rewritten: a token is URL-like when one of
+its full stops joins two word-shaped labels, a stricter test than the one the
+recorded medians ran, which any interior full stop satisfied. Abbreviations
+such as <code>Ph.D.</code> and
+<code>W.Va.</code> therefore keep their lexicon tag instead of being retagged
+<code>URL</code> — so both the answers and the per-token work changed underneath
+the recorded medians. The cold-start figures are unaffected: construction reads
+the same packed table with the same entry count and the same eighteen rules.
+Competitor figures are unaffected too; no competitor version moved. The
+steady-state medians stay visible so the next run has something to diff against,
+and none may be quoted as current; the direction of the change must not be
+inferred either. What survives is the structural finding this section is about —
+a fixed rule table needs no deserialization step, and a deterministic rule
+lookup is categorically less arithmetic than a feature-weighted vote or a
+transformer forward pass.
+</div>
+
 #### Cold start — everything needed before tagging one sentence
 
 | Library | Version | Language | Time (median) | Relative |
 |---|---|---|---:|---:|
-| Verbora (`Lexicon` + `RuleSet` + `BrillPosTagger`) | 0.1.0 | Rust | 7.47 µs | **1.00×** |
+| Verbora (`Lexicon` + `RuleSet` + `BrillTagger`) | 0.1.0 | Rust | 7.47 µs | **1.00×** |
 | postagger (parses a 5.6 MB weights file) | 0.0.3 | Rust | 121.61 ms | 16,283× slower |
 | rust-bert (loads a ~94 MB MobileBERT checkpoint) | 0.23.0 | Rust | 1.281 s | 171,501× slower |
 
@@ -1457,7 +1506,7 @@ rule lookup. **This is not an accuracy claim for either technique** — see
 
 ### Spellcheck
 
-`Spellcheck::get_corrections` and `::is_correct` against three genuinely
+`Spellcheck::corrections` and `::is_correct` against three genuinely
 different algorithms (`docs/COMPETITIVE_BENCHMARKS.md`
 [§1.17](https://github.com/addlayerio/verbora/blob/main/docs/COMPETITIVE_BENCHMARKS.md#117-spellcheck)):
 [symspell](https://github.com/reneklacan/symspell) 0.5.2 (precomputed
@@ -1466,6 +1515,22 @@ deletion dictionary), [harper-core](https://github.com/Automattic/harper)
 standalone spellchecking crate found, 14,470 GitHub stars on its parent
 repo), and [spellbook](https://github.com/helix-editor/spellbook) 0.4.2
 (Hunspell affix-rule morphology).
+
+<div class="callout callout-warn">
+<strong>Every Verbora median in this section is pending re-measurement.</strong>
+The crate's correction contract changed — <code>corrections</code> returns
+<code>Vec&lt;Correction&gt;</code>, carrying the frequency and distance behind
+each ranking rather than words alone, and <code>correction_words</code> is the
+separate call for owned words — so the recorded medians measured a different
+return shape from the one that runs. <code>verbora-spellcheck</code>'s own
+documentation publishes no speed figure for the same reason. Competitor figures are
+unaffected; no competitor version moved. The medians stay visible so the next
+run has something to diff against, and none may be quoted as current; the
+direction of the change must not be inferred either. What is unaffected is the
+structural finding each table below is really about — which algorithm class
+pays at construction and which pays per query — because that follows from the
+designs, not from a timing.
+</div>
 
 #### `symspell` and `harper-core` — same corpus as Verbora
 
@@ -1477,10 +1542,10 @@ Verbora uses.
 | construction (`new`) | 100 | **14.05 µs** | 402.42 µs (28.6× slower) | 77.97 µs (5.6× slower) |
 | construction (`new`) | 20,000 | **3.58 ms** | 115.42 ms (32.3× slower) | 10.95 ms (3.1× slower) |
 | `is_correct` (hit) | 20,000 | **226.16 µs** | 310.15 µs (1.4× slower) | 271.89 µs (1.2× slower) |
-| `get_corrections`, distance 1 | 100 | 22.00 µs | **921 ns** (23.9× faster) | 5.02 µs (4.4× faster) |
-| `get_corrections`, distance 1 | 20,000 | 22.95 µs | **857 ns** (26.8× faster) | 36.87 µs (1.6× slower) |
-| `get_corrections`, distance 2 | 1,000 | 4.96 ms | **2.31 µs** (2,152× faster) | 34.79 µs (142.7× faster) |
-| `get_corrections`, distance 2 | 20,000 | 5.80 ms | **3.50 µs** (1,657× faster) | 333.83 µs (17.4× faster) |
+| `corrections`, distance 1 | 100 | 22.00 µs | **921 ns** (23.9× faster) | 5.02 µs (4.4× faster) |
+| `corrections`, distance 1 | 20,000 | 22.95 µs | **857 ns** (26.8× faster) | 36.87 µs (1.6× slower) |
+| `corrections`, distance 2 | 1,000 | 4.96 ms | **2.31 µs** (2,152× faster) | 34.79 µs (142.7× faster) |
+| `corrections`, distance 2 | 20,000 | 5.80 ms | **3.50 µs** (1,657× faster) | 333.83 µs (17.4× faster) |
 
 Verbora wins construction and membership-testing at every size against both
 competitors. `symspell` and, at the largest corpus, `harper-core` win
@@ -1514,8 +1579,8 @@ presented as a ratio. No Relative column below.
 | `check` / `is_correct`, hit | spellbook | 0.4.2 | real `en_US` Hunspell | 372.5 ns |
 | `check` / `is_correct`, near-miss typo | spellbook | 0.4.2 | real `en_US` Hunspell | 3.25 µs |
 | `is_correct`, hit | Verbora | 0.1.0 | own 20,000-word corpus | 41.71 µs |
-| `suggest` / `get_corrections`, one typo (4 probes) | spellbook | 0.4.2 | real `en_US` Hunspell | 5.28–9.05 ms |
-| `get_corrections`, one typo (`typo8`) | Verbora | 0.1.0 | own 20,000-word corpus | 23.83 µs |
+| `suggest` / `corrections`, one typo (4 probes) | spellbook | 0.4.2 | real `en_US` Hunspell | 5.28–9.05 ms |
+| `corrections`, one typo (`typo8`) | Verbora | 0.1.0 | own 20,000-word corpus | 23.83 µs |
 
 `spellbook`'s `check` is a curated, bundled FST/hash lookup — sub-microsecond
 as expected for a fixed, pre-built dictionary — while its full affix-aware
@@ -1538,10 +1603,10 @@ discipline as `symspell` above.
 |---|--:|--:|--:|
 | construction | 100 | **12.8 µs** | 356.8 µs (27.8× slower) |
 | construction | 20,000 | **3.60 ms** | 122.3 ms (34.0× slower) |
-| `get_corrections`, distance 1 | 100 | 21.19 µs | **766 ns** (27.7× faster) |
-| `get_corrections`, distance 1 | 20,000 | 23.15 µs | **896 ns** (25.9× faster) |
-| `get_corrections`, distance 2 | 1,000 | 5.97 ms | **2.16 µs** (2,769× faster) |
-| `get_corrections`, distance 2 | 20,000 | 5.54 ms | **3.29 µs** (1,686× faster) |
+| `corrections`, distance 1 | 100 | 21.19 µs | **766 ns** (27.7× faster) |
+| `corrections`, distance 1 | 20,000 | 23.15 µs | **896 ns** (25.9× faster) |
+| `corrections`, distance 2 | 1,000 | 5.97 ms | **2.16 µs** (2,769× faster) |
+| `corrections`, distance 2 | 20,000 | 5.54 ms | **3.29 µs** (1,686× faster) |
 
 The same shape as `symspell` above, more extreme at distance 2 — a
 delete-precomputation index trades expensive, size-scaling construction for
@@ -1572,6 +1637,21 @@ construction — built after real evidence (the `fast_symspell` comparison
 above) showed the query-speed trade-off was worth having available, not
 built speculatively ahead of that evidence.
 
+<div class="callout callout-warn">
+<strong>Every figure below is pending re-measurement.</strong>
+<code>DeletionIndex</code>'s map is now keyed on a 64-bit hash of each
+deletion sequence rather than on the sequence itself, which takes the cost
+of indexing one <em>n</em>-scalar word from cubic in <em>n</em> to
+quadratic — a change of cost class, not a constant factor. The numbers
+below were measured against the sequence-keyed map and describe a structure
+that no longer exists. The table and the paragraph beneath it stay visible
+so a future run has something to diff against, and none of their figures
+may be quoted as current; the direction of the change must not be inferred
+either. See
+<a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#35-spellcheck-a-real-architectural-trade-off-not-a-one-sided-loss--verbora-vs-fast_symspell-rust-symspell-family-deletion-index">PERFORMANCE_GAPS.md
+entry 35</a>.
+</div>
+
 | Words | Construction: `FuzzyIndex` | Construction: `DeletionIndex` | Query: `FuzzyIndex` | Query: `DeletionIndex` |
 |---:|--:|--:|--:|--:|
 | 100 | **38.7 µs** | 977.6 µs (25.3× slower) | **589.9 µs** | 1.018 ms (1.73× slower) |
@@ -1579,15 +1659,19 @@ built speculatively ahead of that evidence.
 | 10,000 | **12.39 ms** | 162.6 ms (13.1× slower) | 93.28 ms | **2.64 ms** (35.3× faster) |
 | 20,000 | **26.97 ms** | 407.0 ms (15.1× slower) | 174.1 ms | **3.21 ms** (54.3× faster) |
 
-A genuine crossover on the query side: `FuzzyIndex` is faster at the smallest
-corpus tested (100 words), where a shallow BK-tree beats a deletion index's
-fixed per-query overhead — but `DeletionIndex` wins from 1,000 words up, by a
-rapidly widening margin. Construction is the honest cost throughout:
-`DeletionIndex` is 13×–25× slower to build at every size. Neither structure
-replaces the other — `FuzzyIndex` stays the default (cheaper, more
-predictable, no build-time distance ceiling); reach for `DeletionIndex` when
-the dictionary is large, `max_distance` is known ahead of time, and query
-volume is high enough to amortize the steep one-time build.
+As recorded against that now-superseded map: a genuine crossover on the
+query side, `FuzzyIndex` faster at the smallest corpus tested (100 words),
+where a shallow BK-tree beats a deletion index's fixed per-query overhead,
+and `DeletionIndex` winning from 1,000 words up by a rapidly widening
+margin; construction the honest cost throughout, `DeletionIndex` 13×–25×
+slower to build at every size. What survives without a fresh run is the
+shape alone, since it follows from the two designs rather than either
+number: dearer construction bought against a query cost that grows far more
+slowly with corpus size. Neither structure replaces the other — `FuzzyIndex`
+stays the default (cheaper, more predictable, no build-time distance
+ceiling); reach for `DeletionIndex` when the dictionary is large,
+`max_distance` is known ahead of time, and query volume is high enough to
+amortize the one-time build.
 
 ---
 
@@ -1604,6 +1688,21 @@ match found, but a genuinely different, unsmoothed weighting formula) and
 Both comparisons are explicitly **build/query speed only** — neither crate's
 output values are compared against Verbora's, since the weighting formulas
 differ by design.
+
+<div class="callout callout-warn">
+<strong>Verbora's build and query medians are pending re-measurement.</strong>
+Both timed paths tokenize inside the measured region, and
+<code>verbora-tfidf</code>'s tokenizer and its build path were both rewritten
+underneath these numbers. Competitor figures are unaffected — <code>tfidf</code>
+(afshinm) is still pinned at 0.3.0 and does not tokenize at all, which is the
+asymmetry this section documents and which has not changed. The two
+<em>findings</em> are structural and survive independently of any timing:
+ingestion does strictly more work on Verbora's side, and it buys an index
+whose query cost does not grow with the corpus, which neither competitor has
+an equivalent for. Only their magnitudes are unbacked. See
+<a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#13-tf-idf-ingestion--verbora-vs-tfidf-afshinm-rust">PERFORMANCE_GAPS.md</a>
+entries 13 and 14.
+</div>
 
 | Library | Version | Language | Time (median, build, 256 docs) | Throughput | Relative |
 |---|---|---|---:|---:|---:|
@@ -1762,12 +1861,16 @@ differential fuzzing behind the byte-exact phonetics table
 ([Phonetics](#phonetics)). Disclosed here, not filed upstream without
 separate confirmation.
 
-- **`triple_accel` 0.4.0** — `rdamerau_exp("tac", "tatc")` returns **2**; the
-  correct restricted-Damerau-Levenshtein distance is **1**. Confirmed against
-  `strsim::damerau_levenshtein` and `triple_accel`'s own plain
-  `levenshtein_exp` (both return 1). Real impact: `fast_symspell` uses this
-  exact function as its post-lookup verification pass, so it can silently
-  miss or misrank a correction on an ordinary doubled-letter typo.
+- **`triple_accel` 0.4.0** — `rdamerau("tac", "tatc")` returns **2**; the
+  correct restricted-Damerau-Levenshtein (OSA) distance is **1**. It
+  over-counts an insertion adjacent to a repeated character. Both of the
+  crate's restricted-Damerau entry points carry it — `rdamerau` and
+  `rdamerau_exp` alike — confirmed against a from-scratch three-row OSA
+  implementation, `strsim::osa_distance`, `rapidfuzz`'s `distance::osa` and
+  Verbora's `osa` (all four return 1), and found by a randomized sweep
+  rather than by inspection. Real impact: `fast_symspell` uses this family
+  as its post-lookup verification pass, so it can silently miss or misrank a
+  correction on an ordinary doubled-letter typo.
 - **`fst` 0.4.7** — its `Levenshtein` automaton silently returns *incomplete*
   results for same-byte-length multi-byte UTF-8 substitutions (e.g. Cyrillic
   characters one substitution apart). Matches a still-open upstream issue,
@@ -1793,7 +1896,7 @@ separate confirmation.
   both its encode path (mid-character truncation) and its compare path (an
   empty-encoding underflow: `("ab", "..")` panics where `("..", "ab")`
   returns `false`). The ASCII-only shared corpus never exercises any of
-  these; on every one of those inputs Verbora's own seven byte-exact
+  these; on every one of those inputs Verbora's own eight byte-exact
   encoders return a documented substitute output instead of panicking — the
   one place they deliberately do not match rphonetic.
 
@@ -1835,7 +1938,7 @@ implemented). **0 of 19 — any single Rust crate** at full, unqualified
 equivalence across a whole module; the Rust ecosystem's real strength shows
 up *inside* individual algorithms instead — `strsim`/`rapidfuzz` are genuine
 `Yes`-equivalence competitors for most of Distances, `rust-stemmers` for 9 of
-17 stemmer variants — not as one library matching Verbora's combined scope.
+Verbora's 16 stemmers — not as one library matching Verbora's combined scope.
 That fragmentation is the whole reason this audit went module-by-module
 rather than searching for one all-in-one Rust rival: no such rival exists,
 and claiming one would misrepresent the comparison.

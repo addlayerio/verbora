@@ -1,137 +1,46 @@
-//! The dictionary itself: `WordNet`, its lookups, and the pointer traversal.
-//!
-//! # Result order is defined by a bug, and it is asserted by the reference's own
-//! test suite
-//!
-//! Every recursive helper in `wordnet` walks its work list with `pop()`, so
-//! everything comes out **backwards**, at two levels:
-//!
-//! * the parts of speech are consulted in the order **adv, adj, verb, noun** —
-//!   the reverse of the `[noun, verb, adj, adv]` array literal that produces
-//!   them;
-//! * within one part of speech, the synset offsets listed on the index line are
-//!   visited **last to first**.
-//!
-//! `lookup("fast")` therefore yields `r:86892 r:86488 s:324771 … n:1071904`, and
-//! `getSynonyms(1740, 'n')` yields `[4431553, 2137, 1930]` for an index line that
-//! lists `1930, 2137, 4431553`. `io_spec/wordnet_spec` asserts the latter by
-//! value. An idiomatic `for file in files` / `for offset in offsets` produces the
-//! exact reverse for every single lookup, which is why every traversal below
-//! iterates with `.rev()` and every `&mut Vec` helper drains with `pop`.
-//!
-//! # Callbacks become return values
-//!
-//! The reference API is callback-async throughout: `lookup`, `get`,
-//! `lookupSynonyms` and `getSynonyms` all return `undefined` and deliver later.
-//! Within a single operation, though, every read is strictly sequential — each
-//! `fs` callback issues the next read — so a synchronous port is *order
-//! equivalent*, and that is what this crate provides. The mapping is:
-//!
-//! | the reference | `verbora` |
-//! |---|---|
-//! | `wn.lookup(w, cb)` | [`WordNet::lookup`] → `Result<Vec<DataRecord>>` |
-//! | | [`WordNet::lookup_iter`] → lazy iterator |
-//! | `wn.get(off, pos, cb)` | [`WordNet::get`] |
-//! | `wn.getDataFile(pos)` | [`WordNet::data_file`] → `Option` for `undefined` |
-//! | `wn.lookupSynonyms(w, cb)` | [`WordNet::lookup_synonyms`] |
-//! | `wn.getSynonyms(off, pos, cb)` | [`WordNet::get_synonyms`] |
-//! | `wn.getSynonyms(record, cb)` | [`WordNet::get_synonyms_of`] |
-//! | `wn.lookupFromFiles(f, r, w, cb)` | [`WordNet::lookup_from_files`] — takes `&mut Vec`, and drains them, because the reference does |
-//! | `wn.pushResults(d, r, o, cb)` | [`WordNet::push_results`] |
-//! | `wn.loadSynonyms(s, r, p, cb)` | [`WordNet::load_synonyms`] |
-//! | `wn.loadResultSynonyms(s, r, cb)` | [`WordNet::load_result_synonyms`] |
+//! The dictionary itself: [`WordNet`], its lookups and its relation traversal.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use crate::data_file::{DataFile, DataRecord, Pointer};
+use rustc_hash::FxHashSet;
+
+use crate::data_file::DataFile;
 use crate::error::{Error, Result};
-use crate::index_file::IndexFile;
+use crate::index_file::{IndexEntry, IndexFile, index_key};
+use crate::pointer::{Pointer, PointerSymbol};
+use crate::pos::PartOfSpeech;
 use crate::prebuilt::PrebuiltIndex;
+use crate::sense::Sense;
 use crate::source::Storage;
-use crate::whitespace::normalize_lookup_word;
+use crate::synset::{Synset, SynsetOffset, SynsetRef};
 
-/// The four dictionary file pairs, in the order the reference's array literal
-/// lists them. Traversal iterates this **in reverse**, because `files.pop()` does.
-pub(crate) const POS_ORDER: [Pos; 4] = [Pos::Noun, Pos::Verb, Pos::Adj, Pos::Adv];
+/// Environment variables [`WordNet::from_env`] consults, in order.
+const ENV_VARS: [&str; 2] = ["VERBORA_WORDNET_DICT", "WORDNET_DB_PATH"];
 
-/// Which pair of dictionary files a part-of-speech tag routes to.
-///
-/// `getDataFile` is a five-arm `switch` with **no default clause**: `'a'` and
-/// `'s'` (adjective head and satellite) both select the adjective files, and
-/// anything else — including `'N'`, `'noun'` and `''` — yields `undefined`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Pos {
-    /// `n` — `index.noun` / `data.noun`.
-    Noun,
-    /// `v` — `index.verb` / `data.verb`.
-    Verb,
-    /// `a` and `s` — `index.adj` / `data.adj`.
-    Adj,
-    /// `r` — `index.adv` / `data.adv`.
-    Adv,
-}
-
-impl Pos {
-    /// The reference's `switch (pos)`, exactly: `Some` for `n`, `v`, `a`, `s`,
-    /// `r`, and `None` — the reference's `undefined` — for everything else.
-    ///
-    /// ```
-    /// use verbora_wordnet::Pos;
-    ///
-    /// assert_eq!(Pos::from_tag("a"), Some(Pos::Adj));
-    /// assert_eq!(Pos::from_tag("s"), Some(Pos::Adj)); // satellite adjective
-    /// assert_eq!(Pos::from_tag("N"), None);           // matching is case sensitive
-    /// assert_eq!(Pos::from_tag("noun"), None);
-    /// ```
-    #[must_use]
-    pub fn from_tag(tag: &str) -> Option<Self> {
-        match tag.as_bytes() {
-            b"n" => Some(Self::Noun),
-            b"v" => Some(Self::Verb),
-            b"a" | b"s" => Some(Self::Adj),
-            b"r" => Some(Self::Adv),
-            _ => None,
-        }
-    }
-
-    /// The file-name suffix: `noun`, `verb`, `adj`, `adv`.
-    #[must_use]
-    pub fn suffix(self) -> &'static str {
-        match self {
-            Self::Noun => "noun",
-            Self::Verb => "verb",
-            Self::Adj => "adj",
-            Self::Adv => "adv",
-        }
-    }
-
-    /// The canonical tag: `n`, `v`, `a`, `r`. Note that [`Pos::Adj`] answers
-    /// `"a"`; the satellite tag `"s"` maps *in* but never *out*.
-    #[must_use]
-    pub fn tag(self) -> &'static str {
-        match self {
-            Self::Noun => "n",
-            Self::Verb => "v",
-            Self::Adj => "a",
-            Self::Adv => "r",
-        }
-    }
-
-    /// All four, in the reference's array-literal order.
-    #[must_use]
-    pub fn all() -> [Self; 4] {
-        POS_ORDER
-    }
-}
+/// The relative directory [`WordNet::from_env`] falls back to.
+const FALLBACK_DIR: &str = "dict";
 
 /// How a dictionary is opened.
-#[derive(Debug, Clone, Default)]
+///
+/// ```
+/// use verbora_wordnet::{Config, Storage};
+///
+/// // The default: every file read into memory when the dictionary is opened.
+/// assert_eq!(Config::default().storage, Storage::Resident);
+///
+/// // Naming a sidecar selects `Storage::Indexed`, because that is the only
+/// // strategy a line-start table is meaningful for.
+/// let cfg = Config::default().with_prebuilt("wordnet.vbwnix");
+/// assert_eq!(cfg.storage, Storage::Indexed);
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     /// Which byte-access strategy to use. See [`Storage`].
     pub storage: Storage,
     /// A prebuilt line-start index to load instead of scanning at startup.
     ///
-    /// Only consulted when `storage` is [`Storage::Indexed`]. The dictionary
+    /// Consulted only when `storage` is [`Storage::Indexed`]. The dictionary
     /// text files remain the source of truth: the sidecar records each file's
     /// length and is rejected if it no longer matches.
     pub prebuilt: Option<PathBuf>,
@@ -148,56 +57,42 @@ impl Config {
     }
 
     /// Loads line-start tables from `path` rather than scanning at startup.
+    ///
+    /// This also sets [`Config::storage`] to [`Storage::Indexed`], the only
+    /// strategy that uses a line-start table.
     #[must_use]
     pub fn with_prebuilt(mut self, path: impl Into<PathBuf>) -> Self {
-        self.storage = Storage::Indexed;
+        self.storage = PrebuiltIndex::STORAGE;
         self.prebuilt = Some(path.into());
         self
     }
-}
-
-/// One index/data file pair, as `lookupFromFiles` receives it.
-///
-/// The reference lets the two halves disagree — nothing checks that the index
-/// and the data file describe the same part of speech — and reading `index.adv`
-/// offsets out of `data.noun` produces garbage records rather than an error. That
-/// is preserved here.
-#[derive(Debug, Clone, Copy)]
-pub struct FilePair<'a> {
-    /// The index file to search.
-    pub index: &'a IndexFile,
-    /// The data file to read the resulting offsets from.
-    pub data: &'a DataFile,
 }
 
 /// A WordNet dictionary: four index files and four data files.
 ///
 /// Immutable after construction and `Send + Sync`, so one instance can serve
 /// concurrent queries from any number of threads with no locking. Nothing is
-/// cached per query — the reference caches nothing either — so results never
-/// depend on what was looked up before.
+/// cached per query, so a result never depends on what was looked up before.
 ///
 /// # Data and licensing
 ///
-/// This type reads the WordNet database; it does not contain it. The files are
-/// covered by Princeton University's own licence, reproduced in
-/// `LICENSE-WORDNET` beside this crate. See the crate-level documentation.
+/// This type *reads* the WordNet database; it does not contain it. The files
+/// are covered by Princeton University's own licence — see the crate-level
+/// documentation.
 #[derive(Debug)]
 pub struct WordNet {
     dict_dir: PathBuf,
     indexes: [IndexFile; 4],
-    datas: [DataFile; 4],
+    data: [DataFile; 4],
 }
 
 impl WordNet {
-    /// Opens the dictionary in `dict_dir` with the default strategy.
+    /// Opens the dictionary in `dict_dir` with the default strategy
+    /// ([`Storage::Resident`]).
     ///
     /// `dict_dir` is the directory holding `index.noun`, `data.noun` and their
-    /// six siblings — the path `require('wordnet-db').path` returns in Node.
-    ///
-    /// Unlike the reference, which constructs successfully against a nonexistent
-    /// directory and only stalls silently at the first lookup, this fails
-    /// immediately if a file is missing.
+    /// six siblings. All eight are opened now, so a missing or unreadable file
+    /// is reported here rather than at the first query that happens to need it.
     ///
     /// # Errors
     ///
@@ -210,50 +105,55 @@ impl WordNet {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] if a file cannot be opened, or [`Error::Prebuilt`] if a
-    /// configured sidecar index does not match the dictionary on disk.
+    /// [`Error::Io`] if a file cannot be opened, [`Error::Prebuilt`] if a
+    /// configured sidecar does not describe the dictionary on disk, or
+    /// [`Error::FileTooLarge`] for any storage but [`Storage::Pread`] on a file
+    /// of 4 GiB or more.
     pub fn open_with(dict_dir: impl AsRef<Path>, config: &Config) -> Result<Self> {
         let dir = dict_dir.as_ref();
-        let dir_str = dir.to_string_lossy().into_owned();
 
         let prebuilt = match (&config.prebuilt, config.storage) {
             (Some(path), Storage::Indexed) => Some(PrebuiltIndex::load(path)?),
             _ => None,
         };
 
-        let mut indexes = Vec::with_capacity(4);
-        let mut datas = Vec::with_capacity(4);
-        for pos in POS_ORDER {
-            let index_name = format!("index.{}", pos.suffix());
-            let data_name = format!("data.{}", pos.suffix());
+        let mut indexes = Vec::with_capacity(PartOfSpeech::ALL.len());
+        let mut data = Vec::with_capacity(PartOfSpeech::ALL.len());
+        for pos in PartOfSpeech::ALL {
+            let index_name = format!("index.{}", pos.file_suffix());
+            let data_name = format!("data.{}", pos.file_suffix());
+            let index_path = dir.join(&index_name);
+            let data_path = dir.join(&data_name);
             match &prebuilt {
                 Some(pb) => {
-                    let ipath = crate::whitespace::path_join(&dir_str, &index_name);
-                    let dpath = crate::whitespace::path_join(&dir_str, &data_name);
                     indexes.push(IndexFile::from_source(
-                        ipath.clone(),
-                        pb.source_for(&index_name, Path::new(&ipath))?,
+                        index_path.clone(),
+                        pos,
+                        pb.source_for(&index_name, &index_path)?,
                     ));
-                    datas.push(DataFile::from_source(
-                        dpath.clone(),
-                        pb.source_for(&data_name, Path::new(&dpath))?,
+                    data.push(DataFile::from_source(
+                        data_path.clone(),
+                        pos,
+                        pb.source_for(&data_name, &data_path)?,
                     ));
                 }
                 None => {
-                    indexes.push(IndexFile::open_path(dir, &index_name, config.storage)?);
-                    datas.push(DataFile::open_path(dir, &data_name, config.storage)?);
+                    indexes.push(IndexFile::open(&index_path, pos, config.storage)?);
+                    data.push(DataFile::open(&data_path, pos, config.storage)?);
                 }
             }
         }
 
         Ok(Self {
             dict_dir: dir.to_path_buf(),
+            // `PartOfSpeech::ALL` has exactly four members and the loop pushes
+            // once per member, so both conversions succeed by construction.
             indexes: indexes
                 .try_into()
-                .unwrap_or_else(|_| unreachable!("exactly four parts of speech")),
-            datas: datas
+                .unwrap_or_else(|_| unreachable!("one index file per part of speech")),
+            data: data
                 .try_into()
-                .unwrap_or_else(|_| unreachable!("exactly four parts of speech")),
+                .unwrap_or_else(|_| unreachable!("one data file per part of speech")),
         })
     }
 
@@ -261,20 +161,18 @@ impl WordNet {
     ///
     /// Checks, in order:
     ///
-    /// 1. `$WORDNET_DB_PATH` — the variable `wordnet-db` consumers conventionally
+    /// 1. `$VERBORA_WORDNET_DICT` — this crate's own override;
+    /// 2. `$WORDNET_DB_PATH` — the variable WordNet distributions conventionally
     ///    set;
-    /// 2. `$VERBORA_WORDNET_DICT` — this crate's own override;
-    /// 3. `./node_modules/wordnet-db/dict` under the current directory.
+    /// 3. `./dict` under the current working directory.
     ///
-    /// The database is deliberately **not** vendored into this crate: it is
-    /// separately licensed and 34 MB unpacked. Install it with
-    /// `npm install wordnet-db` and point one of the variables at the `dict`
-    /// directory.
+    /// A candidate counts only if it actually contains `index.noun`, so a stale
+    /// variable falls through to the next one instead of failing the whole call.
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] with a `NotFound` source, naming the candidates tried, when
-    /// none of them exists.
+    /// [`Error::DictionaryNotFound`], naming every candidate that was tried,
+    /// or anything [`WordNet::open_with`] can return once one is found.
     pub fn from_env() -> Result<Self> {
         Self::from_env_with(&Config::default())
     }
@@ -286,33 +184,21 @@ impl WordNet {
     /// As [`WordNet::from_env`].
     pub fn from_env_with(config: &Config) -> Result<Self> {
         let mut tried = Vec::new();
-        for var in ["WORDNET_DB_PATH", "VERBORA_WORDNET_DICT"] {
-            if let Some(v) = std::env::var_os(var) {
-                let p = PathBuf::from(v);
-                if p.join("index.noun").is_file() {
-                    return Self::open_with(&p, config);
+        for var in ENV_VARS {
+            if let Some(value) = std::env::var_os(var) {
+                let dir = PathBuf::from(value);
+                if dir.join("index.noun").is_file() {
+                    return Self::open_with(&dir, config);
                 }
-                tried.push(format!("${var} = {}", p.display()));
+                tried.push(dir);
             }
         }
-        let local = PathBuf::from("node_modules/wordnet-db/dict");
+        let local = PathBuf::from(FALLBACK_DIR);
         if local.join("index.noun").is_file() {
             return Self::open_with(&local, config);
         }
-        tried.push(local.display().to_string());
-
-        Err(Error::Io {
-            path: local,
-            source: std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "no WordNet dictionary found (tried: {}); \
-                     install it with `npm install wordnet-db` and set \
-                     $WORDNET_DB_PATH to its dict/ directory",
-                    tried.join(", ")
-                ),
-            ),
-        })
+        tried.push(local);
+        Err(Error::DictionaryNotFound { tried })
     }
 
     /// The directory the dictionary was opened from.
@@ -321,64 +207,89 @@ impl WordNet {
         &self.dict_dir
     }
 
-    /// The index file for a part of speech.
+    /// The index file for a category.
     #[must_use]
-    pub fn index_file(&self, pos: Pos) -> &IndexFile {
+    pub fn index_file(&self, pos: PartOfSpeech) -> &IndexFile {
         &self.indexes[pos as usize]
     }
 
-    /// The data file for a part of speech.
+    /// The data file for a category.
     #[must_use]
-    pub fn data_file_for(&self, pos: Pos) -> &DataFile {
-        &self.datas[pos as usize]
-    }
-
-    /// `getDataFile(pos)`: the data file for a *tag*, or `None` for the
-    /// reference's `undefined`.
-    #[must_use]
-    pub fn data_file(&self, tag: &str) -> Option<&DataFile> {
-        Pos::from_tag(tag).map(|p| self.data_file_for(p))
-    }
-
-    /// All four index/data pairs, in the reference's array-literal order.
-    #[must_use]
-    pub fn file_pairs(&self) -> [FilePair<'_>; 4] {
-        [
-            self.pair(Pos::Noun),
-            self.pair(Pos::Verb),
-            self.pair(Pos::Adj),
-            self.pair(Pos::Adv),
-        ]
-    }
-
-    /// One index/data pair.
-    #[must_use]
-    pub fn pair(&self, pos: Pos) -> FilePair<'_> {
-        FilePair {
-            index: self.index_file(pos),
-            data: self.data_file_for(pos),
-        }
+    pub fn data_file(&self, pos: PartOfSpeech) -> &DataFile {
+        &self.data[pos as usize]
     }
 
     // -----------------------------------------------------------------------
     // lookup
     // -----------------------------------------------------------------------
 
+    /// The index entry for `word` in one category, or `None` if it has none.
+    ///
+    /// `word` is converted with [`index_key`] first. To search for a key
+    /// verbatim, call [`IndexFile::entry`] on [`WordNet::index_file`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] or [`Error::MalformedIndexEntry`].
+    pub fn index_entry(&self, word: &str, pos: PartOfSpeech) -> Result<Option<IndexEntry>> {
+        self.index_file(pos).entry(&index_key(word))
+    }
+
+    /// Every sense of `word` in one category, in sense order.
+    ///
+    /// Sense order is the order the index line lists its offsets, which
+    /// `wndb(5WN)` defines as most-frequently-tagged first — so element `0` is
+    /// sense 1. An unknown word gives an empty vector, not an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`], [`Error::MalformedIndexEntry`] or
+    /// [`Error::MalformedSynset`].
+    pub fn senses(&self, word: &str, pos: PartOfSpeech) -> Result<Vec<Synset>> {
+        let Some(entry) = self.index_entry(word, pos)? else {
+            return Ok(Vec::new());
+        };
+        let data = self.data_file(pos);
+        entry
+            .synset_offsets
+            .iter()
+            .map(|&offset| data.synset(offset))
+            .collect()
+    }
+
+    /// One numbered sense, or `None` if the word has no such sense.
+    ///
+    /// # Errors
+    ///
+    /// As [`WordNet::senses`].
+    pub fn sense(&self, sense: &Sense) -> Result<Option<Synset>> {
+        let Some(entry) = self.index_entry(&sense.lemma, sense.pos)? else {
+            return Ok(None);
+        };
+        let Some(offset) = entry.offset_for_sense(sense.number) else {
+            return Ok(None);
+        };
+        self.data_file(sense.pos).synset(offset).map(Some)
+    }
+
     /// The lazy primitive behind [`WordNet::lookup`].
     ///
-    /// Yields synsets in the reference's order — adv, adj, verb, noun, and within
-    /// each part of speech the index line's offsets last-to-first — without
-    /// materialising them all first. Reading a single synset out of `data.noun`
-    /// costs one line read, so stopping early genuinely saves the rest.
+    /// Yields every sense of `word` across all four categories — nouns, then
+    /// verbs, then adjectives, then adverbs, and within each category in sense
+    /// order — without materialising them all first. Reading one synset costs
+    /// one line read, so stopping early genuinely saves the rest.
+    ///
+    /// The iterator stops after yielding its first [`Err`]: once a read has
+    /// failed, continuing would report the same failure repeatedly.
     ///
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// use verbora_wordnet::WordNet;
     ///
     /// let wn = WordNet::from_env()?;
-    /// // "run" has 57 senses; take the first two without reading the other 55.
-    /// for record in wn.lookup_iter("run").take(2) {
-    ///     println!("{}", record?.def);
+    /// // Take the first two senses without reading the rest.
+    /// for synset in wn.lookup_iter("run").take(2) {
+    ///     println!("{}", synset?.gloss.definition);
     /// }
     /// # Ok(()) }
     /// ```
@@ -386,349 +297,182 @@ impl WordNet {
     pub fn lookup_iter<'a>(&'a self, word: &str) -> LookupIter<'a> {
         LookupIter {
             wordnet: self,
-            word: normalize_lookup_word(word),
-            // `files.pop()` visits the array literal backwards.
-            next_pos: 4,
-            offsets: Vec::new(),
+            key: index_key(word).into_owned(),
+            next_pos: 0,
+            offsets: Vec::new().into_iter(),
             data: None,
             failed: false,
         }
     }
 
-    /// `WordNet#lookup`: every synset for `word`, across all four parts of
-    /// speech.
+    /// Every sense of `word`, across all four categories.
     ///
-    /// `word` is lowercased and its whitespace runs are replaced with single
-    /// underscores first, so `"New York"` and `"new  york"` both become
-    /// `"new_york"` — and `"  entity  "` becomes `"_entity_"`, which misses.
+    /// `word` is converted with [`index_key`] first. Categories are consulted
+    /// in the order noun, verb, adjective, adverb, and within each the senses
+    /// come out in sense order.
     ///
-    /// No deduplication: a synset reachable from two parts of speech appears
-    /// twice, exactly as in the reference.
+    /// There is no deduplication: a lemma that exists as both a noun and a verb
+    /// yields the senses of both.
     ///
     /// # Errors
     ///
-    /// Any [`Error`] from reading the index or data files.
-    pub fn lookup(&self, word: &str) -> Result<Vec<DataRecord>> {
+    /// The first error from reading any index or data file.
+    pub fn lookup(&self, word: &str) -> Result<Vec<Synset>> {
         self.lookup_iter(word).collect()
     }
 
-    /// [`WordNet::lookup`], fanned out across a `rayon` thread pool. Requires
+    /// [`WordNet::lookup`] fanned out across a `rayon` thread pool. Requires
     /// the `parallel` feature.
     ///
     /// # Why this exists
     ///
-    /// [`WordNet`] is immutable after construction and `Send + Sync` (see the
-    /// [module-level "Concurrency" section](crate::wordnet) and
-    /// `queries_run_concurrently_on_a_shared_dictionary` in this crate's own
-    /// test suite): nothing is cached per query and nothing is locked, so
-    /// looking up many words is embarrassingly parallel with zero coordination
-    /// cost between lookups. This function is exactly
-    /// `words.par_iter().map(|w| self.lookup(w)).collect()` — a thin fan-out
-    /// over the existing sequential primitive, not a second implementation of
-    /// it. `lookup_iter`'s laziness, `lookup_from_files`'s in-place draining,
-    /// and every other entry point are untouched; if you need those shapes in
-    /// parallel, apply the same `par_iter().map(...)` pattern at your own call
-    /// site (see `site/performance/parallelism.md`).
+    /// [`WordNet`] is immutable after construction and `Send + Sync`: nothing
+    /// is cached per query and nothing is locked, so looking up many words is
+    /// embarrassingly parallel with zero coordination between lookups. This
+    /// function is exactly `words.par_iter().map(|w| self.lookup(w)).collect()`
+    /// — a fan-out over the sequential primitive, not a second implementation
+    /// of it. If you need [`WordNet::lookup_iter`]'s laziness in parallel,
+    /// apply the same pattern at your own call site.
     ///
-    /// # When to reach for it vs. the sequential loop
+    /// # When to reach for it
     ///
-    /// Reach for this only when the *batch*, not the single query, is the unit
-    /// of work — for example, resolving every distinct token in a large corpus
-    /// against WordNet as an offline step. Measured per-item costs on this
-    /// crate's own benchmarks (`Storage::Resident`, warm dictionary):
+    /// When the *batch*, not the single query, is the unit of work — resolving
+    /// every distinct token of a corpus against WordNet as an offline step, for
+    /// example. A single lookup is cheap enough that a small batch can be
+    /// dominated by the cost of scheduling the tasks; prefer a plain
+    /// `.iter().map(...)` loop for a handful of words.
     ///
-    /// | Case | Cost |
-    /// |---|--:|
-    /// | a common entry (`entity`) | ~5.7–6.9 µs |
-    /// | the worst case (`run`, 57 senses) | ~150–206 µs |
-    /// | a miss (`zzzzz`) | ~4–5.4 µs |
-    ///
-    /// Measured on `benches/wordnet.rs`'s own `par_lookup_batch` group
-    /// (`Storage::Resident`, 32 hardware threads, `WORDS` — the same 16-word
-    /// mix `bench_repeat` uses — repeated out to each size), sequential vs.
-    /// `par_lookup_batch`:
-    ///
-    /// | Batch size | Sequential | Parallel | Speedup |
-    /// |--:|--:|--:|--:|
-    /// | 16 | 633.5 µs | 600.6 µs | ~1.05× (noise-level) |
-    /// | 160 | 7.03 ms | 2.10 ms | ~3.3× |
-    /// | 1600 | 100.2 ms | 24.95 ms | ~4.0× |
-    ///
-    /// A batch of 16 common words is close to the break-even point — a `rayon`
-    /// task costs on the order of a microsecond to schedule (see
-    /// `site/performance/parallelism.md`), which is comparable to a single
-    /// lookup's own cost, so the win there is within noise. Prefer a plain
-    /// `.iter().map(WordNet::lookup)` loop at that scale. From a few hundred
-    /// words up — where `run`-like high-sense-count words recur often enough
-    /// to matter, or the batch itself is simply large — the scheduling cost
-    /// amortises and the win is real. Reproduce with
-    /// `cargo bench -p verbora-wordnet --features parallel -- par_lookup_batch`.
+    /// **The crossover point is currently unmeasured for this implementation.**
+    /// Earlier figures were measured against a different search algorithm and
+    /// have been retired rather than carried forward; reproduce with
+    /// `cargo bench -p verbora-wordnet --features parallel -- par_lookup_batch`
+    /// before relying on a number.
     ///
     /// # Allocation behaviour
     ///
-    /// One `Vec<Result<Vec<DataRecord>>>` sized to `words.len()` for the
-    /// output, plus whatever [`WordNet::lookup`] itself allocates per word (one
-    /// `Vec<DataRecord>` per successful lookup, growing to the sense count).
-    /// No additional buffering, no locking, no per-call thread-pool
-    /// construction — this uses whichever global `rayon` pool is already
-    /// installed (or `rayon`'s default one), so pool configuration remains the
-    /// caller's responsibility, not this crate's.
+    /// One `Vec` sized to `words.len()` for the output, plus whatever
+    /// [`WordNet::lookup`] allocates per word. No additional buffering, no
+    /// locking, and no per-call thread pool: this uses whichever global `rayon`
+    /// pool is installed, so pool configuration stays the caller's business.
     ///
     /// # Order and errors
     ///
-    /// Output order matches input order — `results[i]` is `self.lookup(words[i])`
-    /// — via `rayon`'s order-preserving `map` + `collect`, unlike this crate's
-    /// own traversal order for the *senses within* a single lookup (see the
-    /// module-level "Result order" section above, which this function does not
-    /// change). Each element carries its own `Result`, exactly as a sequential
-    /// `words.iter().map(|w| self.lookup(w)).collect::<Vec<_>>()` would: one
-    /// word's [`Error`] does not abort the others.
+    /// Output order matches input order — `results[i]` is
+    /// `self.lookup(words[i])` — and each element carries its own `Result`, so
+    /// one word's failure does not abort the others.
     #[cfg(feature = "parallel")]
-    pub fn par_lookup_batch(&self, words: &[&str]) -> Vec<Result<Vec<DataRecord>>> {
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
+    pub fn par_lookup_batch(&self, words: &[&str]) -> Vec<Result<Vec<Synset>>> {
         use rayon::prelude::*;
         words.par_iter().map(|word| self.lookup(word)).collect()
     }
 
-    /// `WordNet#lookupFromFiles`, mutation included.
-    ///
-    /// `files` is drained to empty and `results` is appended to, because that is
-    /// what the reference's `files.pop()` and `results.push()` do — and both are
-    /// observable, since the caller supplies the arrays. Prefer
-    /// [`WordNet::lookup`] unless you are reproducing that.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Error`] from reading the index or data files.
-    pub fn lookup_from_files(
-        &self,
-        files: &mut Vec<FilePair<'_>>,
-        results: &mut Vec<DataRecord>,
-        word: &str,
-    ) -> Result<()> {
-        while let Some(pair) = files.pop() {
-            let Some(record) = pair.index.lookup(word)? else {
-                continue;
-            };
-            let mut offsets = record.synset_offset;
-            self.push_results(pair.data, results, &mut offsets)?;
-        }
-        Ok(())
-    }
-
-    /// `WordNet#pushResults`, mutation included: drains `offsets` from the back
-    /// and appends each record to `results`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Error`] from reading the data file.
-    pub fn push_results(
-        &self,
-        data: &DataFile,
-        results: &mut Vec<DataRecord>,
-        offsets: &mut Vec<f64>,
-    ) -> Result<()> {
-        while let Some(offset) = offsets.pop() {
-            results.push(data.get(offset)?);
-        }
-        Ok(())
-    }
-
     // -----------------------------------------------------------------------
-    // get
+    // direct synset access
     // -----------------------------------------------------------------------
 
-    /// `WordNet#get`: the synset at a byte offset in the file for `tag`.
+    /// The synset at `offset` in the file for `pos`, owned.
     ///
-    /// `synset_offset` is a **byte offset**, not a record index, and is not
-    /// validated: a mid-record offset yields a garbage record rather than an
-    /// error, and an offset inside the 29-line licence header yields
-    /// [`Error::MissingGloss`] (where the reference throws asynchronously).
+    /// An offset is only meaningful together with a category: the same byte
+    /// position names a different synset in each of the four data files.
     ///
     /// # Errors
     ///
-    /// [`Error::UnknownPos`] for a tag outside `n`, `v`, `a`, `s`, `r` — where
-    /// The reference throws `TypeError … reading 'get'` — plus anything
-    /// [`DataFile::get`] can return.
-    pub fn get(&self, synset_offset: f64, tag: &str) -> Result<DataRecord> {
-        let data = self
-            .data_file(tag)
-            .ok_or_else(|| Error::UnknownPos(tag.to_owned()))?;
-        data.get(synset_offset)
+    /// [`Error::OffsetOutOfRange`] if the offset lies outside the file,
+    /// [`Error::MalformedSynset`] if it does not point at the start of a
+    /// well-formed record of the right category, or [`Error::Io`].
+    pub fn synset(&self, offset: SynsetOffset, pos: PartOfSpeech) -> Result<Synset> {
+        self.data_file(pos).synset(offset)
     }
 
-    /// [`WordNet::get`] with a typed part of speech, which cannot fail to resolve.
+    /// [`WordNet::synset`] without copying: the record is handed to `f` as a
+    /// [`SynsetRef`] borrowing the line it was parsed from.
     ///
     /// # Errors
     ///
-    /// Anything [`DataFile::get`] can return.
-    pub fn get_at(&self, synset_offset: f64, pos: Pos) -> Result<DataRecord> {
-        self.data_file_for(pos).get(synset_offset)
-    }
-
-    // -----------------------------------------------------------------------
-    // synonyms
-    // -----------------------------------------------------------------------
-
-    /// `WordNet#loadSynonyms`, mutation included.
-    ///
-    /// Drains `ptrs` from the back, appending the synset each one points at to
-    /// `synonyms`, then hands `results` to [`WordNet::load_result_synonyms`],
-    /// which drains that too. The reference's two functions are mutually
-    /// recursive; the loops here are the same traversal without the recursion.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownPos`] if a pointer's `pos` is not one of `n`, `v`, `a`,
-    /// `s`, `r` — which does not occur in the shipped database — plus anything
-    /// [`DataFile::get`] can return.
-    pub fn load_synonyms(
+    /// As [`WordNet::synset`].
+    pub fn with_synset<R>(
         &self,
-        synonyms: &mut Vec<DataRecord>,
-        results: &mut Vec<DataRecord>,
-        ptrs: &mut Vec<Pointer>,
-    ) -> Result<()> {
-        while let Some(ptr) = ptrs.pop() {
-            synonyms.push(self.follow(&ptr)?);
-        }
-        self.load_result_synonyms(synonyms, results)
+        offset: SynsetOffset,
+        pos: PartOfSpeech,
+        f: impl FnOnce(&SynsetRef<'_>) -> R,
+    ) -> Result<R> {
+        self.data_file(pos).with_synset(offset, f)
     }
 
-    /// `WordNet#loadResultSynonyms`, mutation included.
-    ///
-    /// Drains `results` from the back; for each record, drains that record's own
-    /// pointer list from the back too. So the output order is: last result
-    /// first, and within it, last pointer first.
+    /// The synset a pointer points at.
     ///
     /// # Errors
     ///
-    /// As [`WordNet::load_synonyms`].
-    pub fn load_result_synonyms(
-        &self,
-        synonyms: &mut Vec<DataRecord>,
-        results: &mut Vec<DataRecord>,
-    ) -> Result<()> {
-        while let Some(mut result) = results.pop() {
-            while let Some(ptr) = result.ptrs.pop() {
-                synonyms.push(self.follow(&ptr)?);
-            }
-        }
-        Ok(())
-    }
-
-    /// `WordNet#lookupSynonyms`: every synset one pointer hop from any sense of
-    /// `word`.
-    ///
-    /// Duplicates are possible and are kept: two senses pointing at the same
-    /// synset yield it twice.
-    ///
-    /// # Errors
-    ///
-    /// As [`WordNet::lookup`] and [`WordNet::load_result_synonyms`].
-    pub fn lookup_synonyms(&self, word: &str) -> Result<Vec<DataRecord>> {
-        let mut results = self.lookup(word)?;
-        let mut synonyms = Vec::new();
-        self.load_result_synonyms(&mut synonyms, &mut results)?;
-        Ok(synonyms)
-    }
-
-    /// `WordNet#getSynonyms(synsetOffset, pos, cb)`.
-    ///
-    /// Re-reads the synset from disk and follows its pointers, last to first.
-    ///
-    /// # Errors
-    ///
-    /// As [`WordNet::get`] and [`WordNet::load_synonyms`].
-    pub fn get_synonyms(&self, synset_offset: f64, tag: &str) -> Result<Vec<DataRecord>> {
-        let record = self.get(synset_offset, tag)?;
-        let mut ptrs = record.ptrs;
-        let mut synonyms = Vec::new();
-        let mut results = Vec::new();
-        self.load_synonyms(&mut synonyms, &mut results, &mut ptrs)?;
-        Ok(synonyms)
-    }
-
-    /// `WordNet#getSynonyms(record, cb)`.
-    ///
-    /// Note that the reference **re-reads** the synset from disk using the
-    /// record's own offset and tag rather than using the pointers it already
-    /// holds, so the caller's record is left untouched. This does the same, which
-    /// is why it takes `&DataRecord` rather than consuming it.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::UnknownPos`] if `record.pos` is absent or unrecognised, plus
-    /// anything [`WordNet::get_synonyms`] can return.
-    pub fn get_synonyms_of(&self, record: &DataRecord) -> Result<Vec<DataRecord>> {
-        let tag = record
-            .pos
-            .as_deref()
-            .ok_or_else(|| Error::UnknownPos(String::new()))?;
-        self.get_synonyms(record.synset_offset, tag)
-    }
-
-    /// Reads the synset a pointer points at.
-    fn follow(&self, ptr: &Pointer) -> Result<DataRecord> {
-        let tag = ptr.pos.as_deref().unwrap_or("");
-        self.get(ptr.synset_offset, tag)
+    /// As [`WordNet::synset`].
+    pub fn target(&self, pointer: &Pointer) -> Result<Synset> {
+        self.synset(pointer.offset, pointer.part_of_speech())
     }
 
     // -----------------------------------------------------------------------
     // relation traversal
     // -----------------------------------------------------------------------
 
-    /// Every synset `record` points at, in the reference's order (last pointer
-    /// first).
+    /// Every synset `synset` points at, in file order.
     ///
-    /// This is [`WordNet::get_synonyms_of`] made lazy, and without the re-read:
-    /// it uses the pointers already on `record`.
+    /// This is the lazy form of `synset.pointers.iter().map(|p| wn.target(p))`.
     #[must_use]
-    pub fn pointers<'a>(&'a self, record: &'a DataRecord) -> Pointers<'a> {
+    pub fn pointers<'a>(&'a self, synset: &'a Synset) -> Pointers<'a> {
         Pointers {
             wordnet: self,
-            ptrs: &record.ptrs,
-            next: record.ptrs.len(),
+            pointers: synset.pointers.iter(),
             symbol: None,
         }
     }
 
-    /// Only the synsets reached by pointers whose symbol is `symbol`.
+    /// Only the synsets reached by pointers whose relation is `symbol`.
     ///
     /// ```no_run
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use verbora_wordnet::{WordNet, pointer};
+    /// use verbora_wordnet::{PartOfSpeech, PointerSymbol, WordNet};
     ///
     /// let wn = WordNet::from_env()?;
-    /// let node = wn.get(3_832_647.0, "n")?;
-    /// for parent in wn.relation(&node, pointer::HYPERNYM) {
-    ///     println!("{}", parent?.def);
+    /// for synset in wn.senses("node", PartOfSpeech::Noun)? {
+    ///     for parent in wn.related(&synset, PointerSymbol::Hypernym) {
+    ///         println!("{} -> {}", synset.lemma(), parent?.lemma());
+    ///     }
     /// }
     /// # Ok(()) }
     /// ```
     #[must_use]
-    pub fn relation<'a>(&'a self, record: &'a DataRecord, symbol: &'a str) -> Pointers<'a> {
+    pub fn related<'a>(&'a self, synset: &'a Synset, symbol: PointerSymbol) -> Pointers<'a> {
         Pointers {
             wordnet: self,
-            ptrs: &record.ptrs,
-            next: record.ptrs.len(),
+            pointers: synset.pointers.iter(),
             symbol: Some(symbol),
         }
     }
 
-    /// The transitive closure of `symbol` from `record`, breadth first.
+    /// The transitive closure of one relation from `synset`, breadth first.
     ///
-    /// Cycle safe: each synset offset is visited at most once. Useful for
-    /// hypernym chains, where following `@` repeatedly walks up to `entity`.
+    /// Each reachable synset is yielded at most once — the visited set is keyed
+    /// on `(category, offset)`, because an offset alone is ambiguous across the
+    /// four data files. The starting synset is **not** yielded, and is marked
+    /// visited, so a relation that cycles back to it terminates.
     ///
-    /// The starting record is **not** yielded.
+    /// Following [`PointerSymbol::Hypernym`] repeatedly walks a noun up to
+    /// `entity`; following [`PointerSymbol::Hyponym`] from a general synset can
+    /// reach tens of thousands of descendants, so prefer `.take(n)` or a filter
+    /// unless you want all of them.
     #[must_use]
-    pub fn closure<'a>(&'a self, record: &DataRecord, symbol: &'a str) -> Closure<'a> {
-        let queue: std::collections::VecDeque<Pointer> =
-            record.ptrs.iter().rev().cloned().collect();
+    pub fn closure<'a>(&'a self, synset: &Synset, symbol: PointerSymbol) -> Closure<'a> {
+        let mut seen = FxHashSet::default();
+        seen.insert((synset.part_of_speech(), synset.offset));
         Closure {
             wordnet: self,
             symbol,
-            queue,
-            seen: vec![record.synset_offset.to_bits()],
+            queue: synset
+                .pointers
+                .iter()
+                .filter(|p| p.symbol == symbol)
+                .copied()
+                .collect(),
+            seen,
         }
     }
 }
@@ -737,47 +481,43 @@ impl WordNet {
 #[derive(Debug)]
 pub struct LookupIter<'a> {
     wordnet: &'a WordNet,
-    word: String,
-    /// Index into [`POS_ORDER`], counted down: `files.pop()` walks it backwards.
+    key: String,
+    /// Index into [`PartOfSpeech::ALL`] of the next category to consult.
     next_pos: usize,
-    /// Offsets still to read for the current part of speech, already reversed.
-    offsets: Vec<f64>,
+    /// Offsets still to read for the current category, in sense order.
+    offsets: std::vec::IntoIter<SynsetOffset>,
     data: Option<&'a DataFile>,
     /// Set once an error has been yielded, so the iterator stops rather than
-    /// re-reporting the same failure forever.
+    /// reporting the same failure forever.
     failed: bool,
 }
 
 impl Iterator for LookupIter<'_> {
-    type Item = Result<DataRecord>;
+    type Item = Result<Synset>;
 
-    fn next(&mut self) -> Option<Result<DataRecord>> {
+    fn next(&mut self) -> Option<Result<Synset>> {
         loop {
             if self.failed {
                 return None;
             }
-            if let Some(offset) = self.offsets.pop() {
+            if let Some(offset) = self.offsets.next() {
+                // `data` is set together with `offsets`, so it is `Some`
+                // whenever an offset is pending.
                 let data = self.data?;
-                return Some(match data.get(offset) {
-                    Ok(r) => Ok(r),
+                return Some(match data.synset(offset) {
+                    Ok(record) => Ok(record),
                     Err(e) => {
                         self.failed = true;
                         Err(e)
                     }
                 });
             }
-            if self.next_pos == 0 {
-                return None;
-            }
-            self.next_pos -= 1;
-            let pos = POS_ORDER[self.next_pos];
-            let pair = self.wordnet.pair(pos);
-            match pair.index.lookup(&self.word) {
-                Ok(Some(record)) => {
-                    // `offsets.pop()` visits the index line's offsets backwards;
-                    // popping a forward Vec does the same thing.
-                    self.offsets = record.synset_offset;
-                    self.data = Some(pair.data);
+            let pos = *PartOfSpeech::ALL.get(self.next_pos)?;
+            self.next_pos += 1;
+            match self.wordnet.index_file(pos).entry(&self.key) {
+                Ok(Some(entry)) => {
+                    self.offsets = entry.synset_offsets.into_iter();
+                    self.data = Some(self.wordnet.data_file(pos));
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -789,68 +529,59 @@ impl Iterator for LookupIter<'_> {
     }
 }
 
-/// Iterator returned by [`WordNet::pointers`] and [`WordNet::relation`].
+impl std::iter::FusedIterator for LookupIter<'_> {}
+
+/// Iterator returned by [`WordNet::pointers`] and [`WordNet::related`].
 #[derive(Debug)]
 pub struct Pointers<'a> {
     wordnet: &'a WordNet,
-    ptrs: &'a [Pointer],
-    /// One past the next pointer to visit; counted down, because the reference
-    /// drains the list from the back.
-    next: usize,
-    symbol: Option<&'a str>,
+    pointers: std::slice::Iter<'a, Pointer>,
+    symbol: Option<PointerSymbol>,
 }
 
 impl Iterator for Pointers<'_> {
-    type Item = Result<DataRecord>;
+    type Item = Result<Synset>;
 
-    fn next(&mut self) -> Option<Result<DataRecord>> {
-        while self.next > 0 {
-            self.next -= 1;
-            let ptr = &self.ptrs[self.next];
-            if let Some(want) = self.symbol {
-                if ptr.pointer_symbol.as_deref() != Some(want) {
-                    continue;
-                }
+    fn next(&mut self) -> Option<Result<Synset>> {
+        for pointer in self.pointers.by_ref() {
+            if self.symbol.is_some_and(|want| pointer.symbol != want) {
+                continue;
             }
-            return Some(self.wordnet.follow(ptr));
+            return Some(self.wordnet.target(pointer));
         }
         None
     }
 }
 
+impl std::iter::FusedIterator for Pointers<'_> {}
+
 /// Iterator returned by [`WordNet::closure`].
 #[derive(Debug)]
 pub struct Closure<'a> {
     wordnet: &'a WordNet,
-    symbol: &'a str,
-    queue: std::collections::VecDeque<Pointer>,
-    /// Offsets already emitted, as bit patterns so `NaN` compares by identity.
-    seen: Vec<u64>,
+    symbol: PointerSymbol,
+    queue: VecDeque<Pointer>,
+    /// Every `(category, offset)` already emitted, plus the starting synset.
+    seen: FxHashSet<(PartOfSpeech, SynsetOffset)>,
 }
 
 impl Iterator for Closure<'_> {
-    type Item = Result<DataRecord>;
+    type Item = Result<Synset>;
 
-    fn next(&mut self) -> Option<Result<DataRecord>> {
-        while !self.queue.is_empty() {
-            let ptr = self.queue.pop_front()?;
-            if ptr.pointer_symbol.as_deref() != Some(self.symbol) {
+    fn next(&mut self) -> Option<Result<Synset>> {
+        while let Some(pointer) = self.queue.pop_front() {
+            if !self.seen.insert((pointer.part_of_speech(), pointer.offset)) {
                 continue;
             }
-            let key = ptr.synset_offset.to_bits();
-            if self.seen.contains(&key) {
-                continue;
-            }
-            self.seen.push(key);
-            return Some(match self.wordnet.follow(&ptr) {
-                Ok(record) => {
-                    // Children enter the queue in the same reversed order the
-                    // root's own pointers did, so the walk is consistent with
-                    // `pointers()` at every level.
-                    self.queue.extend(record.ptrs.iter().rev().cloned());
-                    Ok(record)
+            return Some(match self.wordnet.target(&pointer) {
+                Ok(synset) => {
+                    self.queue
+                        .extend(synset.pointers.iter().filter(|p| p.symbol == self.symbol));
+                    Ok(synset)
                 }
                 Err(e) => {
+                    // Stop rather than continuing past a file that cannot be
+                    // read: every later answer would be from the same file.
                     self.queue.clear();
                     Err(e)
                 }
@@ -860,29 +591,11 @@ impl Iterator for Closure<'_> {
     }
 }
 
+impl std::iter::FusedIterator for Closure<'_> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pos_dispatch_matches_the_reference_switch() {
-        assert_eq!(Pos::from_tag("n"), Some(Pos::Noun));
-        assert_eq!(Pos::from_tag("v"), Some(Pos::Verb));
-        assert_eq!(Pos::from_tag("a"), Some(Pos::Adj));
-        assert_eq!(Pos::from_tag("s"), Some(Pos::Adj));
-        assert_eq!(Pos::from_tag("r"), Some(Pos::Adv));
-        for bad in ["N", "V", "A", "S", "R", "", "noun", "x", "nn", " n", "ن"] {
-            assert_eq!(Pos::from_tag(bad), None, "{bad:?}");
-        }
-    }
-
-    #[test]
-    fn pos_round_trips_through_its_tag() {
-        for p in Pos::all() {
-            assert_eq!(Pos::from_tag(p.tag()), Some(p));
-        }
-        assert_eq!(Pos::all(), [Pos::Noun, Pos::Verb, Pos::Adj, Pos::Adv]);
-    }
 
     #[test]
     fn wordnet_is_send_and_sync() {
@@ -890,5 +603,30 @@ mod tests {
         assert_send_sync::<WordNet>();
         assert_send_sync::<IndexFile>();
         assert_send_sync::<DataFile>();
+    }
+
+    #[test]
+    fn naming_a_sidecar_selects_the_indexed_strategy() {
+        let cfg = Config::new(Storage::Pread).with_prebuilt("x.vbwnix");
+        assert_eq!(cfg.storage, Storage::Indexed);
+        assert_eq!(cfg.prebuilt.as_deref(), Some(Path::new("x.vbwnix")));
+        assert_eq!(Config::default().prebuilt, None);
+    }
+
+    #[test]
+    fn the_index_and_data_arrays_are_addressed_by_category() {
+        // `index_file`/`data_file` index by `pos as usize`, which is only
+        // correct if the enum's discriminants match `PartOfSpeech::ALL`'s order.
+        for (i, pos) in PartOfSpeech::ALL.iter().enumerate() {
+            assert_eq!(*pos as usize, i, "{pos:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_dictionary_fails_at_open() {
+        assert!(matches!(
+            WordNet::open("/no/such/dir"),
+            Err(Error::Io { .. })
+        ));
     }
 }

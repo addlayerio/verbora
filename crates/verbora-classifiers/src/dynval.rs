@@ -1,39 +1,41 @@
-//! A reference value, its `Number::toString`, and the two serialisers the
-//! classifiers depend on.
-//!
-//! Two apparently-cosmetic pieces of the reference reach directly into the numbers
-//! this crate computes:
-//!
-//! * `Context.toString()` calls **`safe-stable-stringify`**, and the resulting
-//!   string is the *hash key* under which every frequency, weight and
-//!   normalisation constant is stored. Change one byte of it — sort keys by
-//!   Unicode scalar value instead of UTF-16 code unit, print `1e21` as
-//!   `1000000000000000000000` — and two contexts that the reference keeps apart
-//!   collide, or two that it merges stay separate. The trained model changes.
-//! * `save()` calls `JSON.stringify`, and the reference's own spec files read
-//!   the bytes back. Key order there is the reference's own-property order, which
-//!   is *not* the sorted order `safe-stable-stringify` uses.
-//!
-//! Both need the reference's `Number::toString`, which differs from Rust's `{}` in
-//! exactly the region where the exponent form kicks in:
-//!
-//! | value | Rust `{}` | the reference |
-//! |---|---|---|
-//! | `1e21` | `1000000000000000000000` | `1e+21` |
-//! | `1e-7` | `0.0000001` | `1e-7` |
-//! | `-0.0` | `-0` | `0` |
-//!
-//! [`number_to_string`] implements the ECMA-262 algorithm on top of Rust's
-//! shortest-round-trip digits, so the digits themselves come from a correctly
-//! rounded formatter and only the *layout* is reimplemented.
-
 use std::fmt;
 
-/// A reference value, as far as this crate needs one.
+/// A JSON value carrying the extra states this crate's persisted models need.
 ///
-/// `serde_json::Value` cannot stand in: it has no `undefined`, cannot hold
-/// `NaN`/`Infinity` (all three occur in maxent contexts and alpha vectors), and
-/// does not distinguish `-0.0`, which `Number::toString` renders as `0`.
+/// `serde_json::Value` cannot stand in: it has no `undefined` (an absent
+/// member of a saved model is exactly that), cannot hold `NaN`/`Infinity` (a
+/// Bayes model fitted with a negative smoothing constant scores one — see the
+/// crate-level "`NaN` is computable" section), and does not distinguish
+/// `-0.0`, which is written as `0` here.
+///
+/// Two apparently-cosmetic properties of the encoding reach directly into what
+/// a saved model means:
+///
+/// * **Object key order is data.** `save()` writes a model as JSON and
+///   `restore()` reads it back by inserting each object's fields in the order
+///   they appear. A classifier's `features` object is written in feature-slot
+///   order, so the writer has to leave key order exactly as built: that order
+///   is the only thing carrying the feature slots across the round trip — see
+///   [`json_stringify`](DynValue::json_stringify).
+/// * **The spelling of a number is data.** Every number in a saved model goes
+///   through [`number_to_string`], and a saved model is required to come back
+///   byte for byte, so the layout rules below are part of the format rather
+///   than a formatting preference.
+///
+/// [`number_to_string`] implements the ECMA-262 `Number::toString` layout on
+/// top of Rust's shortest-round-trip digits — the digits come from a correctly
+/// rounded formatter and only the layout is written here. It differs from
+/// Rust's `{}` exactly where the exponent form kicks in:
+///
+/// | value | Rust `{}` | written here |
+/// |---|---|---|
+/// | `1e21` | `1000000000000000000000` | `1e+21` |
+/// | `1e-7` | `0.0000001` | `1e-7` |
+/// | `-0.0` | `-0` | `0` |
+///
+/// [`stable_stringify`](DynValue::stable_stringify) is the third serialiser: a
+/// canonical form with object keys sorted, for a caller that needs two equal
+/// values to render identically however each was built.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DynValue {
     /// `undefined`.
@@ -53,12 +55,13 @@ pub enum DynValue {
 }
 
 impl DynValue {
-    /// The value's `safe-stable-stringify` rendering, as `Context.toString`
-    /// computes it.
+    /// A canonical rendering: object keys sorted by UTF-16 code unit, so two
+    /// values with the same members render identically however each was built.
     ///
-    /// Returns `None` for a top-level `undefined`, mirroring the reference
-    /// function returning the value `undefined` rather than a string — which is
-    /// why `Context(undefined).toString()` never caches and recomputes forever.
+    /// `NaN` and the infinities are written as `null`, which is all JSON can
+    /// carry. Returns `None` for a top-level [`Undefined`](Self::Undefined),
+    /// which has no JSON rendering at all; an `undefined` object member is
+    /// dropped, and an `undefined` array element is written as `null`.
     pub fn stable_stringify(&self) -> Option<String> {
         let mut out = String::new();
         if write_stable(&mut out, self) {
@@ -68,9 +71,16 @@ impl DynValue {
         }
     }
 
-    /// The value's `JSON.stringify` rendering, preserving own-property order.
+    /// The value as JSON, with every object's fields in the order they were
+    /// built — nothing is sorted or hoisted.
     ///
-    /// Returns `None` for a top-level `undefined`, as `JSON.stringify` does.
+    /// That order is part of the contract, not a formatting detail: a
+    /// classifier's `features` object is written in feature-slot order and read
+    /// back by inserting its fields in the order they appear, so reordering here
+    /// would silently re-key every restored model.
+    ///
+    /// Returns `None` for a top-level [`Undefined`](Self::Undefined), which has
+    /// no JSON rendering.
     pub fn json_stringify(&self) -> Option<String> {
         let mut out = String::new();
         if write_json(&mut out, self) {
@@ -80,7 +90,11 @@ impl DynValue {
         }
     }
 
-    /// `String(value)` for the operands of `Element.toString`'s `a + b`.
+    /// The value's plain-text form: a number through [`number_to_string`],
+    /// `null` and `undefined` by name, an array as its elements joined with
+    /// `,` (a `null` or `undefined` element contributing nothing), and any
+    /// object as the literal `[object Object]`. Text is not a serialisation —
+    /// [`json_stringify`](Self::json_stringify) is what writes structure.
     pub fn to_text(&self) -> String {
         match self {
             Self::Undefined => "undefined".to_owned(),
@@ -101,26 +115,6 @@ impl DynValue {
         }
     }
 
-    /// The same value with every object's properties reordered the way
-    /// the reference enumerates them: array-index keys first in ascending numeric
-    /// order, then the rest in insertion order.
-    ///
-    /// Useful when a structure built in source order has to be compared against
-    /// something that went through `Object.keys` — a maxent POS context, for
-    /// instance, is populated `0, -2, -1, 1, 2` but enumerates `0, 1, 2, -2, -1`.
-    pub fn in_own_property_order(&self) -> Self {
-        match self {
-            Self::Obj(fields) => Self::Obj(
-                own_key_order(fields)
-                    .into_iter()
-                    .map(|(k, v)| (k.clone(), v.in_own_property_order()))
-                    .collect(),
-            ),
-            Self::Arr(items) => Self::Arr(items.iter().map(Self::in_own_property_order).collect()),
-            other => other.clone(),
-        }
-    }
-
     /// Looks up an own property, if this is an object.
     pub fn get(&self, key: &str) -> Option<&Self> {
         match self {
@@ -137,7 +131,7 @@ impl DynValue {
         }
     }
 
-    /// The reference truthiness: everything except `false`, `0`, `-0`, `NaN`,
+    /// ECMA-262 `ToBoolean`: everything except `false`, `0`, `-0`, `NaN`,
     /// `""`, `null` and `undefined`.
     pub fn is_truthy(&self) -> bool {
         match self {
@@ -181,12 +175,12 @@ impl From<bool> for DynValue {
 }
 
 // --------------------------------------------------------------------------
-// Number::toString
+// ECMA-262 Number::toString
 // --------------------------------------------------------------------------
 
 /// ECMA-262 `Number::toString(x, 10)`.
 ///
-/// Rust's `{}` and the reference agree on the *digits* — both print the shortest
+/// Rust's `{}` and this layout agree on the *digits* — both print the shortest
 /// decimal that round-trips — but disagree on when to switch to exponent
 /// notation and on the sign of zero. This takes Rust's shortest digits from
 /// `{:e}` and re-lays them out by the specification's five cases.
@@ -195,8 +189,8 @@ pub fn number_to_string(x: f64) -> String {
         return "NaN".to_owned();
     }
     if x == 0.0 {
-        // Covers -0.0: the reference's String(-0) is "0". (Only Object.is and
-        // 1/x can see the sign; nothing in these classifiers does.)
+        // Covers -0.0: the specification renders both zeros as "0", so the
+        // sign of zero never reaches a saved model.
         return "0".to_owned();
     }
     if x.is_infinite() {
@@ -259,11 +253,12 @@ const fn sign_of(n: i32) -> char {
 // string escaping
 // --------------------------------------------------------------------------
 
-/// Appends a JSON string literal, escaping exactly what `JSON.stringify` does.
+/// Appends a JSON string literal, escaping the control set JSON requires and
+/// nothing beyond it.
 ///
-/// Non-ASCII characters are emitted **raw**, not `\u`-escaped — the reference's
-/// context keys contain `café` and `😀` verbatim, and escaping them would change
-/// every hash key derived from them.
+/// Non-ASCII characters are emitted **raw**, not `\u`-escaped: a feature key
+/// holding `café` or `😀` is stored verbatim, and escaping it would change the
+/// bytes of every model that carries one.
 fn write_string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
@@ -285,7 +280,7 @@ fn write_string(out: &mut String, s: &str) {
 }
 
 // --------------------------------------------------------------------------
-// safe-stable-stringify
+// canonical (sorted-key) form
 // --------------------------------------------------------------------------
 
 /// Compares two property names the way `Array.prototype.sort` does: by UTF-16
@@ -299,8 +294,8 @@ pub fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
 
-/// Writes `value` as `safe-stable-stringify` would; returns `false` if the
-/// value is `undefined` (which the reference function omits entirely).
+/// Writes `value` with every object's keys sorted by UTF-16 code unit;
+/// returns `false` for `undefined`, which has no JSON rendering.
 fn write_stable(out: &mut String, value: &DynValue) -> bool {
     match value {
         DynValue::Undefined => false,
@@ -313,7 +308,7 @@ fn write_stable(out: &mut String, value: &DynValue) -> bool {
             true
         }
         DynValue::Num(n) => {
-            // JSON has no NaN or Infinity; the reference emits `null` for both.
+            // JSON has no NaN or Infinity; both are written as `null`.
             out.push_str(&if n.is_finite() {
                 number_to_string(*n)
             } else {
@@ -362,40 +357,24 @@ fn write_stable(out: &mut String, value: &DynValue) -> bool {
 }
 
 // --------------------------------------------------------------------------
-// JSON.stringify
+// JSON output
 // --------------------------------------------------------------------------
 
-/// Orders object entries the way the reference enumerates own properties:
-/// array-index keys first in ascending numeric order, then the rest in
-/// insertion order.
+/// Writes `value` in its own field order, with no sorting and no reordering.
 ///
-/// `JSON.stringify` walks `OwnPropertyKeys`, so this reordering is visible in
-/// every saved file. A maxent POS context is the everyday case: its `tagWindow`
-/// is built as `{'0':…, '-2':…, '-1':…, '1':…, '2':…}` and serialises as
-/// `{"0":…,"1":…,"2":…,"-2":…,"-1":…}`, because `-2` and `-1` are not indices.
-fn own_key_order(fields: &[(String, DynValue)]) -> Vec<&(String, DynValue)> {
-    let mut indices: Vec<(u32, &(String, DynValue))> = Vec::new();
-    let mut rest: Vec<&(String, DynValue)> = Vec::new();
-    for field in fields {
-        if crate::ordmap::is_array_index(&field.0) {
-            indices.push((field.0.parse().expect("checked by is_array_index"), field));
-        } else {
-            rest.push(field);
-        }
-    }
-    indices.sort_by_key(|(n, _)| *n);
-    let mut out: Vec<&(String, DynValue)> = indices.into_iter().map(|(_, f)| f).collect();
-    out.extend(rest);
-    out
-}
-
-/// Writes `value` as `JSON.stringify` would: own-property order, no sorting.
+/// The field order is load-bearing, not cosmetic. `Classifier`'s `features`
+/// object is written in slot order and read back by inserting the fields in the
+/// order they appear, so a feature keeps its slot across a save/restore round
+/// trip only because this writer leaves the order alone. A writer that sorted
+/// the keys, or hoisted the integer-like ones such as `"42"` to the front,
+/// would hand a restored model a feature layout its weights were never trained
+/// against.
 fn write_json(out: &mut String, value: &DynValue) -> bool {
     match value {
         DynValue::Obj(fields) => {
             out.push('{');
             let mut first = true;
-            for (k, v) in own_key_order(fields) {
+            for (k, v) in fields {
                 if matches!(v, DynValue::Undefined) {
                     continue;
                 }
@@ -427,10 +406,12 @@ fn write_json(out: &mut String, value: &DynValue) -> bool {
     }
 }
 
-/// Writes `value` as `JSON.stringify(value, null, indent)` would.
+/// Writes `value` as JSON, indented by `indent` spaces per nesting level and
+/// with every object's keys left in their own field order.
 ///
-/// The maxent `save()` uses an indent of 2, and the reference's spec files read
-/// those bytes back, so the pretty form is part of the observable contract.
+/// Every `save()` in this crate writes with an indent of 2, and a saved file is
+/// read back byte for byte by the round-trip tests, so the pretty form is part
+/// of the observable contract.
 pub fn json_stringify_pretty(value: &DynValue, indent: usize) -> Option<String> {
     let mut out = String::new();
     if write_pretty(&mut out, value, indent, 0) {
@@ -444,8 +425,8 @@ fn write_pretty(out: &mut String, value: &DynValue, indent: usize, depth: usize)
     let pad = |out: &mut String, d: usize| out.extend(std::iter::repeat_n(' ', indent * d));
     match value {
         DynValue::Obj(fields) => {
-            let live: Vec<&(String, DynValue)> = own_key_order(fields)
-                .into_iter()
+            let live: Vec<&(String, DynValue)> = fields
+                .iter()
                 .filter(|(_, v)| !matches!(v, DynValue::Undefined))
                 .collect();
             if live.is_empty() {
@@ -492,7 +473,7 @@ fn write_pretty(out: &mut String, value: &DynValue, indent: usize, depth: usize)
 }
 
 // --------------------------------------------------------------------------
-// JSON.parse
+// JSON input
 // --------------------------------------------------------------------------
 
 /// Why a document could not be parsed as JSON.
@@ -513,7 +494,8 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 impl DynValue {
-    /// `JSON.parse`, producing a [`DynValue`] with object keys in document order.
+    /// Parses a JSON document, producing a [`DynValue`] whose object keys are
+    /// in document order.
     ///
     /// # Why not `serde_json`
     ///
@@ -531,7 +513,7 @@ impl DynValue {
     pub fn parse(input: &str) -> Result<Self, ParseError> {
         let bytes = input.as_bytes();
         let mut pos = 0usize;
-        let value = parse_value(input, bytes, &mut pos)?;
+        let value = parse_value(input, bytes, &mut pos, 0)?;
         skip_ws(bytes, &mut pos);
         if pos != bytes.len() {
             return Err(ParseError {
@@ -566,7 +548,31 @@ fn expect(
     }
 }
 
-fn parse_value(input: &str, bytes: &[u8], pos: &mut usize) -> Result<DynValue, ParseError> {
+/// The deepest nesting `parse` accepts.
+///
+/// This parser descends one stack frame per `[` or `{`, so without a bound a
+/// caller-supplied document is a stack overflow rather than a parse error —
+/// and a stack overflow aborts the process instead of unwinding, so no caller
+/// can catch it. Model files come from disk, which makes their depth an input
+/// like any other. 128 is far past any real serialized model (the deepest
+/// this crate writes is 4) and far short of the frames a default 8 MiB stack
+/// holds.
+const MAX_DEPTH: usize = 128;
+
+fn parse_value(
+    input: &str,
+    bytes: &[u8],
+    pos: &mut usize,
+    depth: usize,
+) -> Result<DynValue, ParseError> {
+    // `depth` is the count already entered, so this admits exactly
+    // `MAX_DEPTH` levels of nesting rather than one more than the name says.
+    if depth >= MAX_DEPTH {
+        return Err(ParseError {
+            offset: *pos,
+            message: "nesting too deep",
+        });
+    }
     skip_ws(bytes, pos);
     match bytes.get(*pos) {
         Some(b'{') => {
@@ -582,7 +588,7 @@ fn parse_value(input: &str, bytes: &[u8], pos: &mut usize) -> Result<DynValue, P
                 let key = parse_string(input, bytes, pos)?;
                 skip_ws(bytes, pos);
                 expect(bytes, pos, b':', "expected ':'")?;
-                let value = parse_value(input, bytes, pos)?;
+                let value = parse_value(input, bytes, pos, depth + 1)?;
                 fields.push((key, value));
                 skip_ws(bytes, pos);
                 match bytes.get(*pos) {
@@ -609,7 +615,7 @@ fn parse_value(input: &str, bytes: &[u8], pos: &mut usize) -> Result<DynValue, P
                 return Ok(DynValue::Arr(items));
             }
             loop {
-                items.push(parse_value(input, bytes, pos)?);
+                items.push(parse_value(input, bytes, pos, depth + 1)?);
                 skip_ws(bytes, pos);
                 match bytes.get(*pos) {
                     Some(b',') => *pos += 1,
@@ -743,10 +749,29 @@ fn parse_string(input: &str, bytes: &[u8], pos: &mut usize) -> Result<String, Pa
                 }
             }
             Some(_) => {
+                // Two separate invariants meet on the next line, and only one
+                // of them is what the `expect` guards.
+                //
+                // `.next()` is `Some` because this arm was entered from
+                // `Some(_) = bytes.get(*pos)`, so `*pos < input.len()` and the
+                // remaining slice is non-empty. That is the `expect`.
+                //
+                // The `input[*pos..]` slice itself panics if `*pos` is not a
+                // character boundary, and *that* is the invariant with no type
+                // behind it: every advance in this parser keeps `*pos` on a
+                // boundary, because it is either `*pos += 1` past a byte
+                // matched by ASCII value (an ASCII byte never occurs inside a
+                // multi-byte UTF-8 sequence, so the next index starts a
+                // character), or `*pos += c.len_utf8()` for a character just
+                // decoded here, or `*pos = end` in `parse_hex4` — which sets it
+                // only after `input.get(*pos..end)` returned `Some`, and `get`
+                // validates both ends. Replacing that `get` with direct
+                // indexing would make this line panickable on input as
+                // ordinary as `"éé"`.
                 let c = input[*pos..]
                     .chars()
                     .next()
-                    .expect("pos is a char boundary");
+                    .expect("this arm is entered only when *pos < input.len()");
                 out.push(c);
                 *pos += c.len_utf8();
             }
@@ -770,6 +795,29 @@ fn parse_hex4(input: &str, pos: &mut usize) -> Result<u16, ParseError> {
 
 #[cfg(test)]
 mod tests {
+    /// Depth is an input, and an unbounded recursive parser turns it into a
+    /// process abort rather than an error.
+    ///
+    /// Before the bound, `"[".repeat(20_000)` overflowed the stack — and a
+    /// stack overflow is not a panic: it aborts, so no caller can catch it,
+    /// and a model file read from disk is enough to kill the process. The
+    /// assertion is that this is now an ordinary parse error.
+    #[test]
+    fn nesting_deeper_than_the_bound_is_an_error_not_an_abort() {
+        for n in [MAX_DEPTH + 1, 20_000] {
+            let deep = format!("{}{}", "[".repeat(n), "]".repeat(n));
+            let err = DynValue::parse(&deep).expect_err("must refuse");
+            assert_eq!(err.message, "nesting too deep");
+        }
+    }
+
+    /// The bound admits every shape a serialized model actually has.
+    #[test]
+    fn nesting_up_to_the_bound_still_parses() {
+        let ok = format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH));
+        assert!(DynValue::parse(&ok).is_ok());
+    }
+
     use super::*;
 
     fn obj(pairs: &[(&str, DynValue)]) -> DynValue {
@@ -784,8 +832,11 @@ mod tests {
     // 3.14 is a fixture input, not an approximation of pi.
     #[allow(clippy::approx_constant)]
     #[test]
-    fn number_to_string_matches_the_reference() {
-        // Values recorded from the reference engine; the exponent-form thresholds are the point.
+    fn number_to_string_follows_the_documented_spelling_rules() {
+        // Each value is derived from the rules `number_to_string` documents:
+        // plain decimal inside 1e-7..1e21, exponent form outside it, no
+        // trailing zeros, and `-0.0` spelled `"0"`. The thresholds are the
+        // point of the fixture — they are where the two forms meet.
         assert_eq!(number_to_string(0.0), "0");
         assert_eq!(number_to_string(-0.0), "0");
         assert_eq!(number_to_string(1.0), "1");

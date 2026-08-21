@@ -1,40 +1,38 @@
-//! The Portuguese Snowball stemmer, ported from
-//! The reference `porter_stemmer_pt`.
+//! The Portuguese Snowball stemmer.
 //!
 //! # Regions are marked once and never remarked
 //!
-//! `stem` marks `all`, `r1`, `r2` and `rv` immediately after the prelude and then
-//! mutates the string through five steps without recomputing any of them. A
-//! region is therefore an index into a string that no longer exists, and
-//! `hasSuffixInRegion` compares `string.length - suffix.length >= regionStart`
-//! against the *current* length. Recomputing regions after each step — which
-//! reads as an obvious tidy-up — changes results.
+//! `stem` marks `all`, `r1`, `r2` and `rv` immediately after the prelude and
+//! then mutates the word through five steps without recomputing any of them. A
+//! region is therefore an index into a word that no longer exists, and the
+//! region test compares `length - suffix.length >= region_start` against the
+//! *current* length. Recomputing regions after each step — which reads as an
+//! obvious tidy-up — changes results.
 //!
 //! # Steps chain rather than alternate
 //!
-//! Step 1 is nine consecutive `replaceSuffixInRegion` calls, not an `else if`
-//! ladder: `"abilidades"` can lose `"idades"` and then have the residue matched
-//! again by a later call in the same step. Only steps 2/4 and 3/4 are mutually
-//! exclusive, and that choice is made by comparing against the string as it was
+//! Step 1 is nine consecutive suffix replacements, not an `else if` ladder:
+//! `"abilidades"` can lose `"idades"` and then have the residue matched again
+//! by a later rule in the same step. Only steps 2/4 and 3/4 are mutually
+//! exclusive, and that choice is made by comparing against the word as it was
 //! before step 1.
 //!
 //! # First listed suffix, not longest
 //!
-//! `replaceSuffixInRegion` walks its array and stops at the first entry that
-//! matches, so every table is hand-ordered longest-first and the order is the
-//! algorithm. This is the opposite of the Spanish/French/Dutch `endsinArr`
-//! convention, and the two must not share a helper.
+//! A step walks its table and stops at the first entry that matches, so every
+//! table is hand-ordered longest-first and the order is the algorithm. This is
+//! the opposite of the Spanish/French/Dutch longest-match convention, and the
+//! two must not share a helper.
 //!
 //! `stem` nevertheless runs each table through one [`crate::among`]
 //! longest-match binary search (`docs/PERFORMANCE_GAPS.md` entry 34): in every
 //! shipped table, whenever one entry is a proper suffix of another the longer
 //! one is listed first, so first-listed and longest coincide — including under
 //! the region check, because an entry too long for the region is excluded from
-//! the search by the same `lb` limit `hasSuffixInRegion` applies. That table
-//! property is pinned by `tables_are_ordered_longest_first_within_nests`
-//! below, so a future table edit cannot silently break the equivalence, and
-//! the pre-conversion implementation is kept in the tests as the
-//! byte-exactness oracle.
+//! the search by the same `lb` limit the region test applies. That table
+//! property is pinned by `tables_are_ordered_longest_first_within_nests` below,
+//! so a future table edit cannot silently break the equivalence, and the
+//! first-match linear scan is kept in the tests as a differential oracle.
 //!
 //! # The nasal detour
 //!
@@ -43,23 +41,29 @@
 //! again at the end. Half the suffix table is spelled in the detoured form
 //! (`"aço~es"`, `"ara~o"`) for that reason.
 //!
-//! # Why not [`verbora_core::Token`]
+//! # The text unit
 //!
-//! The reference is written against `Token`, and this crate re-exports it — but
-//! `Token` stores `Vec<char>`, which is divergence **D1** in `docs/PARITY.md`.
-//! Region marking here compares positions against the literal constants 1, 2 and
-//! 3 and against `string.length`, all of which the reference counts in UTF-16 code
-//! units, so this port runs on a `Vec<u16>` instead.
+//! Region marking here compares positions against the literal constants 1, 2
+//! and 3 and against the word's length, and all of those are counts of
+//! **Unicode scalar values** — R1, R2, RV, the `rv > 3` guard, the literal
+//! `rv = 3`, and every cut. See [`crate::units`] for why a Snowball algorithm
+//! is specified over *letters* and why the scalar value is the letter.
+//! `stem("😀eado")` is `"😀ead"`: five letters, so RV starts at 3 and
+//! leaves two of them, which the three-letter step-2 entry `-ado` does not fit.
+//!
+//! The nasal detour below makes the point concrete in the other direction. It
+//! rewrites one character into two *deliberately*, so that a nasal vowel counts
+//! as vowel-plus-consonant during region marking — a length change the
+//! algorithm asks for. Encoding-driven length changes are exactly what it does
+//! not ask for, and there are now none.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
-use verbora_tokenizers::classes;
-
-use crate::among::AmongTable;
+use crate::among::{AmongTable, Buf, UnionTable, longest_at_most};
 use crate::base::{Casing, TokenizeAndStem};
-use crate::stopwords::{self, Language};
-use crate::units::{ends_with, push_str, text, units};
+use crate::stopwords::Language;
+use crate::units::ends_with;
 
 /// The Portuguese Snowball stemmer.
 ///
@@ -73,30 +77,30 @@ use crate::units::{ends_with, push_str, text, units};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerPt;
 
-/// `'aeiouáéíóúâêôàãõ'` — the vowel set `usingVowels` installs.
+/// The Portuguese vowels, as the region scans see them.
 ///
-/// `ã` and `õ` are unreachable after the prelude has rewritten them, and are kept
-/// because the reference keeps them.
+/// `ã` and `õ` are deliberately **absent**. The prelude rewrites them to `a~`
+/// and `o~` before any region is marked — that is the whole point of the nasal
+/// detour, so that a nasal vowel counts as *vowel followed by consonant* — so
+/// neither can be in the buffer when this predicate runs. They were listed
+/// here and could never match; `the_nasal_detour_leaves_no_nasal_behind` pins
+/// the reason rather than the removal.
 #[inline]
-fn is_vowel(c: u16) -> bool {
+fn is_vowel(c: char) -> bool {
     matches!(
         c,
-        0x61 | 0x65 | 0x69 | 0x6F | 0x75          // a e i o u
-        | 0xE1 | 0xE9 | 0xED | 0xF3 | 0xFA        // á é í ó ú
-        | 0xE2 | 0xEA | 0xF4                      // â ê ô
-        | 0xE0 | 0xE3 | 0xF5
-    ) // à ã õ
+        'a' | 'e' | 'i' | 'o' | 'u' | 'á' | 'é' | 'í' | 'ó' | 'ú' | 'â' | 'ê' | 'ô' | 'à'
+    )
 }
 
-/// `hasVowelAtIndex`. Out of range is the reference's `undefined`, which is not
-/// in the vowel string, so it is false.
+/// Whether `w[i]` is a vowel. A position past the end is not a vowel.
 #[inline]
-fn vowel_at(w: &[u16], i: usize) -> bool {
+fn vowel_at(w: &[char], i: usize) -> bool {
     w.get(i).copied().is_some_and(is_vowel)
 }
 
-/// `markRegionN`: the first position after a non-vowel that follows a vowel.
-fn mark_region_n(w: &[u16], start: usize) -> usize {
+/// R1/R2 marking: the first position after a non-vowel that follows a vowel.
+fn mark_region_n(w: &[char], start: usize) -> usize {
     let length = w.len();
     let mut index = start;
     let mut region = length;
@@ -109,8 +113,8 @@ fn mark_region_n(w: &[u16], start: usize) -> usize {
     region
 }
 
-/// `markRegionV`.
-fn mark_region_v(w: &[u16]) -> usize {
+/// RV marking.
+fn mark_region_v(w: &[char]) -> usize {
     let mut rv = w.len();
     if rv > 3 {
         if !vowel_at(w, 1) {
@@ -124,14 +128,14 @@ fn mark_region_v(w: &[u16]) -> usize {
     rv
 }
 
-/// `replaceAll`, which the reference implements as `split(find).join(replace)`:
-/// every non-overlapping occurrence, scanning left to right.
+/// Replaces every non-overlapping occurrence of `find`, scanning left to right.
 ///
 /// Rebuilds in place only when `find` actually occurs — the four detour calls
 /// in `stem` are no-ops for the typical nasal-free word, and skipping the
 /// rebuild there removes four allocations per word without changing a byte
 /// of output (a zero-occurrence rebuild is the identity).
-fn replace_all(w: &mut Vec<u16>, find: &[u16], replacement: &[u16]) {
+#[cfg(test)]
+fn replace_all(w: &mut Vec<char>, find: &[char], replacement: &[char]) {
     let first = match w.windows(find.len()).position(|win| win == find) {
         Some(i) => i,
         None => return,
@@ -151,64 +155,232 @@ fn replace_all(w: &mut Vec<u16>, find: &[u16], replacement: &[u16]) {
     *w = out;
 }
 
-/// `replaceSuffixInRegion` through one `find_among` search: the longest entry
-/// fitting the region fires, which is the first listed one — see module docs.
+/// Suffix replacement in a region through one `find_among` search: the longest
+/// entry fitting the region fires, which is the first listed one — see module
+/// docs.
 ///
 /// Returns whether a suffix matched and was replaced; every shipped table
 /// pairs a non-empty suffix with a distinct replacement, so "matched" and
 /// "the word changed" coincide at every call site.
 fn replace_in_region(
-    w: &mut Vec<u16>,
-    table: &AmongTable,
+    buf: &mut Buf<char>,
+    table: &AmongTable<char>,
     replacement: &str,
     region: usize,
 ) -> bool {
-    let len = w.len();
-    let n = table.longest(w, len, region.min(len));
+    let len = buf.len();
+    let n = table.longest(buf.as_slice(), len, region.min(len));
     if n > 0 {
-        w.truncate(len - n);
-        push_str(w, replacement);
+        buf.truncate(len - n);
+        buf.push_str(replacement);
         true
     } else {
         false
     }
 }
 
+/// The prelude's nasal detour: `ã` becomes `a~` and `õ` becomes `o~`.
+///
+/// # Why one pass for both, and why backwards
+///
+/// This is a replace-all for one-unit needles and two-unit replacements, so
+/// the word *grows*. Rebuilding into a fresh `Vec` — what the general
+/// replace-all does — cost an allocation on every word even though the
+/// overwhelming majority of Portuguese words contain no nasal at all, and
+/// running the two rewrites separately cost two full scans instead of one.
+/// The two are safe to fuse because their needles and their replacements
+/// share no character, so neither can create or destroy an occurrence of the
+/// other. Counting first and then copying backwards means the buffer is only
+/// touched when there is something to move, and no unit is overwritten
+/// before it has been read.
+fn expand_nasals(buf: &mut Buf<char>) {
+    let extra = buf
+        .as_slice()
+        .iter()
+        .filter(|&&c| c == 'ã' || c == 'õ')
+        .count();
+    if extra == 0 {
+        return;
+    }
+    let old_len = buf.len();
+    for _ in 0..extra {
+        buf.push('\0');
+    }
+    let w = buf.as_mut_slice();
+    let mut write = old_len + extra;
+    for read in (0..old_len).rev() {
+        let base = match w[read] {
+            'ã' => Some('a'),
+            'õ' => Some('o'),
+            _ => None,
+        };
+        if let Some(base) = base {
+            write -= 2;
+            w[write] = base;
+            w[write + 1] = '~';
+        } else {
+            write -= 1;
+            w[write] = w[read];
+        }
+    }
+}
+
+/// The postlude's inverse: `a~` becomes `ã` and `o~` becomes `õ`.
+///
+/// Neither needle can overlap itself or the other (they differ in their
+/// first unit and a `~` consumed by one could only be consumed by the other
+/// if the same position held both `a` and `o`), so one left-to-right
+/// compaction visits exactly the occurrences two successive replace-all passes
+/// would. A word with no `~` at all — every
+/// word that had no nasal, and that is nearly all of them — skips the pass
+/// entirely.
+fn collapse_nasals(buf: &mut Buf<char>) {
+    if !buf.as_slice().contains(&'~') {
+        return;
+    }
+    let len = buf.len();
+    let w = buf.as_mut_slice();
+    let mut write = 0usize;
+    let mut read = 0usize;
+    while read < len {
+        let nasal = if read + 1 < len && w[read + 1] == '~' {
+            match w[read] {
+                'a' => Some('ã'),
+                'o' => Some('õ'),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(nasal) = nasal {
+            w[write] = nasal;
+            read += 2;
+        } else {
+            w[write] = w[read];
+            read += 1;
+        }
+        write += 1;
+    }
+    buf.truncate(write);
+}
+
+/// The nine step-1 rules, in chain order: the suffix table, the replacement
+/// it writes, and which region the match must fit inside.
+///
+/// Step 1 is a *chain*, not a ladder — every rule runs, and a later one sees
+/// what an earlier one left. That is why the whole step cannot collapse to a
+/// single decision the way French's and Italian's step 1 can. What it can
+/// collapse to is a single *search*: none of these rules touches the word
+/// unless it matches, so one merged search over the un-mutated word answers
+/// every rule that is going to decline, and only an actual mutation forces a
+/// re-search. Real words fire at most one or two of the nine.
+struct Step1Rule {
+    /// Index into [`STEP1_TABLE_LIST`], and so into the mask array.
+    table: usize,
+    replacement: &'static str,
+    region: Region,
+}
+
+/// Which of the three marked regions a step-1 rule checks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Region {
+    R1,
+    R2,
+    Rv,
+}
+
+static STEP1_TABLE_LIST: &[&[&str]] = &[
+    STEP1_NOUN,
+    LOGIA,
+    ENCIA,
+    MENTE2,
+    AMENTE,
+    MENTE,
+    STEP1_IDADE,
+    STEP1_IVO,
+    IRA,
+];
+static LOGIA: &[&str] = &["logias", "logia"];
+static ENCIA: &[&str] = &["ências", "ência"];
+static MENTE2: &[&str] = &["ativamente", "icamente", "ivamente", "osamente", "adamente"];
+/// `['amente'] -> '' in R1` — one literal, but a chain step of its own.
+static AMENTE: &[&str] = &["amente"];
+static MENTE: &[&str] = &["antemente", "avelmente", "ivelmente", "mente"];
+/// `iras|ira → "ir"`, gated on the word ending `eiras`/`eira`.
+static IRA: &[&str] = &["iras", "ira"];
+
+/// The chain order.
+static STEP1_RULES: &[Step1Rule] = &[
+    Step1Rule {
+        table: 0,
+        replacement: "",
+        region: Region::R2,
+    },
+    Step1Rule {
+        table: 1,
+        replacement: "log",
+        region: Region::R2,
+    },
+    Step1Rule {
+        table: 2,
+        replacement: "ente",
+        region: Region::R2,
+    },
+    Step1Rule {
+        table: 3,
+        replacement: "",
+        region: Region::R2,
+    },
+    Step1Rule {
+        table: 4,
+        replacement: "",
+        region: Region::R1,
+    },
+    Step1Rule {
+        table: 5,
+        replacement: "",
+        region: Region::R2,
+    },
+    Step1Rule {
+        table: 6,
+        replacement: "",
+        region: Region::R2,
+    },
+    Step1Rule {
+        table: 7,
+        replacement: "",
+        region: Region::R2,
+    },
+    Step1Rule {
+        table: 8,
+        replacement: "ir",
+        region: Region::Rv,
+    },
+];
+/// The one rule with a gate outside its own table.
+const RULE_IRA: usize = 8;
+
 /// The sorted search tables, built once from the ordered rule tables below.
 struct PtTables {
-    noun: AmongTable,
-    logia: AmongTable,
-    encia: AmongTable,
-    mente2: AmongTable,
-    mente: AmongTable,
-    idade: AmongTable,
-    ivo: AmongTable,
-    /// `iras|ira → "ir"`, gated on the word ending `eiras`/`eira`.
-    ira: AmongTable,
-    verb: AmongTable,
-    residual: AmongTable,
+    /// The nine step-1 tables merged into one search; see [`Step1Rule`].
+    step1: UnionTable<char>,
+    verb: AmongTable<char>,
+    residual: AmongTable<char>,
     /// Step 5's `ue|ué|uê` group (after a `g`).
-    ue: AmongTable,
+    ue: AmongTable<char>,
     /// Step 5's `ie|ié|iê` group (after a `c`).
-    ie: AmongTable,
+    ie: AmongTable<char>,
     /// Step 5's unconditional `e|é|ê`.
-    e: AmongTable,
+    e: AmongTable<char>,
 }
 
 static TABLES: LazyLock<PtTables> = LazyLock::new(|| PtTables {
-    noun: AmongTable::build(STEP1_NOUN),
-    logia: AmongTable::build(&["logias", "logia"]),
-    encia: AmongTable::build(&["ências", "ência"]),
-    mente2: AmongTable::build(&["ativamente", "icamente", "ivamente", "osamente", "adamente"]),
-    mente: AmongTable::build(&["antemente", "avelmente", "ivelmente", "mente"]),
-    idade: AmongTable::build(STEP1_IDADE),
-    ivo: AmongTable::build(STEP1_IVO),
-    ira: AmongTable::build(&["iras", "ira"]),
+    step1: UnionTable::build(STEP1_TABLE_LIST),
     verb: AmongTable::build(VERB),
     residual: AmongTable::build(RESIDUAL),
-    ue: AmongTable::build(&["ue", "ué", "uê"]),
-    ie: AmongTable::build(&["ie", "ié", "iê"]),
-    e: AmongTable::build(&["e", "é", "ê"]),
+    ue: AmongTable::build(STEP5_UE),
+    ie: AmongTable::build(STEP5_IE),
+    e: AmongTable::build(STEP5_E),
 });
 
 impl PorterStemmerPt {
@@ -222,39 +394,55 @@ impl PorterStemmerPt {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[must_use]
     pub fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
         let tb = &*TABLES;
-        let mut w = units(&word.to_lowercase());
+        let mut w: Buf<char> = Buf::fill_lowercase(word);
 
         // --- Prelude: nasal vowels become vowel + '~' ----------------------
-        replace_all(&mut w, &[0x00E3], &[0x0061, 0x007E]); // ã -> a~
-        replace_all(&mut w, &[0x00F5], &[0x006F, 0x007E]); // õ -> o~
+        expand_nasals(&mut w);
 
-        let r1 = mark_region_n(&w, 0);
-        let r2 = mark_region_n(&w, r1);
-        let rv = mark_region_v(&w);
+        let r1 = mark_region_n(w.as_slice(), 0);
+        let r2 = mark_region_n(w.as_slice(), r1);
+        let rv = mark_region_v(w.as_slice());
 
         // --- Step 1: standard suffixes (nine chained calls) ----------------
-        let mut changed = replace_in_region(&mut w, &tb.noun, "", r2);
-        changed |= replace_in_region(&mut w, &tb.logia, "log", r2);
-        // The reference has a commented-out `['uço~es', 'uça~o'] -> 'u'` call
-        // here; it is commented out there and absent here.
-        changed |= replace_in_region(&mut w, &tb.encia, "ente", r2);
-        changed |= replace_in_region(&mut w, &tb.mente2, "", r2);
-        // `['amente'] -> '' in R1` — a single literal, checked directly.
-        if ends_with(&w, "amente") && w.len().saturating_sub(6) >= r1 {
-            let keep = w.len() - 6;
-            w.truncate(keep);
-            changed = true;
-        }
-        changed |= replace_in_region(&mut w, &tb.mente, "", r2);
-        changed |= replace_in_region(&mut w, &tb.idade, "", r2);
-        changed |= replace_in_region(&mut w, &tb.ivo, "", r2);
-        if ends_with(&w, "eiras") || ends_with(&w, "eira") {
-            changed |= replace_in_region(&mut w, &tb.ira, "ir", rv);
+        //
+        // One merged search per *mutation*, not per rule: the mask describes
+        // the word every remaining rule is about to be tested against, and
+        // stays valid until some rule actually rewrites it.
+        let mut changed = false;
+        let mut rule = 0usize;
+        'chain: while rule < STEP1_RULES.len() {
+            let len = w.len();
+            let mut lm = [0u32; 9];
+            tb.step1.length_masks(w.as_slice(), len, &mut lm);
+            while rule < STEP1_RULES.len() {
+                let r = &STEP1_RULES[rule];
+                let start = match r.region {
+                    Region::R1 => r1,
+                    Region::R2 => r2,
+                    Region::Rv => rv,
+                };
+                let gated =
+                    rule == RULE_IRA && !IRA_GUARD.iter().any(|g| ends_with(w.as_slice(), g));
+                let m = if gated {
+                    0
+                } else {
+                    longest_at_most(lm[r.table], len - start.min(len))
+                };
+                rule += 1;
+                if m > 0 {
+                    w.truncate(len - m);
+                    w.push_str(r.replacement);
+                    changed = true;
+                    continue 'chain;
+                }
+            }
+            break;
         }
         let step1_changed = changed;
 
@@ -266,7 +454,7 @@ impl PorterStemmerPt {
         // --- Step 3 or 4 ---------------------------------------------------
         if !changed {
             replace_in_region(&mut w, &tb.residual, "", rv);
-        } else if ends_with(&w, "ci") && w.len().saturating_sub(1) >= rv {
+        } else if ends_with(w.as_slice(), STEP4_CI[0]) && w.len().saturating_sub(1) >= rv {
             // `['i'] -> '' in RV`, gated on a preceding `c`.
             let keep = w.len() - 1;
             w.truncate(keep);
@@ -274,26 +462,25 @@ impl PorterStemmerPt {
 
         // --- Step 5: residual form ----------------------------------------
         let mut step5_changed = false;
-        if ends_with(&w, "gue") || ends_with(&w, "gué") || ends_with(&w, "guê") {
+        if STEP5_GUE.iter().any(|g| ends_with(w.as_slice(), g)) {
             step5_changed |= replace_in_region(&mut w, &tb.ue, "", rv);
         }
-        if ends_with(&w, "cie") || ends_with(&w, "cié") || ends_with(&w, "ciê") {
+        if STEP5_CIE.iter().any(|g| ends_with(w.as_slice(), g)) {
             step5_changed |= replace_in_region(&mut w, &tb.ie, "", rv);
         }
         if !step5_changed {
             replace_in_region(&mut w, &tb.e, "", rv);
         }
         // `['ç'] -> 'c'` in region `all` (0), so this one is unconditional.
-        if w.last() == Some(&0x00E7) {
+        if w.as_slice().last() == Some(&'ç') {
             let keep = w.len() - 1;
             w.truncate(keep);
-            w.push(0x63);
+            w.push('c');
         }
 
         // --- Postlude ------------------------------------------------------
-        replace_all(&mut w, &[0x0061, 0x007E], &[0x00E3]);
-        replace_all(&mut w, &[0x006F, 0x007E], &[0x00F5]);
-        Cow::Owned(text(&w))
+        collapse_nasals(&mut w);
+        Cow::Owned(w.into_text())
     }
 }
 
@@ -329,23 +516,73 @@ static VERB: &[&str] = &[
     "ara", "ará", "ava", "eis", "era", "erá", "iam", "ias", "ida", "ido", "ira", "irá", "am", "ar",
     "as", "ei", "em", "er", "es", "eu", "ia", "ir", "is", "iu", "ou",
 ];
-static RESIDUAL: &[&str] = &["os", "a", "i", "o", "á", "í", "ó"];
+static RESIDUAL: &[&str] = &["os", "a", "i", "o", "\u{e1}", "\u{ed}", "\u{f3}"];
+/// Step 5's `ue|ué|uê` group, removable only after a `g`.
+static STEP5_UE: &[&str] = &["ue", "u\u{e9}", "u\u{ea}"];
+/// Step 5's `ie|ié|iê` group, removable only after a `c`.
+static STEP5_IE: &[&str] = &["ie", "i\u{e9}", "i\u{ea}"];
+/// Step 5's unconditional `e|é|ê`.
+static STEP5_E: &[&str] = &["e", "\u{e9}", "\u{ea}"];
+/// The guards on [`STEP5_UE`]: the same three endings with their `g`.
+static STEP5_GUE: &[&str] = &["gue", "gu\u{e9}", "gu\u{ea}"];
+/// The guards on [`STEP5_IE`]: the same three endings with their `c`.
+static STEP5_CIE: &[&str] = &["cie", "ci\u{e9}", "ci\u{ea}"];
+/// Step 4's `ci`, whose `i` is deleted in RV.
+static STEP4_CI: &[&str] = &["ci"];
+/// The endings [`IRA`] is gated on.
+static IRA_GUARD: &[&str] = &["eiras", "eira"];
 
 impl TokenizeAndStem for PorterStemmerPt {
     const FILTER_ON: Casing = Casing::Lower;
     const STEM_ON: Casing = Casing::Raw;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_pt(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Pt, word)
+        Language::Pt.contains(word)
     }
 
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    use crate::among::Buf;
+
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("STEP1_NOUN", super::STEP1_NOUN),
+        ("LOGIA", super::LOGIA),
+        ("ENCIA", super::ENCIA),
+        ("MENTE2", super::MENTE2),
+        ("AMENTE", super::AMENTE),
+        ("MENTE", super::MENTE),
+        ("STEP1_IDADE", super::STEP1_IDADE),
+        ("STEP1_IVO", super::STEP1_IVO),
+        ("IRA", super::IRA),
+        ("IRA_GUARD", super::IRA_GUARD),
+        ("VERB", super::VERB),
+        ("RESIDUAL", super::RESIDUAL),
+        ("STEP5_UE", super::STEP5_UE),
+        ("STEP5_IE", super::STEP5_IE),
+        ("STEP5_E", super::STEP5_E),
+        ("STEP5_GUE", super::STEP5_GUE),
+        ("STEP5_CIE", super::STEP5_CIE),
+        ("STEP4_CI", super::STEP4_CI),
+    ];
+
+    /// The prelude `stem` runs before any table is consulted, in isolation:
+    /// lowercase, then the nasal detour.
+    pub(crate) fn prelude(token: &str) -> String {
+        let mut w: Buf<char> = Buf::fill_lowercase(token);
+        super::expand_nasals(&mut w);
+        w.into_text()
+    }
+
+    /// The units the prelude writes, paired with what it writes them for.
+    /// Half the suffix table is spelled in the detoured form for this reason.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[("a~", "\u{e3}"), ("o~", "\u{f5}")];
 }
 
 impl verbora_core::Stemmer for PorterStemmerPt {
@@ -357,15 +594,13 @@ impl verbora_core::Stemmer for PorterStemmerPt {
 impl PorterStemmerPt {
     /// Appends several stop words to the **process-global Portuguese list**.
     ///
-    /// `stemmer_pt` declares `addStopWords` twice, and the second declaration
-    /// — the concatenating one — wins, so the singular `addStopWord` the first
-    /// declaration was meant to provide does not exist. Neither does it here.
+    /// There is no singular counterpart; pass a one-element iterator.
     pub fn add_stop_words<I, S>(&self, words: I)
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        stopwords::add_all(Language::Pt, words);
+        Language::Pt.add_all(words);
     }
 }
 
@@ -375,6 +610,48 @@ mod tests {
 
     fn s(t: &str) -> String {
         PorterStemmerPt::new().stem(t).into_owned()
+    }
+
+    /// No `ã` or `õ` can reach a region scan or a rule table.
+    ///
+    /// The proof that removing them from [`is_vowel`] changed nothing, and the
+    /// proof that every table entry spelled `a~`/`o~` is spelled that way for
+    /// a reason. Enumerated over every scalar value in four positions rather
+    /// than sampled: the detour is a `replace_all`, so a character it missed
+    /// would be missed everywhere and in every word at once.
+    #[test]
+    fn the_nasal_detour_leaves_no_nasal_behind() {
+        for cp in 0..=0x10_FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            for probe in [
+                c.to_string(),
+                format!("a{c}o"),
+                format!("{c}{c}"),
+                format!("c{c}rac{c}o"),
+            ] {
+                let mut w: Buf<char> = Buf::fill_lowercase(&probe);
+                expand_nasals(&mut w);
+                let out = w.into_text();
+                assert!(
+                    !out.contains('\u{e3}') && !out.contains('\u{f5}'),
+                    "the nasal detour left a nasal in {probe:?}: {out:?}"
+                );
+            }
+        }
+        // ...and the postlude puts them back, so the stem a caller sees keeps
+        // its spelling: no `~` ever escapes, and a surviving nasal is spelled
+        // as a nasal.
+        let pt = PorterStemmerPt::new();
+        assert_eq!(pt.stem("coração"), "coraçã");
+        for w in ["coração", "ações", "irmã", "limões", "põe", "ara~o"] {
+            assert!(
+                !pt.stem(w).contains('~'),
+                "the detour leaked into the stem of {w:?}: {:?}",
+                pt.stem(w)
+            );
+        }
     }
 
     #[test]
@@ -400,10 +677,14 @@ mod tests {
         assert_eq!(s("ãõãõ"), "ãõãõ");
     }
 
-    /// The cross-cutting battery from `docs/PARITY.md`: empty, one character,
-    /// uppercase, accented Latin, Greek, Cyrillic, CJK, an astral pair,
-    /// punctuation, digits, a line terminator, and a very long word. Every
-    /// expectation below was read off the reference with `node`.
+    /// The cross-cutting battery every stemmer in this crate answers: empty,
+    /// one character, uppercase, accented Latin, Greek, Cyrillic, CJK, an
+    /// astral pair, punctuation, digits, a line terminator, and a very long
+    /// word.
+    ///
+    /// The expectations are the *identity* in every row but the case fold,
+    /// which is the whole point: none of these is a word of this language, so
+    /// a stemmer that changes one is reaching outside its own alphabet.
     #[test]
     fn cross_script_battery() {
         for (input, want) in [
@@ -430,6 +711,140 @@ mod tests {
     #[test]
     fn cedilla_becomes_c_in_region_all() {
         assert_eq!(s("çç"), "çc");
+    }
+
+    /// The text unit is the **Unicode scalar value**, and Portuguese's region
+    /// arithmetic makes the choice observable.
+    ///
+    /// Derived from the algorithm. `"😀eado"` is five letters — `😀 e a d o` —
+    /// and the nasal detour leaves all of them alone, there being no `ã` or
+    /// `õ`. Index 1 is `e`, a vowel, so RV marking skips its first arm; index 0
+    /// is not a vowel, so it skips the second and takes the literal
+    /// **`rv = 3`**. RV therefore leaves
+    /// `5 - 3 = 2` letters, which the three-letter step-2 verb ending `-ado`
+    /// does not fit; step 2 declines, step 1 has nothing, and the residual step
+    /// cuts the one-letter `-o`: `"😀ead"`.
+    ///
+    /// `"ñeado"` is the control, and it is a control rather than a decoration:
+    /// `ñ` is outside the vowel set exactly as `😀` is, so the two words have
+    /// the same letter classes in the same positions and the algorithm cannot
+    /// tell them apart. Anything that makes their stems differ is the encoding
+    /// leaking through.
+    #[test]
+    fn one_astral_character_is_one_letter() {
+        assert_eq!(s("😀eado"), "😀ead");
+        assert_eq!(s("ñeado"), "ñead");
+    }
+
+    /// A character that is inert for this algorithm and inside the Basic
+    /// Multilingual Plane: not in the vowel set, not spelled in any rule table,
+    /// its own lower case, and neither produced nor consumed by the nasal
+    /// detour.
+    const INERT_TWIN: char = 'ж';
+
+    /// Every entry of the Portuguese stop-word list and of every Portuguese
+    /// rule table, walked through `stem` with one astral character inserted at
+    /// **every** position, against the same word carrying an inert
+    /// Basic-Multilingual-Plane character instead.
+    ///
+    /// # What the twin proves, and why it needs no second implementation
+    ///
+    /// [`INERT_TWIN`] is inert for this algorithm in exactly the way an astral
+    /// character is: neither is a vowel, neither is spelled in any rule table,
+    /// neither is rewritten by the lower-casing or by the nasal detour. So the
+    /// only thing that can possibly distinguish the two words is **how long
+    /// each of them is** — one character each under the contract, one and two
+    /// under a code-unit reading. One build run over both therefore measures
+    /// the unit directly, and a divergence here is a position being counted in
+    /// code units.
+    ///
+    /// The detour is the reason to state that carefully. This stemmer *does*
+    /// rewrite one character into two — `ã` becomes `a~` — and it does so
+    /// deliberately, so that a nasal vowel counts as vowel-plus-consonant while
+    /// regions are marked. That length change is the algorithm asking for it.
+    /// The one this test forbids is the encoding asking for it.
+    ///
+    /// # Why every entry and every position, rather than a sample
+    ///
+    /// This is the shape of defect that has already cost this crate 116 Swedish
+    /// stop words and two dead rules: a stage transforms text before a later
+    /// stage measures or looks it up, and the entries that die are exactly the
+    /// ones a spot check does not name. So the walk is over every entry of
+    /// every table and of the stop-word list, behind every alphabetic entry of
+    /// that same list — the probe construction [`crate::data::table_audit`]
+    /// uses — and the astral character goes in at every position of each,
+    /// including the two ends. The counts are pinned by equality so that a walk
+    /// which quietly stops enumerating cannot report a clean sweep of nothing.
+    ///
+    /// # What it catches
+    ///
+    /// Run against a code-unit reading, this walk reports **588 of 302 423**
+    /// probes measuring an astral character as more than one letter. It reports
+    /// **0** here. Every one of the 588 has the same shape: a word that opens
+    /// with a non-vowel and whose second letter is a vowel, so that RV marking
+    /// takes its third arm and is the literal `rv = 3`.
+    /// That 3 is an absolute position rather than a relative one, so the extra
+    /// code unit lengthened the region past it, and a suffix that does not fit
+    /// the region by one letter fitted it by one code unit.
+    /// [`one_astral_character_is_one_letter`] states one such word with its
+    /// arithmetic written out; this walk is what shows the shape is the only
+    /// one, and that no other shipped entry can see the unit at all.
+    #[test]
+    fn every_shipped_entry_measures_the_same_under_either_unit() {
+        let stemmer = PorterStemmerPt::new();
+        let stops = Language::Pt.defaults();
+        let fillers: Vec<&str> = std::iter::once("")
+            .chain(
+                stops
+                    .iter()
+                    .copied()
+                    .filter(|w| !w.is_empty() && w.chars().all(char::is_alphabetic)),
+            )
+            .collect();
+        let mut entries: Vec<&str> = audit::TABLES
+            .iter()
+            .flat_map(|(_, table)| table.iter().copied())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            206,
+            "the Portuguese rule-table entry count moved"
+        );
+        entries.extend(stops.iter().copied());
+        assert_eq!(entries.len(), 323, "the Portuguese entry count moved");
+        assert_eq!(fillers.len(), 107, "the Portuguese filler count moved");
+
+        let twin = INERT_TWIN.to_string();
+        let mut probes = 0usize;
+        let mut diverging: Vec<String> = Vec::new();
+        for entry in &entries {
+            for filler in &fillers {
+                let word: Vec<char> = format!("{filler}{entry}").chars().collect();
+                for pos in 0..=word.len() {
+                    let mut astral: String = word[..pos].iter().collect();
+                    astral.push('\u{1F600}');
+                    astral.extend(&word[pos..]);
+                    let bmp = astral.replace('\u{1F600}', &twin);
+                    probes += 1;
+                    let from_astral = stemmer.stem(&astral).replace('\u{1F600}', &twin);
+                    let from_bmp = stemmer.stem(&bmp).into_owned();
+                    if from_astral != from_bmp {
+                        diverging.push(format!("{astral:?}: {from_astral:?} vs {from_bmp:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            diverging.is_empty(),
+            "{} of {probes} probes measure an astral character as more than one \
+             letter: {:#?}",
+            diverging.len(),
+            &diverging[..diverging.len().min(10)]
+        );
+        assert_eq!(
+            probes, 302_423,
+            "the number of probes this walk builds moved"
+        );
     }
 
     /// Portuguese is a **first-match** language; routing its tables through
@@ -460,15 +875,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-find_among implementation, verbatim
-    // (the `Token`-shaped port with linear first-match scans).
+    // Differential oracle: the same steps written over an owned token struct
+    // with linear first-match scans.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
-        use crate::units::{ends_with, replace_suffix, slen};
+        use crate::units::{ends_with, replace_suffix, slen, text};
 
         struct PtToken {
-            w: Vec<u16>,
+            w: Vec<char>,
             r1: usize,
             r2: usize,
             rv: usize,
@@ -523,10 +938,10 @@ mod tests {
         }
 
         pub(super) fn stem(word: &str) -> String {
-            let mut w = units(&word.to_lowercase());
+            let mut w: Vec<char> = word.to_lowercase().chars().collect();
 
-            replace_all(&mut w, &[0x00E3], &[0x0061, 0x007E]);
-            replace_all(&mut w, &[0x00F5], &[0x006F, 0x007E]);
+            replace_all(&mut w, &['ã'], &['a', '~']);
+            replace_all(&mut w, &['õ'], &['o', '~']);
 
             let mut t = PtToken {
                 w,
@@ -564,8 +979,8 @@ mod tests {
             t.replace_suffix_in_region(&["ç"], "c", 0);
 
             let mut w = t.w;
-            replace_all(&mut w, &[0x0061, 0x007E], &[0x00E3]);
-            replace_all(&mut w, &[0x006F, 0x007E], &[0x00F5]);
+            replace_all(&mut w, &['a', '~'], &['ã']);
+            replace_all(&mut w, &['o', '~'], &['õ']);
             text(&w)
         }
     }

@@ -1,55 +1,41 @@
-//! An insertion-ordered string map that enumerates like a reference object.
-//!
-//! `Classifier.textToFeatures` builds its feature vector with
-//! `for (const feature in this.features)`, so the **order in which the reference
-//! enumerates own properties is the layout of the feature vector**, and every
-//! model trained on it. That order is not insertion order and not lexicographic:
-//!
-//! > Integer-index keys first, in ascending numeric order; then every other key
-//! > in insertion order.
-//!
-//! The consequence is a genuine bug that a port must reproduce. Add the token
-//! `"99"` to a trained classifier and it does not land at the end of the feature
-//! vector — it lands at the *front*, shifting every previously learned index by
-//! one and silently corrupting the model. The reference's own recorded output
-//! shows `classify(['alpha'])` flipping from `'A'` to `'B'` for exactly this
-//! reason. A port with a stable insertion-ordered map produces a *correct*
-//! model, and therefore the wrong answer.
-//!
-//! An "integer index" is the canonical decimal spelling of an integer in
-//! `0..=2^32-2`. `"0"`, `"42"` and `"4294967294"` qualify; `"01"`, `"-1"`,
-//! `"1.5"`, `"1e3"`, `"4294967295"`, `" 1"` and the fullwidth `"０"` do not.
-
 use rustc_hash::FxHashMap;
 
-/// Whether `key` is an array index, and therefore hoisted to the front of
-/// the reference's own-property enumeration.
+/// A string-keyed map that iterates in insertion order.
 ///
-/// The check is the canonical-spelling one: the key must round-trip through
-/// `u32` with no leading zeros, no sign and no separators, and must be at most
-/// `2^32 - 2` (`4294967295` is the array *length* limit, not a valid index).
-pub fn is_array_index(key: &str) -> bool {
-    if key.is_empty() || key.len() > 10 {
-        return false;
-    }
-    if !key.bytes().all(|b| b.is_ascii_digit()) {
-        return false;
-    }
-    // "0" is an index; "00" and "01" are not, because they are not canonical.
-    if key.len() > 1 && key.starts_with('0') {
-        return false;
-    }
-    key.parse::<u32>().is_ok_and(|n| n != u32::MAX)
-}
-
-/// A string-keyed map with the reference's own-property enumeration order.
+/// The order is the contract, not an implementation detail: a key takes the
+/// next free slot the first time it is inserted and keeps that slot for as long
+/// as it is present. Overwriting an existing key writes through to its value
+/// and leaves its slot alone. The only operation that moves a slot is
+/// [`Self::remove`], which closes the gap it leaves — see there.
+///
+/// [`Classifier`](crate::Classifier) is why the order is written down. A
+/// feature's identity in an observation vector *is* its slot in this map, and a
+/// trained model's weights are indexed by that slot, so the order has to be one
+/// that a widening vocabulary cannot disturb. Under this contract, adding the
+/// token `"99"` to a trained classifier appends it after every feature already
+/// known and leaves every previously learned index exactly where it was; the
+/// model stays valid, and only the new slot is untrained.
+///
+/// Any order derived from the key *text* would be the wrong contract here. An
+/// order that put integer-like keys first, for instance, would hoist a newly
+/// added `"99"` to slot 0 and shift every learned index by one, silently
+/// scrambling a trained model.
+///
+/// The same contract is what carries a slot layout across a save: `features`
+/// is serialised in slot order and restored by inserting those keys in the
+/// order they appear, so a restored model lands on exactly the slots it was
+/// saved with — whatever order the saving build produced them in. See
+/// [`SCHEMA`](crate::stamp::SCHEMA).
 ///
 /// Cloning is deliberately cheap in behaviour, not in bytes: these maps are
 /// small (one entry per distinct token) and are cloned only at snapshot points.
 #[derive(Debug, Clone, Default)]
 pub struct OrderedMap<V> {
-    /// Entries in insertion order. Deletion preserves the order of the rest.
+    /// Entries in insertion order. `entries[slot]` is the entry at `slot`.
     entries: Vec<(String, V)>,
+    /// Key to slot. Kept in step with `entries` by every mutation, which is
+    /// what makes [`Self::slot_of`] a hash lookup rather than a scan — the
+    /// question a feature vector asks once per *token*, not once per feature.
     index: FxHashMap<String, usize>,
 }
 
@@ -88,8 +74,10 @@ impl<V> OrderedMap<V> {
         self.index.contains_key(key)
     }
 
-    /// Inserts or overwrites, keeping the original position on overwrite —
-    /// which is what assigning to an existing the reference property does.
+    /// Inserts or overwrites, keeping the original slot on overwrite.
+    ///
+    /// A new key is appended, so it takes the next slot and disturbs nothing
+    /// already in the map.
     pub fn insert(&mut self, key: impl Into<String>, value: V) {
         let key = key.into();
         if let Some(&i) = self.index.get(&key) {
@@ -100,7 +88,12 @@ impl<V> OrderedMap<V> {
         }
     }
 
-    /// `delete obj[key]`: removes the entry, leaving the rest in order.
+    /// Removes the entry, leaving the rest in order.
+    ///
+    /// This is the one mutation that moves slots: closing the gap shifts every
+    /// key after the removed one down by one. A caller holding slot indices
+    /// derived from this map — a trained model, above all — must treat them as
+    /// invalidated past the removal point.
     pub fn remove(&mut self, key: &str) -> Option<V> {
         let i = self.index.remove(key)?;
         let (_, v) = self.entries.remove(i);
@@ -112,41 +105,24 @@ impl<V> OrderedMap<V> {
         Some(v)
     }
 
-    /// Entries in insertion order — *not* the reference enumeration order.
-    ///
-    /// Useful when the caller only needs the contents; anything whose output
-    /// order is observable must use [`Self::enumeration_order`].
-    pub fn iter_insertion(&self) -> impl Iterator<Item = (&str, &V)> {
+    /// Entries in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &V)> {
         self.entries.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// Keys in the reference's own-property enumeration order.
-    ///
-    /// Recomputed on every call, exactly as `for...in` is: caching the order
-    /// across mutations is what makes a naive port produce a *stable* feature
-    /// layout, which is precisely the behaviour the reference does not have.
-    pub fn enumeration_order(&self) -> Vec<&str> {
-        let mut indices: Vec<(u32, &str)> = Vec::new();
-        let mut rest: Vec<&str> = Vec::new();
-        for (k, _) in &self.entries {
-            if is_array_index(k) {
-                indices.push((k.parse().expect("checked by is_array_index"), k.as_str()));
-            } else {
-                rest.push(k.as_str());
-            }
-        }
-        indices.sort_unstable_by_key(|(n, _)| *n);
-        let mut out: Vec<&str> = indices.into_iter().map(|(_, k)| k).collect();
-        out.extend(rest);
-        out
+    /// Keys in insertion order — slot 0 first.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|(k, _)| k.as_str())
     }
 
-    /// Entries in the reference's own-property enumeration order.
-    pub fn ordered_entries(&self) -> Vec<(&str, &V)> {
-        self.enumeration_order()
-            .into_iter()
-            .map(|k| (k, self.get(k).expect("key came from this map")))
-            .collect()
+    /// The slot `key` occupies, if present.
+    ///
+    /// The inverse of [`Self::keys`], and the direction a feature vector
+    /// actually asks in: a 0/1 observation is "slot *s* is set iff the document
+    /// holds the key at *s*", which a caller answers with one lookup per token
+    /// instead of one membership test per key.
+    pub fn slot_of(&self, key: &str) -> Option<usize> {
+        self.index.get(key).copied()
     }
 }
 
@@ -164,50 +140,59 @@ impl<V> FromIterator<(String, V)> for OrderedMap<V> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn array_index_recognition_is_canonical() {
-        for k in ["0", "1", "2", "42", "4294967294"] {
-            assert!(is_array_index(k), "{k} should be an index");
-        }
-        for k in [
-            "",
-            "b",
-            "01",
-            "00",
-            "-1",
-            "1.5",
-            "1e3",
-            "4294967295",
-            "4294967296",
-            "+1",
-            " 1",
-            "1 ",
-            "٣",
-            "０",
-            "9007199254740993",
-        ] {
-            assert!(!is_array_index(k), "{k} should not be an index");
-        }
+    fn keys<V>(m: &OrderedMap<V>) -> Vec<&str> {
+        m.keys().collect()
     }
 
+    /// The rule the whole type exists to state: a new key goes at the end,
+    /// whatever it is spelled like.
+    ///
+    /// `"42"` and `"7"` are the keys a reference-order map would have hoisted
+    /// ahead of `"zebra"`, in ascending numeric order. They do not move here.
     #[test]
-    fn enumeration_hoists_integer_keys() {
-        // Recorded from the reference engine: addDocument('zebra 42 apple 7') yields this order.
+    fn integer_like_keys_take_the_next_slot_like_any_other() {
         let mut m: OrderedMap<u32> = OrderedMap::new();
         m.insert("zebra", 1);
         m.insert("42", 1);
         m.insert("appl", 1);
         m.insert("7", 1);
-        assert_eq!(m.enumeration_order(), vec!["7", "42", "zebra", "appl"]);
+        assert_eq!(keys(&m), vec!["zebra", "42", "appl", "7"]);
+        for (slot, key) in keys(&m).iter().enumerate() {
+            assert_eq!(m.slot_of(key), Some(slot), "{key}");
+        }
+    }
+
+    /// Adding a key — integer-like or not — must not move any slot already
+    /// handed out. This is the invariant a trained model depends on.
+    #[test]
+    fn adding_a_key_never_moves_an_existing_slot() {
+        let mut m: OrderedMap<u32> = OrderedMap::new();
+        for k in ["alpha", "beta", "gamma"] {
+            m.insert(k, 1);
+        }
+        let before: Vec<(String, usize)> = m
+            .keys()
+            .map(|k| (k.to_owned(), m.slot_of(k).expect("present")))
+            .collect();
+        for k in ["99", "0", "4294967294", "delta"] {
+            m.insert(k, 1);
+            for (key, slot) in &before {
+                assert_eq!(m.slot_of(key), Some(*slot), "{key} moved when {k} arrived");
+            }
+        }
+        assert_eq!(
+            keys(&m),
+            vec!["alpha", "beta", "gamma", "99", "0", "4294967294", "delta"]
+        );
     }
 
     #[test]
-    fn insertion_order_is_kept_for_non_indices() {
+    fn insertion_order_is_kept() {
         let mut m: OrderedMap<u32> = OrderedMap::new();
         for k in ["c", "a", "b"] {
             m.insert(k, 0);
         }
-        assert_eq!(m.enumeration_order(), vec!["c", "a", "b"]);
+        assert_eq!(keys(&m), vec!["c", "a", "b"]);
     }
 
     #[test]
@@ -216,19 +201,51 @@ mod tests {
         m.insert("a", 1);
         m.insert("b", 2);
         m.insert("a", 3);
-        assert_eq!(m.enumeration_order(), vec!["a", "b"]);
+        assert_eq!(keys(&m), vec!["a", "b"]);
+        assert_eq!(m.slot_of("a"), Some(0));
         assert_eq!(m.get("a"), Some(&3));
     }
 
     #[test]
-    fn removal_preserves_the_rest() {
+    fn slot_of_is_the_inverse_of_keys() {
+        let mut m: OrderedMap<u32> = OrderedMap::new();
+        for k in ["zebra", "42", "appl", "7", "0"] {
+            m.insert(k, 1);
+        }
+        let order = keys(&m);
+        assert_eq!(order, vec!["zebra", "42", "appl", "7", "0"]);
+        for (slot, key) in order.iter().enumerate() {
+            assert_eq!(m.slot_of(key), Some(slot), "{key}");
+        }
+        assert_eq!(m.slot_of("absent"), None);
+    }
+
+    /// Removal closes the gap, so slots *after* the hole move down by one and
+    /// slots before it do not.
+    #[test]
+    fn removal_preserves_the_rest_and_shifts_only_what_followed() {
         let mut m: OrderedMap<u32> = OrderedMap::new();
         for (i, k) in ["a", "b", "c", "d"].iter().enumerate() {
             m.insert(*k, i as u32);
         }
         assert_eq!(m.remove("b"), Some(1));
-        assert_eq!(m.enumeration_order(), vec!["a", "c", "d"]);
+        assert_eq!(keys(&m), vec!["a", "c", "d"]);
+        assert_eq!(m.slot_of("a"), Some(0));
+        assert_eq!(m.slot_of("c"), Some(1));
+        assert_eq!(m.slot_of("d"), Some(2));
+        assert_eq!(m.slot_of("b"), None);
         assert_eq!(m.get("d"), Some(&3));
         assert_eq!(m.remove("b"), None);
+    }
+
+    #[test]
+    fn iter_yields_entries_in_slot_order() {
+        let m: OrderedMap<u32> = [("b".to_owned(), 2u32), ("a".to_owned(), 1)]
+            .into_iter()
+            .collect();
+        assert_eq!(m.iter().collect::<Vec<_>>(), vec![("b", &2), ("a", &1)]);
+        assert_eq!(m.len(), 2);
+        assert!(!m.is_empty());
+        assert!(m.contains_key("a"));
     }
 }

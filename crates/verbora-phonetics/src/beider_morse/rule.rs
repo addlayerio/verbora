@@ -6,7 +6,7 @@
 //! The grammar here is deliberately hand-written, not built on a parser
 //! combinator crate — it is small and line-oriented (confirmed against the
 //! real rule corpus in `data/beider-morse/`, and cross-checked against the
-//! grammar `rphonetic`'s own `nom`-based parser implements), and this
+//! grammar an independent parser of the same corpus implements), and this
 //! project's own convention elsewhere (`verbora-tagger`'s lexicon format,
 //! `verbora-phonetics`'s own Daitch-Mokotoff table) is a small hand-rolled
 //! parser over `nom`/similar for exactly this class of format.
@@ -76,7 +76,8 @@ pub(super) fn parse_phoneme_expr(field: &str) -> PhonemeExpr<'_> {
 /// its *end*; `right_context` is matched against the input starting right
 /// after the pattern, anchored at its *start*. An empty context string means
 /// "always matches" (compiled as `.*`/kept unanchored-empty, per
-/// `rphonetic`'s own treatment — see `Rule::compile`'s doc comment).
+/// the same treatment other readers of this corpus give it — see
+/// `Rule::compile`'s doc comment).
 #[derive(Debug)]
 pub(super) struct RawRule<'a> {
     pub(super) pattern: &'a str,
@@ -117,7 +118,7 @@ pub(super) fn parse_line(line: &str) -> Option<Line<'_>> {
 /// Parses `"a" "b" "c" "d"`, tolerating a trailing `// comment` and the
 /// variable inter-field whitespace (spaces and/or tabs) the real corpus
 /// uses. `\"` inside a field is the one escape the DSL defines (confirmed
-/// against `rphonetic`'s own grammar and the real corpus, which uses it for
+/// against the real corpus, which uses it for
 /// a literal double-quote pattern) — the returned field text still carries
 /// the raw `\"`, unescaped; see [`unescape_quote`], applied once each field
 /// reaches [`Rule::compile`] rather than here, since every field here is a
@@ -233,6 +234,17 @@ impl Rule {
         })
     }
 
+    /// Whether this rule has no context conditions at all, so its pattern
+    /// alone decides whether it fires.
+    ///
+    /// Used by the corpus enumeration in this module's parent: within one
+    /// bucket the *first* matching rule wins, so an unconditional rule makes
+    /// every later rule with the same pattern unreachable.
+    #[cfg(test)]
+    pub(super) fn is_unconditional(&self) -> bool {
+        self.left_context.is_none() && self.right_context.is_none()
+    }
+
     /// Whether this rule's pattern, left context and right context all
     /// match `input` at byte offset `at`.
     pub(super) fn matches(&self, input: &str, at: usize) -> bool {
@@ -271,6 +283,16 @@ mod tests {
         // The real corpus's own shape for this escape, verbatim (e.g.
         // `ash_rules_russian.txt`, `gen_rules_any.txt`): a rule matching a
         // literal `"` character and contributing nothing.
+        //
+        // This is a *component* claim and nothing more. An earlier version
+        // of it asserted only this much and passed for years while the
+        // corpus's four `\"` rules were unreachable in the tables they live
+        // in -- `super`'s own table builder keyed `by_first_char` off the
+        // raw, still-escaped field, filing them under `\` while they only
+        // ever match `"`. The assembly-level claim is pinned by
+        // `literal_quote_rule_is_reachable_in_the_real_rule_table` in
+        // `mod.rs`, which builds the real tables from the real corpus; do
+        // not treat this test as covering it.
         let Some(Line::Rule(raw)) = parse_line(r#""\"" "" "" """#) else {
             panic!("expected a rule line");
         };

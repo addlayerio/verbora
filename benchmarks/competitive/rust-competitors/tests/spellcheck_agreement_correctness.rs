@@ -175,7 +175,7 @@ fn probe_verbora_symspell_harper_d1() {
         let mut examples = Vec::new();
         for w in corpus.iter().filter(|w| w.chars().count() > 2).take(300) {
             let probe = mk(w);
-            let mut v: Vec<String> = sc.get_corrections(&probe, 1);
+            let mut v: Vec<String> = sc.correction_words(&probe, 1);
             v.sort();
             v.dedup();
             let mut s: Vec<String> = sym
@@ -219,7 +219,7 @@ fn probe_verbora_symspell_harper_d1() {
     let mut vs_harper = 0;
     for w in corpus.iter().filter(|w| w.chars().count() > 2).take(300) {
         let Some(probe) = typo_swap(w) else { continue };
-        let mut v: Vec<String> = sc.get_corrections(&probe, 1);
+        let mut v: Vec<String> = sc.correction_words(&probe, 1);
         v.sort();
         v.dedup();
         let mut s: Vec<String> = sym
@@ -261,7 +261,7 @@ fn probe_verbora_symspell_d2() {
     for w in corpus.iter().filter(|w| w.chars().count() > 3).take(150) {
         // two deletions
         let probe = typo_del(&typo_del(w));
-        let mut v: Vec<String> = sc.get_corrections(&probe, 2);
+        let mut v: Vec<String> = sc.correction_words(&probe, 2);
         v.sort();
         v.dedup();
         let mut s: Vec<String> = sym
@@ -310,7 +310,7 @@ fn probe_d2_mixed_and_harper() {
         let mut examples = Vec::new();
         for w in corpus.iter().filter(|w| w.chars().count() > 4).take(150) {
             let Some(probe) = mk(w) else { continue };
-            let mut v: Vec<String> = sc.get_corrections(&probe, 2);
+            let mut v: Vec<String> = sc.correction_words(&probe, 2);
             v.sort();
             v.dedup();
             let mut s: Vec<String> = sym
@@ -390,7 +390,7 @@ fn probe_fast_symspell_shapes() {
         let mut unexplained = 0;
         for w in corpus.iter().filter(|w| w.chars().count() > 1).take(300) {
             let probe = mk(w);
-            let mut tree: Vec<&str> = index.neighbors(&probe, 1).collect();
+            let mut tree: Vec<&str> = index.neighbors(&probe, 1).map(|n| n.word).collect();
             tree.sort_unstable();
             tree.dedup();
             let mut fh: Vec<String> = fast

@@ -27,11 +27,27 @@ Example:
 """
 
 import json
+import datetime
 import os
 import subprocess
 import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+
+def git_commit():
+    """Short commit the numbers were measured at, or None outside a checkout."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return out.stdout.strip() or None
 
 
 def criterion_dir():
@@ -47,9 +63,51 @@ def criterion_dir():
     return os.path.join(meta["target_directory"], "criterion")
 
 
+def min_mtime():
+    """Epoch seconds before which a Criterion estimate is considered stale.
+
+    Criterion writes `<group>/<id>/<size>/new/estimates.json` and leaves it
+    there forever. A target that fails to build — or that is not run at all —
+    therefore leaves its *previous* run's file in place, and a naive collector
+    republishes those numbers as if this campaign had produced them. Nothing
+    downstream can tell the difference: a results row carries no provenance.
+
+    The campaign driver exports `VERBORA_BENCH_STARTED_AT` before step 5, so
+    anything older than the run that is supposed to have produced it is
+    refused rather than silently carried forward. Unset means no filtering,
+    which keeps ad-hoc invocations working.
+    """
+    raw = os.environ.get("VERBORA_BENCH_STARTED_AT")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print(
+            f"warning: VERBORA_BENCH_STARTED_AT={raw!r} is not a number; "
+            "collecting without a staleness filter",
+            file=sys.stderr,
+        )
+        return None
+
+
+STALE = []
+
+
+def _fresh(path):
+    """True when `path` exists and is not older than the current run."""
+    if not os.path.exists(path):
+        return False
+    cutoff = min_mtime()
+    if cutoff is not None and os.path.getmtime(path) < cutoff:
+        STALE.append(path)
+        return False
+    return True
+
+
 def read_estimates(directory, group, ident, size):
     path = os.path.join(directory, group, ident, str(size), "new", "estimates.json")
-    if not os.path.exists(path):
+    if not _fresh(path):
         return None
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -62,7 +120,7 @@ def read_bare_estimates(directory, group, ident):
     no numeric subdirectories for `ident` (e.g. `classifiers.rs`'s
     `bayes_predict` group, one fixed corpus, no size sweep)."""
     path = os.path.join(directory, group, ident, "new", "estimates.json")
-    if not os.path.exists(path):
+    if not _fresh(path):
         return None
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -196,6 +254,48 @@ def main():
         with open(results_path, encoding="utf-8") as fh:
             existing = json.load(fh)
 
+    if not benchmarks:
+        # Writing an empty set would *delete* this module's existing rows,
+        # because the merge below replaces the module wholesale. A target that
+        # failed to build would therefore destroy the evidence it failed to
+        # replace -- strictly worse than the stale-data problem this collector
+        # was hardened against. Leave the file alone and fail loudly instead.
+        print(
+            f'error: collected no fresh measurements for module "{module_name}"; '
+            "results.json left untouched",
+            file=sys.stderr,
+        )
+        if STALE:
+            print(
+                f"  {len(STALE)} Criterion estimate(s) were refused as older than "
+                "this run -- the benchmark did not produce new data",
+                file=sys.stderr,
+            )
+            for path in STALE[:10]:
+                print(f"    {os.path.relpath(path)}", file=sys.stderr)
+            if len(STALE) > 10:
+                print(f"    ... and {len(STALE) - 10} more", file=sys.stderr)
+        else:
+            print(
+                "  no Criterion output was found at all -- check the bench target "
+                "actually ran and the group/id names match",
+                file=sys.stderr,
+            )
+        return 1
+
+    # Stamp every row with the run that produced it. Without this a reader
+    # cannot tell a figure measured minutes ago from one carried over from a
+    # campaign months and several rewrites earlier -- which is exactly how
+    # pre-migration numbers came to sit in this file looking current.
+    measured_at = datetime.datetime.now(datetime.timezone.utc).isoformat(
+        timespec="seconds"
+    )
+    commit = git_commit()
+    for entry in benchmarks:
+        entry["measured_at"] = measured_at
+        if commit:
+            entry["commit"] = commit
+
     # Replace any prior entries for this module, keep everything else --
     # running one module's collection must not erase another's results.
     existing["benchmarks"] = [
@@ -209,6 +309,20 @@ def main():
         f'wrote {len(benchmarks)} benchmark entries for module "{module_name}" '
         "to results/results.json"
     )
+
+    if STALE:
+        # Refused, not collected. Saying so is the point: a module that
+        # measured nothing must not look like one that measured zero change.
+        print(
+            f"warning: refused {len(STALE)} Criterion estimate(s) older than this "
+            f"run -- those benchmarks produced no fresh measurement:",
+            file=sys.stderr,
+        )
+        for path in STALE[:10]:
+            print(f"  {os.path.relpath(path)}", file=sys.stderr)
+        if len(STALE) > 10:
+            print(f"  ... and {len(STALE) - 10} more", file=sys.stderr)
+
     return 0
 
 

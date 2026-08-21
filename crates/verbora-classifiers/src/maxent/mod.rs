@@ -1,105 +1,102 @@
-//! Maximum entropy classification by generalised iterative scaling.
+//! Conditional maximum-entropy classification, trained by generalised
+//! iterative scaling.
 //!
-//! Ten of the crate's thirteen exported APIs live here, and they are wired
-//! together by **shared mutable references**, not by ownership: a
-//! [`MaxEntClassifier`] holds the caller's [`FeatureSet`] and [`Sample`], and
-//! `train()` mutates both — it appends a correction feature to the feature set
-//! and memoises an observed expectation onto every feature. The Rust types use
-//! `Rc<RefCell<…>>` for exactly this reason; a port that took ownership would
-//! quietly diverge the moment a caller trained twice.
+//! [`MaxEntClassifier`](crate::MaxEntClassifier) is the public entry point; its
+//! own documentation states the model, the training objective and the
+//! guarantees a caller needs. What follows here is implementation rationale
+//! that does not change any of that.
 //!
-//! # What a naive port gets wrong
+//! # The slack feature, and why there is not one
 //!
-//! * **The scores are not probabilities.** `calculateAPriori` returns the
-//!   unnormalised weight `∏ αⱼ^fⱼ(x)`; the normalising division is commented out
-//!   in the reference. They routinely exceed 1 and do not sum to 1. Normalising
-//!   changes every score, the Kullback-Leibler trajectory, and therefore the
-//!   iteration at which training stops.
-//! * **Training always runs at least once.** The loop is a `do…while`, so
-//!   `train(0, x)` performs one full iteration where `for _ in 0..0` performs
-//!   none.
-//! * **`observedExpectation` memoises and is never invalidated.** Add an
-//!   eleventh element to a ten-element sample and retrain: The reference still
-//!   reports the expectations of the ten.
-//! * **The correction feature cannot be replaced.** It closes over the scaler
-//!   that built it, and `addFeature` rejects a second feature with the same
-//!   name, so retraining after the sample changed evaluates the correction
-//!   against the *first* run's cached feature sums.
-//! * **Context keys come from `safe-stable-stringify`**, whose key ordering is
-//!   by UTF-16 code unit. See [`crate::dynval`].
+//! GIS's derivation needs `Σⱼ fⱼ(x, y) = C` for every `(x, y)`, where `C` is
+//! [`TrainingReport::scaling_constant`](crate::TrainingReport::scaling_constant).
+//! The classical repair (Berger, Della Pietra & Della Pietra, *A Maximum
+//! Entropy Approach to Natural Language Processing*, Computational Linguistics
+//! 22(1), 1996, §6.1) adds a *slack* — or *correction* — feature
+//! `f_#(x, y) = C − Σⱼ fⱼ(x, y)`, which is non-negative by the definition of
+//! `C`. This module computes `C` and reasons about `f_#` only inside the
+//! convergence argument; it is not a model parameter, because in a conditional
+//! model it cannot be one:
 //!
-//! Every one of those is recorded in `fixtures/classifiers.json`.
+//! ```text
+//! Σⱼ λⱼ fⱼ(x,y) + λ_# ( C − Σⱼ fⱼ(x,y) )  =  λ_# C  +  Σⱼ (λⱼ − λ_#) fⱼ(x,y)
+//! ```
+//!
+//! `λ_# C` does not depend on `y`, so it cancels in `Z(x)`. A model with a
+//! weighted slack feature is therefore *the same distribution* as one without,
+//! at shifted parameters — the slack feature adds no expressive power and is
+//! not identifiable, which is why nothing here stores one. Curran & Clark,
+//! *Investigating GIS and Smoothing for Maximum Entropy Taggers* (EACL 2003),
+//! report the same omission with no loss.
+//!
+//! Storing `f_#` rather than only reasoning about it this way would need
+//! memoising `C − Σⱼ fⱼ` per training element, and would answer `0` for any
+//! `(context, outcome)` pair absent from the sample — a pair the expectation
+//! sum evaluates on every iteration — which would make `Σ f` something other
+//! than `C` and the fitted parameters something other than GIS's. Nothing here
+//! stores it, which is what keeps that failure mode unreachable.
+//!
+//! # Ordering inside a fitted model
+//!
+//! [`MaxEntModel::predicates`](crate::MaxEntModel::predicates) is
+//! first-appearance order and is part of the public contract. The order of the
+//! `(outcome, weight)` pairs *within* one predicate's row is not part of it —
+//! it is whatever order that predicate's outcomes were first seen in — because
+//! nothing in the public surface iterates a row independently of
+//! [`MaxEntModel::weight`](crate::MaxEntModel::weight), which looks a feature
+//! up by key rather than by position.
 
-pub mod classifier;
-pub mod context;
-pub mod distribution;
-pub mod element;
-pub mod feature;
-pub mod feature_set;
-pub mod gis_scaler;
-pub mod pos;
-pub mod sample;
-pub mod simple;
+mod classifier;
+mod gis;
+mod model;
+mod sample;
 
 pub use classifier::{MaxEntClassifier, RestoreError};
-pub use context::Context;
-pub use distribution::Distribution;
-pub use element::{Element, GenerateFeatures};
-pub use feature::{Feature, FeatureFn};
-pub use feature_set::FeatureSet;
-pub use gis_scaler::{GISScaler, ScalerState};
-pub use pos::{MECorpus, MESentence, POSElement, TaggedWord};
-pub use sample::Sample;
-pub use simple::SEElement;
+pub use gis::{Gis, StopReason, TrainingReport};
+pub use model::{MaxEntModel, ModelDefect};
+pub use sample::{Event, Sample};
 
-/// What the maximum-entropy code throws.
+/// What a maximum-entropy operation could not do.
 ///
-/// Three of these are behaviours a Rust port would "fix" by accident. They are
-/// preserved because the reference's own specs depend on them: `addDocument`
-/// really does throw for every input, `new Sample(elements)` really does reject
-/// any non-empty array, and a base [`Element`] really has no way to generate
-/// features.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Every variant names a condition of *this model* — an empty sample, an
+/// unfitted classifier, a setting outside its domain, a persisted model that
+/// does not describe a distribution. None of them reports the internal state of
+/// some other runtime.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MaxEntError {
-    /// `Distribution.weight` indexed past the end of the feature list because
-    /// `alpha` is longer than the feature set.
-    AlphaLongerThanFeatures,
-    /// `x.generateFeatures is not a function`: a base [`Element`] was asked to
-    /// generate features, which only the subclasses can do.
-    ElementCannotGenerateFeatures,
-    /// A [`POSElement`] was applied to a context whose data is not a
-    /// `{ wordWindow, tagWindow }` object.
-    PosContextMissingWindows,
-    /// `getClassifications` before `train()`: `this.p` is `undefined`.
+    /// [`MaxEntClassifier::train`] was called on a sample holding no events.
+    ///
+    /// There is no empirical distribution to constrain the model to, so there
+    /// is nothing to fit — as distinct from fitting something uninformative.
+    NoEvents,
+    /// A prediction was requested from a classifier that has not been trained.
     NotTrained,
-    /// `classify()` with no classes at all: `scores[-1]` is `undefined`.
-    NoClasses,
-    /// `new Sample(elements)` with a non-empty array. The constructor calls
-    /// `analyse()`, whose `forEach` callback loses its `this` under strict mode
-    /// and throws on the very first element.
-    SampleAnalyseIsBroken,
-    /// `Classifier.prototype.addDocument` invoked with `this === prototype`, so
-    /// `this.sample` is `undefined`. It throws for every input, always.
-    AddDocumentAlwaysThrows,
+    /// [`Gis::tolerance`] was not a finite, non-negative number.
+    ///
+    /// The tolerance is compared against an increase in log-likelihood, which
+    /// GIS makes non-negative; a negative or non-finite threshold could never
+    /// be met and would silently turn `max_iterations` into the only stopping
+    /// rule.
+    InvalidTolerance(f64),
+    /// A persisted model parsed as JSON but does not describe a distribution
+    /// this crate can evaluate.
+    MalformedModel(ModelDefect),
 }
 
 impl std::fmt::Display for MaxEntError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::AlphaLongerThanFeatures => {
-                "Cannot read properties of undefined (reading 'apply')"
+        match self {
+            Self::NoEvents => f.write_str("the sample holds no training events"),
+            Self::NotTrained => f.write_str("the classifier has not been trained"),
+            Self::InvalidTolerance(t) => {
+                write!(
+                    f,
+                    "a convergence tolerance must be finite and non-negative, not {t}"
+                )
             }
-            Self::ElementCannotGenerateFeatures => "x.generateFeatures is not a function",
-            Self::PosContextMissingWindows => "Cannot read properties of undefined (reading '0')",
-            Self::NotTrained => "Cannot read properties of undefined (reading 'calculateAPriori')",
-            Self::NoClasses => "Cannot read properties of undefined (reading 'value')",
-            Self::SampleAnalyseIsBroken => {
-                "Cannot read properties of undefined (reading 'classes')"
-            }
-            Self::AddDocumentAlwaysThrows => {
-                "Cannot read properties of undefined (reading 'addElement')"
-            }
-        })
+            Self::MalformedModel(defect) => write!(f, "malformed maximum-entropy model: {defect}"),
+        }
     }
 }
 

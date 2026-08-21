@@ -8,36 +8,28 @@
 //!
 //! # What is being compared
 //!
-//! The reference gives every node its own the reference object holding its own hash
-//! map, so a lookup is a hash plus a pointer chase and building an *n*-node trie
-//! costs *n* allocations. `SipTrie`/`FxTrie` below are the closest faithful Rust
-//! analogues of that shape — one `HashMap<u16, Box<Node>>` per node — in two
-//! flavours, `std`'s SipHash and `rustc-hash`'s FxHash, so the arena is not
-//! being flattered by a slow hasher.
+//! The textbook prefix-tree layout gives every node its own hash map, so a
+//! lookup is a hash plus a pointer chase and building an *n*-node trie costs
+//! *n* allocations. `SipTrie`/`FxTrie` below are that shape — one
+//! `HashMap<char, Box<Node>>` per node — in two flavours, `std`'s SipHash and
+//! `rustc-hash`'s FxHash, so the arena is not being flattered by a slow
+//! hasher.
 //!
 //! The shipped [`verbora_trie::Trie`] instead keeps all nodes in one `Vec` and
 //! each node's children in a two-element inline array scanned linearly.
 //!
-//! ## Measured (20 000-word list, 32 000 for `prefix_heavy`)
+//! ## Measured
 //!
-//! | Benchmark | arena | hashmap (Fx) | hashmap (Sip) |
-//! |---|--:|--:|--:|
-//! | `build/random` | **1.48 ms** | 25.1 ms | 41.9 ms |
-//! | `build/prefix_heavy` | **2.18 ms** | 11.5 ms | 15.2 ms |
-//! | `contains_hit` | **1.13 ms** | 1.20 ms | 3.15 ms |
-//! | `contains_miss` | **1.26 ms** | 1.94 ms | 3.51 ms |
-//! | `get_size` | **0.23 ns** | 1.87 ms | — |
+//! **Nothing.** Every figure this comment used to carry was measured against
+//! the previous UTF-16-code-unit-keyed arena, which no longer exists: one node
+//! is now one Unicode scalar, child lists are kept sorted and binary-searched
+//! past eight entries, and `node_count` counts scalars rather than code units.
+//! The numbers are retired rather than adjusted, and this suite has not been
+//! re-run since — see `CLAUDE.md` on when a campaign is launched.
 //!
-//! The arena wins everywhere, and the margin says *why*: build is 17× faster
-//! than the fastest hash baseline because the arena makes no per-node
-//! allocation, while `contains_hit` is a near tie with FxHash — at one or two
-//! children per node, scanning an inline array costs about what hashing a `u16`
-//! does. So the layout is chosen for its build cost and its memory behaviour,
-//! not for a lookup advantage that does not exist. `get_size` is the outlier
-//! only because the arena's length *is* the answer.
-//!
-//! Against the reference implementation the same inputs run 5.5–15× faster,
-//! and `get_size` moves from a full traversal to a field read.
+//! What the groups below are *for* is unchanged: the arena's build cost (no
+//! per-node allocation), its point-lookup cost against a hash-per-node
+//! baseline, and the `O(1)` `node_count` a flat arena makes possible.
 //!
 //! Inputs come from `benches/data/words.json`, which every sibling harness
 //! reads too, so all of them are measured on byte-identical data.
@@ -49,11 +41,11 @@ use rustc_hash::FxHashMap;
 use verbora_trie::{FrozenTrie, Trie};
 
 // ---------------------------------------------------------------------------
-// Baseline: one hash map per node, mirroring the reference's object-per-node
+// Baseline: one hash map per node — the textbook pointer-chasing layout
 // ---------------------------------------------------------------------------
 
-/// Generates a trie in the shape the reference uses: one node per code unit, each
-/// owning its own hash map, reached by a pointer chase.
+/// Generates a trie in the textbook shape: one node per scalar, each owning its
+/// own hash map, reached by a pointer chase.
 ///
 /// A macro rather than a generic because the node type is recursive through the
 /// map, which no single type parameter can express cleanly. Two instantiations
@@ -63,7 +55,7 @@ macro_rules! hash_trie {
     ($node:ident, $trie:ident, $map:ident) => {
         #[derive(Default)]
         struct $node {
-            children: $map<u16, Box<$node>>,
+            children: $map<char, Box<$node>>,
             is_word: bool,
         }
 
@@ -73,18 +65,20 @@ macro_rules! hash_trie {
         }
 
         impl $trie {
-            fn add_string(&mut self, s: &str) -> bool {
+            fn insert(&mut self, s: &str) -> bool {
                 let mut node = &mut self.root;
-                for unit in s.encode_utf16() {
-                    node = node.children.entry(unit).or_default();
+                // Keyed by scalar, matching the shipped arena's own unit, so
+                // the two structures do the same amount of work per key.
+                for scalar in s.chars() {
+                    node = node.children.entry(scalar).or_default();
                 }
-                std::mem::replace(&mut node.is_word, true)
+                !std::mem::replace(&mut node.is_word, true)
             }
 
             fn contains(&self, s: &str) -> bool {
                 let mut node = &self.root;
-                for unit in s.encode_utf16() {
-                    match node.children.get(&unit) {
+                for scalar in s.chars() {
+                    match node.children.get(&scalar) {
                         Some(next) => node = next,
                         None => return false,
                     }
@@ -92,9 +86,9 @@ macro_rules! hash_trie {
                 node.is_word
             }
 
-            /// The reference's `getSize`: a full traversal, because a per-node
-            /// structure has nowhere to keep a running total.
-            fn get_size(&self) -> usize {
+            /// A full traversal, because a per-node structure has nowhere to
+            /// keep a running total — the cost the flat arena removes.
+            fn node_count(&self) -> usize {
                 fn walk(n: &$node) -> usize {
                     1 + n.children.values().map(|c| walk(c)).sum::<usize>()
                 }
@@ -104,7 +98,7 @@ macro_rules! hash_trie {
             fn from_words(words: &[String]) -> Self {
                 let mut t = Self::default();
                 for w in words {
-                    t.add_string(w);
+                    t.insert(w);
                 }
                 t
             }
@@ -154,8 +148,8 @@ fn prefix_heavy(words: &[String]) -> Vec<String> {
 }
 
 /// The same words transliterated into Cyrillic, to measure the non-ASCII path:
-/// two UTF-8 bytes but still one code unit, so the node count is unchanged while
-/// folding and slicing get more expensive.
+/// two UTF-8 bytes but still one scalar, so the node count is unchanged while
+/// folding and decoding get more expensive.
 fn cyrillic(words: &[String]) -> Vec<String> {
     const ALPHABET: [char; 26] = [
         'а', 'б', 'в', 'г', 'д', 'е', 'ж', 'з', 'и', 'й', 'к', 'л', 'м', 'н', 'о', 'п', 'р', 'с',
@@ -192,17 +186,17 @@ fn bench_build(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("arena", label), set, |b, set| {
             b.iter(|| {
                 let mut t = Trie::new();
-                t.add_strings(set.iter().map(String::as_str));
-                black_box(t.get_size())
+                t.insert_all(set.iter().map(String::as_str));
+                black_box(t.node_count())
             });
         });
 
         g.bench_with_input(BenchmarkId::new("hashmap_sip", label), set, |b, set| {
-            b.iter(|| black_box(SipTrie::from_words(set).get_size()));
+            b.iter(|| black_box(SipTrie::from_words(set).node_count()));
         });
 
         g.bench_with_input(BenchmarkId::new("hashmap_fx", label), set, |b, set| {
-            b.iter(|| black_box(FxTrie::from_words(set).get_size()));
+            b.iter(|| black_box(FxTrie::from_words(set).node_count()));
         });
     }
 
@@ -273,31 +267,31 @@ fn bench_queries(c: &mut Criterion) {
     let mut g = c.benchmark_group("queries");
     g.throughput(Throughput::Elements(probes.len() as u64));
 
-    g.bench_function("find_matches_on_path", |b| {
+    g.bench_function("prefix_matches", |b| {
         b.iter(|| {
             probes
                 .iter()
-                .map(|w| arena.iter_matches_on_path(black_box(w)).count())
+                .map(|w| arena.iter_prefix_matches(black_box(w)).count())
                 .sum::<usize>()
         });
     });
 
     // The allocation-free variant: callers who only need the split point never
     // have to materialise either half.
-    g.bench_function("find_prefix_lengths", |b| {
+    g.bench_function("longest_prefix_lengths", |b| {
         b.iter(|| {
             probes
                 .iter()
-                .map(|w| arena.find_prefix_lengths(black_box(w)).1)
+                .map(|w| arena.longest_prefix_lengths(black_box(w)).rest)
                 .sum::<usize>()
         });
     });
 
-    g.bench_function("find_prefix", |b| {
+    g.bench_function("longest_prefix", |b| {
         b.iter(|| {
             probes
                 .iter()
-                .map(|w| arena.find_prefix(black_box(w)).1.len())
+                .map(|w| arena.longest_prefix(black_box(w)).rest.len())
                 .sum::<usize>()
         });
     });
@@ -367,7 +361,7 @@ fn bench_unicode_and_folding(c: &mut Criterion) {
     let cyr_trie: Trie = cyr.iter().collect();
 
     let mut folding = Trie::case_insensitive();
-    folding.add_strings(words.iter().map(String::as_str));
+    folding.insert_all(words.iter().map(String::as_str));
     let upper: Vec<String> = words.iter().map(|w| w.to_uppercase()).collect();
 
     let mut g = c.benchmark_group("unicode_and_folding");
@@ -410,16 +404,16 @@ fn bench_unicode_and_folding(c: &mut Criterion) {
     g.finish();
 }
 
-fn bench_get_size(c: &mut Criterion) {
+fn bench_node_count(c: &mut Criterion) {
     let words = load_words();
     let arena: Trie = words.iter().collect();
     let fx = FxTrie::from_words(&words);
 
-    // The reference warns that `getSize` "may not be good for frequent use"
-    // because it traverses everything. In the arena it is a `Vec::len`.
-    let mut g = c.benchmark_group("get_size");
-    g.bench_function("arena", |b| b.iter(|| black_box(arena.get_size())));
-    g.bench_function("hashmap_fx", |b| b.iter(|| black_box(fx.get_size())));
+    // A hash-per-node structure has to traverse everything to count its nodes.
+    // In the arena it is a `Vec::len`.
+    let mut g = c.benchmark_group("node_count");
+    g.bench_function("arena", |b| b.iter(|| black_box(arena.node_count())));
+    g.bench_function("hashmap_fx", |b| b.iter(|| black_box(fx.node_count())));
     g.finish();
 }
 
@@ -431,6 +425,6 @@ criterion_group!(
     bench_queries,
     bench_enumeration,
     bench_unicode_and_folding,
-    bench_get_size
+    bench_node_count
 );
 criterion_main!(benches);

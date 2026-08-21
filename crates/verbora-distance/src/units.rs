@@ -1,51 +1,49 @@
-//! Text-unit dispatch: the mechanism that buys exact the reference parity without
-//! paying for it on ordinary input.
+//! Text-unit dispatch: the mechanism that keeps the scalar unit free on
+//! ordinary input.
 //!
-//! # The problem
+//! # The unit
 //!
-//! The reference strings are sequences of UTF-16 code units. Every positional
-//! operation in the reference — `s.length`, `s[i]`, `s.slice(i, j)` — therefore
-//! counts code units, and characters outside the Basic Multilingual Plane count
-//! as **two**. Rust's `char` is a Unicode scalar value, so a straightforward port
-//! disagrees with the reference on any input containing astral-plane characters:
+//! **One Unicode scalar value (`char`) is one unit.** Every count this crate
+//! reports is a count of scalars, so `"a😀b"` is three units and
+//! `levenshtein("a😀b", "ab") == 1`. See `docs/design/distance-contract.md`
+//! §2 for why: it is the unit `str::chars()` already yields, it consults no
+//! Unicode character database (so results are frozen across Unicode
+//! versions), and it is the only unit under which a search can report a byte
+//! range that always slices the target — every scalar boundary is a byte
+//! boundary, while a UTF-16 boundary can fall between the halves of a
+//! surrogate pair.
 //!
-//! ```text
-//! LevenshteinDistance("a😀b", "ab")
-//!   The reference : 2   (lengths 4 and 2; two surrogate halves deleted)
-//!   Rust chars : 1   (lengths 3 and 2; one character deleted)
-//! ```
+//! # The dispatch
 //!
-//! That is a genuine, observable divergence, not a theoretical one — it is
-//! recorded in `fixtures/distance.json`.
-//!
-//! # The solution
-//!
-//! Rather than force every algorithm onto `Vec<u16>` (which would allocate and
-//! slow down the 99.9% case), the algorithms in this crate are written once,
-//! generically over `&[T]`, and [`dispatch`] picks the narrowest representation
-//! that is *provably identical* to UTF-16 for the given input:
+//! Rather than force every algorithm onto `Vec<char>` (which would allocate
+//! and slow down the 99.9% case), the algorithms in this crate are written
+//! once, generically over `&[T]`, and [`dispatch`] picks the narrowest
+//! representation that is *provably identical* to scalars for the given
+//! input:
 //!
 //! | Input                        | Representation | Allocates |
 //! |------------------------------|----------------|-----------|
 //! | both operands ASCII          | `&[u8]`        | no        |
-//! | otherwise                    | `Vec<u16>`     | yes       |
+//! | otherwise                    | `Vec<char>`    | yes       |
 //!
-//! ASCII is checked with [`str::is_ascii`], which is vectorised. For ASCII input
-//! one byte *is* one code unit, so the fast path is not an approximation — it is
-//! the same computation on a narrower type.
+//! ASCII is checked with [`str::is_ascii`], which is vectorised. For ASCII
+//! input one byte *is* one scalar, so the fast path is not an approximation —
+//! it is the same computation on a narrower type.
 
 use rustc_hash::FxHashMap;
 
-/// A symbol an algorithm can operate on: either a byte or a UTF-16 code unit.
+/// A symbol an algorithm can operate on: either an ASCII byte or a Unicode
+/// scalar value.
 ///
 /// The bound is deliberately minimal so that the algorithms stay monomorphisable
 /// down to tight loops over primitives.
-pub trait Unit: Copy + PartialEq + Eq {
-    /// A map from unit to `usize`, used by unrestricted Damerau–Levenshtein to
-    /// remember the last row each symbol appeared in.
+pub(crate) trait Unit: Copy + PartialEq + Eq {
+    /// A map from unit to `usize`, used by the full-matrix
+    /// unrestricted-Damerau branch to remember the last row each symbol
+    /// appeared in.
     ///
     /// Bytes get a flat 256-entry array (no hashing, perfect cache behaviour);
-    /// code units fall back to a hash map.
+    /// scalars fall back to a hash map.
     type Map: UnitMap<Self>;
 
     /// Creates an empty map.
@@ -53,18 +51,16 @@ pub trait Unit: Copy + PartialEq + Eq {
 }
 
 /// A symbol-to-row map, abstracted so the byte path can avoid hashing entirely.
-pub trait UnitMap<T> {
+pub(crate) trait UnitMap<T> {
     /// Returns the stored row for `key`, if present.
     fn get(&self, key: T) -> Option<usize>;
     /// Stores `row` for `key`.
     fn set(&mut self, key: T, row: usize);
-    /// Empties the map.
-    fn clear(&mut self);
 }
 
 /// Flat array map for byte alphabets: a lookup is one indexed load.
 #[derive(Debug)]
-pub struct ByteMap {
+pub(crate) struct ByteMap {
     // `usize::MAX` is the vacant sentinel; row indices never reach it.
     rows: [usize; 256],
 }
@@ -80,11 +76,6 @@ impl UnitMap<u8> for ByteMap {
     fn set(&mut self, key: u8, row: usize) {
         self.rows[key as usize] = row;
     }
-
-    #[inline]
-    fn clear(&mut self) {
-        self.rows = [usize::MAX; 256];
-    }
 }
 
 impl Unit for u8 {
@@ -97,66 +88,108 @@ impl Unit for u8 {
     }
 }
 
-impl UnitMap<u16> for FxHashMap<u16, usize> {
+impl UnitMap<char> for FxHashMap<char, usize> {
     #[inline]
-    fn get(&self, key: u16) -> Option<usize> {
+    fn get(&self, key: char) -> Option<usize> {
         FxHashMap::get(self, &key).copied()
     }
 
     #[inline]
-    fn set(&mut self, key: u16, row: usize) {
+    fn set(&mut self, key: char, row: usize) {
         self.insert(key, row);
-    }
-
-    #[inline]
-    fn clear(&mut self) {
-        FxHashMap::clear(self);
     }
 }
 
-impl Unit for u16 {
-    type Map = FxHashMap<u16, usize>;
+impl Unit for char {
+    type Map = FxHashMap<char, usize>;
 
     fn new_map() -> Self::Map {
         FxHashMap::default()
     }
 }
 
-/// Runs `f` on `a` and `b` in the narrowest representation that matches
-/// the reference's UTF-16 semantics exactly.
+/// Runs `f` on `a` and `b` in the narrowest representation whose element
+/// sequence is exactly the operands' scalar sequence.
 ///
-/// Both operands are promoted together: mixing a `&[u8]` view with a `&[u16]`
-/// view is not possible, so if either operand needs UTF-16, both are converted.
+/// Both operands are promoted together: mixing a `&[u8]` view with a `&[char]`
+/// view is not possible, so if either operand is non-ASCII, both are decoded.
 #[inline]
-pub fn dispatch<R>(a: &str, b: &str, f: impl for<'x> FnOnce(Operands<'x>) -> R) -> R {
+pub(crate) fn dispatch<R>(a: &str, b: &str, f: impl for<'x> FnOnce(Operands<'x>) -> R) -> R {
     if a.is_ascii() && b.is_ascii() {
         f(Operands::Bytes(a.as_bytes(), b.as_bytes()))
     } else {
-        let ua: Vec<u16> = a.encode_utf16().collect();
-        let ub: Vec<u16> = b.encode_utf16().collect();
+        let ua: Vec<char> = a.chars().collect();
+        let ub: Vec<char> = b.chars().collect();
         f(Operands::Units(&ua, &ub))
     }
 }
 
 /// A pair of operands in a single, consistent representation.
 #[derive(Debug, Clone, Copy)]
-pub enum Operands<'a> {
-    /// Both operands are ASCII; one byte is one UTF-16 code unit.
+pub(crate) enum Operands<'a> {
+    /// Both operands are ASCII; one byte is one Unicode scalar value.
     Bytes(&'a [u8], &'a [u8]),
-    /// General case: explicit UTF-16 code units.
-    Units(&'a [u16], &'a [u16]),
+    /// General case: explicit Unicode scalar values.
+    Units(&'a [char], &'a [char]),
 }
 
-/// The number of UTF-16 code units in `s` — the reference's `String#length`.
+// ---------------------------------------------------------------------------
+// Common-affix scans
+// ---------------------------------------------------------------------------
+
+/// Chunk width for the affix scans below, in *units*.
 ///
-/// Uses the ASCII fast path where possible; otherwise counts without allocating
-/// by adding one extra unit per astral-plane character.
+/// Wide enough that the whole-chunk compare has a real chance of lowering to
+/// one `memcmp` call (16 bytes for `u8`, 64 for `char`), short enough that a
+/// mismatch inside the very first chunk — the overwhelmingly common case for
+/// unrelated operands — costs one such compare and nothing else. The scalar
+/// tail loop then pins down the exact boundary inside the chunk that
+/// differed, so the result is the true affix length, never a chunk-rounded
+/// approximation.
+///
+/// `UNMEASURED` at `char`: whether a 64-byte chunk compare still lowers to a
+/// single `memcmp` must be confirmed from the emitted code before the
+/// "at least one SIMD register" rationale is restated as fact
+/// (`docs/design/distance-contract.md` §7, item 7).
+const AFFIX_CHUNK: usize = 16;
+
+/// Length, in units, of the longest common prefix of `a` and `b`.
+///
+/// Exact, not chunk-rounded: the chunked loop only skips *whole* chunks that
+/// compared equal, and the scalar loop that follows always resolves the
+/// mismatching chunk unit by unit.
 #[inline]
-pub fn utf16_len(s: &str) -> usize {
-    if s.is_ascii() {
-        return s.len();
+pub(crate) fn common_prefix_len<T: Unit>(a: &[T], b: &[T]) -> usize {
+    let shared = a.len().min(b.len());
+    let mut i = 0usize;
+    while i + AFFIX_CHUNK <= shared && a[i..i + AFFIX_CHUNK] == b[i..i + AFFIX_CHUNK] {
+        i += AFFIX_CHUNK;
     }
-    s.chars().map(|c| c.len_utf16()).sum()
+    while i < shared && a[i] == b[i] {
+        i += 1;
+    }
+    i
+}
+
+/// Length, in units, of the longest common suffix of `a` and `b`.
+///
+/// Same exactness guarantee as [`common_prefix_len`], walking inward from the
+/// two operands' ends (which need not be at the same absolute index, since the
+/// operands may differ in length).
+#[inline]
+pub(crate) fn common_suffix_len<T: Unit>(a: &[T], b: &[T]) -> usize {
+    let shared = a.len().min(b.len());
+    let (la, lb) = (a.len(), b.len());
+    let mut i = 0usize;
+    while i + AFFIX_CHUNK <= shared
+        && a[la - i - AFFIX_CHUNK..la - i] == b[lb - i - AFFIX_CHUNK..lb - i]
+    {
+        i += AFFIX_CHUNK;
+    }
+    while i < shared && a[la - 1 - i] == b[lb - 1 - i] {
+        i += 1;
+    }
+    i
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +199,7 @@ pub fn utf16_len(s: &str) -> usize {
 /// Pattern-match-table (`Peq`) construction for the bit-parallel kernels,
 /// specialised per unit type the way [`Unit::Map`] already specialises the
 /// unrestricted-Damerau last-occurrence map: bytes get flat arrays (a probe
-/// is one indexed load, no hashing), UTF-16 units get `FxHashMap` (the
+/// is one indexed load, no hashing), scalars get `FxHashMap` (the
 /// fastest hasher already in this crate's dependency tree — a `std`
 /// `HashMap` probe was a measured constant-factor cost in the original
 /// single-word kernel).
@@ -236,8 +269,8 @@ impl BitPeq for u8 {
     }
 }
 
-impl BitPeq for u16 {
-    type Table1 = FxHashMap<u16, u64>;
+impl BitPeq for char {
+    type Table1 = FxHashMap<char, u64>;
 
     fn peq1(pattern: &[Self]) -> Self::Table1 {
         let mut table = FxHashMap::default();
@@ -252,10 +285,10 @@ impl BitPeq for u16 {
         table.get(&unit).copied().unwrap_or(0)
     }
 
-    type TableN = (FxHashMap<u16, u32>, Vec<u64>, usize);
+    type TableN = (FxHashMap<char, u32>, Vec<u64>, usize);
 
     fn peqn(pattern: &[Self], blocks: usize) -> Self::TableN {
-        let mut index: FxHashMap<u16, u32> = FxHashMap::default();
+        let mut index: FxHashMap<char, u32> = FxHashMap::default();
         let mut rows: Vec<u64> = Vec::new();
         for (i, &c) in pattern.iter().enumerate() {
             let slot = index.entry(c).or_insert_with(|| {
@@ -282,22 +315,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn utf16_len_matches_utf16_count() {
-        for s in ["", "abc", "café", "Москва", "😀", "a😀b", "𝕳𝖊𝖑𝖑𝖔"] {
-            assert_eq!(utf16_len(s), s.encode_utf16().count(), "for {s:?}");
+    fn dispatch_yields_the_scalar_sequence() {
+        // The unit is the Unicode scalar value, so the promoted slices are
+        // exactly `s.chars()` — one element per scalar, astral characters
+        // included. Counted from the definition of UTF-8, not from the code:
+        // "a😀b" is three scalars, "𝕳𝖊𝖑𝖑𝖔" is five.
+        for (a, b, la, lb) in [
+            ("a😀b", "ab", 3usize, 2usize),
+            ("𝕳𝖊𝖑𝖑𝖔", "", 5, 0),
+            ("café", "cafe", 4, 4),
+            ("Москва", "Москва", 6, 6),
+        ] {
+            let (ga, gb) = dispatch(a, b, |ops| match ops {
+                Operands::Bytes(x, y) => (x.len(), y.len()),
+                Operands::Units(x, y) => {
+                    assert_eq!(x, a.chars().collect::<Vec<char>>().as_slice());
+                    assert_eq!(y, b.chars().collect::<Vec<char>>().as_slice());
+                    (x.len(), y.len())
+                }
+            });
+            assert_eq!((ga, gb), (la, lb), "for {a:?} / {b:?}");
         }
     }
 
     #[test]
     fn ascii_takes_the_byte_path() {
-        let took_bytes = dispatch("abc", "abd", |ops| matches!(ops, Operands::Bytes(..)));
-        assert!(took_bytes);
+        // The unit change must cost the common case nothing: ASCII operands
+        // still reach the `u8` kernels, whose flat `[usize; 256]` and
+        // `[u64; 256]` tables are width-dependent and were left verbatim.
+        // For ASCII, one byte *is* one scalar by definition, so the byte
+        // arm computes the identical answer on a narrower type.
+        for (a, b) in [
+            ("abc", "abd"),
+            ("", ""),
+            ("", "abc"),
+            ("abc", ""),
+            ("\u{0}\u{7f}", "\u{7f}\u{0}"), // the extremes of ASCII
+            (
+                "the quick brown fox jumps over the lazy dog",
+                "the quick brown fox",
+            ),
+        ] {
+            let took_bytes = dispatch(a, b, |ops| matches!(ops, Operands::Bytes(..)));
+            assert!(took_bytes, "{a:?} / {b:?} must take the byte path");
+        }
     }
 
     #[test]
     fn non_ascii_promotes_both_operands() {
-        let took_units = dispatch("abc", "café", |ops| matches!(ops, Operands::Units(..)));
-        assert!(took_units, "one non-ASCII operand must promote the pair");
+        // One non-ASCII operand promotes the pair, in either position: the
+        // two views cannot be mixed, so a `&[u8]` operand and a `&[char]`
+        // operand is not a representable state.
+        for (a, b) in [
+            ("abc", "café"),
+            ("café", "abc"),
+            ("😀", "a"),
+            ("a", "😀"),
+            ("", "é"),
+            ("é", ""),
+        ] {
+            let took_units = dispatch(a, b, |ops| matches!(ops, Operands::Units(..)));
+            assert!(
+                took_units,
+                "one non-ASCII operand must promote the pair: {a:?} / {b:?}"
+            );
+        }
     }
 
     #[test]
@@ -306,18 +388,18 @@ mod tests {
         assert_eq!(m.get(b'a'), None);
         m.set(b'a', 7);
         assert_eq!(m.get(b'a'), Some(7));
-        m.clear();
-        assert_eq!(m.get(b'a'), None);
+        assert_eq!(m.get(b'b'), None);
     }
 
     #[test]
     fn unit_map_roundtrips() {
-        let mut m = u16::new_map();
-        assert_eq!(UnitMap::get(&m, 0x1234), None);
-        m.set(0x1234, 9);
-        assert_eq!(UnitMap::get(&m, 0x1234), Some(9));
-        m.clear();
-        assert_eq!(UnitMap::get(&m, 0x1234), None);
+        let mut m = char::new_map();
+        assert_eq!(UnitMap::get(&m, '😀'), None);
+        m.set('😀', 9);
+        assert_eq!(UnitMap::get(&m, '😀'), Some(9));
+        // A distinct astral scalar is a distinct key: the map is keyed on the
+        // whole scalar, not on a surrogate half the two would share.
+        assert_eq!(UnitMap::get(&m, '😁'), None);
     }
 
     // -- BitPeq table batteries ---------------------------------------------
@@ -382,46 +464,65 @@ mod tests {
     }
 
     #[test]
-    fn bitpeq_u16_tables_match_naive_masks() {
-        // Same battery for the FxHashMap-backed u16 tables, with unit
-        // values at both extremes (0 and 0xFFFF), surrogate-range values
-        // (astral halves), and more than 300 distinct units so the packed
-        // rows vector grows through many slot allocations.
-        let mut pattern: Vec<u16> = Vec::new();
-        for i in 0..320usize {
-            pattern.push(i as u16); // 320 distinct units, blocks 0..=4
+    fn bitpeq_char_tables_match_naive_masks() {
+        // Same battery for the FxHashMap-backed `char` tables, with unit
+        // values at both extremes of the scalar range (U+0000 and
+        // U+10FFFF), astral values on both sides of the BMP boundary, and
+        // more than 300 distinct units so the packed rows vector grows
+        // through many slot allocations.
+        let mut pattern: Vec<char> = Vec::new();
+        for i in 0..320u32 {
+            // U+0100.. avoids the surrogate range entirely; 320 distinct
+            // units spanning blocks 0..=4.
+            pattern.push(char::from_u32(0x0100 + i).expect("BMP non-surrogate"));
         }
         for i in 0..70usize {
             // Recurrences of early units far from their first block, plus
-            // extremes and surrogate halves.
-            pattern.push([0u16, 5, 0xFFFF, 0xD83D, 0xDE00, 17][i % 6]);
+            // the extremes and two astral characters.
+            pattern.push(['\u{0}', '\u{105}', '\u{10FFFF}', '😀', '𝕳', '\u{111}'][i % 6]);
         }
         let blocks = pattern.len().div_ceil(64);
 
         let head = &pattern[..48];
-        let t1 = <u16 as BitPeq>::peq1(head);
-        for unit in [0u16, 5, 17, 47, 48, 0xFFFF] {
+        let t1 = <char as BitPeq>::peq1(head);
+        for unit in [
+            '\u{0}',
+            '\u{100}',
+            '\u{105}',
+            '\u{12F}',
+            '\u{130}',
+            '\u{10FFFF}',
+        ] {
             assert_eq!(
-                <u16 as BitPeq>::peq1_get(&t1, unit),
+                <char as BitPeq>::peq1_get(&t1, unit),
                 naive_mask(head, unit, 0),
-                "peq1 mismatch for unit {unit}"
+                "peq1 mismatch for unit {unit:?}"
             );
         }
 
-        let tn = <u16 as BitPeq>::peqn(&pattern, blocks);
-        for unit in [0u16, 5, 17, 100, 319, 0xFFFF, 0xD83D, 0xDE00] {
-            let row = <u16 as BitPeq>::peqn_row(&tn, unit).expect("present unit must have a row");
+        let tn = <char as BitPeq>::peqn(&pattern, blocks);
+        for unit in [
+            '\u{0}',
+            '\u{100}',
+            '\u{105}',
+            '\u{111}',
+            '\u{23F}',
+            '\u{10FFFF}',
+            '😀',
+            '𝕳',
+        ] {
+            let row = <char as BitPeq>::peqn_row(&tn, unit).expect("present unit must have a row");
             assert_eq!(row.len(), blocks);
             for (b, &word) in row.iter().enumerate() {
                 assert_eq!(
                     word,
                     naive_mask(&pattern, unit, b),
-                    "peqn mismatch for unit {unit}, block {b}"
+                    "peqn mismatch for unit {unit:?}, block {b}"
                 );
             }
         }
-        assert!(<u16 as BitPeq>::peqn_row(&tn, 999).is_none());
-        assert!(<u16 as BitPeq>::peqn_row(&tn, 0xFFFE).is_none());
+        assert!(<char as BitPeq>::peqn_row(&tn, 'z').is_none());
+        assert!(<char as BitPeq>::peqn_row(&tn, '\u{10FFFE}').is_none());
     }
 
     #[test]
@@ -441,5 +542,120 @@ mod tests {
             let expected_union = naive_mask(&pattern, b'x', b) | naive_mask(&pattern, b'y', b);
             assert_eq!(rx[b] | ry[b], expected_union, "union wrong in block {b}");
         }
+    }
+
+    // -- Common-affix scans -------------------------------------------------
+
+    /// The definitional scans: one unit at a time, no chunking, no length
+    /// bookkeeping. Any chunk-rounding, tail-loop or reversed-index bug in
+    /// the real implementations disagrees with these.
+    fn naive_prefix<T: PartialEq>(a: &[T], b: &[T]) -> usize {
+        let mut i = 0;
+        while i < a.len().min(b.len()) && a[i] == b[i] {
+            i += 1;
+        }
+        i
+    }
+
+    fn naive_suffix<T: PartialEq>(a: &[T], b: &[T]) -> usize {
+        let mut i = 0;
+        while i < a.len().min(b.len()) && a[a.len() - 1 - i] == b[b.len() - 1 - i] {
+            i += 1;
+        }
+        i
+    }
+
+    /// Deterministic PRNG, same shape as the sibling modules' helpers.
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        fn next_range(&mut self, bound: usize) -> usize {
+            (self.next_u64() % bound as u64) as usize
+        }
+    }
+
+    #[test]
+    fn affix_scans_match_the_naive_walk_at_chunk_boundaries() {
+        // Every affix length from 0 through several chunk widths, against
+        // both equal-length and unequal-length operands: the chunked loop
+        // must hand off to the scalar tail at exactly the right unit, and
+        // the suffix scan must index from each operand's own end.
+        for shared in 0usize..=(AFFIX_CHUNK * 3 + 5) {
+            for extra_a in [0usize, 1, 7, AFFIX_CHUNK, AFFIX_CHUNK + 3] {
+                for extra_b in [0usize, 1, 5, AFFIX_CHUNK + 1] {
+                    let mut a: Vec<u8> = vec![b'a'; shared];
+                    let mut b: Vec<u8> = vec![b'a'; shared];
+                    a.extend(std::iter::repeat_n(b'x', extra_a));
+                    b.extend(std::iter::repeat_n(b'y', extra_b));
+                    assert_eq!(
+                        common_prefix_len(&a, &b),
+                        naive_prefix(&a, &b),
+                        "prefix shared={shared} extra=({extra_a},{extra_b})"
+                    );
+                    // Mirrored operands exercise the suffix scan over the
+                    // same shapes.
+                    let ra: Vec<u8> = a.iter().rev().copied().collect();
+                    let rb: Vec<u8> = b.iter().rev().copied().collect();
+                    assert_eq!(
+                        common_suffix_len(&ra, &rb),
+                        naive_suffix(&ra, &rb),
+                        "suffix shared={shared} extra=({extra_a},{extra_b})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affix_scans_match_the_naive_walk_on_random_pairs() {
+        // Randomized, both monomorphizations, tiny alphabets so shared
+        // affixes arise by chance at every length rather than only when
+        // planted — including the degenerate empty and single-unit cases.
+        let mut rng = SplitMix64(0xAFF1_0000_5CA4_0001);
+        for round in 0..4000 {
+            let la = rng.next_range(120);
+            let lb = rng.next_range(120);
+            let alphabet: &[u8] = [&b"a"[..], b"ab", b"abc"][round % 3];
+            let a: Vec<u8> = (0..la)
+                .map(|_| alphabet[rng.next_range(alphabet.len())])
+                .collect();
+            let b: Vec<u8> = (0..lb)
+                .map(|_| alphabet[rng.next_range(alphabet.len())])
+                .collect();
+            assert_eq!(common_prefix_len(&a, &b), naive_prefix(&a, &b));
+            assert_eq!(common_suffix_len(&a, &b), naive_suffix(&a, &b));
+
+            // Mapped into the astral plane, so the `char` monomorphization
+            // is exercised on values a UTF-16 unit could never hold.
+            let map = |c: u8| char::from_u32(0x1_F600 + u32::from(c)).expect("astral scalar");
+            let ua: Vec<char> = a.iter().map(|&c| map(c)).collect();
+            let ub: Vec<char> = b.iter().map(|&c| map(c)).collect();
+            assert_eq!(common_prefix_len(&ua, &ub), naive_prefix(&ua, &ub));
+            assert_eq!(common_suffix_len(&ua, &ub), naive_suffix(&ua, &ub));
+        }
+    }
+
+    #[test]
+    fn affix_scans_never_exceed_the_shorter_operand() {
+        // A prefix of one operand: the scan must stop at the shorter
+        // length, never read past it, and the two scans must be able to
+        // overlap-claim the same units (callers apply the prefix cut before
+        // the suffix scan, precisely so they cannot).
+        let a = b"abcabcabcabcabcabcabcabc";
+        let b = b"abcabcabc";
+        assert_eq!(common_prefix_len(a.as_slice(), b.as_slice()), b.len());
+        assert_eq!(common_suffix_len(a.as_slice(), b.as_slice()), b.len());
+        assert_eq!(common_prefix_len(b"".as_slice(), a.as_slice()), 0);
+        assert_eq!(common_suffix_len(b"".as_slice(), a.as_slice()), 0);
+        assert_eq!(common_prefix_len(a.as_slice(), a.as_slice()), a.len());
+        assert_eq!(common_suffix_len(a.as_slice(), a.as_slice()), a.len());
     }
 }

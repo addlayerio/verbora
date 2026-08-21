@@ -1,53 +1,66 @@
 [package]
 name = "verbora-transliterators"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Kana-to-romaji transliteration for Rust"
-keywords = ["transliteration", "japanese", "romaji"]
+description = "Japanese kana romanized into modified-Hepburn romaji"
+keywords = ["transliteration", "romanization", "japanese", "romaji", "hepburn"]
 categories.workspace = true
 
+# docs.rs bakes one immutable page set per published version: a page built with
+# the wrong flags cannot be re-rendered later, only republished under a new
+# version. Build with every feature enabled, so feature-gated items and the doc
+# links pointing at them resolve, and with `--cfg docsrs`, which is what makes
+# the `#[cfg_attr(docsrs, doc(cfg(...)))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
-# `verbora-normalizers` is the parity-verified port of `normalizeJa` and the
-# Japanese `Converters`. `TransliterateJa` does not call them, but every caller
-# of it in the reference tree does — the transliterator has no halfwidth-katakana
-# keys, so its `stemmer_ja` and `noun_inflector` both normalize first.
-# `ja::transliterate_normalized` is that pairing, reusing the verified tables
-# rather than growing a second copy of them here.
+# `verbora-normalizers` supplies `nfkc` and `nfkd`. The syllabary has no
+# halfwidth-katakana key, and folding halfwidth onto fullwidth — along with the
+# halfwidth voiced sound mark onto the kana it belongs to — is UAX #15
+# compatibility normalization, not romanization. `transliterate_ja_normalized`
+# is that pairing, so no width table is copied into this crate.
+#
+# The one thing it adds on top is two scalars wide: the *spacing* voiced sound
+# marks U+309B/U+309C decompose to `0020 3099`/`0020 309A`, and that U+0020
+# strands the mark instead of composing it, so they are re-spelled as the bare
+# combining marks before `nfkc` runs. That is the standard's own mapping minus
+# the space — still not a table, and still not romanization. See
+# `transliterate_ja_normalized`'s own doc comment for the derivation.
+#
+# `nfkd` is used by one test, to read the two compatibility mappings back out
+# of the UCD rather than restate them in an assertion.
 verbora-normalizers = { workspace = true }
 
-# Deliberately no `regex`:
+# Deliberately no `regex`. Romanization here is one left-to-right scan over a
+# static index whose keys are at most two scalars long, decided by a
+# subtraction and a bounds check per character. Every rule that a regex would
+# express — the sokuon's gemination, the syllabic nasal's three forms, the
+# prolonged sound mark — depends on the *following* mora, which is lookahead
+# the `regex` crate cannot express at all.
 #
-#   * 30 of the reference's rules use lookahead, `/X(?=[…])/g`, which the crate
-#     cannot express at all;
-#   * the closing rule keys on the reference's ASCII-only `\B`, which the crate
-#     makes Unicode-aware and therefore gets backwards on kana and kanji; and
-#   * the three table phases are leftmost-longest scans over static tables whose
-#     keys are at most three `char`s, which is three binary searches behind a
-#     bitmap gate — strictly less work than a 382-branch alternation.
-#
-# And deliberately no `verbora-core`: nothing here splits or trims on `\s`, so
-# `is_js_whitespace` has no call site. The only reference character semantics
-# that bite are `\w` and `\B`, both of which are ASCII-only and local to
-# `src/ja.rs`.
+# And deliberately no `verbora-core`: nothing here splits or trims on
+# whitespace, and the crate's only character classification is "is this ASCII
+# byte a vowel", which is a `match`.
 #
 # `par_transliterate_ja_batch`: data-parallel fan-out over `transliterate_ja`,
 # gated behind the `parallel` feature. See that function's doc comment in
-# `src/ja.rs` for when to reach for it.
+# `src/romanize.rs` for when to reach for it.
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-serde_json = { workspace = true }
 
 [features]
 default = []
-# Adds `par_transliterate_ja_batch`, a `rayon`-backed fan-out over the
-# existing sequential `transliterate_ja`. See its doc comment in `src/ja.rs`
-# for when to reach for it.
+# Adds `par_transliterate_ja_batch`, a `rayon`-backed fan-out over the existing
+# sequential `transliterate_ja`. See its doc comment in `src/romanize.rs` for
+# when to reach for it.
 parallel = ["dep:rayon"]
 
 [[bench]]

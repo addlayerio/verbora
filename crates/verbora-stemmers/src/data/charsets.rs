@@ -1,8 +1,10 @@
-//! Case-insensitive character sets applied per character.
+//! Case-insensitive character sets, tested one scalar at a time.
 //!
-//! Generated data; see the note in `gen-stemmer-data`.
+//! Checked-in data with no generator in the tree, so the sets are unverifiable
+//! as they stand. Grounding them in Carry's published description is an open
+//! item — see `docs/design/rust-native-migration.md`.
 
-/// Carry's vowel set, from `defaultConf.vowels`. Note `y` is NOT a vowel here.
+/// Carry's vowel set. `y` is deliberately **not** a vowel here.
 #[inline]
 pub(crate) fn is_carry_vowel(unit: u16) -> bool {
     matches!(unit,
@@ -38,7 +40,11 @@ pub(crate) fn is_carry_vowel(unit: u16) -> bool {
     )
 }
 
-/// PorterStemmerEs.isVowel. The /i flag is why an uppercase word still gets regions marked — while every suffix comparison stays case-sensitive, so it matches nothing.
+/// The Spanish vowel set.
+///
+/// It is case-insensitive, which is why an uppercase word still gets its regions
+/// marked — while every suffix comparison stays case-sensitive, so it then
+/// matches nothing.
 #[inline]
 pub(crate) fn is_es_vowel(unit: u16) -> bool {
     matches!(

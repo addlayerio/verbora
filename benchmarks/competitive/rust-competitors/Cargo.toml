@@ -16,6 +16,12 @@ publish.workspace = true
 # src/double_metaphone_cpp.rs. The one non-Cargo, compiled-from-source
 # competitor in this workspace; requires a C++11 toolchain to build. See
 # vendor/pixelglow-double_metaphone/README.md.
+#
+# It is a correctness oracle only: there is no `[[bench]]` for it. Verbora's
+# Double Metaphone caps both keys at four characters and stops scanning once
+# they fill, while the vendored library is uncapped and takes no length
+# argument, so no fair timing workload exists for the pair. The full reasoning
+# is in tests/double_metaphone_cpp_correctness.rs's module doc comment.
 [build-dependencies]
 cc = "1"
 
@@ -34,7 +40,15 @@ verbora-phonetics = { path = "../../../crates/verbora-phonetics" }
 # §1.9-1.11 Language Detection / Script Detection / Transliteration.
 # `language-detection` adds `WhatlangDetector`; `detect_script` and
 # `transliterate_ja` need no feature.
-verbora-language = { path = "../../../crates/verbora-language", features = ["language-detection"] }
+# `fast-language-detection` is here because §1.9's fairness rule cuts both
+# ways: `whichlang` is a hashed-linear model, and benchmarking it only
+# against Verbora's *n-gram* detector would report an algorithm difference
+# as a library difference. Both of Verbora's detectors (and their
+# `FallbackDetector` composition) are therefore measured and labelled
+# separately, for speed in benches/language.rs and for accuracy in
+# examples/language_accuracy.rs — neither number is published without the
+# other.
+verbora-language = { path = "../../../crates/verbora-language", features = ["language-detection", "fast-language-detection"] }
 verbora-transliterators = { path = "../../../crates/verbora-transliterators" }
 # §1.9 Language Detection — `lingua` and `whichlang` are NORMAL dependencies,
 # not dev-dependencies, unlike every other competitor pinned below: they are
@@ -80,11 +94,13 @@ verbora-classifiers = { path = "../../../crates/verbora-classifiers" }
 
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-# Same `regex` major version verbora-tokenizers itself builds
-# `Pattern`/`RegexpTokenizer` on (see its own Cargo.toml) — needed here to
-# construct the `\s+` pattern for the whitespace-tokenization row directly,
-# exactly as Verbora's own callers would.
-regex = "1"
+# `regex` was here only to build the `\s+` pattern for the whitespace-
+# tokenization row, via `verbora_tokenizers::{Pattern, RegexpTokenizer}`.
+# Both types are deleted by the text-shaping migration
+# (`docs/design/text-shaping-contract.md` §3.4), which also drops
+# `verbora-tokenizers`' own `regex` dependency — Verbora no longer performs
+# regex tokenization at all, so the row and this dependency went together.
+# See `benches/tokenizers.rs`'s own module doc comment.
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -105,13 +121,32 @@ rapidfuzz = "=0.5.0"
 # vendored source, not assumed from the matrix note — see
 # benches/distance.rs's own doc comment.
 stringmetrics = "=2.2.2"
-# §1.8 Distances — Jaro and Jaro-Winkler only (both matrix `Yes`). Crate
-# abandoned since 2020; `tests/distance_correctness.rs` re-verifies its
-# output against Verbora's on fresh vectors before any timing number here is
-# trusted, per the matrix's own "re-verify" flag. Struct-based API
-# (`eddie::Jaro::new()` / `eddie::JaroWinkler::new()`), reused across calls
-# exactly like `strsim`'s/`rapidfuzz`'s options structs above — see
-# benches/distance.rs.
+# §1.8 Distances — CORRECTNESS ORACLE ONLY. NOT TIMED. NOT PUBLISHABLE.
+#
+# eddie 0.4.2 is UNSOUND. `utils/buffer.rs`'s `Buffer::store` clears its `Vec`
+# and then writes through `get_unchecked_mut(i)` for `i` past the (now zero)
+# length, calling `set_len` only afterwards — undefined behaviour on the first
+# character of every call. Debug builds abort with SIGABRT; release builds
+# merely compile the check out. Verified per entry point in this workspace,
+# one process each: every `eddie::str` metric except `Hamming`, plus
+# `eddie::slice::Levenshtein`, execute it. 0.4.2 is the LATEST published
+# version (13 versions, newest 2020-01-18) — there is nothing to upgrade to.
+#
+# It stays pinned for exactly one reason: `eddie::slice::Jaro` /
+# `eddie::slice::JaroWinkler` never touch `Buffer`, reach zero `unsafe`, and
+# are the only Jaro implementation here that computes the function
+# `docs/design/distance-contract.md` §3.4 specifies — `strsim` and `rapidfuzz`
+# both truncate the half-transposition count and diverge from Verbora on 28.6%
+# of random pairs. Reaching it any other way is a defect.
+#
+# ALL access goes through `tests/distance_correctness.rs`'s `eddie_slice`
+# module (it stays a dev-dependency so `src/` cannot reach it); read that
+# module's doc comment
+# first. `tests/distance_correctness.rs` fails the build if any other
+# `eddie::` path appears anywhere in this crate. No `eddie` row exists in
+# `benches/distance.rs` or `examples/distance_memory.rs`, and none may be
+# added: timing a competitor whose published API is undefined behaviour
+# measures nothing reportable.
 eddie = "=0.4.2"
 # §1.8 Distances — Levenshtein, restricted-only Damerau (`rdamerau`),
 # Hamming, and fuzzy substring search (`levenshtein_search`), all matrix
@@ -138,18 +173,19 @@ tantivy = { version = "=0.26.1", default-features = false }
 # and `progressbar` are dropped since nothing benchmarked here trains a
 # tokenizer or shows progress.
 tokenizers = { version = "=0.23.1", default-features = false, features = ["onig"] }
-# §1.1 Tokenizers — the matrix's third and fourth tokenizer competitors,
-# selected but never wired in until this pass (docs/COMPETITIVE_BENCHMARKS.md
-# §1.1 flagged this as a real, undocumented gap distinct from the deliberate
-# exclusions in this file's other comments). `unicode-segmentation` is
-# UAX#29-conformant and covers three separate matrix rows: `unicode_words()`/
-# `split_word_bounds()` vs. `WordTokenizer` ("Selected cases"), `unicode_words()`
-# vs. `AggressiveTokenizer`'s English variant only ("Selected cases"), and
-# `UnicodeSentences`/`USentenceBounds` vs. `SentenceTokenizer` ("Yes"). No
-# features beyond the default `std`-based UAX#29 tables are needed. Already a
-# transitive dependency of this workspace (pulled in at 1.13.3 by other
-# crates already), so this pin does not add a new crate to the tree, only a
-# direct one.
+# §1.1 Tokenizers — NO LONGER A COMPETITOR. The text-shaping migration
+# reimplemented `verbora-tokenizers` ON this crate: `WordTokenizer::tokens`
+# is literally `str::unicode_words()` and `SentenceTokenizer::tokens` drives
+# `str::split_sentence_bound_indices()` (see the crate's own `src/word.rs`
+# and `src/sentence.rs`). Rows that pit Verbora against it therefore measure
+# wrapper overhead, not rival implementations, and live in the explicit
+# `*_wrapper_overhead` bench groups — never reported as Verbora beating or
+# losing to `unicode-segmentation`. The matrix's `unicode_words()` vs.
+# `AggressiveTokenizer` row is gone with that tokenizer. This dependency
+# stays because those baselines, and the correctness tests that prove the
+# delegation is exact, both need it. No features beyond the default
+# `std`-based UAX#29 tables are needed; already a transitive dependency of
+# this workspace, so the pin adds a direct edge, not a new crate.
 unicode-segmentation = "=1.13.3"
 # §1.1 Tokenizers — `SentenceTokenizer`, "Selected cases": a rule-based,
 # orthographic-feature sentence(+word) segmenter (Rust port of the Python
@@ -242,33 +278,49 @@ lindera-dictionary = "=5.2.0"
 # three times) — narrowed out of the benchmarked word sample, not hidden; see
 # that test file and `benches/stemmers.rs`'s own doc comment.
 sastrawi = "=0.1.1"
-# §1.4 Normalizers — remove_diacritics. Case-preserving, non-decomposing
-# table lookup, the closest semantic match found (matrix: Partial,
-# "case-preserving, closer semantic shape"). `unaccent` (decomposition-based,
-# non-standard license) and `secular` (forces lowercasing) are deliberately
-# not pinned here — see benches/normalizers.rs's own doc comment.
+# §1.4 Normalizers — remove_diacritics. A case-preserving, NON-decomposing
+# per-character table lookup. It was pinned as "the closest semantic match"
+# when Verbora's own `remove_diacritics` was also a table lookup; the
+# text-shaping migration redefined Verbora's as NFD → strip `ccc != 0` → NFC
+# (`docs/design/text-shaping-contract.md` §3.2), so this crate is now the
+# mechanically *opposite* implementation of the same user-facing task. Still
+# a fair competitor for that task, still pinned — but `unaccent` 0.1.1
+# (decomposition-based) has become the mechanism-matched candidate and is
+# an open follow-up blocked on the licence review `AGENTS.md` § Licensing
+# requires (crates.io flags its license field "non-standard"). `secular`
+# (forces lowercasing) is unchanged: matrix `No`. See
+# benches/normalizers.rs's own doc comment.
 diacritics = "=0.2.2"
-# §1.4 Normalizers — normalize_ja, matrix `Selected cases`: covers only 2 of
-# Verbora's 17 conversions (`hira2kata`/`kata2hira`, a bare codepoint shift
-# with none of `hiragana_to_katakana`/`katakana_to_hiragana`'s halfwidth-fold
-# or small-tsu/voiced-mark phonetic fixups) — narrowed to pure hiragana/
-# katakana input with neither, verified in
-# tests/normalizers_correctness.rs. The published package is `unicode-jp`,
-# but its own `[lib] name = "kana"` (see its Cargo.toml), so Rust code below
-# imports it as `kana::`, not `unicode_jp::`.
-unicode-jp = "=0.4.0"
-# §1.4 Normalizers — normalize_ja, narrower still (matrix `Selected cases`):
-# a single-purpose halfwidth-kana/ASCII-to-fullwidth converter. Its
-# `to_double_byte(_, KanaOnly)` composes voiced/semi-voiced halfwidth
-# katakana pairs like Verbora's `katakana_hf`, but ALSO folds halfwidth CJK
-# punctuation and space (a job Verbora keeps in a separate function,
-# `pure_punctuation_hf`) and drops/miscomposes an orphan dakuten/handakuten
-# mark with no valid preceding base character, where `katakana_hf` passes it
-# through as a standalone spacing mark — both divergences verified in
+# `unicode-jp` ("=0.4.0", imported as `kana::` — its own `[lib] name`) is
+# GONE, not merely unused: it existed only to compete with
+# `hiragana_to_katakana`/`katakana_to_hiragana`, and
+# `verbora_normalizers::ja::converters` is deleted in full by the
+# text-shaping migration. Kana ↔ kana conversion is a transliteration, not a
+# normalization (`docs/design/text-shaping-contract.md` §3.2), and
+# `verbora-transliterators` today ships only kana → romaji — so there is no
+# Verbora side left for it to be benchmarked against.
+#
+# §1.4 Normalizers — the surviving Japanese row. A single-purpose
+# halfwidth-kana/ASCII-to-fullwidth converter (matrix `Selected cases`),
+# now benchmarked against `verbora_normalizers::nfkc`, which subsumes the
+# width fold `katakana_hf` used to perform (NFKC decomposes halfwidth kana
+# to fullwidth and `U+FF9E` to the combining `U+3099`, which canonical
+# composition then recombines). `KanaOnly` still ALSO folds halfwidth CJK
+# punctuation and the space (to `U+3000`, where NFKC gives `U+0020`) and
+# still drops/miscomposes an orphan dakuten with no valid preceding base,
+# where NFKC composes the correct `ヺ`/`ヷ` — every divergence verified in
 # tests/normalizers_correctness.rs and excluded from the benchmarked domain.
 kana-converter = "=0.1.2"
-# §1.5 Inflectors — CountInflector. Matrix's single "Yes" (full equivalence)
-# row in the whole Inflectors group.
+# UAX #15 oracle for `tests/normalizers_correctness.rs` — NOT a competitor.
+# `remove_diacritics`'s contract is stated as a composition of published
+# Unicode operations, so the test re-derives it (NFD → strip `ccc != 0` →
+# NFC) over whole codepoint ranges instead of recording what the current
+# implementation emits. Already in this workspace's lock file transitively
+# via `verbora-normalizers`; pinned to the same version the main workspace
+# resolves, so this adds a direct edge, not a new crate.
+unicode-normalization = "=0.1.25"
+# §1.5 Inflectors — OrdinalInflector. Matrix's single "Yes" (full
+# equivalence) row in the whole Inflectors group.
 ordinal = "=0.4.0"
 # §1.5 Inflectors — NounInflector, matrix `Partial`: same regex-suffix-rule-
 # chain-plus-irregulars strategy as Verbora's port, but an independently
@@ -280,13 +332,15 @@ ordinal = "=0.4.0"
 # benches/inflectors.rs's own doc comment.
 pluralizer = "=0.5.0"
 # §1.5 Inflectors — NounInflector (`to_plural`/`to_singular`, matrix
-# `Partial`, same narrowing discipline as `pluralizer` above) and, found
-# while implementing this pass, a genuine second CountInflector match: its
-# string-shaped `numbers::ordinalize::ordinalize` fully agrees with
-# `CountInflector::nth_str` over every non-negative `i64` in `0..2_000_000`
-# (exhaustively checked in tests/inflectors_correctness.rs) — a cleaner
-# result than the existing `ordinal` crate row, which has a real teens-
-# exception bug (see that file's own doc comment). The published package is
+# `Partial`, same narrowing discipline as `pluralizer` above) and a second
+# ordinal oracle: its string-shaped `numbers::ordinalize::ordinalize` fully
+# agrees with `OrdinalInflector::nth` over every non-negative `i64` in
+# `0..2_000_000` (exhaustively checked in tests/inflectors_correctness.rs) —
+# a cleaner result than the existing `ordinal` crate row, which has a real
+# teens-exception bug (see that file's own doc comment). It is a correctness
+# oracle only: the `count_inflector_nth_str` timing group was deleted when
+# the Rust-native migration removed `CountInflector::nth_str`, Verbora's only
+# string-in ordinal API. The published package is
 # `Inflector`, but its own `[lib] name = "inflector"` (lowercase — see its
 # Cargo.toml), so Rust code below imports it as `inflector::`.
 Inflector = "=0.11.4"
@@ -326,12 +380,17 @@ fst = { version = "=0.4.7", features = ["levenshtein"] }
 # §1.6 Phonetics — the one actively-maintained Rust crate covering every
 # phonetic family benchmarked here, from the canonical Apache commons-codec
 # reference. Two regimes (see tests/phonetics_correctness.rs's own doc):
-# the four reference-ported encoders (Soundex, Metaphone, Double Metaphone,
-# single-branch SoundExDM) are matrix-Partial — same shape of work,
-# documented algorithm-variant divergence, never byte-exact — while the
-# seven rphonetic-pinned native extensions (Cologne, Nysiis, Caverphone1/2,
-# Phonex, RefinedSoundex, MatchRatingApproach, branching DaitchMokotoff)
-# are byte-exact against this crate. `embedded_dm` pulls in the crate's bundled
+# the three reference-ported encoders (Soundex, Metaphone, Double Metaphone)
+# are matrix-Partial — same shape of work, documented algorithm-variant
+# divergence, never byte-exact — while the seven spec-pinned native
+# extensions (Cologne, Nysiis, Caverphone1/2, Phonex, RefinedSoundex,
+# MatchRatingApproach, branching DaitchMokotoff) are byte-exact against this
+# crate on the ASCII corpus. A fourth reference-ported row, single-branch
+# `SoundExDM`, is gone: the Rust-native migration deleted that encoder.
+# Those seven extensions are now pinned to their own publications rather
+# than to rphonetic, and diverge from it on ten inputs carrying a scalar
+# outside the algorithm's own alphabet — enumerated and pinned in
+# tests/phonetics_correctness.rs's regime 3. `embedded_dm` pulls in the crate's bundled
 # `dmrules.txt` so `DaitchMokotoffSoundex::default()` is available without
 # hand-loading a rules file. `embedded_bm` (Beider-Morse) closes a real,
 # previously-undiscovered coverage gap: `verbora-phonetics::BeiderMorse`
@@ -376,7 +435,7 @@ postagger = "=0.0.3"
 rust-bert = { version = "=0.23.0", default-features = false, features = ["download-libtorch"] }
 tch = "=0.17.0"
 # §1.17 Spellcheck — same `lookup(word, verbosity, max_edit_distance)` shape
-# as Verbora's `get_corrections`, loaded with the SAME frequency corpus
+# as Verbora's `corrections`/`correction_words`, loaded with the SAME corpus
 # (matrix: Partial, different algorithm — delete-precomputation vs.
 # combinatorial edit generation).
 symspell = "=0.5.2"
@@ -500,10 +559,6 @@ harness = false
 
 [[bench]]
 name = "ngrams"
-harness = false
-
-[[bench]]
-name = "double_metaphone_cpp"
 harness = false
 
 [[bench]]

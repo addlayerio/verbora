@@ -1,20 +1,32 @@
 [package]
 name = "verbora-stemmers"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Stemmers for sixteen languages"
+description = "Sixteen stemmers for fourteen languages"
 keywords = ["stemmer", "porter", "snowball"]
 categories.workspace = true
 
+# docs.rs bakes one immutable page set per published version: a page built with
+# the wrong flags cannot be re-rendered later, only republished under a new
+# version. Build with every feature enabled, so feature-gated items and the doc
+# links pointing at them resolve, and with `--cfg docsrs`, which is what makes
+# the `#[cfg_attr(docsrs, doc(cfg(...)))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 verbora-core = { workspace = true }
-# The Norwegian and Swedish tokenizers fold diacritics before splitting, and the
-# folders are already parity-verified in the normalizers crate.
-verbora-normalizers = { workspace = true }
+# No dependency on `verbora-normalizers`, deliberately. Norwegian and Swedish
+# used to fold diacritics before splitting; they no longer do, because `å ä ö`
+# and `æ ø å` are letters of those alphabets rather than accents (see
+# `PorterStemmerSv` and `PorterStemmerNo`). Nothing else in this crate
+# normalizes, so the edge — and `unicode-normalization` behind it — would exist
+# only to render two doc links.
 verbora-tokenizers = { workspace = true }
 rayon = { workspace = true, optional = true }
 

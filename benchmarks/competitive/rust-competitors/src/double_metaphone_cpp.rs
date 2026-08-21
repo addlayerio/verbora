@@ -1,8 +1,9 @@
 //! FFI binding to the vendored `pixelglow/double_metaphone` C++11 header
 //! (compiled and linked by `build.rs`). See
 //! `vendor/pixelglow-double_metaphone/README.md` for provenance and
-//! license, and `benches/double_metaphone_cpp.rs` for the fairness
-//! reasoning behind comparing it to `verbora_phonetics::DoubleMetaphone`.
+//! license, and `tests/double_metaphone_cpp_correctness.rs` for the
+//! comparison against `verbora_phonetics::DoubleMetaphone` — including why
+//! that comparison is correctness-only, with no companion benchmark.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;

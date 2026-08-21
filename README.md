@@ -119,16 +119,22 @@ tokenizer.tokenize_into(text, &mut v) // reuses the caller's buffer
 tokenizer.tokenize_borrowed(text)     // &str slices, zero copies
 ```
 
-**Fast paths that are exact, not approximate.** String distances are defined
-over UTF-16 code units, and the difference is observable —
-`LevenshteinDistance("a😀b", "ab")` is 2 under that definition and 1 under a
-`char`-based one. `verbora-distance` runs ASCII operands over `&[u8]` and
-promotes only genuinely non-ASCII input to `Vec<u16>`. For ASCII, one byte
-*is* one code unit, so the fast path is not a shortcut.
+**Fast paths that are exact, not approximate.** String distances count Unicode
+scalar values — one `char` is one unit — so `levenshtein("a😀b", "ab")` is 1.
+`verbora-distance` runs ASCII operands over `&[u8]` and promotes only
+genuinely non-ASCII input to `Vec<char>`. For ASCII, one byte *is* one scalar,
+so the fast path computes the same answer as the general one rather than a
+cheaper approximation of it.
 
-**Explicit, not flattering.** `DiceCoefficient("", "")` returns `NaN`;
-`HammingDistance` returns `-1` for length mismatch; search offsets can be
-negative. Each of these is a deliberate, documented choice with a test behind
+**Explicit, not flattering.** No metric in `verbora-distance` rewrites its
+input to make a score look better: nothing folds case, trims, collapses
+whitespace or normalises, so `dice_coefficient("ABC", "abc")` is `0.0` and
+`hamming("ABC", "abc")` is `Some(3)`. Caseless matching belongs to the caller,
+applied once at ingestion rather than re-applied against every candidate.
+Absence is spelled as absence rather than as a magic number — `hamming`
+returns `None` when the two operands have different scalar counts, no
+similarity in the crate ever returns `NaN`, and no function in it panics on
+any input. Each of these is a deliberate, documented choice with a test behind
 it, not an accident smoothed over in prose.
 
 ## Measured performance

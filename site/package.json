@@ -8,7 +8,7 @@
     "dev": "vitepress dev",
     "build": "vitepress build",
     "preview": "vitepress preview",
-    "check": "python3 check-snippets.py && vitepress build && python3 check-links.py"
+    "check": "python3 check-snippets.py && npm run build && python3 check-links.py"
   },
   "devDependencies": {
     "vitepress": "^1.6.4"

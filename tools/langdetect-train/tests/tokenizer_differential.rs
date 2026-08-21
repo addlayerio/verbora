@@ -215,11 +215,22 @@ fn shipped_extractor_matches_reference_on_randomized_corpus() {
 fn reference_cyrillic_buckets(text: &str) -> Vec<u32> {
     fn fold(chr: char) -> u32 {
         let cp = chr as u32;
-        match cp {
-            0x0410..=0x042F => cp + 0x20,
-            0x0400..=0x040F => cp + 0x50,
-            _ => chr.to_ascii_lowercase() as u32,
+        // The shipped `fold_cyrillic` hand-codes the Cyrillic block's
+        // case pairs only so the hot loop stays branch-cheap; the
+        // *definition* is Unicode's own simple lowercase mapping over the
+        // range `Script::of` routes to this model. Stating it that way
+        // here keeps the reference independent of the shipped match arms
+        // rather than a transcription of them.
+        if (0x0400..=0x052F).contains(&cp) {
+            let mut lower = chr.to_lowercase();
+            let first = lower.next().expect("to_lowercase is never empty");
+            assert!(
+                lower.next().is_none(),
+                "U+{cp:04X} lowercases to more than one scalar"
+            );
+            return first as u32;
         }
+        chr.to_ascii_lowercase() as u32
     }
     let mut out = Vec::new();
     let mut prev: u32 = 0;
@@ -251,6 +262,11 @@ fn shipped_cyrillic_extractor_matches_reference() {
         "Это русское предложение о погоде.",
         "Сьогодні чудова погода, і діти граються надворі!",
         "ЁЄІЇҐ ыэъё",
+        // Uppercase forms of the Ukrainian discriminators, plus the
+        // block's irregular Ӏ/ӏ pair — the sub-blocks an offset-only fold
+        // used to miss.
+        "ҐУДЗИК НА ҐАНКУ ҐРУНТОВНО ҐРЕЧНО",
+        "ӀӏӁӂӍӎӐӑҊҋѠѡ",
         "смешанный text із latin",
         "а",
         "12345 !!!",

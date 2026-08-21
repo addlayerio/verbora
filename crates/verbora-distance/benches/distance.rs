@@ -6,13 +6,15 @@
 //! Criterion benchmarks for the distance metrics.
 //!
 //! Input sizes span four orders of magnitude so that scaling behaviour — not
-//! just single-call latency — is visible. See `docs/PERFORMANCE.md` for the
-//! paired results against the reference implementation.
+//! just single-call latency — is visible. Measured results live in
+//! `site/benchmarks/distance.md`, backed by
+//! `benchmarks/competitive/results/results.json`.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use verbora_distance::{
-    dice_coefficient, hamming, jaro_winkler,
-    levenshtein::{Options, damerau_levenshtein, levenshtein, levenshtein_search},
+    LevenshteinCosts, PreparedPattern, damerau_levenshtein, damerau_levenshtein_weighted,
+    dice_coefficient, hamming, jaro_winkler, levenshtein, levenshtein_search, levenshtein_weighted,
+    osa,
 };
 #[cfg(feature = "parallel")]
 use verbora_distance::{
@@ -72,21 +74,20 @@ fn load_inputs() -> Inputs {
 fn bench_levenshtein(c: &mut Criterion) {
     let inputs = load_inputs();
     let mut g = c.benchmark_group("levenshtein");
-    let opts = Options::default();
 
     for (n, a, b) in &inputs.ascii {
         // Report the logical n×n DP grid as normalized work; the bit-vector
         // implementation deliberately does not evaluate those cells one by one.
         g.throughput(Throughput::Elements((n * n) as u64));
         g.bench_with_input(BenchmarkId::new("ascii", n), n, |bench, _| {
-            bench.iter(|| levenshtein(black_box(a), black_box(b), &opts));
+            bench.iter(|| levenshtein(black_box(a), black_box(b)));
         });
     }
 
     for (n, a, b) in &inputs.cyrillic {
         g.throughput(Throughput::Elements((n * n) as u64));
         g.bench_with_input(BenchmarkId::new("cyrillic", n), n, |bench, _| {
-            bench.iter(|| levenshtein(black_box(a), black_box(b), &opts));
+            bench.iter(|| levenshtein(black_box(a), black_box(b)));
         });
     }
 
@@ -95,7 +96,6 @@ fn bench_levenshtein(c: &mut Criterion) {
 
 fn bench_levenshtein_shapes(c: &mut Criterion) {
     let inputs = load_inputs();
-    let opts = Options::default();
     let mut g = c.benchmark_group("levenshtein_shapes");
     let (_, near_a, _) = inputs
         .ascii
@@ -106,59 +106,44 @@ fn bench_levenshtein_shapes(c: &mut Criterion) {
     near_b[512] = if near_b[512] == b'x' { b'y' } else { b'x' };
     let near_b = String::from_utf8(near_b).unwrap();
     g.bench_function("near/1024", |bench| {
-        bench.iter(|| levenshtein(black_box(near_a), black_box(&near_b), &opts));
+        bench.iter(|| levenshtein(black_box(near_a), black_box(&near_b)));
     });
     let near_unicode_a = "абвг".repeat(256);
     let mut near_unicode_chars: Vec<char> = near_unicode_a.chars().collect();
     near_unicode_chars[512] = 'д';
     let near_unicode_b: String = near_unicode_chars.into_iter().collect();
     g.bench_function("near_unicode/1024", |bench| {
-        bench.iter(|| {
-            levenshtein(
-                black_box(&near_unicode_a),
-                black_box(&near_unicode_b),
-                &opts,
-            )
-        });
+        bench.iter(|| levenshtein(black_box(&near_unicode_a), black_box(&near_unicode_b)));
     });
     g.bench_function("empty_ascii/1024", |bench| {
-        bench.iter(|| levenshtein(black_box(""), black_box(near_a), &opts));
+        bench.iter(|| levenshtein(black_box(""), black_box(near_a)));
     });
     g.bench_function("empty_unicode/1024", |bench| {
-        bench.iter(|| levenshtein(black_box(""), black_box(&near_unicode_a), &opts));
+        bench.iter(|| levenshtein(black_box(""), black_box(&near_unicode_a)));
     });
     let disjoint_a = "a".repeat(1024);
     let disjoint_b = "z".repeat(1024);
     g.bench_function("disjoint/1024", |bench| {
-        bench.iter(|| levenshtein(black_box(&disjoint_a), black_box(&disjoint_b), &opts));
+        bench.iter(|| levenshtein(black_box(&disjoint_a), black_box(&disjoint_b)));
     });
     let late_overlap_a = "z".repeat(65);
     let late_overlap_b = format!("{}zb", "a".repeat(9_998));
     g.bench_function("late_overlap/65x10000", |bench| {
-        bench.iter(|| {
-            levenshtein(
-                black_box(&late_overlap_a),
-                black_box(&late_overlap_b),
-                &opts,
-            )
-        });
+        bench.iter(|| levenshtein(black_box(&late_overlap_a), black_box(&late_overlap_b)));
     });
     g.finish();
 }
 
 fn bench_levenshtein_weighted(c: &mut Criterion) {
     let inputs = load_inputs();
-    let weighted = Options {
-        substitution_cost: 0.5,
-        ..Options::default()
-    };
+    let weighted = LevenshteinCosts::new(1.0, 1.0, 0.5).expect("admissible costs");
     let mut g = c.benchmark_group("levenshtein_weighted");
     for (n, a, b) in &inputs.ascii {
         if !matches!(*n, 16 | 64 | 256) {
             continue;
         }
         g.bench_with_input(BenchmarkId::from_parameter(n), n, |bench, _| {
-            bench.iter(|| levenshtein(black_box(a), black_box(b), &weighted));
+            bench.iter(|| levenshtein_weighted(black_box(a), black_box(b), &weighted));
         });
     }
 
@@ -173,7 +158,7 @@ fn bench_levenshtein_weighted(c: &mut Criterion) {
         .find(|(n, _, _)| *n == 1024)
         .expect("1024-char pair");
     g.bench_function("rectangular/16x1024", |bench| {
-        bench.iter(|| levenshtein(black_box(short_a), black_box(long_b), &weighted));
+        bench.iter(|| levenshtein_weighted(black_box(short_a), black_box(long_b), &weighted));
     });
     g.finish();
 }
@@ -187,30 +172,94 @@ fn bench_levenshtein_variants(c: &mut Criterion) {
         .expect("64-char pair");
     let mut g = c.benchmark_group("levenshtein_variants");
 
-    let plain = Options::default();
-    let restricted = Options {
-        restricted: true,
-        ..Options::default()
-    };
-    let unrestricted = Options {
-        restricted: false,
-        ..Options::default()
-    };
+    let weighted = LevenshteinCosts::new(1.0, 1.0, 1.5).expect("admissible costs");
+    let weighted_damerau =
+        verbora_distance::DamerauCosts::new(1.0, 1.0, 1.5, 1.0).expect("admissible");
 
-    // These exercise the bit-vector, three-row and unrestricted-Damerau
-    // kernels respectively.
+    // The three unit-cost kernels (Myers, Hyyro-OSA, Zhao-Sahni) plus the
+    // weighted full-matrix fallback each Damerau variant shares.
     g.bench_function("plain_myers_unit", |bench| {
-        bench.iter(|| levenshtein(black_box(a), black_box(b), &plain));
+        bench.iter(|| levenshtein(black_box(a), black_box(b)));
     });
-    g.bench_function("damerau_restricted_3row", |bench| {
-        bench.iter(|| damerau_levenshtein(black_box(a), black_box(b), &restricted));
+    g.bench_function("osa_bit_vector", |bench| {
+        bench.iter(|| osa(black_box(a), black_box(b)));
     });
-    g.bench_function("damerau_unrestricted_matrix", |bench| {
-        bench.iter(|| damerau_levenshtein(black_box(a), black_box(b), &unrestricted));
+    g.bench_function("damerau_zhao_sahni", |bench| {
+        bench.iter(|| damerau_levenshtein(black_box(a), black_box(b)));
+    });
+    g.bench_function("damerau_weighted_matrix", |bench| {
+        bench.iter(|| damerau_levenshtein_weighted(black_box(a), black_box(b), &weighted_damerau));
+    });
+    g.bench_function("plain_weighted_rows", |bench| {
+        bench.iter(|| levenshtein_weighted(black_box(a), black_box(b), &weighted));
     });
     g.bench_function("search_matrix", |bench| {
-        bench.iter(|| levenshtein_search(black_box(a), black_box(b), &plain));
+        bench.iter(|| levenshtein_search(black_box(a), black_box(b)));
     });
+
+    g.finish();
+}
+
+/// The 1-vs-N screening shape: one query term against a candidate set, with
+/// and without a prepared pattern.
+///
+/// Not read from `distance-pairs.json`, which holds *pairs* keyed by length
+/// and has no candidate-set shape to offer. The tokens below are generated
+/// from a fixed seed instead, so the corpus is still byte-identical between
+/// runs, and the two arms see exactly the same one.
+///
+/// Construction is deliberately **inside** the timed closure. The question a
+/// screening workload asks is not "how fast is a query once the table exists"
+/// but "what does the whole scan cost", so the table build has to be paid for
+/// out of the same budget and amortized over the candidates the way it would
+/// be in the caller's loop.
+fn bench_prepared_pattern(c: &mut Criterion) {
+    /// Deterministic PRNG — a fixed corpus, not a random one.
+    struct SplitMix64(u64);
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+    }
+
+    let mut g = c.benchmark_group("prepared_pattern");
+    const CANDIDATES: usize = 64;
+
+    for len in [3usize, 7, 12, 24, 48] {
+        let mut rng = SplitMix64(0x0DDB_A110_C0FF_EE00 ^ len as u64);
+        let token = |rng: &mut SplitMix64| -> String {
+            (0..len)
+                .map(|_| (b'a' + (rng.next_u64() % 26) as u8) as char)
+                .collect()
+        };
+        let pattern = token(&mut rng);
+        let candidates: Vec<String> = (0..CANDIDATES).map(|_| token(&mut rng)).collect();
+
+        g.throughput(Throughput::Elements(CANDIDATES as u64));
+        g.bench_with_input(BenchmarkId::new("per_call", len), &len, |bench, _| {
+            bench.iter(|| {
+                let mut total = 0usize;
+                for candidate in &candidates {
+                    total += levenshtein(black_box(&pattern), black_box(candidate));
+                }
+                total
+            });
+        });
+        g.bench_with_input(BenchmarkId::new("prepared", len), &len, |bench, _| {
+            bench.iter(|| {
+                let prepared = PreparedPattern::new(black_box(&pattern));
+                let mut total = 0usize;
+                for candidate in &candidates {
+                    total += prepared.levenshtein(black_box(candidate));
+                }
+                total
+            });
+        });
+    }
 
     g.finish();
 }
@@ -218,11 +267,10 @@ fn bench_levenshtein_variants(c: &mut Criterion) {
 fn bench_jaro_winkler(c: &mut Criterion) {
     let inputs = load_inputs();
     let mut g = c.benchmark_group("jaro_winkler");
-    let opts = Default::default();
     for (n, a, b) in &inputs.ascii {
         g.throughput(Throughput::Elements((n * n) as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), n, |bench, _| {
-            bench.iter(|| jaro_winkler(black_box(a), black_box(b), &opts));
+            bench.iter(|| jaro_winkler(black_box(a), black_box(b)));
         });
     }
     g.finish();
@@ -246,7 +294,7 @@ fn bench_hamming(c: &mut Criterion) {
     for (n, a, b) in &inputs.ascii {
         g.throughput(Throughput::Bytes(*n as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), n, |bench, _| {
-            bench.iter(|| hamming(black_box(a), black_box(b), false));
+            bench.iter(|| hamming(black_box(a), black_box(b)));
         });
     }
     g.finish();
@@ -279,7 +327,6 @@ fn bench_hamming(c: &mut Criterion) {
 #[cfg(feature = "parallel")]
 fn bench_par_levenshtein_by_length(c: &mut Criterion) {
     let inputs = load_inputs();
-    let opts = Options::default();
     const BATCH: usize = 300;
 
     let mut g = c.benchmark_group("par_levenshtein_by_length");
@@ -298,12 +345,12 @@ fn bench_par_levenshtein_by_length(c: &mut Criterion) {
             bench.iter(|| {
                 black_box(&pairs)
                     .iter()
-                    .map(|(a, b)| levenshtein(a, b, &opts))
+                    .map(|(a, b)| levenshtein(a, b))
                     .collect::<Vec<_>>()
             });
         });
         g.bench_with_input(BenchmarkId::new("parallel", n), n, |bench, _| {
-            bench.iter(|| par_levenshtein_batch(black_box(&pairs), &opts));
+            bench.iter(|| par_levenshtein_batch(black_box(&pairs)));
         });
     }
     g.finish();
@@ -312,7 +359,6 @@ fn bench_par_levenshtein_by_length(c: &mut Criterion) {
 #[cfg(feature = "parallel")]
 fn bench_par_levenshtein_by_batch_size(c: &mut Criterion) {
     let inputs = load_inputs();
-    let opts = Options::default();
     let (_, a, b) = inputs
         .ascii
         .iter()
@@ -329,12 +375,12 @@ fn bench_par_levenshtein_by_batch_size(c: &mut Criterion) {
             bench.iter(|| {
                 black_box(&pairs)
                     .iter()
-                    .map(|(a, b)| levenshtein(a, b, &opts))
+                    .map(|(a, b)| levenshtein(a, b))
                     .collect::<Vec<_>>()
             });
         });
         g.bench_with_input(BenchmarkId::new("parallel", batch), &batch, |bench, _| {
-            bench.iter(|| par_levenshtein_batch(black_box(&pairs), &opts));
+            bench.iter(|| par_levenshtein_batch(black_box(&pairs)));
         });
     }
     g.finish();
@@ -343,7 +389,6 @@ fn bench_par_levenshtein_by_batch_size(c: &mut Criterion) {
 #[cfg(feature = "parallel")]
 fn bench_par_jaro_winkler(c: &mut Criterion) {
     let inputs = load_inputs();
-    let opts = Default::default();
     const BATCH: usize = 1000;
 
     let mut g = c.benchmark_group("par_jaro_winkler");
@@ -358,12 +403,12 @@ fn bench_par_jaro_winkler(c: &mut Criterion) {
             bench.iter(|| {
                 black_box(&pairs)
                     .iter()
-                    .map(|(a, b)| jaro_winkler(a, b, &opts))
+                    .map(|(a, b)| jaro_winkler(a, b))
                     .collect::<Vec<_>>()
             });
         });
         g.bench_with_input(BenchmarkId::new("parallel", n), n, |bench, _| {
-            bench.iter(|| par_jaro_winkler_batch(black_box(&pairs), &opts));
+            bench.iter(|| par_jaro_winkler_batch(black_box(&pairs)));
         });
     }
     g.finish();
@@ -410,12 +455,12 @@ fn bench_par_hamming(c: &mut Criterion) {
             bench.iter(|| {
                 black_box(&pairs)
                     .iter()
-                    .map(|(a, b)| hamming(a, b, false))
+                    .map(|(a, b)| hamming(a, b))
                     .collect::<Vec<_>>()
             });
         });
         g.bench_with_input(BenchmarkId::new("parallel", n), n, |bench, _| {
-            bench.iter(|| par_hamming_batch(black_box(&pairs), false));
+            bench.iter(|| par_hamming_batch(black_box(&pairs)));
         });
     }
     g.finish();
@@ -427,6 +472,7 @@ criterion_group!(
     bench_levenshtein_shapes,
     bench_levenshtein_weighted,
     bench_levenshtein_variants,
+    bench_prepared_pattern,
     bench_jaro_winkler,
     bench_dice,
     bench_hamming

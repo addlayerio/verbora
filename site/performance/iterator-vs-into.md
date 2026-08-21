@@ -14,7 +14,7 @@ completely, still holding every item at once — but its allocation is paid for
 once and then borrowed by every subsequent call.
 
 ```text
-tokens()                          tokenize_into()
+tokens()                          tokenize_borrowed_into()
 
 input                             allocate buffer once
   │                                        │
@@ -34,10 +34,12 @@ single pass                       result is re-readable, indexable, sortable
 **You consume once, in order.**
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let t = AggressiveTokenizer::new();
-let letters: usize = t.tokens("counting letters in every word").map(str::len).sum();
+let letters: usize = WordTokenizer
+    .tokens("counting letters in every word")
+    .map(str::len)
+    .sum();
 
 assert_eq!(letters, 26);
 ```
@@ -47,12 +49,10 @@ Materialising here would allocate a `Vec` that exists for one traversal.
 **You might not need all of it.**
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
-
-let t = AggressiveTokenizer::new();
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 // Scanning stops at the first hit; the rest of the string is never split.
-let found = t.tokens("alpha beta gamma delta").any(|w| w == "beta");
+let found = WordTokenizer.tokens("alpha beta gamma delta").any(|w| w == "beta");
 
 assert!(found);
 ```
@@ -68,15 +68,14 @@ document, simultaneously.
 **You are feeding another API that takes `IntoIterator`.**
 
 ```rust
-use verbora_core::StopWords;
-use verbora_phonetics::{SoundEx, phoneticize_tokens_with};
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_core::{StopWordLanguage, StopWords};
+use verbora_phonetics::{SoundEx, phoneticize_tokens};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let tokenizer = AggressiveTokenizer::new();
 let soundex = SoundEx::new();
-let stops = StopWords::english();
+let stops = StopWords::for_language(StopWordLanguage::En);
 
-let keys = phoneticize_tokens_with(tokenizer.tokens("the quick fox"), &stops, false, |t| {
+let keys = phoneticize_tokens(WordTokenizer.tokens("the quick fox"), &stops, |t| {
     soundex.process(t)
 });
 
@@ -90,16 +89,15 @@ No `Vec<String>` is built between the tokenizer and the encoder.
 **You need the whole result, and you need it again and again.**
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn index(corpus: &[&str]) -> usize {
-    let t = AggressiveTokenizer::new();
-    let mut buf = Vec::new();
+    let mut buf: Vec<&str> = Vec::new();
     let mut hits = 0;
 
     for document in corpus {
         buf.clear();
-        t.tokenize_into(document, &mut buf);
+        WordTokenizer.tokenize_borrowed_into(document, &mut buf);
 
         // Two passes over the same tokens. An iterator would have to re-scan.
         let longest = buf.iter().map(|w| w.len()).max().unwrap_or(0);
@@ -124,8 +122,8 @@ the allocator again.
 
 ## When neither wins
 
-Calling something once. Use `tokenize()`. Both of the shapes on this page cost
-you something in exchange for a saving you will not measure.
+Calling something once. Use `tokenize_borrowed()`. Both of the shapes on this
+page cost you something in exchange for a saving you will not measure.
 
 ## The decision
 
@@ -133,8 +131,8 @@ you something in exchange for a saving you will not measure.
 |---|---|
 | No — one at a time, and you might stop early | `tokens()` — the iterator wins twice |
 | No — one at a time, always all of them | `tokens()` — still no container |
-| Yes, once | `tokenize()` |
-| Yes, repeatedly in a loop | `tokenize_into()` with one buffer |
+| Yes, once | `tokenize_borrowed()` |
+| Yes, repeatedly in a loop | `tokenize_borrowed_into()` with one buffer |
 
 ## What Verbora actually offers
 
@@ -143,8 +141,8 @@ Not every subsystem has both. Reading a name is not enough — check the page.
 | Subsystem | Lazy | `_into` |
 |---|---|---|
 | Tokenizers | `tokens()` on every tokenizer | `tokenize_into`, `tokenize_borrowed_into` |
-| N-grams | `ngrams_iter()` → `NGramIter` | — |
-| Trie | `iter_keys_with_prefix()`, `keys()`, `iter_matches_on_path()` | — |
+| N-grams | `ngrams()`, `Padded::ngrams()`, `char_ngrams()` — all lazy already | — (nothing is allocated to write into) |
+| Trie | `iter_keys_with_prefix()`, `keys()`, `iter_prefix_matches()` | — (`for_each_key_with_prefix` is the allocation-free enumeration) |
 | Inflectors | — | `pluralize_into`, `singularize_into` |
 | Core traits | — | `stem_into` (clears first) |
 | Distance | — | — |

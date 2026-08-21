@@ -115,25 +115,25 @@
 //!   it is absent from every other benchmark in this crate (see
 //!   `Cargo.toml`'s own note on that row).
 //! - **Inflectors** (`inflectors_section`) — added in the pass that wired
-//!   `NounInflector`/`CountInflector` competitors into `benches/
+//!   `NounInflector`/`OrdinalInflector` competitors into `benches/
 //!   inflectors.rs` for the first time (this module had zero Rust
 //!   competitors before). Real allocator counts for one pass over
 //!   `benches/inflectors.rs`'s own verified-agreeing `PAIRS` word list
-//!   (`pluralize` all 73 singulars, `singularize` all 73 plurals — Verbora
-//!   vs. `pluralizer` vs. `Inflector`), and for `CountInflector::nth`/
-//!   `nth_str` over the same `sample(256)` range that file's own
-//!   `count_inflector_nth`/`count_inflector_nth_str` groups use (Verbora vs.
-//!   `ordinal` vs. `Inflector::ordinalize`).
-//! - **Normalizers** (`normalizers_section`) — added in the same pass, for
-//!   `normalize_ja` (zero Rust competitors before it), reusing `benches/
-//!   normalizers.rs`'s own Iroha-pangram and halfwidth-katakana generators at
-//!   `repeats=256`: `hiragana_to_katakana`/`katakana_to_hiragana` (Verbora
-//!   vs. `unicode-jp`'s `hira2kata`/`kata2hira`) and `katakana_hf` (Verbora
-//!   vs. `kana-converter`'s `to_double_byte(_, KanaOnly)`). Also includes
-//!   `remove_diacritics` (Verbora vs. `diacritics`, already benchmarked for
-//!   time in `benches/normalizers.rs` but not yet for memory), reusing that
-//!   file's own `accented_prose(256)` generator, for a complete per-module
-//!   picture rather than a partial one.
+//!   (`pluralize` all 72 singulars, `singularize` all 72 plurals — Verbora
+//!   vs. `pluralizer` vs. `Inflector`), and for `OrdinalInflector::nth`
+//!   over the same `sample(256)` range that file's own
+//!   `count_inflector_nth` group uses (Verbora vs. `ordinal` vs.
+//!   `Inflector::ordinalize`). The `nth_str` rows are gone with the API they
+//!   measured; see `inflectors_section`'s own comment.
+//! - **Normalizers** (`normalizers_section`) — reusing `benches/
+//!   normalizers.rs`'s own generators at `repeats=256`: `nfkc` over
+//!   halfwidth katakana (Verbora vs. `kana-converter`'s
+//!   `to_double_byte(_, KanaOnly)`) and `remove_diacritics` over
+//!   `accented_prose(256)` (Verbora vs. `diacritics`). The two `unicode-jp`
+//!   kana-conversion rows this section used to carry are gone: the
+//!   text-shaping migration deleted `verbora_normalizers::ja::converters` in
+//!   full, so there is no Verbora side left to measure. See
+//!   `benches/normalizers.rs`'s own module doc comment.
 //! - **Stemmers** (`stemmers_section`) — added for the three real
 //!   competitors wired into `benches/stemmers.rs` for the first time in this
 //!   pass, over that file's own (sky-/gap-word-excluded) shared word lists:
@@ -242,17 +242,14 @@ use spellbook::Dictionary as SpellbookDictionary;
 use symspell::{AsciiStringStrategy, SymSpell, SymSpellBuilder};
 use unicode_segmentation::UnicodeSegmentation;
 use verbora_classifiers::BayesClassifier;
-use verbora_inflectors::{CountInflector, NounInflector};
+use verbora_inflectors::{NounInflector, OrdinalInflector};
 use verbora_language::{LanguageDetector, WhatlangDetector};
-use verbora_normalizers::ja::converters::{
-    hiragana_to_katakana, katakana_hf, katakana_to_hiragana,
-};
-use verbora_normalizers::remove_diacritics;
+use verbora_normalizers::{nfkc, remove_diacritics};
 use verbora_phonetics::{DoubleMetaphone, PhoneticIndexBuilder, SoundEx};
 use verbora_spellcheck::Spellcheck;
 use verbora_stemmers::{PorterStemmer, StemmerId, StemmerJa};
-use verbora_tfidf::{DocKey, DocumentInput, Terms, TfIdf};
-use verbora_tokenizers::{AggressiveTokenizer, SentenceTokenizer, Tokenize, WordTokenizer};
+use verbora_tfidf::TfIdf;
+use verbora_tokenizers::{BorrowingTokenizer, SentenceTokenizer, WordTokenizer};
 use verbora_wordnet::{Config, Storage, WordNet};
 
 /// One [`memory::measure`] call, flattened for printing and JSON.
@@ -799,24 +796,27 @@ fn tfidf_section() -> Vec<Measurement> {
     let mut rows = Vec::new();
 
     // -- build (cold) --
-    let (mut verbora_corpus, m) = measured(
+    let (verbora_corpus, m) = measured(
         format!("tfidf/build/verbora_{N}"),
         format!(
             "add_document x{N}, same ~163kB-article rotation as benches/tfidf.rs's own bench_build"
         ),
         || {
+            // Keyless `add_document`, matching `benches/tfidf.rs`'s own corpus
+            // builder and both competitors — see that file for why the
+            // synthetic per-document key the pre-migration API required is not
+            // reintroduced. It matters more here than there: a stored key is a
+            // `String` per document, and this is an *allocation* report.
             let mut t = TfIdf::new();
-            #[expect(clippy::cast_precision_loss, reason = "benchmark corpora are tiny")]
-            for (i, doc) in docs.iter().enumerate() {
-                t.add_document(DocumentInput::Text(doc), DocKey::Num(i as f64), false)
-                    .expect("a fresh instance always has a documents array");
+            for doc in &docs {
+                t.add_document(doc);
             }
             t
         },
     );
     assert_eq!(
-        verbora_corpus.documents().map(<[_]>::len),
-        Some(N),
+        verbora_corpus.documents().len(),
+        N,
         "sanity: built verbora corpus must hold all N documents"
     );
     rows.push(m);
@@ -847,7 +847,7 @@ fn tfidf_section() -> Vec<Measurement> {
         || {
             std::hint::black_box(
                 verbora_corpus
-                    .tfidf(Terms::Text("the"), 0)
+                    .tfidf("the", 0)
                     .expect("term/doc index in range"),
             )
         },
@@ -1152,7 +1152,7 @@ fn classifiers_section() -> Vec<Measurement> {
 
 // ---------------------------------------------------------------------------
 // Inflectors -- NounInflector (Verbora vs. pluralizer vs. Inflector) and
-// CountInflector (Verbora vs. ordinal vs. Inflector::ordinalize). Same
+// OrdinalInflector (Verbora vs. ordinal vs. Inflector::ordinalize). Same
 // verified-agreeing PAIRS/sample() domains as benches/inflectors.rs.
 // ---------------------------------------------------------------------------
 
@@ -1259,7 +1259,7 @@ fn inflectors_section() -> Vec<Measurement> {
         ),
         || {
             for (s, _) in INFLECTORS_PAIRS {
-                std::hint::black_box(verbora_nouns.pluralize(std::hint::black_box(s)).unwrap());
+                std::hint::black_box(verbora_nouns.pluralize(std::hint::black_box(s)));
             }
         },
     );
@@ -1296,7 +1296,7 @@ fn inflectors_section() -> Vec<Measurement> {
         format!("NounInflector::singularize x{n}"),
         || {
             for (_, p) in INFLECTORS_PAIRS {
-                std::hint::black_box(verbora_nouns.singularize(std::hint::black_box(p)).unwrap());
+                std::hint::black_box(verbora_nouns.singularize(std::hint::black_box(p)));
             }
         },
     );
@@ -1326,19 +1326,29 @@ fn inflectors_section() -> Vec<Measurement> {
     );
     rows.push(m);
 
-    // -- CountInflector::nth (i64) vs ordinal, and ::nth_str (&str) vs
+    // -- OrdinalInflector::nth (i64) vs ordinal and vs
     // Inflector::ordinalize, over the same sample(256) range as
-    // benches/inflectors.rs's own count_inflector_nth/_nth_str groups --
+    // benches/inflectors.rs's own count_inflector_nth group --
+    //
+    // The `nth_str` rows are gone with the API. `CountInflector::nth_str` was
+    // Verbora's string-in ordinal twin and the migration removed it entirely
+    // (see benches/inflectors.rs's module doc comment), so there is no Verbora
+    // allocation left to measure on that shape. `Inflector::ordinalize` is
+    // kept and re-pointed at `nth`: for an allocation report the two are
+    // directly comparable, because both produce exactly one owned `String`
+    // holding the same ordinal for the same value — the input-type mismatch
+    // that makes them unfair to *time* against each other does not affect what
+    // either allocates.
     const COUNT_N: usize = 256;
     let nums = inflectors_sample(COUNT_N);
     let strs: Vec<String> = nums.iter().map(i64::to_string).collect();
 
     let (_, m) = measured(
         format!("count_inflector/nth/verbora_{COUNT_N}"),
-        format!("CountInflector::nth x{COUNT_N}, same sample() range as benches/inflectors.rs"),
+        format!("OrdinalInflector::nth x{COUNT_N}, same sample() range as benches/inflectors.rs"),
         || {
             for &i in &nums {
-                std::hint::black_box(CountInflector::nth(std::hint::black_box(i)));
+                std::hint::black_box(OrdinalInflector::nth(std::hint::black_box(i)));
             }
         },
     );
@@ -1358,20 +1368,7 @@ fn inflectors_section() -> Vec<Measurement> {
     rows.push(m);
 
     let (_, m) = measured(
-        format!("count_inflector/nth_str/verbora_{COUNT_N}"),
-        format!(
-            "CountInflector::nth_str x{COUNT_N}, decimal strings pre-formatted outside the measured region"
-        ),
-        || {
-            for s in &strs {
-                std::hint::black_box(CountInflector::nth_str(std::hint::black_box(s)));
-            }
-        },
-    );
-    rows.push(m);
-
-    let (_, m) = measured(
-        format!("count_inflector/nth_str/inflector_{COUNT_N}"),
+        format!("count_inflector/nth/inflector_{COUNT_N}"),
         format!("inflector::numbers::ordinalize::ordinalize x{COUNT_N}"),
         || {
             for s in &strs {
@@ -1387,76 +1384,33 @@ fn inflectors_section() -> Vec<Measurement> {
 }
 
 // ---------------------------------------------------------------------------
-// Normalizers -- normalize_ja converters (Verbora vs. unicode-jp vs.
-// kana-converter) plus remove_diacritics (Verbora vs. diacritics), reusing
-// benches/normalizers.rs's own generators at repeats=256.
+// Normalizers -- `nfkc` (Verbora vs. kana-converter) plus `remove_diacritics`
+// (Verbora vs. diacritics), reusing benches/normalizers.rs's own generators
+// at repeats=256.
+//
+// The text-shaping migration (docs/design/text-shaping-contract.md 3.2)
+// deleted `verbora_normalizers::ja::converters` in full, so the two
+// `unicode-jp` rows (`hiragana_to_katakana`/`katakana_to_hiragana` vs.
+// `kana::hira2kata`/`kata2hira`) are GONE, not merely renamed: kana-to-kana
+// conversion is a transliteration, not a normalization, and Verbora ships
+// none. The halfwidth-width-fold row survives, re-pointed from `katakana_hf`
+// to `nfkc`, which subsumes it. See benches/normalizers.rs's own module doc
+// comment for the comparability limit that re-pointing creates.
 // ---------------------------------------------------------------------------
 
 fn normalizers_section() -> Vec<Measurement> {
     let mut rows = Vec::new();
     const N: usize = 256;
 
-    let hira = "いろはにほへとちりぬるをわかよたれそつねならむうゐのおくやまけふこえてあさきゆめみしゑひもせす"
-        .repeat(N);
-    let kata = "イロハニホヘトチリヌルヲワカヨタレソツネナラムウヰノオクヤマケフコエテアサキユメミシヱヒモセス"
-        .repeat(N);
     let half_katakana = "ｼﾝｸﾞﾙﾊﾞｲﾄｶﾅｶﾀｶﾅｶﾞｷﾞｸﾞｹﾞｺﾞｻﾞｼﾞｽﾞｾﾞｿﾞﾀﾞﾁﾞﾂﾞﾃﾞﾄﾞﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ".repeat(N);
     let accented = "crème brûlée à la française, naïve résumé of Ångström ".repeat(N);
 
-    let (v, m) = measured(
-        format!("ja_hiragana_to_katakana/verbora_{N}"),
-        format!(
-            "hiragana_to_katakana over the repeated Iroha pangram (repeats={N}), same generator as benches/normalizers.rs"
-        ),
-        || hiragana_to_katakana(std::hint::black_box(&hira)),
-    );
-    assert!(
-        v.starts_with('イ'),
-        "sanity: pangram must actually convert to katakana"
-    );
-    rows.push(m);
-
-    let (u, m) = measured(
-        format!("ja_hiragana_to_katakana/unicode_jp_{N}"),
-        "kana::hira2kata over the identical repeated pangram".to_string(),
-        || kana::hira2kata(std::hint::black_box(&hira)),
-    );
-    assert_eq!(
-        v.as_ref(),
-        u,
-        "sanity: verified-agreeing domain must still agree"
-    );
-    rows.push(m);
-
-    let (v2, m) = measured(
-        format!("ja_katakana_to_hiragana/verbora_{N}"),
-        format!("katakana_to_hiragana over the repeated katakana pangram (repeats={N})"),
-        || katakana_to_hiragana(std::hint::black_box(&kata)),
-    );
-    assert!(
-        v2.starts_with('い'),
-        "sanity: pangram must actually convert to hiragana"
-    );
-    rows.push(m);
-
-    let (u2, m) = measured(
-        format!("ja_katakana_to_hiragana/unicode_jp_{N}"),
-        "kana::kata2hira over the identical repeated pangram".to_string(),
-        || kana::kata2hira(std::hint::black_box(&kata)),
-    );
-    assert_eq!(
-        v2.as_ref(),
-        u2,
-        "sanity: verified-agreeing domain must still agree"
-    );
-    rows.push(m);
-
     let (v3, m) = measured(
-        format!("ja_katakana_halfwidth_to_fullwidth/verbora_{N}"),
+        format!("nfkc_halfwidth_katakana/verbora_{N}"),
         format!(
-            "katakana_hf over repeated halfwidth katakana (repeats={N}, valid dakuten pairs only)"
+            "nfkc over repeated halfwidth katakana (repeats={N}, valid dakuten pairs only) -- the width fold katakana_hf used to perform"
         ),
-        || katakana_hf(std::hint::black_box(&half_katakana)),
+        || nfkc(std::hint::black_box(&half_katakana)),
     );
     assert!(
         v3.starts_with('シ'),
@@ -1465,7 +1419,7 @@ fn normalizers_section() -> Vec<Measurement> {
     rows.push(m);
 
     let (k3, m) = measured(
-        format!("ja_katakana_halfwidth_to_fullwidth/kana_converter_{N}"),
+        format!("nfkc_halfwidth_katakana/kana_converter_{N}"),
         "kana_converter::to_double_byte(_, KanaOnly) over the identical repeated input".to_string(),
         || {
             kana_converter::to_double_byte(
@@ -1768,11 +1722,13 @@ fn stemmers_section() -> Vec<Measurement> {
 }
 
 // ---------------------------------------------------------------------------
-// Tokenizers -- Verbora vs. unicode-segmentation (WordTokenizer,
-// AggressiveTokenizer's English variant, SentenceTokenizer) and segtok
-// (SentenceTokenizer only). Both competitors were selected in
-// docs/COMPETITIVE_BENCHMARKS.md's original matrix but never wired into
-// Cargo.toml/benchmarked until the audit round that added this section --
+// Tokenizers -- Verbora's WordTokenizer/SentenceTokenizer against segtok
+// (the one remaining rival implementation) and against unicode-segmentation
+// (a wrapper-overhead baseline, NOT a competitor: Verbora is now built on
+// it -- see benches/tokenizers.rs's own module doc comment). Both were
+// selected in docs/COMPETITIVE_BENCHMARKS.md's original matrix but never
+// wired into Cargo.toml/benchmarked until the audit round that added this
+// section --
 // see benches/tokenizers.rs's own module doc comment for the narrowed input
 // domains and tests/tokenizers_correctness.rs for the proof each domain is
 // where the compared implementations actually agree. This section extends
@@ -1840,32 +1796,49 @@ fn tok_unicode_split_word_bounds_count(text: &str) -> usize {
         .count()
 }
 
+/// The text-shaping migration (`docs/design/text-shaping-contract.md` 3.4)
+/// deleted `AggressiveTokenizer`, so the two `aggressive_en_*` rows this
+/// section used to carry are gone; `WordTokenizer` — which now *is*
+/// `str::unicode_words()` — carries the comparison they made. The
+/// `unicode_words`/`unicode_bounds`/`unicode_sentences` rows below are
+/// therefore no longer competitor rows at all but wrapper-overhead
+/// baselines, exactly as `benches/tokenizers.rs`'s `*_wrapper_overhead`
+/// groups are; only `segtok` remains a rival implementation. Both Verbora
+/// API shapes are measured — the allocating `tokenize_borrowed` and the
+/// allocation-free `tokens` — since the whole point of this file is
+/// allocation counts and collapsing them into one row would hide the number
+/// it exists to report.
 fn tokenizers_section() -> Vec<Measurement> {
     let corpus = words();
     let mut rows = Vec::new();
 
-    // WordTokenizer vs. unicode_words()/split_word_bounds(), and
-    // AggressiveTokenizer (English) vs. unicode_words() -- same 8192-word
-    // document, the largest size benches/tokenizers.rs's own
-    // word_tokenization_unicode_segmentation/aggressive_tokenization_en
-    // groups measure.
+    // WordTokenizer vs. unicode_words()/split_word_bounds() -- same
+    // 8192-word document, the largest size benches/tokenizers.rs's own
+    // word_tokenization_wrapper_overhead group measures.
     let doc = tok_document(&corpus, 8192);
 
     let (verbora_word_count, m) = measured(
         "word_tokenizer_verbora_8192w",
-        "WordTokenizer::tokenize over an 8192-word punctuation-free document",
-        || WordTokenizer::new().tokenize(&doc).map(|v| v.len()),
+        "WordTokenizer::tokenize_borrowed over an 8192-word punctuation-free document (one Vec<&str>, no per-token allocation)",
+        || WordTokenizer.tokenize_borrowed(&doc).len(),
     );
     assert_eq!(
-        verbora_word_count,
-        Some(8192),
+        verbora_word_count, 8192,
         "sanity: every word must survive as its own token"
     );
     rows.push(m);
 
+    let (verbora_lazy_count, m) = measured(
+        "word_tokenizer_verbora_lazy_8192w",
+        "WordTokenizer::tokens().count() over the IDENTICAL document -- the allocation-free primitive tokenize_borrowed is built on",
+        || WordTokenizer.tokens(&doc).count(),
+    );
+    assert_eq!(verbora_lazy_count, 8192);
+    rows.push(m);
+
     let (uw_count, m) = measured(
         "word_tokenizer_unicode_words_8192w",
-        "str::unicode_words().count() over the IDENTICAL 8192-word document",
+        "str::unicode_words().count() over the IDENTICAL 8192-word document -- WordTokenizer::tokens IS this call, so this is a wrapper-overhead baseline, never a competitor row",
         || doc.unicode_words().count(),
     );
     assert_eq!(uw_count, 8192);
@@ -1879,32 +1852,15 @@ fn tokenizers_section() -> Vec<Measurement> {
     assert_eq!(ub_count, 8192);
     rows.push(m);
 
-    let (agg_count, m) = measured(
-        "aggressive_en_verbora_8192w",
-        "AggressiveTokenizer::tokenize (English variant) over the IDENTICAL 8192-word document",
-        || AggressiveTokenizer::new().tokenize(&doc).len(),
-    );
-    assert_eq!(agg_count, 8192);
-    rows.push(m);
-
-    let (agg_uw_count, m) = measured(
-        "aggressive_en_unicode_words_8192w",
-        "str::unicode_words().count() over the IDENTICAL document (AggressiveTokenizer's English-variant competitor row, matrix Selected cases)",
-        || doc.unicode_words().count(),
-    );
-    assert_eq!(agg_uw_count, 8192);
-    rows.push(m);
-
     // SentenceTokenizer vs. unicode_sentences()/split_sentence_bounds()/
     // segtok, 2048-sentence document -- benches/tokenizers.rs's own largest
-    // sentence_tokenization row, and the size at which docs/PERFORMANCE_GAPS.md
-    // records Verbora's real, reproduced loss against unicode-segmentation.
+    // sentence_tokenization row.
     let text = tok_sentence_prose(&corpus, 2048, 6);
 
     let (verbora_sent_count, m) = measured(
         "sentence_tokenizer_verbora_2048s",
-        "SentenceTokenizer::tokenize over a 2048-sentence plain-declarative document (no abbreviations/URIs/digits -- the narrowed domain tests/tokenizers_correctness.rs verifies)",
-        || SentenceTokenizer::new().tokenize(&text).len(),
+        "SentenceTokenizer::tokenize_borrowed over a 2048-sentence plain-declarative document (no abbreviations/URIs/digits -- the narrowed domain tests/tokenizers_correctness.rs verifies)",
+        || SentenceTokenizer::new().tokenize_borrowed(&text).len(),
     );
     assert_eq!(
         verbora_sent_count, 2048,
@@ -1912,9 +1868,17 @@ fn tokenizers_section() -> Vec<Measurement> {
     );
     rows.push(m);
 
+    let (verbora_sent_lazy_count, m) = measured(
+        "sentence_tokenizer_verbora_lazy_2048s",
+        "SentenceTokenizer::tokens().count() over the IDENTICAL document -- the allocation-free primitive",
+        || SentenceTokenizer::new().tokens(&text).count(),
+    );
+    assert_eq!(verbora_sent_lazy_count, 2048);
+    rows.push(m);
+
     let (us_count, m) = measured(
         "sentence_tokenizer_unicode_sentences_2048s",
-        "str::unicode_sentences().count() over the IDENTICAL document",
+        "str::unicode_sentences().count() over the IDENTICAL document -- a wrapper-overhead baseline: SentenceTokenizer is built on this crate's sentence boundaries",
         || text.unicode_sentences().count(),
     );
     assert_eq!(us_count, 2048);
@@ -1922,7 +1886,7 @@ fn tokenizers_section() -> Vec<Measurement> {
 
     let (ub2_count, m) = measured(
         "sentence_tokenizer_unicode_bounds_2048s",
-        "str::split_sentence_bounds().count() over the IDENTICAL document",
+        "str::split_sentence_bounds().count() over the IDENTICAL document -- with no abbreviations configured, SentenceTokenizer emits EXACTLY this segmentation",
         || text.split_sentence_bounds().count(),
     );
     assert_eq!(ub2_count, 2048);
@@ -1930,7 +1894,7 @@ fn tokenizers_section() -> Vec<Measurement> {
 
     let (segtok_count, m) = measured(
         "sentence_tokenizer_segtok_2048s",
-        "segtok::segmenter::split_single(SegmentConfig::default()) over the IDENTICAL document (segtok also trim()s each sentence internally, same as Verbora -- see benches/tokenizers.rs's own doc comment)",
+        "segtok::segmenter::split_single(SegmentConfig::default()) over the IDENTICAL document -- the one remaining rival implementation. segtok trims each sentence internally; Verbora no longer does (contract 3.1), a formatting difference that does not affect the count",
         || split_single(&text, SegmentConfig::default()).len(),
     );
     assert_eq!(segtok_count, 2048);
@@ -1987,13 +1951,13 @@ fn main() {
 
     let inflectors_rows = inflectors_section();
     print_section(
-        "Inflectors -- NounInflector vs. pluralizer/Inflector, CountInflector vs. ordinal/Inflector::ordinalize",
+        "Inflectors -- NounInflector vs. pluralizer/Inflector, OrdinalInflector vs. ordinal/Inflector::ordinalize",
         &inflectors_rows,
     );
 
     let normalizers_rows = normalizers_section();
     print_section(
-        "Normalizers -- normalize_ja converters vs. unicode-jp/kana-converter, remove_diacritics vs. diacritics",
+        "Normalizers -- nfkc (halfwidth kana width fold) vs. kana-converter, remove_diacritics vs. diacritics",
         &normalizers_rows,
     );
 
@@ -2005,7 +1969,7 @@ fn main() {
 
     let tokenizers_rows = tokenizers_section();
     print_section(
-        "Tokenizers -- WordTokenizer/AggressiveTokenizer(en) vs. unicode-segmentation, SentenceTokenizer vs. unicode-segmentation and segtok",
+        "Tokenizers -- SentenceTokenizer vs. segtok (rival); WordTokenizer/SentenceTokenizer vs. unicode-segmentation (wrapper-overhead baseline, not a competitor)",
         &tokenizers_rows,
     );
 
@@ -2068,14 +2032,14 @@ fn main() {
     obj.insert(
         "inflectors".to_owned(),
         json!({
-            "note": "NounInflector::pluralize/singularize (Verbora vs. pluralizer vs. Inflector) over benches/inflectors.rs's own 73-word verified-agreeing PAIRS; CountInflector::nth/nth_str (Verbora vs. ordinal / Inflector::ordinalize) over that file's own sample(256) range. See benches/inflectors.rs's own module doc comment for how PAIRS was verified.",
+            "note": "NounInflector::pluralize/singularize (Verbora vs. pluralizer vs. Inflector) over benches/inflectors.rs's own 72-word verified-agreeing PAIRS; OrdinalInflector::nth (Verbora vs. ordinal / Inflector::ordinalize) over that file's own sample(256) range. The nth_str rows are gone: CountInflector::nth_str was removed by the Rust-native migration. See benches/inflectors.rs's own module doc comment for how PAIRS was verified.",
             "measurements": inflectors_rows,
         }),
     );
     obj.insert(
         "normalizers".to_owned(),
         json!({
-            "note": "normalize_ja converters (Verbora vs. unicode-jp's hira2kata/kata2hira, vs. kana-converter's to_double_byte KanaOnly) over benches/normalizers.rs's own Iroha-pangram/halfwidth-katakana generators at repeats=256; remove_diacritics (Verbora vs. diacritics) over that file's own accented_prose(256). See benches/normalizers.rs's own module doc comment for the narrowed/verified domains.",
+            "note": "nfkc (Verbora, the halfwidth-kana width fold katakana_hf used to perform) vs. kana-converter's to_double_byte KanaOnly over benches/normalizers.rs's own halfwidth-katakana generator at repeats=256; remove_diacritics (Verbora vs. diacritics) over that file's own accented_prose(256). The unicode-jp kana-conversion rows are GONE -- verbora_normalizers::ja::converters was deleted by the text-shaping migration and Verbora ships no kana-to-kana conversion. remove_diacritics is now NFD -> strip ccc != 0 -> NFC, the mechanical opposite of the diacritics crate's table lookup; the two still agree byte-for-byte on this generator's alphabet, proved per character in tests/normalizers_correctness.rs. See benches/normalizers.rs's own module doc comment for the narrowed/verified domains.",
             "measurements": normalizers_rows,
         }),
     );
@@ -2089,7 +2053,7 @@ fn main() {
     obj.insert(
         "tokenizers".to_owned(),
         json!({
-            "note": "unicode-segmentation and segtok, both selected in docs/COMPETITIVE_BENCHMARKS.md's original matrix but never wired into Cargo.toml/benchmarked until this audit round -- see benches/tokenizers.rs's own doc comment and tests/tokenizers_correctness.rs. WordTokenizer vs. unicode_words()/split_word_bounds() and AggressiveTokenizer(en) vs. unicode_words(), 8192-word document; SentenceTokenizer vs. unicode_sentences()/split_sentence_bounds()/segtok's split_single, 2048-sentence document -- the size at which docs/PERFORMANCE_GAPS.md records Verbora's real, reproduced TIME loss against both unicode-segmentation sentence APIs; these allocation counts independently confirm the same story.",
+            "note": "segtok is the one remaining rival implementation; unicode-segmentation is NOT a competitor here -- the text-shaping migration reimplemented WordTokenizer as str::unicode_words() and SentenceTokenizer on str::split_sentence_bound_indices(), so those rows are wrapper-overhead baselines. AggressiveTokenizer was deleted and its row with it. Both Verbora API shapes are measured: the allocating tokenize_borrowed and the allocation-free tokens(). WordTokenizer over an 8192-word document; SentenceTokenizer over a 2048-sentence document. See benches/tokenizers.rs's own doc comment and tests/tokenizers_correctness.rs. NOTE: docs/PERFORMANCE_GAPS.md's recorded SentenceTokenizer loss against unicode-segmentation predates the migration and describes a different implementation.",
             "measurements": tokenizers_rows,
         }),
     );

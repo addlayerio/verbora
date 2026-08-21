@@ -1,7 +1,7 @@
 //! Language auto-detection: guesses which of a [`NameType`](crate::NameType)'s
 //! languages a name is plausibly spelled under, purely from the spelling
-//! itself — the `*_lang.txt` heuristic layer every reference implementation
-//! runs before [`BeiderMorse::encode`](super::BeiderMorse::encode) decides
+//! itself — the `*_lang.txt` heuristic layer that runs before
+//! [`BeiderMorse::encode`](super::BeiderMorse::encode) decides
 //! which rule file to load and which languages a candidate phoneme starts
 //! out valid under. Not run at all by
 //! [`BeiderMorse::encode_language`](super::BeiderMorse::encode_language),

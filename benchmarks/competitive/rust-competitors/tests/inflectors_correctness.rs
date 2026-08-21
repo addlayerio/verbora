@@ -1,29 +1,45 @@
 //! `CORRECTNESS BEFORE PERFORMANCE` for `benches/inflectors.rs`.
 //!
-//! Verifies, once and outside the timed code, that `CountInflector::nth` and
-//! the `ordinal` 0.4.0 crate agree on the non-negative domain actually
-//! benchmarked, and explicitly documents — via an assertion, not just a
-//! comment — the real divergence found for negative integers, which the
-//! benchmarked domain deliberately excludes.
+//! Verifies, once and outside the timed code, that [`OrdinalInflector::nth`]
+//! and the `ordinal` 0.4.0 crate agree on the domain actually benchmarked,
+//! and characterizes — via an assertion, not just a comment — the one real
+//! divergence that remains, which is a verified bug in `ordinal` itself and
+//! which the benchmarked domain deliberately excludes.
 //!
 //! Also covers the `NounInflector` competitors `pluralizer` 0.5.0 and
 //! `Inflector` 0.11.4, and `Inflector`'s `numbers::ordinalize::ordinalize` as
-//! a second `CountInflector` match.
+//! a second [`OrdinalInflector`] match.
 //!
-//! The second coverage round adds, on top of the first round's fixtures: the
-//! `"<n>-large"` bench shape's value set (9-19-digit ordinals), a seeded
-//! 100_000-value random sweep over the bug-free non-negative domain, an
-//! exhaustive `0..10_000` characterization proving the `ordinal` crate's bug
-//! domain is *exactly* the four last-two-digit ranges (neither wider nor
-//! narrower), a full `-1000..0` sweep quantifying the negative-integer
-//! divergence, a 200_000-value seeded sweep of `Inflector::ordinalize`
-//! across the full non-negative `i64` magnitude range, and 59 more
-//! verified-unanimous noun pairs (72 → 131, found by probing ~140 further
-//! candidates the same way the first round probed its ~120), plus the
-//! `"<n>-irregular"` bench shape's subset-of-`PAIRS` sync check.
+//! # What the Rust-native migration changed here
+//!
+//! Two things, both of which *widened* this file's coverage rather than
+//! narrowing it:
+//!
+//! **The negative-integer divergence is gone.** Verbora's ordinal suffix is
+//! now specified on `n.unsigned_abs() % 100` ([`OrdinalInflector::suffix`]),
+//! so `nth(-1)` is `"-1st"`. It previously answered `"-1th"` because the old
+//! implementation's signed `%` kept the dividend's sign. `ordinal` has always
+//! taken `Abs::abs(self)` first (`ordinal-0.4.0/src/lib.rs`'s
+//! `impl_ordinal!`), so the two now agree on negative input, and the four
+//! tests that existed to pin the disagreement have been replaced by tests
+//! pinning the agreement plus Verbora's own contract for the sign.
+//!
+//! **`nth_str` no longer exists, so the `Inflector::ordinalize` comparison
+//! retargets onto `nth`.** The old Verbora carried a string-in/string-out
+//! ordinal twin, `CountInflector::nth_str`, pinned to `f64` number semantics;
+//! it was the shape-match for `ordinalize`'s own `&str -> String` signature,
+//! and every `ordinalize` assertion below used to be capped at `2^53 - 1`
+//! because past that bound `nth_str` suffixed a *rounded* value. Verbora is
+//! now `i64`-exact with no string-in form at all, so those assertions retarget
+//! onto `nth(i)` for the same integer `i` and the `2^53` cap is dropped: the
+//! sweeps below now cover the **full** `i64` range, which the old ones could
+//! not. See `benches/inflectors.rs`'s own doc comment for why the *timing*
+//! group did not survive the same retarget — outputs for a given value are
+//! comparable, but a `&str` input against an `i64` input is not equivalent
+//! benchmark preparation.
 
 use ordinal::ToOrdinal;
-use verbora_inflectors::{CountInflector, NounInflector};
+use verbora_inflectors::{NounInflector, OrdinalInflector};
 
 /// The exact values `benches/inflectors.rs`'s `sample` cycles through — every
 /// suffix class (units, the teens exception, round hundreds) it actually
@@ -38,11 +54,14 @@ const BENCHMARKED: [i64; 24] = [
 #[test]
 fn agrees_on_benchmarked_values() {
     for i in BENCHMARKED {
-        let a = CountInflector::nth(i);
+        let a = OrdinalInflector::nth(i);
         let b = i.to_ordinal_string();
         assert_eq!(a, b, "nth({i}): verbora={a:?} ordinal={b:?}");
     }
-    assert_eq!(CountInflector::nth(i64::MAX), i64::MAX.to_ordinal_string());
+    assert_eq!(
+        OrdinalInflector::nth(i64::MAX),
+        i64::MAX.to_ordinal_string()
+    );
 }
 
 /// A real, verified bug in `ordinal` 0.4.0, found while writing this test —
@@ -59,7 +78,7 @@ fn agrees_on_benchmarked_values() {
 #[test]
 fn ordinal_crate_has_a_real_teens_modulus_bug() {
     for i in [31i64, 32, 33, 51, 52, 53, 71, 72, 73, 91, 92, 93, 131, 331] {
-        let verbora = CountInflector::nth(i);
+        let verbora = OrdinalInflector::nth(i);
         let ordinal = i.to_ordinal_string();
         assert!(
             verbora.ends_with("st") || verbora.ends_with("nd") || verbora.ends_with("rd"),
@@ -73,7 +92,7 @@ fn ordinal_crate_has_a_real_teens_modulus_bug() {
     }
 
     let mismatches = (0..1000i64)
-        .filter(|&i| CountInflector::nth(i) != i.to_ordinal_string())
+        .filter(|&i| OrdinalInflector::nth(i) != i.to_ordinal_string())
         .count();
     assert_eq!(
         mismatches, 120,
@@ -84,10 +103,19 @@ fn ordinal_crate_has_a_real_teens_modulus_bug() {
 /// True exactly when `i`'s last two digits fall in the `ordinal` crate's
 /// verified bug ranges (`31..=33`, `51..=53`, `71..=73`, `91..=93` — see
 /// [`ordinal_crate_has_a_real_teens_modulus_bug`]). The single definition the
-/// second-round sweeps below share, so the excluded domain is stated once,
-/// not re-derived per test.
+/// sweeps below share, so the excluded domain is stated once, not re-derived
+/// per test.
+///
+/// Taken on the **magnitude**, not the signed remainder. Both implementations
+/// now discard the sign before deciding a suffix — Verbora via
+/// `n.unsigned_abs() % 100`, `ordinal` via `Abs::abs(self) % 20` — so the bug
+/// domain is symmetric about zero, and `-31` diverges for exactly the same
+/// reason `31` does. Before the Rust-native migration this function took
+/// `i % 100`, which was correct then only because Verbora's old signed `%`
+/// made *every* negative a separate, wider divergence handled by its own
+/// tests; see this file's module doc comment.
 fn in_ordinal_bug_range(i: i64) -> bool {
-    matches!(i % 100, 31..=33 | 51..=53 | 71..=73 | 91..=93)
+    matches!(i.unsigned_abs() % 100, 31..=33 | 51..=53 | 71..=73 | 91..=93)
 }
 
 /// Second-round sharpening of the bug's characterization: over `0..10_000`,
@@ -99,7 +127,7 @@ fn in_ordinal_bug_range(i: i64) -> bool {
 fn ordinal_bug_domain_is_exactly_the_four_last_two_digit_ranges() {
     let mut mismatches = 0usize;
     for i in 0..10_000i64 {
-        let diverges = CountInflector::nth(i) != i.to_ordinal_string();
+        let diverges = OrdinalInflector::nth(i) != i.to_ordinal_string();
         assert_eq!(
             diverges,
             in_ordinal_bug_range(i),
@@ -125,8 +153,8 @@ fn splitmix64(state: &mut u64) -> u64 {
 /// spanning the full magnitude range, skipping only [`in_ordinal_bug_range`]
 /// values — the same documented exclusion the fixed samples already apply,
 /// respected here rather than widened or narrowed. Every surviving value must
-/// agree on both API pairs: the `i64` pair (`nth` vs `to_ordinal_string`) and
-/// the string pair (`nth_str` vs `ordinalize`).
+/// agree with both competitors: `to_ordinal_string` on the `i64` directly,
+/// and `ordinalize` on that same integer's decimal string.
 #[test]
 fn seeded_random_sweep_agrees_outside_the_bug_ranges() {
     let mut state = 0x5EED_0002_0D1A_7015u64;
@@ -137,26 +165,19 @@ fn seeded_random_sweep_agrees_outside_the_bug_ranges() {
             continue; // documented ordinal-crate bug domain, excluded as always
         }
         checked += 1;
-        let a = CountInflector::nth(i);
+        let a = OrdinalInflector::nth(i);
         let b = i.to_ordinal_string();
         assert_eq!(a, b, "nth({i}): verbora={a:?} ordinal={b:?}");
 
-        // The string API pair is only comparable where an `f64` represents
-        // the integer exactly. `nth_str` is pinned to the reference's
-        // number semantics -- the reference stores every number as `f64`,
-        // so past 2^53 - 1 the *value itself* changes before any suffix
-        // rule runs (9222385241222751086 becomes ...232, whose suffix is
-        // genuinely "nd"), while `inflector::ordinalize` parses the digits
-        // exactly and answers "th". That is a documented property of the
-        // ported semantics, not a defect on either side, and the exact-
-        // integer API (`CountInflector::nth`, asserted above for the same
-        // `i` with no range restriction) is the one that agrees everywhere.
-        if i.unsigned_abs() < 1u64 << 53 {
-            let s = i.to_string();
-            let v = CountInflector::nth_str(&s);
-            let inf = inflector::numbers::ordinalize::ordinalize(&s);
-            assert_eq!(v, inf, "nth_str({s}): verbora={v:?} inflector={inf:?}");
-        }
+        // `Inflector::ordinalize` takes the decimal string of the same
+        // integer and must produce the same ordinal. Before the migration
+        // this arm was capped at `2^53 - 1`, because the old `nth_str` was
+        // pinned to `f64` number semantics and suffixed a rounded value past
+        // that bound. `nth` is `i64`-exact, so the cap is gone and the full
+        // range is checked.
+        let s = i.to_string();
+        let inf = inflector::numbers::ordinalize::ordinalize(&s);
+        assert_eq!(a, inf, "ordinalize({s}): verbora={a:?} inflector={inf:?}");
     }
 }
 
@@ -190,166 +211,175 @@ fn agrees_on_benchmarked_large_values() {
             !in_ordinal_bug_range(i),
             "{i} must stay outside the documented ordinal-crate bug ranges"
         );
-        let a = CountInflector::nth(i);
+        let a = OrdinalInflector::nth(i);
         let b = i.to_ordinal_string();
         assert_eq!(a, b, "nth({i}): verbora={a:?} ordinal={b:?}");
 
-        // The string API pair is only comparable where an `f64` represents
-        // the integer exactly. `nth_str` is pinned to the reference's
-        // number semantics -- the reference stores every number as `f64`,
-        // so past 2^53 - 1 the *value itself* changes before any suffix
-        // rule runs (9222385241222751086 becomes ...232, whose suffix is
-        // genuinely "nd"), while `inflector::ordinalize` parses the digits
-        // exactly and answers "th". That is a documented property of the
-        // ported semantics, not a defect on either side, and the exact-
-        // integer API (`CountInflector::nth`, asserted above for the same
-        // `i` with no range restriction) is the one that agrees everywhere.
-        if i.unsigned_abs() < 1u64 << 53 {
-            let s = i.to_string();
-            let v = CountInflector::nth_str(&s);
-            let inf = inflector::numbers::ordinalize::ordinalize(&s);
-            assert_eq!(v, inf, "nth_str({s}): verbora={v:?} inflector={inf:?}");
-        }
+        // `Inflector::ordinalize` takes the decimal string of the same
+        // integer and must produce the same ordinal. Before the migration
+        // this arm was capped at `2^53 - 1`, because the old `nth_str` was
+        // pinned to `f64` number semantics and suffixed a rounded value past
+        // that bound. `nth` is `i64`-exact, so the cap is gone and the full
+        // range is checked.
+        let s = i.to_string();
+        let inf = inflector::numbers::ordinalize::ordinalize(&s);
+        assert_eq!(a, inf, "ordinalize({s}): verbora={a:?} inflector={inf:?}");
     }
 }
 
-/// The real divergence: the reference's signed `%` means Verbora gives every
-/// negative number (outside the `11`/`12`/`13` coincidence) a `"th"` suffix,
-/// while `ordinal` takes the absolute value first and so still applies
-/// `st`/`nd`/`rd`. `benches/inflectors.rs` never feeds negative input to
-/// either side because of this.
+/// Verbora's own contract for the sign, pinned directly from
+/// `crates/verbora-inflectors/src/ordinal.rs` rather than inferred from any
+/// competitor: the sign is **orthographic**. [`OrdinalInflector::suffix`] is
+/// specified on `n.unsigned_abs() % 100`, so the suffix a negative integer
+/// gets is the suffix its magnitude gets, with a `-` prefixed to the numeral.
+///
+/// This is a behaviour change from the pre-migration `CountInflector`, whose
+/// signed `%` gave every negative a `"th"`; the four cases below are the
+/// exact spot values the old `negative_integers_are_a_documented_divergence`
+/// asserted the *disagreement* on, kept at the same values so the change of
+/// answer is legible in the diff rather than hidden behind a new fixture set.
 #[test]
-fn negative_integers_are_a_documented_divergence() {
-    for (i, verbora_expected, ordinal_expected) in [
-        (-1i64, "-1th", "-1st"),
-        (-2, "-2th", "-2nd"),
-        (-3, "-3th", "-3rd"),
-        (-21, "-21th", "-21st"),
+fn verbora_treats_the_sign_as_orthographic() {
+    for (i, expected) in [
+        (-1i64, "-1st"),
+        (-2, "-2nd"),
+        (-3, "-3rd"),
+        (-11, "-11th"),
+        (-12, "-12th"),
+        (-13, "-13th"),
+        (-21, "-21st"),
+        (-101, "-101st"),
+        (-111, "-111th"),
     ] {
-        let a = CountInflector::nth(i);
-        let b = i.to_ordinal_string();
-        assert_eq!(a, verbora_expected);
-        assert_eq!(b, ordinal_expected);
-        assert_ne!(
-            a, b,
-            "the negative-integer divergence is expected to still exist at {i}"
+        let got = OrdinalInflector::nth(i);
+        assert_eq!(got, expected, "nth({i})");
+        // The magnitude decides the suffix, and nothing else.
+        assert_eq!(
+            OrdinalInflector::suffix(i),
+            OrdinalInflector::suffix(-i),
+            "suffix({i}) must equal suffix({})",
+            -i
         );
     }
-    // The one coincidental agreement in the negative range, kept as a
-    // regression check rather than left as a surprise: both read "th" here,
-    // but for unrelated reasons (Verbora: the reference teens exception on `-11 %
-    // 100 == -11`, which is not `> 10`; ordinal: `abs(-11) == 11`, a genuine
-    // teen).
-    assert_eq!(CountInflector::nth(-11), "-11th");
-    assert_eq!((-11i64).to_ordinal_string(), "-11th");
 }
 
-/// Second-round quantification of the same documented divergence — the domain
-/// stays exactly as first documented (every negative integer, benchmarks
-/// still never feed one to either side); this sweep just proves the prose's
-/// shape claims over `-1000..0` instead of four spot values. Verbora's side
-/// is *always* `"th"` (the signed-`%` reasoning above admits no exception),
-/// and the two sides coincide exactly where `ordinal`'s abs-then-suffix
-/// (with its own `% 20` bug in play) also lands on `"th"` — measured: 850
-/// coincidental agreements, 150 divergences per 1000.
+/// The negative-integer divergence the pre-migration `CountInflector` had
+/// against `ordinal` is **gone**: both sides now discard the sign before
+/// choosing a suffix. What remains on negative input is exactly the same
+/// `% 20`-vs-`% 100` bug in `ordinal` already characterized above for
+/// non-negative input, now visibly symmetric about zero — over `-1000..0` the
+/// two sides diverge on a value if and only if [`in_ordinal_bug_range`] holds
+/// for it, and nowhere else.
 #[test]
-fn negative_divergence_holds_across_a_full_sweep() {
+fn negative_integers_now_agree_outside_the_ordinal_bug_range() {
     let mut mismatches = 0usize;
     for i in -1000i64..0 {
-        let a = CountInflector::nth(i);
+        let a = OrdinalInflector::nth(i);
         let b = i.to_ordinal_string();
-        assert!(
-            a.ends_with("th"),
-            "Verbora must give every negative a \"th\", got {a:?} at {i}"
-        );
         let diverges = a != b;
         assert_eq!(
             diverges,
-            !b.ends_with("th"),
-            "at {i}: the sides must diverge exactly when ordinal's suffix is not \"th\""
+            in_ordinal_bug_range(i),
+            "at {i}: divergence and bug-range membership must coincide \
+             (verbora={a:?} ordinal={b:?})"
         );
         mismatches += usize::from(diverges);
     }
-    assert_eq!(mismatches, 150);
+    // Exactly the non-negative rate, mirrored: `-1000..0` spans magnitudes
+    // `1..=1000`, and neither `0` nor `1000` is in the bug range, so this is
+    // the same 120-per-1000 the `0..1000` sweep measures.
+    assert_eq!(mismatches, 120);
 }
 
 // ---------------------------------------------------------------------------
-// `Inflector::numbers::ordinalize::ordinalize` vs `CountInflector::nth_str`
+// `Inflector::numbers::ordinalize::ordinalize` vs `OrdinalInflector::nth`
 // ---------------------------------------------------------------------------
+//
+// This section used to compare `ordinalize` against `CountInflector::nth_str`,
+// a string-in/string-out twin that no longer exists. It now compares against
+// `nth(i)` for the same integer `i`: the two produce the same ordinal for the
+// same *value*, which is what a correctness oracle needs, even though their
+// input types differ enough that timing them against each other would not be
+// fair (see `benches/inflectors.rs`). Because `nth` is `i64`-exact rather than
+// `f64`-pinned, every sweep below covers the full `i64` range instead of
+// stopping at `2^53 - 1`.
 
 /// Unlike `ordinal` 0.4.0, `Inflector::ordinalize` operates directly on the
 /// decimal string, checking whether the *character* immediately before the
 /// last one is `'1'` — reading `Inflector-0.11.4/src/numbers/ordinalize/
 /// mod.rs` shows this has no `% 20`-vs-`% 100` bug: it never even computes a
 /// remainder. Exhaustively confirmed to fully agree with
-/// `CountInflector::nth_str` (`CountInflector::nth`'s string-in/string-out
-/// twin — the fair match for `ordinalize`'s own `&str -> String` shape) over
-/// every non-negative `i64` in `0..2_000_000`, not just a hand-picked sample.
+/// [`OrdinalInflector::nth`] over every non-negative `i64` in `0..2_000_000`,
+/// not just a hand-picked sample.
 #[test]
-fn inflector_ordinalize_agrees_with_count_inflector_nth_str_on_non_negative_integers() {
-    // Every value here is far below 2^53 - 1, so the reference's `f64`
-    // number semantics represent it exactly and the two string APIs are
-    // directly comparable (see the full-range sweep for what changes past
-    // that bound).
+fn inflector_ordinalize_agrees_with_ordinal_inflector_nth_on_non_negative_integers() {
     for i in 0..2_000_000i64 {
         let s = i.to_string();
-        let v = CountInflector::nth_str(&s);
+        let v = OrdinalInflector::nth(i);
         let inf = inflector::numbers::ordinalize::ordinalize(&s);
-        assert_eq!(v, inf, "nth_str({s}): verbora={v:?} inflector={inf:?}");
+        assert_eq!(v, inf, "nth({i}): verbora={v:?} inflector={inf:?}");
     }
 }
 
-/// Second-round extension of the exhaustive `0..2_000_000` check above to the
-/// magnitudes it cannot reach: 200_000 deterministic random values (fixed
-/// seed) across the **full** non-negative `i64` range, no exclusions at all —
-/// the full-agreement claim for this competitor pair has no documented
-/// divergence on non-negative input to respect, unlike `ordinal`'s.
+/// Extension of the exhaustive `0..2_000_000` check above to the magnitudes it
+/// cannot reach: 200_000 deterministic random values (fixed seed) across the
+/// **full** non-negative `i64` range, no exclusions at all — this competitor
+/// pair has no documented divergence on non-negative input to respect, unlike
+/// `ordinal`'s.
+///
+/// The pre-migration version of this test capped its draw at `2^53` because
+/// `nth_str` was pinned to `f64` number semantics and, past that bound,
+/// suffixed a *rounded* value while `ordinalize` suffixed the exact digits.
+/// `nth` has no such bound, so the cap is gone and the top of the `i64` range
+/// is now genuinely covered.
 #[test]
 fn inflector_ordinalize_agrees_on_seeded_random_values_across_the_full_range() {
     let mut state = 0x5EED_0003_10FE_EC70u64;
     for case in 0..200_000 {
-        // Drawn across the whole exactly-representable range: the top bit
-        // is cleared for non-negativity and the value is reduced below
-        // 2^53, the largest integer the reference's `f64` number semantics
-        // (which `nth_str` is pinned to) can hold without rounding. Beyond
-        // that bound the two sides answer different questions -- `nth_str`
-        // suffixes the rounded value the reference would actually see,
-        // `ordinalize` suffixes the exact digits -- so agreement there
-        // would be a coincidence, not a property. The exact-integer API
-        // (`CountInflector::nth`) has no such bound and is swept over the
-        // full `i64` range by the tests above.
-        let i = ((splitmix64(&mut state) >> 1) % (1u64 << 53)) as i64;
+        let i = (splitmix64(&mut state) >> 1) as i64; // top bit cleared: non-negative
         let s = i.to_string();
-        let v = CountInflector::nth_str(&s);
+        let v = OrdinalInflector::nth(i);
         let inf = inflector::numbers::ordinalize::ordinalize(&s);
         assert_eq!(
             v, inf,
-            "case {case}, nth_str({s}): verbora={v:?} inflector={inf:?}"
+            "case {case}, nth({i}): verbora={v:?} inflector={inf:?}"
         );
     }
 }
 
-/// The same negative-integer divergence as `ordinal` (see above), verified
-/// separately because `Inflector::ordinalize` reaches the "th" via a
-/// different code path (no signed-`%` coercion at all — it just is not
-/// designed for negative input): confirmed by reading
-/// `Inflector-0.11.4/src/numbers/ordinalize/mod.rs`'s own doctest,
-/// `ordinalize("-1")` is `"-1st"`. `benches/inflectors.rs` never feeds
-/// negative input to either side because of this.
+/// Negative input agrees too, and for the same reason it agrees with
+/// `ordinal`: Verbora now treats the sign as orthographic
+/// ([`verbora_treats_the_sign_as_orthographic`]), and
+/// `Inflector::ordinalize` never inspects the sign at all — it looks only at
+/// the last two *characters*, so a leading `-` cannot reach its decision.
+/// `Inflector-0.11.4/src/numbers/ordinalize/mod.rs`'s own doctest already
+/// states `ordinalize("-1") == "-1st"`; this pins that Verbora now says the
+/// same, where before the migration it said `"-1th"`.
+///
+/// `Inflector::ordinalize` has no `% 20` bug, so unlike `ordinal` this
+/// agreement holds across the whole `-1000..0` sweep with no excluded range.
 #[test]
-fn inflector_ordinalize_negative_integers_are_a_documented_divergence() {
-    for (i, verbora_expected, inflector_expected) in [
-        (-1i64, "-1th", "-1st"),
-        (-2, "-2th", "-2nd"),
-        (-3, "-3th", "-3rd"),
-        (-21, "-21th", "-21st"),
+fn inflector_ordinalize_agrees_on_negative_integers() {
+    for (i, expected) in [
+        (-1i64, "-1st"),
+        (-2, "-2nd"),
+        (-3, "-3rd"),
+        (-11, "-11th"),
+        (-21, "-21st"),
+        (-31, "-31st"),
     ] {
         let s = i.to_string();
-        let v = CountInflector::nth_str(&s);
+        let v = OrdinalInflector::nth(i);
         let inf = inflector::numbers::ordinalize::ordinalize(&s);
-        assert_eq!(v, verbora_expected);
-        assert_eq!(inf, inflector_expected);
-        assert_ne!(v, inf);
+        assert_eq!(v, expected, "verbora nth({i})");
+        assert_eq!(inf, expected, "inflector ordinalize({s})");
+    }
+
+    for i in -1000i64..0 {
+        let s = i.to_string();
+        let v = OrdinalInflector::nth(i);
+        let inf = inflector::numbers::ordinalize::ordinalize(&s);
+        assert_eq!(v, inf, "nth({i}): verbora={v:?} inflector={inf:?}");
     }
 }
 
@@ -424,7 +454,6 @@ pub(crate) const PAIRS: &[(&str, &str)] = &[
     ("bench", "benches"),
     ("watch", "watches"),
     ("tax", "taxes"),
-    ("virus", "viri"),
     ("status", "statuses"),
     ("sky", "skies"),
     ("story", "stories"),
@@ -461,7 +490,6 @@ pub(crate) const PAIRS: &[(&str, &str)] = &[
     ("diagnosis", "diagnoses"),
     ("parenthesis", "parentheses"),
     ("hoax", "hoaxes"),
-    ("alias", "aliases"),
     ("mile", "miles"),
     ("place", "places"),
     ("price", "prices"),
@@ -516,8 +544,8 @@ pub(crate) const PAIRS: &[(&str, &str)] = &[
 fn benchmarked_pairs_agree_across_all_three_implementations() {
     let inflector = NounInflector::new();
     for (singular, plural) in PAIRS {
-        let vp = inflector.pluralize(singular).unwrap();
-        let vs = inflector.singularize(plural).unwrap();
+        let vp = inflector.pluralize(singular);
+        let vs = inflector.singularize(plural);
         assert_eq!(vp, *plural, "verbora.pluralize({singular:?})");
         assert_eq!(vs, *singular, "verbora.singularize({plural:?})");
 
@@ -582,14 +610,14 @@ fn benchmarked_irregular_subset_is_drawn_from_pairs() {
 #[test]
 fn octopus_is_a_documented_three_way_divergence() {
     let inflector = NounInflector::new();
-    assert_eq!(inflector.pluralize("octopus").unwrap(), "octopi");
+    assert_eq!(inflector.pluralize("octopus"), "octopi");
     assert_eq!(pluralizer::pluralize("octopus", 2, false), "octopuses");
     assert_eq!(inflector::string::pluralize::to_plural("octopus"), "octopi");
 
     // The round trip: Verbora and Inflector agree octopus -> octopi, but
     // `pluralizer` has no reverse rule for "-i" endings that keeps it in
     // sync with the forward direction it just took.
-    assert_eq!(inflector.singularize("octopi").unwrap(), "octopus");
+    assert_eq!(inflector.singularize("octopi"), "octopus");
     assert_eq!(
         inflector::string::singularize::to_singular("octopi"),
         "octopus"
@@ -611,13 +639,7 @@ fn octopus_is_a_documented_three_way_divergence() {
 fn benchmarked_pairs_round_trip_on_all_three_implementations() {
     let inflector = NounInflector::new();
     for (singular, plural) in PAIRS {
-        let v = inflector
-            .pluralize(
-                &inflector
-                    .singularize(&inflector.pluralize(singular).unwrap())
-                    .unwrap(),
-            )
-            .unwrap();
+        let v = inflector.pluralize(&inflector.singularize(&inflector.pluralize(singular)));
         assert_eq!(v, *plural, "verbora round trip from {singular:?}");
 
         let p = pluralizer::pluralize(
@@ -632,5 +654,47 @@ fn benchmarked_pairs_round_trip_on_all_three_implementations() {
                 &inflector::string::pluralize::to_plural(singular),
             ));
         assert_eq!(i, *plural, "inflector round trip from {singular:?}");
+    }
+}
+
+/// The two pairs the Rust-native migration removed from [`PAIRS`], pinned
+/// individually so the exclusion is visible rather than merely absent.
+///
+/// [`PAIRS`] is the set of nouns all three implementations agree on, in both
+/// directions — see `benches/inflectors.rs`'s module doc comment for how it
+/// was derived. Re-running that unanimity probe after the migration found
+/// exactly two new disagreements, and both are Verbora-side changes:
+///
+/// * **`virus`** — Verbora now pluralizes to `"viruses"`; `pluralizer` and
+///   `Inflector` both still produce `"viri"`.
+/// * **`aliases`** — Verbora's `singularize` now returns `"aliase"`, so the
+///   pair no longer round-trips on Verbora's side at all. `pluralize("alias")`
+///   still agrees with both competitors at `"aliases"`; it is only the reverse
+///   direction that broke, which is why the pair had to leave a domain that
+///   requires agreement in *both* directions.
+///
+/// This test asserts the disagreements rather than the agreements, so it fails
+/// if either is silently resolved — at which point the pair can go back into
+/// [`PAIRS`] and into the benchmark's domain.
+#[test]
+fn the_two_pairs_the_migration_removed_from_the_unanimous_domain() {
+    let verbora = NounInflector::new();
+
+    assert_eq!(verbora.pluralize("virus"), "viruses");
+    assert_eq!(pluralizer::pluralize("virus", 2, false), "viri");
+    assert_eq!(inflector::string::pluralize::to_plural("virus"), "viri");
+
+    // The forward direction still agrees; only the reverse diverges.
+    assert_eq!(verbora.pluralize("alias"), "aliases");
+    assert_eq!(pluralizer::pluralize("alias", 2, false), "aliases");
+    assert_eq!(verbora.singularize("aliases"), "aliase");
+    assert_eq!(pluralizer::pluralize("aliases", 1, false), "alias");
+
+    // Neither word may reappear in the benchmarked domain while that holds.
+    for excluded in ["virus", "alias"] {
+        assert!(
+            !PAIRS.iter().any(|(s, _)| *s == excluded),
+            "{excluded:?} is back in PAIRS but still diverges"
+        );
     }
 }

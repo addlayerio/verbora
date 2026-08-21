@@ -1,17 +1,48 @@
 //! Correctness of `fst::Set::search` + `fst::automaton::Levenshtein` against
 //! `verbora_spellcheck::FuzzyIndex::neighbors` — the property
-//! `benches/fst_fuzzy.rs`'s own NARROWED_EXACT classification rests on.
+//! `benches/fst_fuzzy.rs`'s own PARTIAL classification rests on.
 //! Checked once, directly, before any timing number in that file is
 //! trusted, per this workbench's `CORRECTNESS BEFORE PERFORMANCE` rule.
 //!
-//! Both sides must agree on the exact *set* of matches (never order — `fst`
-//! returns matches in the automaton's own traversal order,
-//! `FuzzyIndex::neighbors` in its BK-tree's own traversal order) for every
-//! query and `max_distance` tested. The corpus is ASCII-only, the domain
-//! `benches/fst_fuzzy.rs`'s own module doc comment documents as where the
-//! two metrics (`verbora_distance::levenshtein`'s UTF-16-code-unit count vs.
-//! `fst::automaton::Levenshtein`'s Unicode-scalar-value count) provably
-//! agree — this file does not test non-ASCII input, on purpose.
+//! # The metrics diverged: `fst`'s set is now a strict subset, not an equal
+//!
+//! This file used to assert **set equality** between the two, because
+//! `FuzzyIndex` used plain `verbora_distance::levenshtein` and so answered
+//! literally the same question as `fst::automaton::Levenshtein`. The
+//! Rust-native migration changed the crate's metric:
+//! `crates/verbora-spellcheck/src/fuzzy_index.rs` now states that
+//! **unrestricted Damerau–Levenshtein** "is this crate's metric", chosen
+//! because a BK-tree's pruning "is correct only under a true metric" and the
+//! weighted variants are not metrics for arbitrary cost sets. It counts a
+//! transposition as one edit; `fst`'s automaton counts it as two.
+//!
+//! Unrestricted Damerau–Levenshtein is bounded above by Levenshtein for every
+//! pair — it permits every Levenshtein edit and one more operation — so at the
+//! same `max_distance` the relationship is exact and one-directional:
+//!
+//! ```text
+//! fst_neighbors(q, d)  ⊆  FuzzyIndex::neighbors(q, d)
+//! ```
+//!
+//! Every test below therefore asserts that containment **plus** an exact
+//! account of the difference: for each word Verbora returns that `fst` does
+//! not, `damerau_levenshtein(q, w) <= d < levenshtein(q, w)` must hold — i.e.
+//! the word is reachable within budget only by using a transposition, which is
+//! precisely and only what the two metrics disagree about. A word appearing in
+//! Verbora's set for any *other* reason still fails, so this stays a real
+//! over-matching check rather than a blanket relaxation.
+//!
+//! Order is still never asserted — `fst` returns matches in the automaton's
+//! own traversal order, `FuzzyIndex::neighbors` in its BK-tree's own.
+//!
+//! The corpus is ASCII-only, and it stays that way on purpose — but **not**
+//! because the two metrics count different units. They count the same one:
+//! both `verbora_distance` (`docs/design/distance-contract.md` §2) and
+//! `fst::automaton::Levenshtein` count Unicode scalar values. The
+//! restriction survives because of `fst` 0.4.7's own automaton defect on
+//! same-byte-length multi-byte UTF-8 substitutions (upstream issue #38),
+//! which `benches/fst_fuzzy.rs`'s module doc comment documents in full and
+//! which is a BMP defect, entirely independent of the unit.
 //!
 //! Coverage spans: the original 3 000-word sweep at distances 0–2; a larger
 //! 10 000-word sweep with four deterministic query-perturbation shapes
@@ -26,7 +57,46 @@ use std::collections::BTreeSet;
 
 use fst::automaton::Levenshtein;
 use fst::{IntoStreamer, Set, Streamer};
+use verbora_distance::{damerau_levenshtein, levenshtein};
 use verbora_spellcheck::{FuzzyIndex, FuzzyIndexBuilder};
+
+/// Asserts the exact relationship between the two result sets: `fst`'s is a
+/// subset of Verbora's, and every extra word Verbora returns is one the two
+/// metrics *must* disagree about.
+///
+/// See this file's module doc comment. The check on each extra word is
+/// `damerau_levenshtein(query, word) <= max_distance < levenshtein(query,
+/// word)` — reachable within budget only by spending a transposition. Any
+/// other extra word fails, so a genuine over-matching bug in `FuzzyIndex`
+/// would still be caught here rather than absorbed by the relaxation.
+fn assert_fst_subset_explained_by_transpositions(
+    verbora: &BTreeSet<String>,
+    fst: &BTreeSet<String>,
+    query: &str,
+    max_distance: u32,
+    context: &str,
+) {
+    for word in fst {
+        assert!(
+            verbora.contains(word),
+            "{context}: fst found {word:?} for query {query:?} at max_distance \
+             {max_distance} but FuzzyIndex did not — Damerau-Levenshtein can \
+             never exceed Levenshtein, so this is a real miss, not a metric \
+             difference"
+        );
+    }
+    for word in verbora.difference(fst) {
+        let d = damerau_levenshtein(query, word) as u32;
+        let l = levenshtein(query, word) as u32;
+        assert!(
+            d <= max_distance && l > max_distance,
+            "{context}: FuzzyIndex returned {word:?} for query {query:?} at \
+             max_distance {max_distance} and fst did not, but this is not a \
+             transposition case (damerau={d}, levenshtein={l}) — the extra \
+             match is unexplained"
+        );
+    }
+}
 
 fn words() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -103,12 +173,15 @@ fn fst_and_fuzzy_index_agree_on_ascii_queries() {
         for max_distance in [0, 1, 2] {
             let via_fuzzy_index: BTreeSet<String> = index
                 .neighbors(query, max_distance)
-                .map(str::to_owned)
+                .map(|n| n.word.to_owned())
                 .collect();
             let via_fst = fst_neighbors(&fst_set, query, max_distance);
-            assert_eq!(
-                via_fuzzy_index, via_fst,
-                "mismatch for query {query:?} at max_distance {max_distance}"
+            assert_fst_subset_explained_by_transpositions(
+                &via_fuzzy_index,
+                &via_fst,
+                query,
+                max_distance,
+                "sweep",
             );
         }
     }
@@ -164,12 +237,15 @@ fn fst_and_fuzzy_index_agree_on_larger_perturbed_sweep() {
         for max_distance in [0, 1, 2] {
             let via_fuzzy_index: BTreeSet<String> = index
                 .neighbors(query, max_distance)
-                .map(str::to_owned)
+                .map(|n| n.word.to_owned())
                 .collect();
             let via_fst = fst_neighbors(&fst_set, query, max_distance);
-            assert_eq!(
-                via_fuzzy_index, via_fst,
-                "mismatch for query {query:?} at max_distance {max_distance}"
+            assert_fst_subset_explained_by_transpositions(
+                &via_fuzzy_index,
+                &via_fst,
+                query,
+                max_distance,
+                "sweep",
             );
         }
     }
@@ -193,12 +269,17 @@ fn fst_and_fuzzy_index_agree_at_distance_three_on_short_queries() {
     );
 
     for query in queries {
-        let via_fuzzy_index: BTreeSet<String> =
-            index.neighbors(query, 3).map(str::to_owned).collect();
+        let via_fuzzy_index: BTreeSet<String> = index
+            .neighbors(query, 3)
+            .map(|n| n.word.to_owned())
+            .collect();
         let via_fst = fst_neighbors(&fst_set, query, 3);
-        assert_eq!(
-            via_fuzzy_index, via_fst,
-            "mismatch for query {query:?} at max_distance 3"
+        assert_fst_subset_explained_by_transpositions(
+            &via_fuzzy_index,
+            &via_fst,
+            query,
+            3,
+            "distance-three sweep",
         );
     }
 }
@@ -234,7 +315,7 @@ fn fst_and_fuzzy_index_agree_on_edge_shaped_queries() {
         for max_distance in [0, 1, 2] {
             let via_fuzzy_index: BTreeSet<String> = index
                 .neighbors(query, max_distance)
-                .map(str::to_owned)
+                .map(|n| n.word.to_owned())
                 .collect();
             let via_fst = fst_neighbors(&fst_set, query, max_distance);
             assert_eq!(
@@ -272,12 +353,15 @@ fn duplicate_insertion_is_a_no_op_on_both_sides() {
         for max_distance in [1, 2] {
             let via_fuzzy_index: BTreeSet<String> = index
                 .neighbors(query, max_distance)
-                .map(str::to_owned)
+                .map(|n| n.word.to_owned())
                 .collect();
             let via_fst = fst_neighbors(&fst_set, query, max_distance);
-            assert_eq!(
-                via_fuzzy_index, via_fst,
-                "mismatch for query {query:?} at max_distance {max_distance} on doubled corpus"
+            assert_fst_subset_explained_by_transpositions(
+                &via_fuzzy_index,
+                &via_fst,
+                query,
+                max_distance,
+                "doubled corpus",
             );
         }
     }
@@ -297,10 +381,16 @@ fn fuzzy_index_has_no_automaton_size_failure_mode() {
     let long_query = "supercalifragilisticexpialidocious";
 
     let via_fst = fst_neighbors(&fst_set, long_query, 2);
-    let via_fuzzy: BTreeSet<String> = index.neighbors(long_query, 2).map(str::to_owned).collect();
-    assert_eq!(
-        via_fuzzy, via_fst,
-        "long query at small distance must still agree"
+    let via_fuzzy: BTreeSet<String> = index
+        .neighbors(long_query, 2)
+        .map(|n| n.word.to_owned())
+        .collect();
+    assert_fst_subset_explained_by_transpositions(
+        &via_fuzzy,
+        &via_fst,
+        long_query,
+        2,
+        "long query at small distance",
     );
 
     // distance 20 errors in fst (asserted above); FuzzyIndex just answers.

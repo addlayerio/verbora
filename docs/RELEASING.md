@@ -18,6 +18,11 @@ for changed crates, and publishes only crates whose release version is ready.
 You never need to create a `release-plz-*` branch yourself; release-plz creates
 its own Release PR branches.
 
+If crates.io throttles a large publication, the release job retries every 15
+minutes from `main` until all pending crates are published. Scheduled retries
+skip the full test suite and do not create Release PRs; normal PR checks remain
+the verification gate.
+
 ## Independent versions
 
 Every workspace crate declares its own version. For example, a change limited

@@ -1,8 +1,8 @@
 //! Correctness of [`FuzzyIndex`] against a brute-force baseline.
 //!
 //! A BK-tree's pruning is a performance optimization, not a filter — it
-//! must return exactly the same set of matches a linear scan computing
-//! real Levenshtein distance against every dictionary word would. This is
+//! must return exactly the same set of matches a linear scan computing the
+//! crate's own metric against every dictionary word would. This is
 //! the property that actually defines correctness here (matching this
 //! workspace's own "verify against ground truth, not just a few hand-
 //! picked examples" discipline for anything without a reference oracle to
@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use verbora_distance::levenshtein;
+use verbora_distance::damerau_levenshtein;
 use verbora_spellcheck::FuzzyIndexBuilder;
 
 /// The same shared word list this workspace's other crates' benchmarks
@@ -46,7 +46,7 @@ fn brute_force_neighbors<'a>(
     dictionary
         .iter()
         .map(String::as_str)
-        .filter(|w| (levenshtein(query, w, &Default::default()).round() as u32) <= max_distance)
+        .filter(|w| damerau_levenshtein(query, w) <= max_distance as usize)
         .collect()
 }
 
@@ -92,7 +92,10 @@ fn matches_brute_force_across_many_queries_and_distances() {
     for query in &queries {
         for max_distance in [0, 1, 2, 3] {
             let mut expected = brute_force_neighbors(&sample, query, max_distance);
-            let mut actual: Vec<&str> = index.neighbors(query, max_distance).collect();
+            let mut actual: Vec<&str> = index
+                .neighbors(query, max_distance)
+                .map(|n| n.word)
+                .collect();
             expected.sort_unstable();
             actual.sort_unstable();
             assert_eq!(
@@ -101,6 +104,38 @@ fn matches_brute_force_across_many_queries_and_distances() {
             );
         }
     }
+}
+
+/// Every neighbour reports the distance the metric itself reports — over the
+/// whole sampled dictionary, not a chosen pair.
+#[test]
+fn every_reported_distance_is_the_metrics_own() {
+    let dictionary = words();
+    let sample: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        dictionary
+            .into_iter()
+            .take(2_000)
+            .filter(|w| seen.insert(w.clone()))
+            .collect()
+    };
+    let mut builder = FuzzyIndexBuilder::new();
+    builder.insert_all(sample.iter().map(String::as_str));
+    let index = builder.build();
+
+    let mut checked = 0usize;
+    for query in sample.iter().take(40) {
+        for n in index.neighbors(query, 3) {
+            assert_eq!(
+                n.distance as usize,
+                damerau_levenshtein(query, n.word),
+                "reported distance for {query:?} -> {:?}",
+                n.word
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no neighbours were checked");
 }
 
 #[test]
@@ -119,7 +154,10 @@ fn duplicate_inserts_collapse_to_one_entry() {
     let index = builder.build();
     assert_eq!(index.len(), 1);
     assert_eq!(
-        index.neighbors("hello", 0).collect::<Vec<_>>(),
+        index
+            .neighbors("hello", 0)
+            .map(|n| n.word)
+            .collect::<Vec<_>>(),
         vec!["hello"]
     );
 }

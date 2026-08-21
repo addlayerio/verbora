@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 231006.96875,
-      "upper_bound": 233518.5234375
+      "lower_bound": 213925.13039658297,
+      "upper_bound": 216108.70107319273
     },
-    "point_estimate": 232262.74609375,
-    "standard_error": 886.489416720632
+    "point_estimate": 215015.0363600348,
+    "standard_error": 557.8227371654087
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 231006.96875,
-      "upper_bound": 233518.5234375
+      "lower_bound": 213917.2142857143,
+      "upper_bound": 216472.13913690476
     },
-    "point_estimate": 232262.74609375,
-    "standard_error": 886.489416720632
+    "point_estimate": 215308.48684210528,
+    "standard_error": 646.3797629183542
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 1861.8154567899182
+      "lower_bound": 1121.7269769603643,
+      "upper_bound": 4086.20878995527
     },
-    "point_estimate": 1861.8154567899182,
-    "standard_error": 930.9072525101807
+    "point_estimate": 2501.897967714784,
+    "standard_error": 783.3169488969816
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 231006.96875,
-      "upper_bound": 233518.5234375
+      "lower_bound": 215029.1814663662,
+      "upper_bound": 217460.94940695
     },
-    "point_estimate": 233016.2125,
-    "standard_error": 965.5460489755197
+    "point_estimate": 216236.14639123942,
+    "standard_error": 632.124690266842
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 1775.9373508521103
+      "lower_bound": 1805.0648314978598,
+      "upper_bound": 3102.3088902634477
     },
-    "point_estimate": 1775.9373508521103,
-    "standard_error": 887.9682214917672
+    "point_estimate": 2550.907078971201,
+    "standard_error": 331.6907271688702
   }
 }

@@ -1,9 +1,11 @@
 //! Allocation-count assertions for `HashedLinearDetector::detect`.
 //!
 //! Lives here rather than in `verbora-language` because a counting global
-//! allocator requires `unsafe impl GlobalAlloc`, which the workspace's
-//! `unsafe_code = "deny"` lint rightly forbids in shipped crates — this
-//! tool is deliberately outside the workspace (see Cargo.toml). The
+//! allocator requires `unsafe impl GlobalAlloc`, and this tool sits outside
+//! the workspace (see Cargo.toml), so it inherits no `unsafe_code` lint at
+//! all. A shipped crate *can* carry one where the property is not otherwise
+//! observable — `verbora-spellcheck`'s test-only `counting_alloc` does, with
+//! a recorded `expect` — but nothing here needs that exemption. The
 //! contract under test is the report's 0-alloc inference claim: the
 //! scoring loop allocates nothing; the only allocation on any path is the
 //! single-candidate `Vec` the public `LanguageDetection` shape requires,

@@ -1,153 +1,366 @@
-//! The relation symbols that appear in [`Pointer::pointer_symbol`], named.
-//!
-//! The reference never interprets these — it hands back the raw two-character
-//! symbol and leaves the caller to know what `@i` means. The constants and the
-//! [`describe`] table below are a `verbora` addition: they add no behaviour,
-//! change no output, and exist so that
-//! `wordnet.relation(&synset, pointer::HYPERNYM)` reads as what it is.
-//!
-//! Symbols are drawn from the WordNet 3.1 `wninput(5WN)` manual page. Several
-//! are part-of-speech specific: `\` is *derived from adjective* in the adverb
-//! file and *pertainym* in the adjective file, and `<` appears only for verbs.
-//!
-//! [`Pointer::pointer_symbol`]: crate::Pointer::pointer_symbol
+//! Relational pointers between synsets.
 
-/// `!` — antonym. The only lexical (word-to-word) relation in the core set.
-pub const ANTONYM: &str = "!";
-/// `@` — hypernym: a more general synset ("node" → "computer").
-pub const HYPERNYM: &str = "@";
-/// `@i` — instance hypernym: the class an individual belongs to.
-pub const INSTANCE_HYPERNYM: &str = "@i";
-/// `~` — hyponym: a more specific synset.
-pub const HYPONYM: &str = "~";
-/// `~i` — instance hyponym: a named individual of this class.
-pub const INSTANCE_HYPONYM: &str = "~i";
-/// `#m` — member holonym: a whole this synset is a member of.
-pub const MEMBER_HOLONYM: &str = "#m";
-/// `#s` — substance holonym: a whole this synset is a substance of.
-pub const SUBSTANCE_HOLONYM: &str = "#s";
-/// `#p` — part holonym: a whole this synset is a part of.
-pub const PART_HOLONYM: &str = "#p";
-/// `%m` — member meronym: a member of this synset.
-pub const MEMBER_MERONYM: &str = "%m";
-/// `%s` — substance meronym: a substance of this synset.
-pub const SUBSTANCE_MERONYM: &str = "%s";
-/// `%p` — part meronym: a part of this synset.
-pub const PART_MERONYM: &str = "%p";
-/// `=` — attribute: the adjective/noun pair "weight" ↔ "heavy".
-pub const ATTRIBUTE: &str = "=";
-/// `+` — derivationally related form.
-pub const DERIVATIONALLY_RELATED: &str = "+";
-/// `;c` — domain of synset, topic.
-pub const DOMAIN_TOPIC: &str = ";c";
-/// `-c` — member of this domain, topic.
-pub const MEMBER_TOPIC: &str = "-c";
-/// `;r` — domain of synset, region.
-pub const DOMAIN_REGION: &str = ";r";
-/// `-r` — member of this domain, region.
-pub const MEMBER_REGION: &str = "-r";
-/// `;u` — domain of synset, usage.
-pub const DOMAIN_USAGE: &str = ";u";
-/// `-u` — member of this domain, usage.
-pub const MEMBER_USAGE: &str = "-u";
-/// `*` — entailment (verbs).
-pub const ENTAILMENT: &str = "*";
-/// `>` — cause (verbs).
-pub const CAUSE: &str = ">";
-/// `^` — also see.
-pub const ALSO_SEE: &str = "^";
-/// `$` — verb group.
-pub const VERB_GROUP: &str = "$";
-/// `&` — similar to (adjective satellites).
-pub const SIMILAR_TO: &str = "&";
-/// `<` — participle of verb (adjectives).
-pub const PARTICIPLE: &str = "<";
-/// `\` — pertainym in `data.adj`, derived-from-adjective in `data.adv`.
-pub const PERTAINYM: &str = "\\";
+use std::fmt;
+use std::num::NonZeroU8;
 
-/// A human-readable name for a pointer symbol, or `None` if it is unknown.
+use crate::pos::{PartOfSpeech, SynsetType};
+use crate::synset::SynsetOffset;
+
+/// One of the twenty-six relations WordNet records between synsets.
 ///
-/// `\` is ambiguous by part of speech; the adjective reading is given.
+/// The set is closed: `wninput(5WN)` enumerates it, and a `data.*` record
+/// carrying anything else is malformed rather than carrying a relation this
+/// crate does not know about. Reading one therefore fails with
+/// [`RecordError::InvalidField`](crate::RecordError::InvalidField) instead of
+/// producing a pointer nothing can interpret.
+///
+/// Several symbols are used by more than one part of speech, and one — `\` — has
+/// two different meanings depending on the file it appears in, which is why
+/// [`PointerSymbol::name`] takes the category as an argument.
 ///
 /// ```
-/// use verbora_wordnet::pointer;
+/// use verbora_wordnet::PointerSymbol;
 ///
-/// assert_eq!(pointer::describe("@"), Some("hypernym"));
-/// assert_eq!(pointer::describe("%p"), Some("part meronym"));
-/// assert_eq!(pointer::describe("??"), None);
+/// assert_eq!(PointerSymbol::from_symbol("@"), Some(PointerSymbol::Hypernym));
+/// assert_eq!(PointerSymbol::from_symbol("@i"), Some(PointerSymbol::InstanceHypernym));
+/// assert_eq!(PointerSymbol::Hypernym.symbol(), "@");
+/// assert_eq!(PointerSymbol::from_symbol("??"), None);
 /// ```
-#[must_use]
-pub fn describe(symbol: &str) -> Option<&'static str> {
-    // A `match` over string literals compiles to a length-and-bytes decision
-    // tree, so this costs no allocation and no hashing.
-    Some(match symbol {
-        ANTONYM => "antonym",
-        HYPERNYM => "hypernym",
-        INSTANCE_HYPERNYM => "instance hypernym",
-        HYPONYM => "hyponym",
-        INSTANCE_HYPONYM => "instance hyponym",
-        MEMBER_HOLONYM => "member holonym",
-        SUBSTANCE_HOLONYM => "substance holonym",
-        PART_HOLONYM => "part holonym",
-        MEMBER_MERONYM => "member meronym",
-        SUBSTANCE_MERONYM => "substance meronym",
-        PART_MERONYM => "part meronym",
-        ATTRIBUTE => "attribute",
-        DERIVATIONALLY_RELATED => "derivationally related form",
-        DOMAIN_TOPIC => "domain of synset - topic",
-        MEMBER_TOPIC => "member of this domain - topic",
-        DOMAIN_REGION => "domain of synset - region",
-        MEMBER_REGION => "member of this domain - region",
-        DOMAIN_USAGE => "domain of synset - usage",
-        MEMBER_USAGE => "member of this domain - usage",
-        ENTAILMENT => "entailment",
-        CAUSE => "cause",
-        ALSO_SEE => "also see",
-        VERB_GROUP => "verb group",
-        SIMILAR_TO => "similar to",
-        PARTICIPLE => "participle of verb",
-        PERTAINYM => "pertainym / derived from adjective",
-        _ => return None,
-    })
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PointerSymbol {
+    /// `!` — antonym. The only lexical relation in the core noun set.
+    Antonym,
+    /// `@` — hypernym: a more general synset.
+    Hypernym,
+    /// `@i` — instance hypernym: the class a named individual belongs to.
+    InstanceHypernym,
+    /// `~` — hyponym: a more specific synset.
+    Hyponym,
+    /// `~i` — instance hyponym: a named individual of this class.
+    InstanceHyponym,
+    /// `#m` — member holonym: a whole this synset is a member of.
+    MemberHolonym,
+    /// `#s` — substance holonym: a whole this synset is a substance of.
+    SubstanceHolonym,
+    /// `#p` — part holonym: a whole this synset is a part of.
+    PartHolonym,
+    /// `%m` — member meronym: a member of this synset.
+    MemberMeronym,
+    /// `%s` — substance meronym: a substance of this synset.
+    SubstanceMeronym,
+    /// `%p` — part meronym: a part of this synset.
+    PartMeronym,
+    /// `=` — attribute: the noun/adjective pair "weight" ↔ "heavy".
+    Attribute,
+    /// `+` — derivationally related form.
+    DerivationallyRelatedForm,
+    /// `;c` — domain of synset, topic.
+    DomainOfTopic,
+    /// `-c` — member of this domain, topic.
+    MemberOfTopic,
+    /// `;r` — domain of synset, region.
+    DomainOfRegion,
+    /// `-r` — member of this domain, region.
+    MemberOfRegion,
+    /// `;u` — domain of synset, usage.
+    DomainOfUsage,
+    /// `-u` — member of this domain, usage.
+    MemberOfUsage,
+    /// `*` — entailment (verbs).
+    Entailment,
+    /// `>` — cause (verbs).
+    Cause,
+    /// `^` — also see.
+    AlsoSee,
+    /// `$` — verb group.
+    VerbGroup,
+    /// `&` — similar to: links an adjective satellite to its head.
+    SimilarTo,
+    /// `<` — participle of verb (adjectives).
+    ParticipleOfVerb,
+    /// `\` — pertainym in `data.adj`, derived-from-adjective in `data.adv`.
+    Pertainym,
+}
+
+impl PointerSymbol {
+    /// All twenty-six, in the order `wninput(5WN)` tabulates them.
+    pub const ALL: [Self; 26] = [
+        Self::Antonym,
+        Self::Hypernym,
+        Self::InstanceHypernym,
+        Self::Hyponym,
+        Self::InstanceHyponym,
+        Self::MemberHolonym,
+        Self::SubstanceHolonym,
+        Self::PartHolonym,
+        Self::MemberMeronym,
+        Self::SubstanceMeronym,
+        Self::PartMeronym,
+        Self::Attribute,
+        Self::DerivationallyRelatedForm,
+        Self::DomainOfTopic,
+        Self::MemberOfTopic,
+        Self::DomainOfRegion,
+        Self::MemberOfRegion,
+        Self::DomainOfUsage,
+        Self::MemberOfUsage,
+        Self::Entailment,
+        Self::Cause,
+        Self::AlsoSee,
+        Self::VerbGroup,
+        Self::SimilarTo,
+        Self::ParticipleOfVerb,
+        Self::Pertainym,
+    ];
+
+    /// The relation a `ptr_symbol` field names, or `None` if it names none.
+    ///
+    /// Matching is exact and byte-for-byte: the two-character symbols (`@i`,
+    /// `#p`, `;c` …) are distinct relations from their one-character prefixes.
+    #[must_use]
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        // A `match` over string literals compiles to a length-and-bytes decision
+        // tree: no allocation, no hashing, no table to keep in sync.
+        Some(match symbol {
+            "!" => Self::Antonym,
+            "@" => Self::Hypernym,
+            "@i" => Self::InstanceHypernym,
+            "~" => Self::Hyponym,
+            "~i" => Self::InstanceHyponym,
+            "#m" => Self::MemberHolonym,
+            "#s" => Self::SubstanceHolonym,
+            "#p" => Self::PartHolonym,
+            "%m" => Self::MemberMeronym,
+            "%s" => Self::SubstanceMeronym,
+            "%p" => Self::PartMeronym,
+            "=" => Self::Attribute,
+            "+" => Self::DerivationallyRelatedForm,
+            ";c" => Self::DomainOfTopic,
+            "-c" => Self::MemberOfTopic,
+            ";r" => Self::DomainOfRegion,
+            "-r" => Self::MemberOfRegion,
+            ";u" => Self::DomainOfUsage,
+            "-u" => Self::MemberOfUsage,
+            "*" => Self::Entailment,
+            ">" => Self::Cause,
+            "^" => Self::AlsoSee,
+            "$" => Self::VerbGroup,
+            "&" => Self::SimilarTo,
+            "<" => Self::ParticipleOfVerb,
+            "\\" => Self::Pertainym,
+            _ => return None,
+        })
+    }
+
+    /// The symbol as written in the dictionary files.
+    #[must_use]
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Antonym => "!",
+            Self::Hypernym => "@",
+            Self::InstanceHypernym => "@i",
+            Self::Hyponym => "~",
+            Self::InstanceHyponym => "~i",
+            Self::MemberHolonym => "#m",
+            Self::SubstanceHolonym => "#s",
+            Self::PartHolonym => "#p",
+            Self::MemberMeronym => "%m",
+            Self::SubstanceMeronym => "%s",
+            Self::PartMeronym => "%p",
+            Self::Attribute => "=",
+            Self::DerivationallyRelatedForm => "+",
+            Self::DomainOfTopic => ";c",
+            Self::MemberOfTopic => "-c",
+            Self::DomainOfRegion => ";r",
+            Self::MemberOfRegion => "-r",
+            Self::DomainOfUsage => ";u",
+            Self::MemberOfUsage => "-u",
+            Self::Entailment => "*",
+            Self::Cause => ">",
+            Self::AlsoSee => "^",
+            Self::VerbGroup => "$",
+            Self::SimilarTo => "&",
+            Self::ParticipleOfVerb => "<",
+            Self::Pertainym => "\\",
+        }
+    }
+
+    /// The relation's English name in the file `pos` belongs to.
+    ///
+    /// Only [`PointerSymbol::Pertainym`] depends on the argument: `wninput(5WN)`
+    /// gives `\` as *pertainym (pertains to noun)* in `data.adj` and as *derived
+    /// from adjective* in `data.adv`. Every other symbol answers the same name
+    /// for all four categories.
+    ///
+    /// ```
+    /// use verbora_wordnet::{PartOfSpeech, PointerSymbol};
+    ///
+    /// let p = PointerSymbol::Pertainym;
+    /// assert_eq!(p.name(PartOfSpeech::Adjective), "pertainym (pertains to noun)");
+    /// assert_eq!(p.name(PartOfSpeech::Adverb), "derived from adjective");
+    /// ```
+    #[must_use]
+    pub fn name(self, pos: PartOfSpeech) -> &'static str {
+        match self {
+            Self::Antonym => "antonym",
+            Self::Hypernym => "hypernym",
+            Self::InstanceHypernym => "instance hypernym",
+            Self::Hyponym => "hyponym",
+            Self::InstanceHyponym => "instance hyponym",
+            Self::MemberHolonym => "member holonym",
+            Self::SubstanceHolonym => "substance holonym",
+            Self::PartHolonym => "part holonym",
+            Self::MemberMeronym => "member meronym",
+            Self::SubstanceMeronym => "substance meronym",
+            Self::PartMeronym => "part meronym",
+            Self::Attribute => "attribute",
+            Self::DerivationallyRelatedForm => "derivationally related form",
+            Self::DomainOfTopic => "domain of synset - topic",
+            Self::MemberOfTopic => "member of this domain - topic",
+            Self::DomainOfRegion => "domain of synset - region",
+            Self::MemberOfRegion => "member of this domain - region",
+            Self::DomainOfUsage => "domain of synset - usage",
+            Self::MemberOfUsage => "member of this domain - usage",
+            Self::Entailment => "entailment",
+            Self::Cause => "cause",
+            Self::AlsoSee => "also see",
+            Self::VerbGroup => "verb group",
+            Self::SimilarTo => "similar to",
+            Self::ParticipleOfVerb => "participle of verb",
+            Self::Pertainym => match pos {
+                PartOfSpeech::Adverb => "derived from adjective",
+                _ => "pertainym (pertains to noun)",
+            },
+        }
+    }
+}
+
+impl fmt::Display for PointerSymbol {
+    /// Writes the symbol as the dictionary files spell it.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.symbol())
+    }
+}
+
+/// Whether a pointer relates two synsets or two individual words.
+///
+/// `wndb(5WN)`'s `source/target` field is four hexadecimal digits: the word
+/// number within the source synset followed by the word number within the
+/// target synset. `0000` — both halves zero — marks a *semantic* relation
+/// between the synsets as wholes; anything else marks a *lexical* relation
+/// between one word of each.
+///
+/// Modelling that as an enum rather than as a raw `u16` means the two readings
+/// cannot be confused, and a half-zero field (which the format does not define)
+/// is rejected at parse time instead of being silently rounded to one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PointerScope {
+    /// `0000` — the relation holds between the two synsets as wholes.
+    Semantic,
+    /// The relation holds between one word of each synset. Word numbers are
+    /// 1-based, as `wndb(5WN)` writes them.
+    Lexical {
+        /// Which word of the synset carrying this pointer.
+        source_word: NonZeroU8,
+        /// Which word of the target synset.
+        target_word: NonZeroU8,
+    },
+}
+
+/// A relational pointer from one synset to another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Pointer {
+    /// Which relation this is.
+    pub symbol: PointerSymbol,
+    /// Byte offset of the target synset within the file for
+    /// [`Pointer::synset_type`]'s part of speech.
+    pub offset: SynsetOffset,
+    /// The target synset's own type, which selects the file to read it from.
+    pub synset_type: SynsetType,
+    /// Whether the relation is between synsets or between individual words.
+    pub scope: PointerScope,
+}
+
+impl Pointer {
+    /// The file pair the target lives in.
+    #[must_use]
+    pub fn part_of_speech(self) -> PartOfSpeech {
+        self.synset_type.part_of_speech()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Walks the whole table rather than sampling it: every symbol must round
+    /// trip, all twenty-six spellings must be distinct, and nothing outside the
+    /// table may parse.
     #[test]
-    fn every_constant_is_described() {
-        for s in [
-            ANTONYM,
-            HYPERNYM,
-            INSTANCE_HYPERNYM,
-            HYPONYM,
-            INSTANCE_HYPONYM,
-            MEMBER_HOLONYM,
-            SUBSTANCE_HOLONYM,
-            PART_HOLONYM,
-            MEMBER_MERONYM,
-            SUBSTANCE_MERONYM,
-            PART_MERONYM,
-            ATTRIBUTE,
-            DERIVATIONALLY_RELATED,
-            DOMAIN_TOPIC,
-            MEMBER_TOPIC,
-            DOMAIN_REGION,
-            MEMBER_REGION,
-            DOMAIN_USAGE,
-            MEMBER_USAGE,
-            ENTAILMENT,
-            CAUSE,
-            ALSO_SEE,
-            VERB_GROUP,
-            SIMILAR_TO,
-            PARTICIPLE,
-            PERTAINYM,
-        ] {
-            assert!(describe(s).is_some(), "{s:?}");
+    fn every_symbol_round_trips_and_the_table_is_injective() {
+        let mut spellings: Vec<&str> = Vec::with_capacity(PointerSymbol::ALL.len());
+        for s in PointerSymbol::ALL {
+            assert_eq!(PointerSymbol::from_symbol(s.symbol()), Some(s), "{s:?}");
+            assert_eq!(s.to_string(), s.symbol());
+            spellings.push(s.symbol());
         }
-        assert_eq!(describe(""), None);
-        assert_eq!(describe("nonsense"), None);
+        assert_eq!(spellings.len(), 26);
+        spellings.sort_unstable();
+        let before = spellings.len();
+        spellings.dedup();
+        assert_eq!(spellings.len(), before, "two variants share a spelling");
+    }
+
+    /// Enumerates every one- and two-character ASCII string — 128 + 16 384
+    /// candidates — and checks that exactly the twenty-six documented ones
+    /// parse. A sampled test would not have caught a stray arm.
+    #[test]
+    fn exactly_twenty_six_ascii_strings_parse_as_symbols() {
+        let mut accepted = Vec::new();
+        for a in 0u8..=127 {
+            let one = (a as char).to_string();
+            if PointerSymbol::from_symbol(&one).is_some() {
+                accepted.push(one);
+            }
+            for b in 0u8..=127 {
+                let two = format!("{}{}", a as char, b as char);
+                if PointerSymbol::from_symbol(&two).is_some() {
+                    accepted.push(two);
+                }
+            }
+        }
+        accepted.sort_unstable();
+        let mut expected: Vec<String> = PointerSymbol::ALL
+            .iter()
+            .map(|s| s.symbol().to_owned())
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(accepted, expected);
+        assert_eq!(PointerSymbol::from_symbol(""), None);
+        assert_eq!(PointerSymbol::from_symbol("@@"), None);
+        assert_eq!(PointerSymbol::from_symbol("😀"), None);
+    }
+
+    #[test]
+    fn every_symbol_has_a_name_in_every_category() {
+        for s in PointerSymbol::ALL {
+            for pos in PartOfSpeech::ALL {
+                assert!(!s.name(pos).is_empty(), "{s:?} in {pos:?}");
+            }
+        }
+        // The one symbol whose name depends on the file it was read from.
+        let p = PointerSymbol::Pertainym;
+        assert_ne!(
+            p.name(PartOfSpeech::Adjective),
+            p.name(PartOfSpeech::Adverb)
+        );
+        for s in PointerSymbol::ALL {
+            if s == PointerSymbol::Pertainym {
+                continue;
+            }
+            for pos in PartOfSpeech::ALL {
+                assert_eq!(s.name(pos), s.name(PartOfSpeech::Noun), "{s:?}");
+            }
+        }
     }
 }

@@ -1,22 +1,129 @@
-//! Lazy iterators over the trie.
+//! Lazy iterators over the trie, and the straight-line bulk walk behind
+//! [`Trie::keys_with_prefix`](crate::Trie::keys_with_prefix).
 //!
-//! The reference builds its results by recursion into a result array; both
-//! iterators here reproduce the same sequences without materialising them, so a
-//! caller that wants the first match, or the first ten keys, pays only for those.
+//! Every enumeration here emits words in ascending order of their scalar
+//! sequence — see [`Trie`]'s own "Order" section. Because one node label is one
+//! whole Unicode scalar, spelling a word out is a plain `String::push`: there
+//! is no half-character to hold back between edges.
 
 use std::borrow::Cow;
 use std::iter::FusedIterator;
 
-use crate::trie::{ROOT, Trie};
+use crate::trie::{Child, ROOT, Trie};
 
 // ---------------------------------------------------------------------------
-// keysWithPrefix
+// keys with prefix
 // ---------------------------------------------------------------------------
+
+/// Runs the same depth-first walk [`KeysWithPrefix`] yields, handing each
+/// stored word to `emit` as a borrow of the shared path buffer.
+///
+/// `folded` must already have been through
+/// [`fold`](crate::trie::fold) — every caller of this is a `Trie` method that
+/// folds its own argument first, which is what makes case handling uniform
+/// across the whole API.
+///
+/// # Why this exists alongside the iterator
+///
+/// [`KeysWithPrefix`] has to *suspend* at every word: the arena cursor and the
+/// path buffer live behind `&mut self` and are re-read from memory on each
+/// `next`, and the traversal position has to be re-derived from the stack top
+/// before any progress is made. A caller that wants the whole subtree pays that
+/// per-word ceremony ~20 000 times for nothing. Here the same state is a set of
+/// locals the optimiser keeps in registers across the entire subtree.
+///
+/// # Shape, and what each part of it buys
+///
+/// The stack holds *pending edges*, not open nodes. A node is therefore read
+/// exactly once — the walk never returns to a parent to ask what its next child
+/// was, which was the one read guaranteed to miss because a whole subtree had
+/// been traversed since the last one.
+///
+/// On top of that the inner loop runs a **single-child chain in place**. Most
+/// nodes in a natural-language trie mark no word and have exactly one child:
+/// pure spelling, no decision. Those cost one label append and one arena hop
+/// here instead of also a stack push, a stack pop, a buffer truncation and a
+/// child-list copy. It is the same observation
+/// [`Trie::freeze`](crate::Trie::freeze) makes structurally, applied at walk
+/// time — `Trie` itself cannot compress those nodes away, because
+/// [`Trie::node_count`](crate::Trie::node_count) counts them.
+///
+/// Iterative, not recursive, for the reason the rest of this crate is: the
+/// chain depth is the *word length*, and a 100 kB key must not overflow.
+pub(crate) fn walk_keys<F: FnMut(&str)>(trie: &Trie, folded: &str, mut emit: F) {
+    let Some(start) = trie.descend_folded(folded) else {
+        return;
+    };
+    // Results are the folded prefix concatenated with stored edge labels, so
+    // seeding the buffer with it is exactly right.
+    let mut buf = String::from(folded);
+    let mut stack: Vec<PendingEdge> = Vec::new();
+
+    let root = trie.node(start);
+    if root.is_word {
+        emit(&buf);
+    }
+    push_edges(&mut stack, &root.children, buf.len());
+
+    while let Some(edge) = stack.pop() {
+        // The buffer only ever grew past `restore_len` while the siblings
+        // pushed after this edge were being walked, so truncating back to it
+        // is always a shortening and always lands on the exact spelling this
+        // edge's parent had.
+        buf.truncate(edge.restore_len);
+        let mut key = edge.key;
+        let mut at = edge.node;
+
+        loop {
+            buf.push(key);
+            let node = trie.node(at);
+            if node.is_word {
+                emit(&buf);
+            }
+            // A node with exactly one child has no sibling that could ever
+            // need to rewind to it, so there is nothing to record and nobody
+            // to come back for: stay in the loop with the buffer exactly as
+            // it is. Only a fork or a leaf goes back through the stack.
+            match node.children.as_slice() {
+                [only] => {
+                    key = only.key;
+                    at = only.node;
+                }
+                children => {
+                    push_edges(&mut stack, children, buf.len());
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Queues `children` so the depth-first walk reaches them in ascending label
+/// order.
+///
+/// Reversed, because the stack is LIFO and the *smallest* label must come out
+/// first.
+#[inline]
+fn push_edges(stack: &mut Vec<PendingEdge>, children: &[Child], restore_len: usize) {
+    stack.extend(children.iter().rev().map(|c| PendingEdge {
+        node: c.node,
+        key: c.key,
+        restore_len,
+    }));
+}
+
+/// One queued edge of the depth-first walk: the child to visit and the buffer
+/// length to rewind to before its label is appended.
+struct PendingEdge {
+    /// Arena index of the node this edge leads to.
+    node: u32,
+    /// The edge label: one Unicode scalar.
+    key: char,
+    /// Length `buf` had at the parent, before this edge's label.
+    restore_len: usize,
+}
 
 /// One level of the depth-first walk.
-///
-/// The restore fields are what turns the reference's `stringAgg + c` — a fresh
-/// string per edge — into a single buffer that is pushed and truncated.
 struct Frame {
     /// Arena index of the node this frame is visiting.
     node: u32,
@@ -24,26 +131,20 @@ struct Frame {
     next: usize,
     /// Length `buf` had before this node's edge label was appended.
     restore_len: usize,
-    /// The half-pair carried before this node's edge label was appended.
-    restore_pending: Option<u16>,
 }
 
-/// Iterator over the stored words beneath a prefix, in the reference order.
+/// Iterator over the stored words beneath a prefix, in ascending scalar order.
 ///
-/// Created by [`Trie::iter_keys_with_prefix`] and [`Trie::keys`].
+/// Created by [`Trie::iter_keys_with_prefix`](crate::Trie::iter_keys_with_prefix)
+/// and [`Trie::keys`](crate::Trie::keys).
 ///
-/// Pre-order: a node's own word is emitted before its children are visited, and
-/// children are visited ASCII-digits-first (ascending) then in insertion order.
+/// A node's own word is emitted before its subtree, which follows from the
+/// order rather than adding to it: a node's word is a proper prefix of every
+/// word beneath it, and a proper prefix sorts first.
 pub struct KeysWithPrefix<'t> {
     trie: &'t Trie,
     /// The word being spelled out, reused across the whole traversal.
     buf: String,
-    /// A high surrogate whose partner has not arrived yet.
-    ///
-    /// Nodes are keyed by UTF-16 code unit, so a non-BMP character reaches this
-    /// iterator as two separate edges. Holding the first half back until the
-    /// second arrives is what lets `buf` stay a plain `String`.
-    pending: Option<u16>,
     stack: Vec<Frame>,
     /// The node the prefix landed on, consumed by the first call to `next`.
     start: Option<u32>,
@@ -59,47 +160,26 @@ pub struct KeysWithPrefix<'t> {
 }
 
 impl<'t> KeysWithPrefix<'t> {
-    /// Positions the iterator at `prefix`.
+    /// Positions the iterator at an already-folded `prefix`.
     ///
-    /// `prefix` is **not** case-folded, even on a case-insensitive trie — see
-    /// the note on [`Trie::keys_with_prefix`] for why that is deliberate.
-    pub(crate) fn new(trie: &'t Trie, prefix: &str) -> Self {
-        let start = trie.descend_exact(prefix);
+    /// `folded` is taken by value so that a prefix the fold already had to
+    /// rewrite — the case-insensitive path — is moved into the path buffer
+    /// instead of being copied into a second one.
+    pub(crate) fn new(trie: &'t Trie, folded: Cow<'_, str>) -> Self {
+        let start = trie.descend_folded(&folded);
         Self {
             trie,
-            // Results are the caller's prefix concatenated with stored edge
-            // labels, so seeding the buffer with the prefix is exactly right —
-            // and pointless work if the prefix matched nothing.
+            // A miss yields nothing, so it never spells a word out and never
+            // needs the prefix; `String::new` does not allocate.
             buf: if start.is_some() {
-                String::from(prefix)
+                folded.into_owned()
             } else {
                 String::new()
             },
-            pending: None,
             stack: Vec::new(),
             start,
             remaining: start.map_or(0, |n| trie.node(n).word_count as usize),
         }
-    }
-
-    /// Appends one edge label to `buf`, reassembling surrogate pairs.
-    fn push_unit(&mut self, unit: u16) {
-        if let Some(high) = self.pending.take() {
-            if let Some(c) = char::decode_utf16([high, unit]).next().and_then(Result::ok) {
-                self.buf.push(c);
-                return;
-            }
-            // Unreachable through the public API: every stored word came from a
-            // `&str`, so a high surrogate is always followed by its low half.
-            // Kept total rather than panicking on a hand-built malformed tree.
-            self.buf.push(char::REPLACEMENT_CHARACTER);
-        }
-        if (0xD800..0xDC00).contains(&unit) {
-            self.pending = Some(unit);
-            return;
-        }
-        self.buf
-            .push(char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER));
     }
 }
 
@@ -116,7 +196,6 @@ impl Iterator for KeysWithPrefix<'_> {
                 node,
                 next: 0,
                 restore_len: self.buf.len(),
-                restore_pending: None,
             });
             if trie.node(node).is_word {
                 self.remaining -= 1;
@@ -125,6 +204,14 @@ impl Iterator for KeysWithPrefix<'_> {
         }
 
         loop {
+            // Both `expect`s in this loop body rest on the `?` two lines down:
+            // an empty stack ends the iterator there, so reaching either one
+            // proves `last()` was `Some`. What keeps that proof valid is that
+            // nothing between the guard and the `expect` touches `self.stack`
+            // — `trie` was copied out of `self` above precisely so the reads
+            // below borrow the arena rather than the stack. A future edit that
+            // pops inside the `next >= children.len()` branch without
+            // `continue`ing back to the guard would break it silently.
             let (node, next) = {
                 let frame = self.stack.last()?;
                 (frame.node, frame.next)
@@ -134,7 +221,6 @@ impl Iterator for KeysWithPrefix<'_> {
             if next >= children.len() {
                 let frame = self.stack.pop().expect("frame checked above");
                 self.buf.truncate(frame.restore_len);
-                self.pending = frame.restore_pending;
                 continue;
             }
 
@@ -142,13 +228,11 @@ impl Iterator for KeysWithPrefix<'_> {
             self.stack.last_mut().expect("frame checked above").next += 1;
 
             let restore_len = self.buf.len();
-            let restore_pending = self.pending;
-            self.push_unit(child.key);
+            self.buf.push(child.key);
             self.stack.push(Frame {
                 node: child.node,
                 next: 0,
                 restore_len,
-                restore_pending,
             });
 
             if trie.node(child.node).is_word {
@@ -185,23 +269,23 @@ impl std::fmt::Debug for KeysWithPrefix<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// findMatchesOnPath
+// prefix matches
 // ---------------------------------------------------------------------------
 
 /// Iterator over the stored words that prefix a search string, shortest first.
 ///
-/// Created by [`Trie::iter_matches_on_path`].
+/// Created by [`Trie::iter_prefix_matches`](crate::Trie::iter_prefix_matches).
 ///
-/// Items are cut from the search string, so on a case-sensitive trie they borrow
-/// it and the whole traversal allocates nothing.
-pub struct MatchesOnPath<'t, 'a> {
+/// Items are cut from the search string, so on a case-sensitive trie they
+/// borrow it and the whole traversal allocates nothing.
+pub struct PrefixMatches<'t, 'a> {
     trie: &'t Trie,
     /// The search string after folding: borrowed on a case-sensitive trie,
     /// owned when folding actually changed something.
     folded: Cow<'a, str>,
     /// Arena index of the node the walk has reached.
     node: u32,
-    /// Byte offset of the next character to consume.
+    /// Byte offset of the next scalar to consume.
     pos: usize,
     /// Whether the root has been considered yet.
     started: bool,
@@ -209,7 +293,7 @@ pub struct MatchesOnPath<'t, 'a> {
     done: bool,
 }
 
-impl<'t, 'a> MatchesOnPath<'t, 'a> {
+impl<'t, 'a> PrefixMatches<'t, 'a> {
     pub(crate) fn new(trie: &'t Trie, folded: Cow<'a, str>) -> Self {
         Self {
             trie,
@@ -235,13 +319,13 @@ impl<'t, 'a> MatchesOnPath<'t, 'a> {
     }
 }
 
-impl<'a> Iterator for MatchesOnPath<'_, 'a> {
+impl<'a> Iterator for PrefixMatches<'_, 'a> {
     type Item = Cow<'a, str>;
 
     fn next(&mut self) -> Option<Cow<'a, str>> {
         if !self.started {
             self.started = true;
-            // The root is on every path, so an added empty string always matches.
+            // The root is on every path, so a stored empty string always matches.
             if self.trie.node(ROOT).is_word {
                 return Some(self.cut(0));
             }
@@ -250,20 +334,15 @@ impl<'a> Iterator for MatchesOnPath<'_, 'a> {
             return None;
         }
 
-        while let Some(ch) = self.folded[self.pos..].chars().next() {
-            // Non-BMP characters are two edges in the reference, and both must
-            // exist for the walk to continue.
-            let mut buf = [0u16; 2];
-            for &unit in &*ch.encode_utf16(&mut buf) {
-                match self.trie.child(self.node, unit) {
-                    Some(next) => self.node = next,
-                    None => {
-                        self.done = true;
-                        return None;
-                    }
+        while let Some(scalar) = self.folded[self.pos..].chars().next() {
+            match self.trie.child(self.node, scalar) {
+                Some(next) => self.node = next,
+                None => {
+                    self.done = true;
+                    return None;
                 }
             }
-            self.pos += ch.len_utf8();
+            self.pos += scalar.len_utf8();
             if self.trie.node(self.node).is_word {
                 return Some(self.cut(self.pos));
             }
@@ -274,11 +353,11 @@ impl<'a> Iterator for MatchesOnPath<'_, 'a> {
     }
 }
 
-impl FusedIterator for MatchesOnPath<'_, '_> {}
+impl FusedIterator for PrefixMatches<'_, '_> {}
 
-impl std::fmt::Debug for MatchesOnPath<'_, '_> {
+impl std::fmt::Debug for PrefixMatches<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MatchesOnPath")
+        f.debug_struct("PrefixMatches")
             .field("consumed", &self.pos)
             .field("done", &self.done)
             .finish_non_exhaustive()

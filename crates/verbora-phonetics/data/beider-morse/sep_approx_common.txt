@@ -48,7 +48,7 @@
 "ae" "" "" "D"
 
 /// "s" "" "$" "(s|)" // Attia(s)
-/// "C" "" "" "s"  // "c" could actually be "�"
+/// "C" "" "" "s"  // "c" could actually be "ç"
 
 "n" "" "[bp]" "m"
 

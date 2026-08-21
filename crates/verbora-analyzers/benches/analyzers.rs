@@ -3,33 +3,36 @@
 // here.
 #![allow(missing_docs)]
 
-//! Criterion benchmarks for the sentence analyzer.
+//! Criterion benchmarks for the clause analyzer.
 //!
-//! Sentence lengths span 8 to 2 048 tags so that scaling — every method here is
-//! a single linear pass — is visible rather than inferred. Tokens come from
+//! Sentence lengths span 8 to 2 048 words so that scaling — the pipeline is a
+//! constant number of linear passes — is visible rather than inferred. Tokens come from
 //! `benches/data/words.json`, the shared corpus the rest of the workspace's
 //! benchmarks use, so every harness describes byte-identical input.
+//!
+//! No figures measured from this harness are published anywhere in the crate:
+//! the pipeline was rewritten and nothing has been measured against it.
 
 use criterion::{
     BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
-use verbora_analyzers::{Punct, SentenceAnalyzer, TaggedWord};
+use verbora_analyzers::{TaggedWord, Terminator, analyze, analyze_with_terminator};
 
-/// Sentence lengths, in tags.
+/// Sentence lengths, in words, excluding the terminator.
 const SIZES: [usize; 5] = [8, 32, 128, 512, 2048];
 
-/// The POS tags assigned cyclically to the corpus words.
+/// The Penn Treebank tags assigned cyclically to the corpus words.
 ///
-/// Chosen so every branch is exercised at a realistic frequency: `IN` opens a
-/// prepositional phrase, `NN`/`NNS` close one, `VB` ends the subject, `PRP` is
-/// the tag-question trigger. `DT` comes first so the sentence always has a
-/// subject and `part` never appends an implicit 'You' — which keeps repeated
-/// calls idempotent and the measurement meaningful.
+/// Chosen so every rule is exercised at a realistic frequency: `IN` opens a
+/// prepositional phrase, `NN`/`NNS` close one, `VBD` ends the subject, `PRP` is
+/// the tag-question pronoun. `DT` comes first so the sentence is never
+/// imperative, which keeps the subject/predicate split the thing being
+/// measured.
 ///
-/// Every sibling harness carries the same array; a mismatch would make them
-/// measure different work, so keep them in step.
+/// Every entry is a real Penn Treebank tag; an ambiguity class such as `NN|IN`
+/// would measure the `TagClass::Other` path instead and is deliberately absent.
 const TAG_CYCLE: [&str; 10] = [
-    "DT", "JJ", "NN", "VB", "RB", "IN", "NNS", "PRP", "VBD", "CD",
+    "DT", "JJ", "NN", "VBD", "RB", "IN", "NNS", "PRP", "VBG", "CD",
 ];
 
 /// The shared word list, read from `benches/data/words.json`.
@@ -54,112 +57,80 @@ fn load_words() -> Vec<String> {
         .collect()
 }
 
-/// Builds an `n`-tag sentence, borrowing every token from `words`.
+/// Builds an `n`-word sentence plus a full stop, borrowing every token.
 fn sentence<'a>(words: &'a [String], n: usize) -> Vec<TaggedWord<'a>> {
-    (0..n)
+    let mut out: Vec<TaggedWord<'a>> = (0..n)
         .map(|i| {
             TaggedWord::new(
                 words[i % words.len()].as_str(),
                 TAG_CYCLE[i % TAG_CYCLE.len()],
             )
         })
-        .collect()
+        .collect();
+    out.push(TaggedWord::new(".", "."));
+    out
 }
 
-fn bench_preposition_phrases(c: &mut Criterion) {
+fn bench_analyze(c: &mut Criterion) {
     let words = load_words();
-    let mut g = c.benchmark_group("preposition_phrases");
+    let mut g = c.benchmark_group("analyze");
     for n in SIZES {
         let tags = sentence(&words, n);
         g.throughput(Throughput::Elements(n as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bench, _| {
-            // `pp` is only ever set, so repeated calls on one analyzer do the
-            // same work and leave the same state.
-            let mut a = SentenceAnalyzer::new(tags.clone());
-            bench.iter(|| {
-                a.preposition_phrases();
-                black_box(&a.pos_obj.tags);
-            });
+            // The input is borrowed and never modified, so one sentence can be
+            // analysed over and over without rebuilding it.
+            bench.iter(|| black_box(analyze(&tags)));
         });
     }
     g.finish();
 }
 
-fn bench_part(c: &mut Criterion) {
+/// The out-of-band form, which analyses one more word (no terminator is split
+/// off) and skips the terminator lookup.
+fn bench_analyze_with_terminator(c: &mut Criterion) {
     let words = load_words();
-    let mut g = c.benchmark_group("part");
+    let mut g = c.benchmark_group("analyze_with_terminator");
     for n in SIZES {
         let tags = sentence(&words, n);
         g.throughput(Throughput::Elements(n as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bench, _| {
-            let mut a = SentenceAnalyzer::new(tags.clone());
-            bench.iter(|| {
-                a.part();
-                black_box(&a.pos_obj.tags);
-            });
+            bench.iter(|| black_box(analyze_with_terminator(&tags, Some(Terminator::FullStop))));
         });
     }
     g.finish();
 }
 
-fn bench_type_of(c: &mut Criterion) {
-    let words = load_words();
-    let mut g = c.benchmark_group("type_of");
-    for n in SIZES {
-        let tags = sentence(&words, n);
-        g.throughput(Throughput::Elements(n as u64));
-        g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bench, _| {
-            // A non-empty `punct()` keeps the call non-destructive: the mark it
-            // pops comes from the returned list, not from the sentence. With an
-            // empty one this would consume a tag per iteration. The list is
-            // rebuilt per call, exactly as the reference
-            // `function () { return [{ token: '.', pos: '.' }] }` does.
-            let mut a = SentenceAnalyzer::with_punct(tags.clone(), || {
-                Punct::List(vec![TaggedWord::new(".", ".")])
-            });
-            a.part();
-            bench.iter(|| black_box(a.type_of()));
-        });
-    }
-    g.finish();
-}
-
+/// The two rendering shapes: lazy iteration vs. one owned `String`.
 fn bench_render(c: &mut Criterion) {
     let words = load_words();
     let mut g = c.benchmark_group("render");
     for n in SIZES {
         let tags = sentence(&words, n);
-        let mut a = SentenceAnalyzer::new(tags);
-        a.part();
+        let analysis = analyze(&tags);
         g.throughput(Throughput::Elements(n as u64));
-        g.bench_with_input(BenchmarkId::new("subject_to_string", n), &n, |bench, _| {
-            bench.iter(|| black_box(a.subject_to_string()));
+        g.bench_with_input(BenchmarkId::new("subject_tokens", n), &n, |bench, _| {
+            bench.iter(|| black_box(analysis.subject_tokens().count()));
         });
-        g.bench_with_input(BenchmarkId::new("to_string", n), &n, |bench, _| {
-            bench.iter(|| black_box(a.to_string()));
+        g.bench_with_input(BenchmarkId::new("subject_to_string", n), &n, |bench, _| {
+            bench.iter(|| black_box(analysis.subject_to_string()));
         });
     }
     g.finish();
 }
 
-fn bench_end_to_end(c: &mut Criterion) {
+/// Building the input, which a caller pays before calling anything here.
+fn bench_build(c: &mut Criterion) {
     let words = load_words();
-    let mut g = c.benchmark_group("end_to_end");
+    let mut g = c.benchmark_group("build_sentence");
     for n in SIZES {
-        let tags = sentence(&words, n);
         g.throughput(Throughput::Elements(n as u64));
         g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bench, _| {
-            // The whole pipeline on a fresh sentence: annotate, split, classify,
-            // render. `iter_batched` keeps the tag clone out of the measurement,
-            // since a caller would already hold its tagger's output.
+            // Tokens are borrowed, so this measures one `Vec` growth and
+            // nothing else — the payoff for `Cow` fields over `String` ones.
             bench.iter_batched(
-                || tags.clone(),
-                |fresh| {
-                    let mut a = SentenceAnalyzer::new(fresh);
-                    a.part();
-                    let ty = a.type_of();
-                    black_box((ty, a.subject_to_string(), a.predicate_to_string()))
-                },
+                || (),
+                |()| black_box(sentence(&words, n)),
                 BatchSize::SmallInput,
             );
         });
@@ -167,23 +138,9 @@ fn bench_end_to_end(c: &mut Criterion) {
     g.finish();
 }
 
-fn bench_build(c: &mut Criterion) {
-    let words = load_words();
-    let mut g = c.benchmark_group("build_tags");
-    for n in SIZES {
-        g.throughput(Throughput::Elements(n as u64));
-        g.bench_with_input(BenchmarkId::from_parameter(n), &n, |bench, _| {
-            // Tokens are borrowed, so this measures one `Vec` growth and nothing
-            // else — the payoff for `Cow` fields over `String` ones.
-            bench.iter(|| black_box(sentence(&words, n)));
-        });
-    }
-    g.finish();
-}
-
-/// Sequential `SentenceAnalyzer` pipeline vs. `par_analyze_batch`, at a few
-/// realistic batch sizes. Requires the `parallel` feature; a no-op group
-/// otherwise, so `criterion_group!` below stays a single, unconditional list.
+/// Sequential `analyze` loop vs. `par_analyze_batch`, at a few batch sizes.
+/// Requires the `parallel` feature; a no-op group otherwise, so
+/// `criterion_group!` below stays a single unconditional list.
 fn bench_par_analyze_batch(c: &mut Criterion) {
     #[cfg(not(feature = "parallel"))]
     {
@@ -195,46 +152,24 @@ fn bench_par_analyze_batch(c: &mut Criterion) {
         use verbora_analyzers::par_analyze_batch;
 
         let words = load_words();
-        // A mid-range sentence length from `SIZES` above (~6-7 µs per
-        // `bench_end_to_end`), repeated out to a few batch sizes: a small
-        // batch close to rayon's scheduling break-even point, and larger ones
-        // where the fan-out should win clearly.
-        const TAGS_PER_SENTENCE: usize = 32;
+        // A mid-range sentence length from `SIZES`, repeated out to a small
+        // batch near rayon's scheduling break-even point and to larger ones
+        // where the fan-out should win.
+        const WORDS_PER_SENTENCE: usize = 32;
         let mut g = c.benchmark_group("par_analyze_batch");
         for &n in &[16usize, 256, 4096] {
+            let sentences: Vec<Vec<TaggedWord<'_>>> = (0..n)
+                .map(|_| sentence(&words, WORDS_PER_SENTENCE))
+                .collect();
             g.throughput(Throughput::Elements(n as u64));
-            g.bench_with_input(BenchmarkId::new("sequential", n), &n, |bench, &n| {
-                bench.iter_batched(
-                    || {
-                        (0..n)
-                            .map(|_| sentence(&words, TAGS_PER_SENTENCE))
-                            .collect::<Vec<_>>()
-                    },
-                    |fresh: Vec<Vec<TaggedWord<'_>>>| {
-                        let out: Vec<_> = fresh
-                            .into_iter()
-                            .map(|tags| {
-                                let mut a = SentenceAnalyzer::new(tags);
-                                a.part();
-                                let ty = a.type_of();
-                                (ty, a.subject_to_string(), a.predicate_to_string())
-                            })
-                            .collect();
-                        black_box(out)
-                    },
-                    BatchSize::SmallInput,
-                );
+            g.bench_with_input(BenchmarkId::new("sequential", n), &n, |bench, _| {
+                bench.iter(|| {
+                    let out: Vec<_> = sentences.iter().map(|s| analyze(s)).collect();
+                    black_box(out)
+                });
             });
-            g.bench_with_input(BenchmarkId::new("parallel", n), &n, |bench, &n| {
-                bench.iter_batched(
-                    || {
-                        (0..n)
-                            .map(|_| sentence(&words, TAGS_PER_SENTENCE))
-                            .collect::<Vec<_>>()
-                    },
-                    |fresh| black_box(par_analyze_batch(fresh)),
-                    BatchSize::SmallInput,
-                );
+            g.bench_with_input(BenchmarkId::new("parallel", n), &n, |bench, _| {
+                bench.iter(|| black_box(par_analyze_batch(&sentences)));
             });
         }
         g.finish();
@@ -243,11 +178,9 @@ fn bench_par_analyze_batch(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_preposition_phrases,
-    bench_part,
-    bench_type_of,
+    bench_analyze,
+    bench_analyze_with_terminator,
     bench_render,
-    bench_end_to_end,
     bench_build,
     bench_par_analyze_batch
 );

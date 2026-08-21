@@ -1,5 +1,5 @@
-//! [`Language`]: a compact, strongly-typed identifier for every language a
-//! Verbora subsystem has a language-specific strategy for.
+//! The language identifier. User-facing prose lives on [`Language`], not
+//! in this private module's `//!` block.
 
 use std::fmt;
 use std::str::FromStr;
@@ -52,7 +52,10 @@ pub enum Language {
     /// ISO 639-1 `zh` — not script/region-qualified; see
     /// [`Language::iso639_1`]'s own doc comment.
     Chinese,
-    /// ISO 639-1 `no`.
+    /// ISO 639-1 `no` — the Norwegian macrolanguage. Verbora has no
+    /// separate Bokmål/Nynorsk strategy anywhere, so the two are one
+    /// variant here; a detector that distinguishes them (`whatlang` reports
+    /// Bokmål) maps its answer onto this.
     Norwegian,
     /// ISO 639-1 `sv`.
     Swedish,
@@ -154,7 +157,12 @@ impl Language {
         }
     }
 
-    /// Parses an ISO 639-1 code, case-insensitively.
+    /// Parses an ISO 639-1 code, case-insensitively, or [`None`] for a code
+    /// no Verbora subsystem has a strategy for.
+    ///
+    /// ASCII case folding only: the codes are all two ASCII letters, so
+    /// there is no Unicode case-folding subtlety to get wrong, and no input
+    /// — of any length, in any script — can panic.
     #[must_use]
     pub fn from_iso639_1(code: &str) -> Option<Self> {
         Self::ALL
@@ -183,6 +191,15 @@ impl FromStr for Language {
 /// strategy for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseLanguageError(String);
+
+impl ParseLanguageError {
+    /// The code that failed to parse, exactly as given — not lowercased,
+    /// not trimmed.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.0
+    }
+}
 
 impl fmt::Display for ParseLanguageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -241,5 +258,42 @@ mod tests {
     #[test]
     fn display_matches_name() {
         assert_eq!(Language::English.to_string(), "English");
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        // `ALL` is what every enumeration test in this crate sweeps, so a
+        // variant missing from it would silently exempt itself from all of
+        // them. Names are unique per variant, so counting distinct names is
+        // a proxy the compiler cannot drift from.
+        let mut names: Vec<&str> = Language::ALL.iter().map(|l| l.name()).collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), before, "duplicate entry in Language::ALL");
+        assert_eq!(before, 22);
+    }
+
+    #[test]
+    fn a_parse_error_reports_the_code_it_was_given() {
+        let error = "XX".parse::<Language>().expect_err("XX is not a language");
+        assert_eq!(error.code(), "XX", "the code is reported verbatim");
+        assert!(error.to_string().contains("XX"));
+    }
+
+    #[test]
+    fn parsing_never_panics_on_arbitrary_input() {
+        for code in [
+            "",
+            " ",
+            "e",
+            "eng",
+            "EN ",
+            "😀",
+            "\u{0}",
+            &"e".repeat(10_000),
+        ] {
+            let _ = Language::from_iso639_1(code);
+        }
     }
 }

@@ -1,90 +1,92 @@
 # Choosing an API: tokenization
 
-Verbora gives you several ways to split one string into tokens. They are not
-alternative *implementations* — there is exactly one implementation of each
+Verbora gives you several ways to move tokens from a tokenizer to you. They are
+not alternative *implementations* — there is exactly one implementation of each
 tokenizer's behaviour, and every convenience method is defined on top of it.
-They are alternative ways of **moving the tokens from the tokenizer to you**,
-and they differ in who owns the memory.
+They differ only in who owns the memory.
 
 This page is about picking one. For what each tokenizer *does*, see
 [Tokenizers](../features/tokenizers.md). For the conventions this page is an
 instance of, see [API shapes](./api-shapes.md).
 
-## The three core shapes
+## The two traits
 
-Here is the entire trait. Two of the three methods are one line each:
+There is one token shape — `&'a str`, a contiguous slice of your input — so
+there is no associated token type and nothing to abstract over. Two traits,
+seven methods, and only two of them carry any behaviour:
 
 ```rust  ignore
-pub trait Tokenize {
-    type Token<'a>;
+pub trait Tokenizer {
+    fn tokenize(&self, text: &str) -> Vec<String>;                   // provided
+    fn tokenize_into(&self, text: &str, out: &mut Vec<String>);      // required
+    fn tokenize_batch<S: AsRef<str>>(&self, texts: &[S]) -> Vec<Vec<String>>;
+}
 
-    fn tokens<'a>(&self, text: &'a str) -> impl Iterator<Item = Self::Token<'a>>;
+pub trait BorrowingTokenizer: Tokenizer {
+    // The primitive. Every token is a contiguous slice of `text`.
+    fn tokens<'a>(&self, text: &'a str) -> impl Iterator<Item = &'a str>;
 
-    fn tokenize<'a>(&self, text: &'a str) -> Vec<Self::Token<'a>> {
+    fn tokenize_borrowed<'a>(&self, text: &'a str) -> Vec<&'a str> {
         self.tokens(text).collect()
     }
 
-    fn tokenize_into<'a>(&self, text: &'a str, out: &mut Vec<Self::Token<'a>>) {
+    // Appends; does **not** clear `out`.
+    fn tokenize_borrowed_into<'a>(&self, text: &'a str, out: &mut Vec<&'a str>) {
         out.extend(self.tokens(text));
     }
 }
 ```
 
-There is no behaviour in `tokenize` or `tokenize_into` that is not in `tokens`.
-Choosing between them is choosing a memory strategy, never a result:
+All three tokenizers in the workspace implement both. There is no behaviour in
+any method that is not in `tokens`, so choosing between them is choosing a
+memory strategy, never a result:
 
 | | Peak memory | First token visible | Allocations |
 |---|---|---|---|
 | `tokens()` | one token | immediately — `find`/`any` can stop the scan | none |
-| `tokenize()` | the whole token list | after the last token is produced | one `Vec`, grown by doubling |
-| `tokenize_into()` | the whole token list | after the last token is produced | none once your buffer is warm |
+| `tokenize_borrowed()` | the whole token list | after the last token is produced | one `Vec` of `&str` |
+| `tokenize_borrowed_into()` | the whole token list | after the last token is produced | none once your buffer is warm |
+| `tokenize()` | the whole token list, owned | after the last token is produced | one `Vec` **plus one `String` per token** |
 
 <div class="callout callout-warn">
-<strong>Careful.</strong> <code>tokenize_into</code> does <strong>not</strong>
-clear <code>out</code>; its body is
-<code>out.extend(self.tokens(text))</code>. The <code>buf.clear()</code> at the
-top of a reuse loop is <em>your</em> line, and leaving it out gives you a buffer
-holding every document at once.
+<strong>Careful.</strong> <code>tokenize_borrowed_into</code> and
+<code>tokenize_into</code> do <strong>not</strong> clear <code>out</code>; the
+body of the first is <code>out.extend(self.tokens(text))</code>. The
+<code>buf.clear()</code> at the top of a reuse loop is <em>your</em> line, and
+leaving it out gives you a buffer holding every document at once.
 </div>
 
 ## Every entry point, compared
 
 | API | Best for | Lazy | Buffer reuse | Allocations | Token type |
 |---|---|:--:|:--:|---|---|
-| `Tokenize::tokens` | pipelines, folds, early exit | ✅ | n/a | none, for the 13 slicing tokenizers | `Self::Token<'a>` |
-| `Tokenize::tokenize` | one document, simplest call | ❌ | ❌ | one `Vec`, grown by doubling | `Self::Token<'a>` |
-| `Tokenize::tokenize_into` | a corpus through one buffer | ❌ | ✅ | none once the buffer is warm | `Self::Token<'a>` |
-| `verbora_core::Tokenizer::tokenize` | generic code; owned tokens | ❌ | ❌ | one `Vec` **plus one `String` per token** | `String` |
-| `verbora_core::Tokenizer::tokenize_into` | generic code, warm `Vec` | ❌ | ✅ (the `Vec` only) | one `String` per token | `String` |
-| `verbora_core::Tokenizer::tokenize_batch` | a slice of documents in one call | ❌ | ❌ | outer `Vec` + inner `Vec` + `String` per token | `Vec<Vec<String>>` |
-| `verbora_core::BorrowingTokenizer::tokenize_borrowed` | generic code, zero-copy | ❌ | ❌ | one `Vec` | `&'a str` |
-| `verbora_core::BorrowingTokenizer::tokenize_borrowed_into` | generic code, zero-copy, warm buffer | ❌ | ✅ | none once warm | `&'a str` |
-| inherent methods on the four regex tokenizers | those four tokenizers | mixed | ✅ (`_into`) | mixed | wrapped in `Option` |
+| `BorrowingTokenizer::tokens` | pipelines, folds, early exit | ✅ | n/a | none | `&'a str` |
+| `BorrowingTokenizer::tokenize_borrowed` | one document, simplest zero-copy call | ❌ | ❌ | one `Vec` | `&'a str` |
+| `BorrowingTokenizer::tokenize_borrowed_into` | a corpus through one buffer | ❌ | ✅ | none once warm | `&'a str` |
+| `Tokenizer::tokenize` | tokens must outlive the input | ❌ | ❌ | one `Vec` **plus one `String` per token** | `String` |
+| `Tokenizer::tokenize_into` | owned tokens, warm `Vec` | ❌ | ✅ (the `Vec` only) | one `String` per token | `String` |
+| `Tokenizer::tokenize_batch` | a slice of documents in one call | ❌ | ❌ | outer `Vec` + inner `Vec` + `String` per token | `Vec<Vec<String>>` |
+| `par_tokenize_batch` | many independent documents, feature `parallel` | ❌ | ❌ | one `Vec` per document | `Vec<Vec<&'a str>>` |
 
-<div class="callout callout-note">
-<strong>Five tokenizers are not lazy.</strong> <code>TreebankWordTokenizer</code>,
-<code>TokenizerJa</code> and <code>SentenceTokenizer</code> build the whole list
-before <code>tokens()</code> yields its first item, because their algorithms are
-inherently whole-text; <code>AggressiveTokenizerNo</code> and
-<code>AggressiveTokenizerSv</code> normalize the text first and then scan it
-lazily; <code>CaseTokenizer</code> is lazy on ASCII only. Among the regex
-tokenizers, <code>RegexpTokenizer::tokens</code> also collects, because it has to
-know whether the scan found no match at all before it can hand you anything. The
-signature stays uniform so generic code need not special-case them, but
-<code>tokens()</code> will not save you an allocation there.
+<div class="callout callout-good">
+<strong>Every tokenizer here is lazy, and every one is allocation-free in
+<code>tokens()</code>.</strong> There is no exception to special-case: the
+crate's three tokenizers are all single-pass boundary scanners over the input,
+so <code>find</code>, <code>any</code> and <code>take</code> genuinely stop
+early.
 </div>
 
 ## Decision table
 
 | Your situation | Call |
 |---|---|
-| I name a concrete tokenizer type, and look at each token once | `tokens()` |
-| I name a concrete type and want a `Vec` to keep, index or return | `tokenize()` |
-| I name a concrete type and am in a loop over many documents | `buf.clear(); tokenize_into(doc, &mut buf)` |
-| My function takes "some tokenizer" and needs owned `String`s | `verbora_core::Tokenizer` |
-| My function takes "some tokenizer" and only needs slices | `verbora_core::BorrowingTokenizer` (13 of 24 types) |
-| My tokenizer is `RegexpTokenizer` / `WordTokenizer` / `OrthographyTokenizer` / `WordPunctTokenizer` | the inherent methods — they return `Option`, `None` meaning "no match at all" |
-| I have a slice of documents and want one call | `verbora_core::Tokenizer::tokenize_batch` (a sequential map — it saves typing, not allocation) |
+| I look at each token once, or stop early | `tokens()` |
+| I want a `Vec` to index or iterate, and the input outlives it | `tokenize_borrowed()` |
+| I am in a loop over many documents that all outlive the loop | `buf.clear(); tokenize_borrowed_into(doc, &mut buf)` |
+| My tokens must outlive the text they came from | `Tokenizer::tokenize` |
+| My documents are read and dropped one at a time, and I still want buffer reuse | `Tokenizer::tokenize_into` |
+| I have a slice of documents and want one call | `Tokenizer::tokenize_batch` (a sequential map — it saves typing, not allocation) |
+| I have many independent documents and the `parallel` feature | `par_tokenize_batch(&t, texts)` |
 
 ## One example per variant
 
@@ -96,10 +98,10 @@ a hash, a writer — and you never need the list itself.
 ```rust
 use std::collections::HashMap;
 
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn main() {
-    let t = AggressiveTokenizer::new();
+    let t = WordTokenizer;
     let doc = "the cat sat on the mat";
 
     // A word-frequency map with zero token allocations: the keys borrow `doc`.
@@ -114,18 +116,17 @@ fn main() {
 }
 ```
 
-### `tokenize()` — the simple one
+### `tokenize_borrowed()` — the simple one
 
 Random access, `len()`, sorting and returning the tokens all need the `Vec`.
-This is the right default: one allocation, and for the thirteen slicing
-tokenizers it allocates *only* the `Vec` — every token inside it points into
+This is the right default: one allocation, and every token inside it points into
 your original string.
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn first_and_last(doc: &str) -> Option<(&str, &str)> {
-    let tokens = AggressiveTokenizer::new().tokenize(doc);
+    let tokens = WordTokenizer.tokenize_borrowed(doc);
     Some((*tokens.first()?, *tokens.last()?))
 }
 
@@ -135,24 +136,24 @@ fn main() {
 }
 ```
 
-### `tokenize_into()` — the hot loop
+### `tokenize_borrowed_into()` — the hot loop
 
 One buffer for a whole corpus. Its advantage is one thing only: no `Vec` per
 document. That matters at corpus scale and is invisible at document scale.
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn main() {
-    let t = AggressiveTokenizer::new();
+    let t = WordTokenizer;
     let corpus = ["the quick brown fox", "jumps over", "the lazy dog"];
 
     // One heap buffer for the whole corpus. Reserve if you know the shape.
     let mut buf: Vec<&str> = Vec::with_capacity(64);
     let mut total = 0usize;
     for doc in corpus {
-        buf.clear(); // required: tokenize_into appends
-        t.tokenize_into(doc, &mut buf);
+        buf.clear(); // required: tokenize_borrowed_into appends
+        t.tokenize_borrowed_into(doc, &mut buf);
         total += buf.len();
     }
     assert_eq!(total, 9);
@@ -163,41 +164,34 @@ Dropping the `clear` concatenates the corpus into one token list, which is a
 legitimate use and the reason the method does not clear on your behalf:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn main() {
-    let t = AggressiveTokenizer::new();
+    let t = WordTokenizer;
     let mut all: Vec<&str> = Vec::new();
     for doc in ["a b", "c d"] {
-        t.tokenize_into(doc, &mut all);
+        t.tokenize_borrowed_into(doc, &mut all);
     }
     assert_eq!(all, ["a", "b", "c", "d"]);
 }
 ```
 
 <div class="callout callout-note">
-<strong>Note.</strong> The buffer's element type is
-<code>Self::Token&lt;'a&gt;</code>, so a <code>Vec&lt;&amp;'a str&gt;</code> ties
-itself to the lifetime of the text it borrows from. Reusing one buffer across
-documents requires every document to outlive the buffer. When your documents are
-read and dropped one at a time, use
-<code>verbora_core::Tokenizer::tokenize_into</code>, whose
+<strong>Note.</strong> A <code>Vec&lt;&amp;'a str&gt;</code> ties itself to the
+lifetime of the text it borrows from, so reusing one buffer across documents
+requires every document to outlive the buffer. When your documents are read and
+dropped one at a time, use <code>Tokenizer::tokenize_into</code>, whose
 <code>Vec&lt;String&gt;</code> owns its contents — you keep the buffer reuse and
 pay one <code>String</code> per token.
 </div>
 
-### `verbora_core::Tokenizer` — generic, owned
+### `Tokenizer` — owned tokens, and generic code
 
-`Tokenize::Token<'a>` is a generic associated type, which is what lets a slicing
-tokenizer say "my token is a slice of your input" — but it also means a function
-generic over `T: Tokenize` cannot do much with the tokens without a `for<'a>`
-bound that not every token type satisfies (`Utf16Token` does not implement
-`AsRef<str>`). When you need one signature that works for all of them, use
-`verbora_core::Tokenizer` and accept the `String`s:
+Reach for the owned path when the tokens must outlive the text, or when you are
+writing one signature that works for anything implementing the trait:
 
 ```rust
-use verbora_core::Tokenizer;
-use verbora_tokenizers::{AggressiveTokenizer, SentenceTokenizer, TokenizerJa};
+use verbora_tokenizers::{SentenceTokenizer, Tokenizer, WordTokenizer};
 
 fn longest_token<T: Tokenizer>(t: &T, text: &str) -> Option<String> {
     t.tokenize(text).into_iter().max_by_key(String::len)
@@ -205,12 +199,8 @@ fn longest_token<T: Tokenizer>(t: &T, text: &str) -> Option<String> {
 
 fn main() {
     assert_eq!(
-        longest_token(&AggressiveTokenizer::new(), "a bb ccc"),
+        longest_token(&WordTokenizer, "a bb ccc"),
         Some("ccc".to_string())
-    );
-    assert_eq!(
-        longest_token(&TokenizerJa::new(), "日本語"),
-        Some("日本語".to_string())
     );
     assert_eq!(
         longest_token(&SentenceTokenizer::new(), "Hi. Hello there."),
@@ -219,20 +209,17 @@ fn main() {
 }
 ```
 
-Twenty of the twenty-four tokenizer types implement it. `Tokenizer` is **not
-object-safe** — `tokenize_batch` is generic — so `Box<dyn Tokenizer>` does not
-compile. If you need runtime dispatch, wrap it in a small `dyn`-compatible trait
-of your own with a blanket impl.
+`Tokenizer` is **not object-safe** — `tokenize_batch` is generic — so
+`Box<dyn Tokenizer>` does not compile. If you need runtime dispatch, wrap it in a
+small `dyn`-compatible trait of your own with a blanket impl.
 
-### `verbora_core::BorrowingTokenizer` — generic, zero-copy
+### `BorrowingTokenizer` — generic *and* zero-copy
 
-The compromise between the two: still generic, still zero-copy, but only the
-thirteen tokenizers whose tokens are always contiguous substrings implement it
-(the twelve character-class variants and `AggressiveTokenizerFa`).
+The compromise between the two: still generic, still zero-copy. Every tokenizer
+in the crate implements it, because every token is a substring by construction.
 
 ```rust
-use verbora_core::BorrowingTokenizer;
-use verbora_tokenizers::{AggressiveTokenizer, AggressiveTokenizerRu};
+use verbora_tokenizers::{BorrowingTokenizer, SegmentTokenizer, WordTokenizer};
 
 fn count_long<T: BorrowingTokenizer>(t: &T, docs: &[&str], min: usize) -> usize {
     let mut buf: Vec<&str> = Vec::new();
@@ -248,50 +235,18 @@ fn count_long<T: BorrowingTokenizer>(t: &T, docs: &[&str], min: usize) -> usize 
 }
 
 fn main() {
-    assert_eq!(count_long(&AggressiveTokenizer::new(), &["a bb ccc", "dddd"], 3), 2);
-    assert_eq!(count_long(&AggressiveTokenizerRu::new(), &["мир да"], 3), 1);
+    assert_eq!(count_long(&WordTokenizer, &["a bb ccc", "dddd"], 3), 2);
+    assert_eq!(count_long(&WordTokenizer, &["мир да"], 3), 1);
+    // SegmentTokenizer sees the whitespace runs too, but none is 3 long here.
+    assert_eq!(count_long(&SegmentTokenizer, &["a bb ccc"], 3), 1);
 }
 ```
-
-### The four `Option`-returning tokenizers
-
-`RegexpTokenizer`, `WordTokenizer`, `OrthographyTokenizer` and
-`WordPunctTokenizer` implement neither trait. In matching mode, "no match at
-all" is a distinct outcome from "matched, but produced zero tokens," and no
-trait in this workspace can express that distinction. They keep the same three
-method names as inherent methods, wrapped in `Option`; their `tokenize_into`
-returns `bool` instead, `false` meaning "no match at all," in which case nothing
-was appended.
-
-```rust
-use verbora_tokenizers::WordTokenizer;
-
-fn main() {
-    // Splitting mode (the default) always succeeds.
-    let split = WordTokenizer::new();
-    assert_eq!(split.tokenize("hello, world"), Some(vec!["hello", "world"]));
-    assert_eq!(split.tokenize(""), Some(vec![]));
-
-    // Matching mode can return `None` when nothing matches.
-    let m = WordTokenizer::matching();
-    assert_eq!(m.tokenize("abc def"), Some(vec![" "]));
-    assert_eq!(m.tokenize("abcdef"), None);
-
-    // `tokenize_into` reports the same distinction as a bool.
-    let mut buf: Vec<&str> = Vec::new();
-    assert!(!m.tokenize_into("abcdef", &mut buf));
-    assert!(buf.is_empty());
-}
-```
-
-If your application does not care about the distinction, collapse it *visibly*
-with `.unwrap_or_default()` rather than letting it disappear into a `?`.
 
 ### `tokenize_batch` — a shorter call site, not a faster one
 
-`tokenize_batch` is a provided method on `verbora_core::Tokenizer`. Its default
-body, in full, is a sequential `map` calling `tokenize` once per document — and
-`tokenize` allocates a fresh `Vec` every time:
+`tokenize_batch` is a provided method on `Tokenizer`. Its default body, in full,
+is a sequential `map` calling `tokenize` once per document — and `tokenize`
+allocates a fresh `Vec` and one `String` per token every time:
 
 ```rust  ignore
 fn tokenize_batch<S: AsRef<str>>(&self, texts: &[S]) -> Vec<Vec<String>> {
@@ -301,15 +256,14 @@ fn tokenize_batch<S: AsRef<str>>(&self, texts: &[S]) -> Vec<Vec<String>> {
 
 No tokenizer in this workspace overrides it. Use it when you want
 `Vec<Vec<String>>` and a shorter call site; if you are reaching for it to make a
-corpus faster, write the loop with `tokenize_into` instead — that is the API
-that actually reuses memory.
+corpus faster, write the loop with `tokenize_borrowed_into` instead — that is the
+API that actually reuses memory.
 
 ```rust
-use verbora_core::Tokenizer;
-use verbora_tokenizers::AggressiveTokenizer;
+use verbora_tokenizers::{Tokenizer, WordTokenizer};
 
 fn main() {
-    let t = AggressiveTokenizer::new();
+    let t = WordTokenizer;
     let docs = ["one two", "three four"];
 
     // Convenient.
@@ -326,25 +280,26 @@ fn main() {
 
 Stated plainly, so you do not go looking:
 
-- **Parallel tokenization is opt-in, not default.** `Tokenize::par_tokenize_batch`
-  is a provided method behind `verbora-tokenizers`'s `parallel` Cargo feature,
-  and it is exactly `texts.par_iter().map(|t| self.tokenize(t)).collect()`.
+- **Parallel tokenization is opt-in, not default.** `par_tokenize_batch` is a
+  free function behind `verbora-tokenizers`'s `parallel` Cargo feature, and it is
+  exactly `texts.par_iter().map(|t| tokenizer.tokenize_borrowed(t)).collect()`.
   Without that feature every tokenizer is single-threaded. Either way,
-  tokenizers are zero-sized (or immutable), stateless and `Send + Sync`, so
+  tokenizers are zero-sized or immutable, stateless and `Send + Sync`, so
   parallelising across documents in your own code is straightforward. See
   [Parallelism](../performance/parallelism.md).
 - **There is no streaming reader API.** Every entry point takes a `&str` that is
   fully in memory. There is no `tokenize_read(impl BufRead)`.
 - **There is no buffer-reusing batch call.** "Many documents, one buffer" exists
-  only as a loop you write around `tokenize_into`. None of the four
-  `Option`-returning tokenizers has a batch method at all.
+  only as a loop you write around `tokenize_borrowed_into`.
+- **There are no byte-offset accessors.** `SegmentTokenizer`'s concatenation
+  guarantee makes offsets recoverable by running length when you need them.
 - **`_into` never clears** anywhere in the tokenizers. (`Stemmer::stem_into` in
   `verbora_core` *does* clear its `String` — that difference is documented on
   [API shapes](./api-shapes.md).)
 
 ## Related
 
-- [Tokenizers](../features/tokenizers.md) — the catalogue of all twenty-five.
+- [Tokenizers](../features/tokenizers.md) — what each of the three does.
 - [API shapes](./api-shapes.md) — the workspace-wide conventions.
 - [Iterator vs `_into`](../performance/iterator-vs-into.md) ·
   [Buffer reuse](../performance/buffer-reuse.md) ·

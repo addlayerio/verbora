@@ -3,19 +3,21 @@
 `verbora-wordnet` reads the Princeton WordNet lexical database and turns its
 `index.*` / `data.*` files into synsets, definitions and relational pointers.
 
-Two behaviours will surprise you if you assume otherwise: the index search is an
-**incomplete** bisection that reports "not found" for some lemmas that are in the
-file, and every traversal returns results in **reverse** of the order the files
-list them. Both are pinned by the crate's test suite, and both are explained
-below.
+WordNet groups English nouns, verbs, adjectives and adverbs into *synsets* — sets
+of words that share one sense — and records the relations between them (Fellbaum,
+*WordNet: An Electronic Lexical Database*, MIT Press, 1998). It ships as eight
+plain-text files whose layout is specified by the `wndb(5WN)` and `wninput(5WN)`
+manual pages. This crate reads those files and nothing else; every behaviour on
+this page is derived from that published format, and where the format leaves
+something open, Verbora's choice is stated and pinned by a test.
 
 <div class="callout callout-spec">
-<strong>Specification status.</strong> <code>lookup</code>, <code>get</code>,
-<code>lookup_synonyms</code>, <code>get_synonyms</code>, the index bisection's
-probe sequence and the reader's handling of CRLF line endings, missing gloss
-separators and non-ASCII keys are all documented and test-pinned, with no
-external data required. <code>cargo test -p verbora-wordnet</code> runs
-<strong>54</strong> unit tests and <strong>14</strong> doctests.
+<strong>Specification status.</strong> The lookup pipeline, the index bisection,
+sense addressing, the reader's handling of malformed records and
+<code>index_key</code>'s normalisation are all documented and test-pinned, with
+no external data required. <code>cargo test -p verbora-wordnet</code> runs
+<strong>86</strong> unit tests, <strong>4</strong> enumeration tests and
+<strong>13</strong> doctests.
 </div>
 
 ## The database is separately licensed
@@ -23,22 +25,25 @@ external data required. <code>cargo test -p verbora-wordnet</code> runs
 `verbora` is MIT. **The WordNet database is not.** This crate ships **no
 dictionary data at all** — none of the roughly 28 MB of index and data files
 WordNet 3.0/3.1 consists of. It reads them at run time from a directory you
-supply. The database is covered by Princeton University's own licence,
-reproduced verbatim in `LICENSE-WORDNET` beside the crate; it requires the notice
-to accompany all copies, including modifications, and forbids using Princeton's
-name in advertising.
+supply. The database is covered by Princeton University's own licence, reproduced
+verbatim in `LICENSE-WORDNET` beside the crate; it requires the notice to
+accompany all copies, including modifications, and forbids using Princeton's name
+in advertising.
 
 Download any WordNet 3.0 or 3.1 database from Princeton, then point
 `WordNet::open` at the `dict` directory it contains — or set an environment
 variable and use `WordNet::from_env`:
 
 ```text
-export WORDNET_DB_PATH=/path/to/wordnet/dict
+export VERBORA_WORDNET_DICT=/path/to/wordnet/dict
 ```
 
-`WordNet::from_env` checks `$WORDNET_DB_PATH`, then `$VERBORA_WORDNET_DICT`
-(this crate's own override), then one conventional relative path, and fails with
-`Error::Io` naming every candidate it tried.
+`WordNet::from_env` checks `$VERBORA_WORDNET_DICT` (this crate's own override),
+then `$WORDNET_DB_PATH` (the variable WordNet distributions conventionally set),
+then `./dict`. A candidate counts only if it actually contains `index.noun`, so a
+stale variable falls through to the next one instead of failing the whole call;
+if none matches, `Error::DictionaryNotFound` names every candidate that was
+tried.
 
 Snippets on this page that need the real database are fenced `no_run`. The
 runnable ones build a tiny, hand-written dictionary in the WordNet text format —
@@ -48,8 +53,12 @@ the same trick the crate's own unit tests use.
 
 - **Synonym, definition and relation lookup for English words**, when you already
   have (or can install) the database and do not need it embedded in your binary.
-- **Walking the hypernym/hyponym/meronym graph.** `relation` gives you one hop;
-  `closure` walks the whole transitive chain lazily, with cycle protection.
+  A synset's own `words` *are* its synonyms — the set of words sharing that
+  sense — so `senses(word, pos)` and `Synset::words` answer the synonym question
+  directly, with no separate call.
+- **Walking the hypernym/hyponym/meronym graph.** `related` gives you one hop;
+  `closure` walks the whole transitive chain lazily, breadth first, visiting each
+  synset at most once.
 - **A long-lived process serving concurrent lookups.** `WordNet` is immutable
   after construction and `Send + Sync`; share one `Arc<WordNet>` across threads
   with no locking. See [Concurrency](#concurrency).
@@ -58,16 +67,14 @@ the same trick the crate's own unit tests use.
 
 - **You cannot ship or install the database.** There is no bundled fallback; every
   method that needs a missing file returns `Error::Io` at open, not later.
-- **You need every WordNet entry to be reachable.** The index search is not
-  merely slow, it is **incomplete** — see
-  [The index search is incomplete](#the-index-search-is-incomplete). A word
-  genuinely in the database can still come back as a miss.
-- **You want results in dictionary or alphabetical order.** Every traversal comes
-  back in `pop()`-driven reverse order. See
-  [Result order is reversed](#result-order-is-reversed).
-- **You want stemming, POS tagging, or a general thesaurus API.** This crate is
-  the lexical database reader only. Pair it with [Inflectors](./inflectors) or
-  your own normalisation if the input is not already a WordNet headword.
+- **You need morphological reduction.** This crate looks up the lemma you give it.
+  Reducing *running* to *run* belongs to [Stemmers](./stemmers) or
+  [Inflectors](./inflectors); keeping it there is what stops a lookup from quietly
+  answering about a different word.
+- **You want a general thesaurus API, POS tagging, or the rest of a WordNet
+  distribution.** Only the eight `index.*`/`data.*` files are read —
+  `index.sense`, the morphological exception lists, `cntlist` and the
+  lexicographer sources are not.
 
 ## Quick example
 
@@ -75,7 +82,7 @@ Two synsets, `alpha` and `beta`, with `alpha` pointing at `beta` as its hypernym
 No download required.
 
 ```rust
-use verbora_wordnet::{WordNet, pointer};
+use verbora_wordnet::{PartOfSpeech, PointerSymbol, Sense, SynsetOffset, WordNet};
 
 fn tiny_dict() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -84,11 +91,30 @@ fn tiny_dict() -> std::path::PathBuf {
         std::thread::current().id()
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    let index = "aaa n 1 0 1 0 00000000  \nbbb n 2 1 @ 2 0 00000000 00000083  \nccc n 1 0 1 0 00000083  \n";
-    let data = "00000000 06 n 01 alpha 0 001 @ 00000083 n 0000 | the first letter; \"as in alpha\"  \n00000083 06 n 02 beta 0 second 1 000 | the second letter  \n";
-    for pos in ["noun", "verb", "adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), index).unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), data).unwrap();
+
+    // `wndb(5WN)` requires the copyright header lines to start with two spaces,
+    // so their first field is empty and sorts below every real lemma. This one
+    // is 65 bytes, which is where the first data record begins.
+    let header = "  1 Copyright notice, two leading spaces, as the format requires\n";
+    let alpha =
+        "00000065 06 n 01 alpha 0 001 @ 00000148 n 0000 | the first letter; \"as in alpha\"  \n";
+    let beta = "00000148 06 n 02 beta 0 second 1 000 | the second letter  \n";
+
+    std::fs::write(dir.join("data.noun"), format!("{header}{alpha}{beta}")).unwrap();
+    std::fs::write(
+        dir.join("index.noun"),
+        format!(
+            "{header}\
+             aaa n 1 0 1 0 00000065  \n\
+             bbb n 2 1 @ 2 0 00000065 00000148  \n\
+             ccc n 1 0 1 0 00000148  \n"
+        ),
+    )
+    .unwrap();
+    // A dictionary is all eight files; the other three categories are empty here.
+    for suffix in ["verb", "adj", "adv"] {
+        std::fs::write(dir.join(format!("index.{suffix}")), "").unwrap();
+        std::fs::write(dir.join(format!("data.{suffix}")), "").unwrap();
     }
     dir
 }
@@ -97,17 +123,34 @@ fn main() {
     let dir = tiny_dict();
     let wn = WordNet::open(&dir).unwrap();
 
-    let alpha = wn.get(0.0, "n").unwrap();
-    assert_eq!(alpha.lemma.as_deref(), Some("alpha"));
-    assert_eq!(alpha.def, "the first letter");
-    assert_eq!(alpha.exp, ["as in alpha"]);
+    // Senses come back in sense order: element 0 is sense 1.
+    let senses = wn.senses("bbb", PartOfSpeech::Noun).unwrap();
+    assert_eq!(
+        senses.iter().map(|s| s.offset).collect::<Vec<_>>(),
+        [SynsetOffset::new(65), SynsetOffset::new(148)]
+    );
+
+    let alpha = &senses[0];
+    assert_eq!(alpha.lemma(), "alpha");
+    assert_eq!(alpha.gloss.definition, "the first letter");
+    assert_eq!(alpha.gloss.examples, ["as in alpha"]);
+
+    // A synset's own words are its synonyms — the words sharing that sense.
+    let beta = &senses[1];
+    let synonyms: Vec<&str> = beta.words.iter().map(|w| w.lemma.as_str()).collect();
+    assert_eq!(synonyms, ["beta", "second"]);
 
     // One pointer hop from alpha reaches beta.
-    let synonyms = wn.get_synonyms_of(&alpha).unwrap();
-    assert_eq!(synonyms[0].lemma.as_deref(), Some("beta"));
+    assert_eq!(wn.related(alpha, PointerSymbol::Hypernym).count(), 1);
+    assert_eq!(wn.related(alpha, PointerSymbol::Hyponym).count(), 0);
+    let parent = wn.related(alpha, PointerSymbol::Hypernym).next().unwrap().unwrap();
+    assert_eq!(parent.lemma(), "beta");
 
-    assert_eq!(wn.relation(&alpha, pointer::HYPERNYM).count(), 1);
-    assert_eq!(wn.relation(&alpha, pointer::HYPONYM).count(), 0);
+    // The same synset, addressed as a numbered sense.
+    let first: Sense = "bbb#n#1".parse().unwrap();
+    assert_eq!(wn.sense(&first).unwrap().unwrap().offset, SynsetOffset::new(65));
+    // Past the end is absence, not an error.
+    assert!(wn.sense(&"bbb#n#3".parse().unwrap()).unwrap().is_none());
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -116,23 +159,62 @@ fn main() {
 Against the real database:
 
 ```rust no_run
-use verbora_wordnet::{WordNet, pointer};
+use verbora_wordnet::{PartOfSpeech, PointerSymbol, WordNet};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wn = WordNet::open("/path/to/wordnet/dict")?;
 
+    // Every sense of "bank", nouns first, then verbs, adjectives and adverbs.
     for synset in wn.lookup("bank")? {
-        println!("{:?}  {}", synset.lemma, synset.def);
+        println!("{}  {}", synset.lemma(), synset.gloss.definition);
+    }
+
+    // Just the nouns, numbered as WordNet numbers them.
+    for (i, synset) in wn.senses("bank", PartOfSpeech::Noun)?.iter().enumerate() {
+        println!("bank#n#{}: {}", i + 1, synset.gloss.definition);
     }
 
     // Walk up the hypernym chain from one specific noun sense.
-    let sense = wn.get(3_832_647.0, "n")?;
-    for parent in wn.closure(&sense, pointer::HYPERNYM).take(5) {
-        println!("^ {}", parent?.def);
+    let node = wn.sense(&"node#n#8".parse()?)?.expect("node has eight senses");
+    for parent in wn.closure(&node, PointerSymbol::Hypernym).take(5) {
+        println!("^ {}", parent?.gloss.definition);
     }
     Ok(())
 }
 ```
+
+## Normalisation is named, never hidden
+
+WordNet's index files are keyed on a specific spelling: lower-case ASCII, with the
+words of a collocation joined by `_`. Turning a word a user typed into that
+spelling is a real transform, so it has a name — `index_key` — and every entry
+point says which side of the line it is on. Entry points that take a **word**
+(`lookup`, `senses`, `index_entry`, `sense`) apply it first; entry points that
+take a **key** (`IndexFile::entry`) use the argument verbatim.
+
+```rust
+use verbora_wordnet::index_key;
+
+fn main() {
+    assert_eq!(index_key("entity"), "entity");
+    assert_eq!(index_key("New York"), "new_york");
+    assert_eq!(index_key("new  york"), "new_york");
+    assert_eq!(index_key("  entity  "), "entity");
+    assert_eq!(index_key("U.S.A."), "u.s.a.");
+
+    // Non-ASCII is left exactly as it is, and is therefore simply absent from
+    // an ASCII index. Mangling it into something that matched would be a guess.
+    assert_eq!(index_key("CAFÉ"), "cafÉ");
+}
+```
+
+The transform is idempotent and is the identity on every string that is already a
+legal index key, which is what makes every lemma reachable through it.
+`tests/enumeration.rs` proves that by walking **every** entry of every index file
+it is given rather than sampling: 5,956 generated keys spanning the lemma
+alphabet, reachable under all four `Storage` strategies, plus 12,372 alternative
+spellings (upper-cased, whitespace-padded) resolving to the same entries and 55
+deliberately absent keys producing no false hit.
 
 ## Choosing a `Storage` strategy
 
@@ -143,10 +225,14 @@ be a runtime choice rather than a type parameter.
 
 | `Storage` | Startup | Per query | Resident memory | Pick it when |
 |---|---|---|---|---|
-| `Pread` | none | a handful of positioned syscalls | none | short-lived process, one or two lookups (a CLI tool) |
-| `LazyResident` | none | in-memory, once a file is first touched | grows to whichever files were used | long-lived process that may never touch some of the eight files |
-| `Resident` *(default)* | reads ~28 MB | in-memory scan | ~28 MB | long-lived process querying broadly, where predictable per-query latency beats a fast first request |
-| `Indexed` | + one `memchr` pass over the resident bytes | `partition_point` over a `u32` line-start table | + ~4 bytes per line (~470 KiB for `index.noun`) | hot path with many repeated lookups, where the bisection shows up in a profile |
+| `Pread` | none | a handful of positioned reads | none | short-lived process, one or two lookups (a CLI tool) |
+| `LazyResident` | none | in memory, once a file is first touched | grows to whichever files were used | long-lived process that may never touch some of the eight files |
+| `Resident` *(default)* | reads the dictionary | in memory | the whole dictionary | long-lived process querying broadly, where predictable per-query latency beats a fast first request |
+| `Indexed` | + one newline scan | line starts by `partition_point` | + four bytes per line | hot path with many repeated lookups, where the backwards line scan shows up in a profile |
+
+**These are qualitative descriptions, not measurements.** The crate's Criterion
+suite measures all four; no figures are published because none have been taken
+against this implementation.
 
 ```rust no_run
 use verbora_wordnet::{Config, Storage, WordNet};
@@ -168,16 +254,17 @@ the whole file the first time any part of it is read.
 
 ### The `PrebuiltIndex` sidecar
 
-`Storage::Indexed` normally builds its line-start tables with one `memchr` pass
-at open time. `PrebuiltIndex` persists those line offsets to a file once, so every
-later open loads them instead of re-scanning ~28 MB for newlines.
+`Storage::Indexed` normally builds its line-start tables with one newline scan at
+open time. `PrebuiltIndex` persists those line offsets to a file once, so every
+later open loads them instead of re-scanning the dictionary for newlines.
 
 The dictionary text files remain the only source of truth: the sidecar carries no
 lemmas, glosses or content-derived offsets — only each line's byte position, plus
-the length of the file it was built from. `PrebuiltIndex::source_for` refuses an
-entry whose file has since changed size, because the bisection's probe positions
-are a function of file length. The builder is a pure function of the eight
-dictionary files — same bytes in, same sidecar out, no timestamps — so it can be
+the length of the file it was built from. Opening against a sidecar refuses any
+entry whose file has since changed size, with `Error::Prebuilt` naming the file
+and both lengths, because the bisection's probe positions are a function of file
+length. The builder is a pure function of the eight dictionary files — same bytes
+in, same sidecar out, no timestamps, every integer little-endian — so it can be
 built once in CI and shipped alongside the dictionary.
 
 ```rust no_run
@@ -196,6 +283,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Order
+
+Everything comes out in the order the files list it.
+
+- `lookup` consults categories in the order **noun, verb, adjective, adverb**.
+- Within a category, senses come out in **sense order** — the order the index line
+  lists its offsets, which `wndb(5WN)` defines as most-frequently-tagged first.
+  Element `0` is sense 1, so numbering results by arrival position and numbering
+  them with `Sense` agree.
+- `pointers` yields pointers in the order the data record writes them.
+- `closure` is breadth first and yields each reachable synset at most once.
+
+There is no deduplication across categories: a lemma that exists as both a noun
+and a verb yields the senses of both.
+
 ## Traversal: eager vs lazy
 
 Every method performs strictly sequential, synchronous I/O and returns its result
@@ -203,47 +305,45 @@ directly.
 
 | API | Answers | Lazy | Output | Allocates |
 |---|---|:--:|---|---|
-| `lookup` | every synset for a word, all parts of speech | ❌ | `Vec<DataRecord>` | one `Vec`, one `DataRecord` per synset |
-| `lookup_iter` | the same synsets | ✅ | `LookupIter` → `Result<DataRecord>` | one `DataRecord` per synset actually read |
-| `par_lookup_batch` | `lookup`, fanned out over many words | ❌ | `Vec<Result<Vec<DataRecord>>>` | one outer `Vec`, plus `lookup`'s own per word |
-| `pointers` | every synset one hop from a record | ✅ | `Pointers` → `Result<DataRecord>` | one `DataRecord` per hop followed |
-| `relation` | `pointers`, filtered to one relation symbol | ✅ | `Pointers` → `Result<DataRecord>` | as `pointers`, minus the hops skipped |
-| `closure` | the whole transitive chain of one relation | ✅ | `Closure` → `Result<DataRecord>` | one `DataRecord` per synset visited, plus a `VecDeque` queue and a seen-offsets `Vec` |
-| `get_synonyms_of` | `pointers`, eager and **re-read from disk** | ❌ | `Vec<DataRecord>` | as `pointers`, plus the re-read |
+| `lookup` | every sense of a word, all four categories | ❌ | `Result<Vec<Synset>>` | one `Vec`, one `Synset` per sense |
+| `lookup_iter` | the same senses | ✅ | `LookupIter` → `Result<Synset>` | one `Synset` per sense actually read |
+| `senses` | one category's senses | ❌ | `Result<Vec<Synset>>` | as `lookup`, over one index file |
+| `sense` | one numbered sense | ❌ | `Result<Option<Synset>>` | one index line, one record |
+| `index_entry` | the index line only — offsets, counts, relation symbols | ❌ | `Result<Option<IndexEntry>>` | one `IndexEntry`; no data record is read |
+| `par_lookup_batch` | `lookup`, fanned out over many words | ❌ | `Vec<Result<Vec<Synset>>>` | one outer `Vec`, plus `lookup`'s own per word |
+| `pointers` | every synset one hop from a record | ✅ | `Pointers` → `Result<Synset>` | one `Synset` per hop followed |
+| `related` | `pointers`, filtered to one relation | ✅ | `Pointers` → `Result<Synset>` | as `pointers`, minus the hops skipped |
+| `closure` | the whole transitive chain of one relation | ✅ | `Closure` → `Result<Synset>` | one `Synset` per synset visited, plus a queue and a visited set |
 
 Three things are easy to miss:
 
-- **`lookup` is exactly `lookup_iter(word).collect()`.** `"run"` has 57 senses in
-  the real database, so collecting all of them to take the first two is 55 line
-  reads you did not need. `lookup_iter`'s errors are sticky: once one lookup
-  fails, later `next()` calls return `None` rather than re-reporting forever.
-- **`get_synonyms_of` re-reads the starting synset from disk** by offset and tag
-  before following its pointers, so a record you mutated after reading is not
-  what gets followed. Use `pointers` when you want the pointers already in hand.
-- **`closure` is the only one that walks more than one hop.** It is
-  breadth-first, never yields the starting record, and is cycle-safe: an offset
-  already emitted is never queued again, tracked as the bit pattern of the `f64`
-  offset so a `NaN` offset compares by identity rather than by IEEE 754's "`NaN`
-  never equals anything", which would otherwise defeat the cycle check.
-
-`get_synonyms(offset, tag)` and `get_synonyms_of(&record)` are the same operation
-from two starting points, given two names rather than one overloaded function, so
-an offset of `0.0` is never mistaken for "no offset given".
+- **`lookup` is exactly `lookup_iter(word).collect()`.** A word with many senses
+  costs one line read each, so collecting all of them to take the first two is
+  work you did not need. `lookup_iter` stops after yielding its first `Err`:
+  once a read has failed, continuing would report the same failure repeatedly.
+- **`senses` searches one index file, `lookup` searches four.** When you know the
+  category, saying so skips three bisections.
+- **`closure` is the only one that walks more than one hop.** It never yields the
+  starting synset, and its visited set is keyed on `(category, offset)` — an
+  offset alone is ambiguous across the four data files. Following `Hyponym` from a
+  general synset can reach tens of thousands of descendants, so prefer `.take(n)`
+  or a filter unless you want all of them.
 
 ```rust no_run
-use verbora_wordnet::{WordNet, pointer};
+use verbora_wordnet::{PartOfSpeech, PointerSymbol, WordNet};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wn = WordNet::open("/path/to/wordnet/dict")?;
-    let sense = wn.get(3_832_647.0, "n")?;
 
-    // One hop of one relation.
-    for parent in wn.relation(&sense, pointer::HYPERNYM) {
-        println!("^ {}", parent?.def);
-    }
-    // The whole chain, lazily, one read at a time.
-    for ancestor in wn.closure(&sense, pointer::HYPERNYM) {
-        println!("^^ {}", ancestor?.def);
+    for synset in wn.senses("node", PartOfSpeech::Noun)? {
+        // One hop of one relation.
+        for parent in wn.related(&synset, PointerSymbol::Hypernym) {
+            println!("^ {}", parent?.lemma());
+        }
+        // The whole chain, lazily, one read at a time.
+        for ancestor in wn.closure(&synset, PointerSymbol::Hypernym) {
+            println!("^^ {}", ancestor?.lemma());
+        }
     }
     Ok(())
 }
@@ -254,26 +354,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Behind the `parallel` Cargo feature, `par_lookup_batch` is exactly
 `words.par_iter().map(|w| self.lookup(w)).collect()` — a thin fan-out over the
 same sequential `lookup`, input order preserved, each element carrying its own
-`Result`. `WordNet` is already immutable and `Send + Sync` with nothing cached or
-locked per query, so it needed no new synchronization.
+`Result`, so one word's failure does not abort the others. `WordNet` is already
+immutable and `Send + Sync` with nothing cached or locked per query, so it needed
+no new synchronization, and it uses whichever global `rayon` pool is installed
+rather than building one of its own.
 
-Measured on `benches/wordnet.rs`'s `par_lookup_batch` group (`Storage::Resident`,
-32 hardware threads, the same 16-word mix repeated out to each size):
+Reach for it when the *batch* is the unit of work — resolving every distinct token
+of a corpus as an offline step, for example. A single lookup is cheap enough that
+a small batch can be dominated by the cost of scheduling the tasks; prefer a plain
+`.iter().map(...)` loop for a handful of words.
 
-| Batch size | Sequential | Parallel | Speedup |
-|--:|--:|--:|--:|
-| 16 | 633.5 µs | 600.6 µs | ~1.05× (noise-level) |
-| 160 | 7.03 ms | 2.10 ms | ~3.3× |
-| 1600 | 100.2 ms | 24.95 ms | ~4.0× |
+**The crossover point is unmeasured for this implementation**, so no speedup
+figure is quoted here. See [Parallelism](../performance/parallelism).
 
-A batch of 16 common words sits close to break-even: a `rayon` task costs about a
-microsecond to schedule, comparable to a single lookup's own cost (~5.7–6.9 µs
-for a common entry like `entity`, up to ~150–206 µs for a high-sense-count word
-like `run`). Prefer a plain `.iter().map(WordNet::lookup)` loop at that scale;
-from a few hundred words up, the win is real. See
-[Parallelism](../performance/parallelism).
-
-```rust  ignore
+```rust ignore
 let results = wn.par_lookup_batch(&["run", "entity", "zzzzz"]);
 for r in results {
     match r {
@@ -282,111 +376,6 @@ for r in results {
     }
 }
 ```
-
-## Result order is reversed
-
-Every traversal drains its work list from the back, so results arrive reversed at
-two levels: parts of speech are consulted **adv, adj, verb, noun**, and within one
-part of speech the index line's offsets are visited **last to first**.
-`lookup("fast")` therefore yields `r:86892 r:86488 s:324771 … n:1071904` against
-the real database. The order is pinned by value in the crate's test suite.
-
-```rust
-use verbora_wordnet::WordNet;
-
-fn multi_pos_dict() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verbora-wordnet-docs-order-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-
-    let noun_a = "00000000 06 n 01 x 0 000 | noun sense A  \n".to_string();
-    let noun_b_offset = noun_a.len();
-    let noun_b = format!("{noun_b_offset:08} 06 n 01 x 0 000 | noun sense B  \n");
-    std::fs::write(dir.join("data.noun"), format!("{noun_a}{noun_b}")).unwrap();
-    std::fs::write(
-        dir.join("index.noun"),
-        format!("x n 2 0 2 0 00000000 {noun_b_offset:08}  \n"),
-    )
-    .unwrap();
-
-    std::fs::write(dir.join("data.verb"), "00000000 06 v 01 x 0 000 | verb sense  \n").unwrap();
-    std::fs::write(dir.join("index.verb"), "x v 1 0 1 0 00000000  \n").unwrap();
-
-    for pos in ["adj", "adv"] {
-        std::fs::write(dir.join(format!("index.{pos}")), "").unwrap();
-        std::fs::write(dir.join(format!("data.{pos}")), "").unwrap();
-    }
-    dir
-}
-
-fn main() {
-    let dir = multi_pos_dict();
-    let wn = WordNet::open(&dir).unwrap();
-
-    // Verb before noun, and within noun, sense B (the SECOND offset on the
-    // index line) before sense A.
-    let defs: Vec<String> = wn
-        .lookup("x")
-        .unwrap()
-        .into_iter()
-        .map(|r| r.def.trim_end().to_owned())
-        .collect();
-    assert_eq!(defs, ["verb sense", "noun sense B", "noun sense A"]);
-
-    // lookup_iter is lazy: the FIRST result costs exactly one line read, and it
-    // is the verb sense — reading it never touches data.noun at all.
-    let first: Vec<String> = wn
-        .lookup_iter("x")
-        .take(1)
-        .map(|r| r.unwrap().def.trim_end().to_owned())
-        .collect();
-    assert_eq!(first, ["verb sense"]);
-
-    // Sense NUMBERS run forwards over the index line, the opposite direction.
-    assert_eq!(wn.find_sense("x#n#1").unwrap().unwrap().def.trim_end(), "noun sense A");
-    let senses: Vec<String> =
-        wn.query_sense("x#n").unwrap().iter().map(|s| s.to_string()).collect();
-    assert_eq!(senses, ["x#n#1", "x#n#2"]);
-
-    std::fs::remove_dir_all(&dir).ok();
-}
-```
-
-<div class="callout callout-warn">
-<strong>Careful.</strong> Sense numbers run <strong>forwards</strong> over the
-index line's own order — sense 1 is the first offset written on the line — which
-is the <strong>opposite</strong> of the order <code>lookup</code> yields for that
-part of speech. Numbering results as <code>lookup</code> hands them to you would
-number every word backwards. Use <code>query_sense</code> /
-<code>find_sense</code>, which parse and resolve a <code>lemma#pos[#n]</code>
-string, rather than the position a synset arrives in.
-</div>
-
-## The index search is incomplete
-
-`IndexFile::find` bisects **byte positions**, not lines. Each probe snaps
-backwards to the start of the line it landed in, compares that line's first token
-to the search key, and halves the step — and because the snap-back changes which
-line a position denotes, the invariant a binary search needs does not hold.
-Measured against the shipped WordNet 3.1 database:
-
-| File | Lemmas | Reported missing |
-|---|---:|---:|
-| `index.adv` | 4,475 | 20 |
-| `index.verb` | 11,540 | 183 |
-| `index.adj` | 21,499 | 117 |
-| `index.noun` | 117,953 | 624 |
-
-`index.verb` misses the **entire head of the file** — `aah`, `abandon`, `abase`,
-`abate` are all reported missing — and `awful`, `safely`, `such`, `bitter` and
-`firm` are adverbs this search cannot find. The probe sequence is pinned by the
-test suite, so which lemmas are reachable is stable and reproducible. Treat a miss
-as "this search could not reach the word", never as "the word is absent"; if you
-need guaranteed coverage, scan the index file yourself or keep your own lemma
-list.
 
 ## Concurrency
 
@@ -423,42 +412,58 @@ fan-out.
 
 ## Error behaviour <span class="badge badge-fallible">FALLIBLE</span>
 
-Every method that reaches malformed or unusual on-disk data returns a specific
-`Error` variant instead of panicking, hanging, or looping unboundedly:
+A word with no entry is `None` or an empty `Vec` — never an error and never a
+sentinel. A file that cannot be read, or a record that does not match the
+documented format, is an `Error`, including the cases a lenient reader would paper
+over. No public function panics on any input.
 
 | Condition | Result |
 |---|---|
-| An unopenable dictionary file | `Error::Io`, at open rather than at the first query |
-| An offset that lands past EOF | `Error::UnterminatedLine` |
-| A record with no `'\| '` gloss separator | `Error::MissingGloss` |
-| An absurdly large word or pointer count | `Error::CountTooLarge`, refused beyond `numfmt::MAX_COUNT` |
-| A part-of-speech tag that is not `n`/`v`/`a`/`s`/`r` | `Error::UnknownPos` — case-sensitive, no `"noun"`, no default |
-| A negative probe position | `Error::NegativeProbe` — verified unreachable across all 147,580 keys the fixture exercises, but reported rather than silently clamped |
+| A dictionary file is missing or unreadable | `Error::Io`, at open rather than at the first query |
+| `from_env` found no dictionary | `Error::DictionaryNotFound`, naming every candidate tried |
+| An offset lies at or past the end of its data file | `Error::OffsetOutOfRange`, with the offset and the file's recorded length |
+| An offset does not point at the start of a record | `Error::MalformedSynset` with `RecordError::OffsetMismatch` |
+| A record read from the wrong category's file | `Error::MalformedSynset` with an `ss_type` complaint |
+| A record has no `\|` gloss delimiter | `Error::MalformedSynset` with `RecordError::MissingGloss` |
+| A numeric field is not a number in its documented radix | `Error::MalformedSynset` / `Error::MalformedIndexEntry` with `RecordError::InvalidField` |
+| An index line's two sense counts disagree | `RecordError::SenseCountMismatch` — guessing which to believe would drop or invent senses |
+| A dictionary file is 4 GiB or larger, under any strategy that holds it in memory | `Error::FileTooLarge`, naming the file, its length and the limit |
+| A prebuilt sidecar no longer matches the files | `Error::Prebuilt` |
 
-A file's length is recorded once at open, so a file that changes size mid-session
-does not change the search path; descriptors are held for the process lifetime
-(or not at all, for `Storage::Resident`) rather than opened per operation.
+Every variant names the file it concerns, and the two record variants also name
+the exact byte position of the record that failed, so a malformed dictionary can
+be inspected with `dd`/`sed` without guesswork. A file's length is recorded once
+at open, so a file that changes size mid-session does not change the search path.
 
 ## Allocation behaviour
 
-- **At open.** `Resident` and `Indexed` each read the whole file into one
-  `Box<[u8]>` per file (eight files); `Indexed` adds one `u32` per line. `Pread`
-  and `LazyResident` allocate nothing beyond the `File` handles —
-  `LazyResident`'s buffer is allocated the first time that file is queried.
-- **Per query, eager.** `get` and `lookup` return owned `DataRecord`s: one
-  `String` per textual field, one `Vec` each for `synonyms`, `ptrs` and `exp`.
+- **At open.** `Resident` and `Indexed` each read the whole file into one buffer
+  per file (eight files); `Indexed` adds four bytes per line. `Pread` and
+  `LazyResident` allocate nothing beyond the `File` handles — `LazyResident`'s
+  buffer is allocated the first time that file is queried.
+- **The 4 GiB ceiling.** Every strategy that makes a file resident — `Resident`,
+  `Indexed` and `LazyResident` — refuses a file of 4 GiB or more with
+  `Error::FileTooLarge` instead of handing its length to an allocator. A
+  dictionary path is caller-supplied and so is its size, so the length is
+  checked, not trusted: `LazyResident` reports it at open rather than at the
+  first query, and the read is capped one byte past the limit so a file that
+  grows between the metadata call and the read is refused on what was actually
+  read. Only `Pread`, which holds one line at a time, has no ceiling. WordNet
+  3.1's largest file is about 16 MB, four thousand times under the limit, which
+  is why respecting it costs nothing.
+- **Per query, eager.** `synset`, `senses` and `lookup` return owned `Synset`s:
+  one `String` per textual field, one `Vec` each for `words`, `pointers` and the
+  gloss's examples.
 - **Per query, borrowed** <a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>**.**
-  `DataFile::with_record` hands a `DataRecordRef` to a closure instead: every
-  string field except the cleaned examples is a subslice of the line being
-  parsed, so reading a synset allocates only for examples containing a quote or a
-  whitespace run needing cleanup. This is the primitive `DataFile::get` is built
-  on.
-- **Traversal.** `pointers` and `relation` allocate nothing beyond the
-  `DataRecord` each hop reads. `closure` adds a `VecDeque<Pointer>` queue and a
-  `Vec<u64>` of visited offsets, both bounded by the reachable subgraph.
-- **`IndexFile::find`.** Each probe allocates one `String` for the line it reads
-  (or reuses a scratch buffer on the positioned-read backends); nothing is
-  retained but the winning line.
+  `with_synset` hands a `SynsetRef` to a closure instead: every string field
+  points into the line being parsed, so reading a synset allocates only where the
+  gloss needs cleaning up. This is the primitive the owned form is built on —
+  `synset` is one `SynsetRef::to_synset` on top of it, so the two cannot diverge.
+- **Traversal.** `pointers` and `related` allocate nothing beyond the `Synset`
+  each hop reads. `closure` adds a queue of pending pointers and a visited set,
+  both bounded by the reachable subgraph.
+- **The bisection.** Each probe reads one line into a scratch buffer that is
+  reused across probes; nothing is retained but the winning line.
 
 There is no `_into` variant and no caller-supplied output buffer anywhere in this
 crate. See [Allocation](../performance/allocation) and
@@ -467,53 +472,51 @@ crate. See [Allocation](../performance/allocation) and
 ## Performance characteristics
 
 `crates/verbora-wordnet/benches/wordnet.rs` is a Criterion suite comparing the
-four `Storage` strategies across five dimensions: `open` (startup cost), `cold`
-(open plus one lookup), `lookup` (steady-state per-query latency), `repeat`
-(throughput over a realistic word list) and `footprint` (resident bytes). These
-benches need the real database and skip cleanly when `$WORDNET_DB_PATH` is unset.
+four `Storage` strategies across startup, cold, warm and batch dimensions. These
+benches need the real database and skip cleanly when no dictionary is configured.
 Reproduce with `cargo bench -p verbora-wordnet`; see
 [Benchmarks](../benchmarks/index) for results across the workspace.
 
+**No timing figure is published for this crate**: no measurement describes the
+implementation as it now stands, and measurement is pending.
+
 ## Unicode and language notes
 
-- **String comparison during the bisection is UTF-16 code-unit order**
-  <span class="badge badge-utf16">UTF-16</span> (`whitespace::value_lt`), not
-  Rust's UTF-8 byte `Ord`. The two disagree for supplementary-plane characters,
-  which decides which way a probe turns.
-- **Lookup normalisation is full Unicode lowercasing**, not
-  `str::to_ascii_lowercase`: `'İSTANBUL'` lowercases to nine code units from
-  eight, and `'ΟΔΟΣ'` produces a final sigma. Whitespace runs — a set that
-  excludes U+0085 and includes U+FEFF — collapse to a single `_`, so
-  `"  entity  "` becomes `"_entity_"`, which then misses.
-- **Line splitting on `/\s+/` keeps empty edge fields**, which is what makes
-  `find("")` a hit on a licence-header line: the header starts with two spaces,
-  so its first token is `""`.
-- **Decoding is lossy, not fallible.** A line's bytes are converted with
-  `String::from_utf8_lossy`, substituting U+FFFD for invalid bytes.
-- **Reported paths are normalised.** `IndexFile::file_path` and
-  `DataFile::file_path` collapse `.`, `..` and duplicate separators, which plain
-  [`Path::join`](https://doc.rust-lang.org/std/path/struct.Path.html#method.join)
-  does not.
+- **Searching is byte-wise.** `wndb(5WN)` specifies that index files are sorted in
+  the ASCII collating sequence so they can be binary searched, so `IndexFile::entry`
+  compares the raw bytes of a line's first field against the raw bytes of the key.
+  Comparing decoded scalar values would agree for every legal file — the format's
+  alphabet is ASCII — and would silently disagree for a corrupt one, which is the
+  case where being wrong matters.
+- **Content is Unicode scalar values.** A gloss is handed back as `&str`, decoded
+  from UTF-8 with invalid bytes replaced by `U+FFFD` rather than failing the whole
+  read: one corrupt byte costs one character of one definition, not the record.
+- **`index_key` works in scalars for whitespace and in ASCII for case.**
+  Whitespace uses Unicode's own definition, because a non-breaking space between
+  two words is still a word boundary. Case is folded only for ASCII, because
+  `wndb(5WN)` defines index lemmas as lower-case ASCII: folding `İ` would produce
+  a string no index contains, which is a guess dressed as a lookup.
+- **The copyright header is not an entry.** Header lines begin with two spaces, so
+  their first field is empty and sorts below every real lemma; an empty key answers
+  `None` without touching the file.
 
 ## Common mistakes
 
 - **Assuming the database ships with the crate.** It does not, ever.
   `WordNet::open` on a missing directory fails immediately with `Error::Io` — no
   partial dictionary, no silent stall.
-- **Passing a `Pos` name instead of its one-letter tag.** `get` and
-  `get_synonyms` take `"n"`, `"v"`, `"a"`, `"s"` or `"r"`; `"noun"` and `"N"`
-  both return `Error::UnknownPos`. `get_at` takes a typed `Pos` and cannot fail
-  to resolve one.
-- **Treating a miss as proof the word is not in the database.** The bisection is
-  incomplete by construction — see
-  [The index search is incomplete](#the-index-search-is-incomplete).
-- **Expecting `lookup` or `get_synonyms` to follow the index line's order.** Both
-  reverse it; number senses with `query_sense`, not by arrival position.
-- **Expecting `get_synonyms_of` to reuse your record's own pointers.** It re-reads
-  the synset from disk. Use `pointers` for the value in hand.
-- **Mixing up `get`'s two error paths.** `Error::UnknownPos` means the *tag* was
-  wrong; `Error::MissingGloss` and `Error::UnterminatedLine` mean the tag resolved
-  but the *offset* landed somewhere that is not a well-formed record start.
+- **Passing a raw offset without a category.** The same byte position names a
+  different synset in each of the four data files, so `synset` takes a
+  `SynsetOffset` *and* a `PartOfSpeech`. Use `target` to follow a `Pointer`, which
+  already carries both.
+- **Expecting a lookup to reduce morphology.** `lookup("running")` looks for
+  *running*. Stem first if that is what you meant.
+- **Passing a word where a key belongs.** `IndexFile::entry` uses its argument
+  verbatim; `WordNet::lookup` and friends apply `index_key` first.
+- **Treating an unknown word as an error.** It is an empty `Vec` or a `None`.
+  Errors are reserved for files that cannot be read or records that do not parse.
+- **Assuming `#s` means something separate from `#a`.** The adjective-satellite
+  tag routes to the adjective files, because that is where satellites live.
 
 ```rust
 use verbora_wordnet::{Error, WordNet};
@@ -525,15 +528,14 @@ fn main() {
 
 ## Related
 
-- [Inflectors](./inflectors) — normalise a word to a headword before looking it
-  up here.
+- [Stemmers](./stemmers) and [Inflectors](./inflectors) — reduce a word to a
+  headword before looking it up here.
 - [Iterator vs. `_into`](../performance/iterator-vs-into) — the lazy/eager
-  distinction behind `lookup` vs. `lookup_iter` and `relation` vs. `closure`.
+  distinction behind `lookup` vs. `lookup_iter` and `related` vs. `closure`.
 - [Parallelism](../performance/parallelism) — the shared, `Arc`-wrapped,
   read-only-query pattern this page reuses.
 - [Allocation](../performance/allocation) and
-  [Zero-copy](../performance/zero-copy) — what "borrowed" means for
-  `DataRecordRef`.
+  [Zero-copy](../performance/zero-copy) — what "borrowed" means for `SynsetRef`.
 - [Choosing an API](../choosing/index), [Core traits](./core),
   [Benchmarks](../benchmarks/index), [Recipes](../recipes/index).
 
@@ -543,8 +545,8 @@ fn main() {
 // verbora_wordnet
 pub struct Config { pub storage: Storage, pub prebuilt: Option<PathBuf> }
 pub enum Storage { Pread, LazyResident, Resident /* default */, Indexed }
-pub enum Pos { Noun, Verb, Adj, Adv }
-pub struct FilePair<'a> { pub index: &'a IndexFile, pub data: &'a DataFile }
+pub enum PartOfSpeech { Noun, Verb, Adjective, Adverb }
+pub enum SynsetType { Noun, Verb, Adjective, AdjectiveSatellite, Adverb }
 
 impl WordNet {
     pub fn open(dict_dir: impl AsRef<Path>) -> Result<Self>;
@@ -553,74 +555,80 @@ impl WordNet {
     pub fn from_env_with(config: &Config) -> Result<Self>;
 
     pub fn dict_dir(&self) -> &Path;
-    pub fn index_file(&self, pos: Pos) -> &IndexFile;
-    pub fn data_file_for(&self, pos: Pos) -> &DataFile;
-    pub fn data_file(&self, tag: &str) -> Option<&DataFile>;
-    pub fn file_pairs(&self) -> [FilePair<'_>; 4];
-    pub fn pair(&self, pos: Pos) -> FilePair<'_>;
+    pub fn index_file(&self, pos: PartOfSpeech) -> &IndexFile;
+    pub fn data_file(&self, pos: PartOfSpeech) -> &DataFile;
 
-    pub fn lookup(&self, word: &str) -> Result<Vec<DataRecord>>;
+    pub fn index_entry(&self, word: &str, pos: PartOfSpeech) -> Result<Option<IndexEntry>>;
+    pub fn senses(&self, word: &str, pos: PartOfSpeech) -> Result<Vec<Synset>>;
+    pub fn sense(&self, sense: &Sense) -> Result<Option<Synset>>;
+    pub fn lookup(&self, word: &str) -> Result<Vec<Synset>>;
     pub fn lookup_iter<'a>(&'a self, word: &str) -> LookupIter<'a>;
 
-    pub fn get(&self, synset_offset: f64, tag: &str) -> Result<DataRecord>;
-    pub fn get_at(&self, synset_offset: f64, pos: Pos) -> Result<DataRecord>;
+    pub fn synset(&self, offset: SynsetOffset, pos: PartOfSpeech) -> Result<Synset>;
+    pub fn with_synset<R>(&self, offset: SynsetOffset, pos: PartOfSpeech,
+        f: impl FnOnce(&SynsetRef<'_>) -> R) -> Result<R>;
+    pub fn target(&self, pointer: &Pointer) -> Result<Synset>;
 
-    pub fn lookup_synonyms(&self, word: &str) -> Result<Vec<DataRecord>>;
-    pub fn get_synonyms(&self, synset_offset: f64, tag: &str) -> Result<Vec<DataRecord>>;
-    pub fn get_synonyms_of(&self, record: &DataRecord) -> Result<Vec<DataRecord>>;
-
-    pub fn pointers<'a>(&'a self, record: &'a DataRecord) -> Pointers<'a>;
-    pub fn relation<'a>(&'a self, record: &'a DataRecord, symbol: &'a str) -> Pointers<'a>;
-    pub fn closure<'a>(&'a self, record: &DataRecord, symbol: &'a str) -> Closure<'a>;
+    pub fn pointers<'a>(&'a self, synset: &'a Synset) -> Pointers<'a>;
+    pub fn related<'a>(&'a self, synset: &'a Synset, symbol: PointerSymbol) -> Pointers<'a>;
+    pub fn closure<'a>(&'a self, synset: &Synset, symbol: PointerSymbol) -> Closure<'a>;
 
     // requires the `parallel` Cargo feature
-    pub fn par_lookup_batch(&self, words: &[&str]) -> Vec<Result<Vec<DataRecord>>>;
-
-    pub fn query_sense(&self, spec: &str) -> Result<Vec<Sense>>;
-    pub fn find_sense(&self, spec: &str) -> Result<Option<DataRecord>>;
+    pub fn par_lookup_batch(&self, words: &[&str]) -> Vec<Result<Vec<Synset>>>;
 }
 
-impl Pos {
-    pub fn from_tag(tag: &str) -> Option<Self>;   // "n"/"v"/"a"/"s"/"r"; "s" -> Adj
-    pub fn suffix(self) -> &'static str;          // "noun"/"verb"/"adj"/"adv"
-    pub fn tag(self) -> &'static str;             // "n"/"v"/"a"/"r"
-    pub fn all() -> [Self; 4];
+impl PartOfSpeech {
+    pub const ALL: [Self; 4];
+    pub fn from_tag(tag: &str) -> Option<Self>;   // "n"/"v"/"a"/"s"/"r"; "s" -> Adjective
+    pub fn tag(self) -> &'static str;
+    pub fn file_suffix(self) -> &'static str;     // "noun"/"verb"/"adj"/"adv"
+    pub fn name(self) -> &'static str;
 }
 
-impl Iterator for LookupIter<'_> { type Item = Result<DataRecord>; }
-impl Iterator for Pointers<'_>   { type Item = Result<DataRecord>; }
-impl Iterator for Closure<'_>    { type Item = Result<DataRecord>; }
+impl Iterator for LookupIter<'_> { type Item = Result<Synset>; }
+impl Iterator for Pointers<'_>   { type Item = Result<Synset>; }
+impl Iterator for Closure<'_>    { type Item = Result<Synset>; }
 
 // records
-pub struct DataRecord { pub synset_offset: f64, pub lex_filenum: f64, pub pos: Option<String>,
-    pub w_cnt: f64, pub lemma: Option<String>, pub synonyms: Vec<Option<String>>,
-    pub lex_id: Option<String>, pub ptrs: Vec<Pointer>, pub gloss: String, pub def: String,
-    pub exp: Vec<String> }
-pub struct DataRecordRef<'a> { /* borrowed mirror of DataRecord */ }
-pub struct Pointer { pub pointer_symbol: Option<String>, pub synset_offset: f64,
-    pub pos: Option<String>, pub source_target: Option<String> }
-pub struct IndexRecord { pub lemma: Option<String>, pub pos: Option<String>,
-    pub ptr_symbol: Vec<Option<String>>, pub sense_cnt: f64, pub tagsense_cnt: f64,
-    pub synset_offset: Vec<f64> }
-pub enum Find { Hit(IndexHit), Miss }
+pub struct SynsetOffset(u32);          // new(u32), get() -> u32
+pub struct Synset { pub offset: SynsetOffset, pub lex_filenum: u8,
+    pub synset_type: SynsetType, pub words: Vec<Word>, pub pointers: Vec<Pointer>,
+    pub gloss: Gloss }
+pub struct SynsetRef<'a> { /* borrowed mirror of Synset; to_synset() -> Synset */ }
+pub struct Word { pub lemma: String, pub lex_id: u8, pub marker: Option<SyntacticMarker> }
+pub struct Gloss { pub definition: String, pub examples: Vec<String> }
+pub struct Pointer { pub symbol: PointerSymbol, pub offset: SynsetOffset,
+    pub synset_type: SynsetType, pub scope: PointerScope }
+pub enum PointerScope { Semantic, Lexical { source_word: NonZeroU8, target_word: NonZeroU8 } }
+pub struct IndexEntry { pub lemma: String, pub pos: PartOfSpeech,
+    pub pointer_symbols: Vec<PointerSymbol>, pub tagged_sense_count: u32,
+    pub synset_offsets: Vec<SynsetOffset> }
+
+impl Synset {
+    pub fn lemma(&self) -> &str;
+    pub fn part_of_speech(&self) -> PartOfSpeech;
+    pub fn pointers_with(&self, symbol: PointerSymbol) -> impl Iterator<Item = &Pointer>;
+}
 
 impl DataFile {
-    pub fn open(dict_dir: &Path, name: &str, storage: Storage) -> Result<Self>;
-    pub fn file_path(&self) -> &str;
-    pub fn path(&self) -> PathBuf;
-    pub fn with_record<R>(&self, offset: f64, f: impl FnOnce(&DataRecordRef<'_>) -> R) -> Result<R>;
-    pub fn get(&self, offset: f64) -> Result<DataRecord>;
+    pub fn open(path: impl AsRef<Path>, pos: PartOfSpeech, storage: Storage) -> Result<Self>;
+    pub fn path(&self) -> &Path;
+    pub fn part_of_speech(&self) -> PartOfSpeech;
+    pub fn len_bytes(&self) -> u64;
+    pub fn synset(&self, offset: SynsetOffset) -> Result<Synset>;
+    pub fn with_synset<R>(&self, offset: SynsetOffset,
+        f: impl FnOnce(&SynsetRef<'_>) -> R) -> Result<R>;
+    pub fn synsets(&self) -> Synsets<'_>;
 }
 impl IndexFile {
-    pub fn open(dict_dir: &Path, name: &str, storage: Storage) -> Result<Self>;
-    pub fn file_path(&self) -> &str;
-    pub fn path(&self) -> PathBuf;
-    pub fn probes<'a>(&'a self, search_key: &'a str) -> Probes<'a>;
-    pub fn find(&self, search_key: &str) -> Result<Find>;
-    pub fn lookup(&self, word: &str) -> Result<Option<IndexRecord>>;
+    pub fn open(path: impl AsRef<Path>, pos: PartOfSpeech, storage: Storage) -> Result<Self>;
+    pub fn path(&self) -> &Path;
+    pub fn part_of_speech(&self) -> PartOfSpeech;
+    pub fn len_bytes(&self) -> u64;
+    pub fn entry(&self, key: &str) -> Result<Option<IndexEntry>>;
+    pub fn entries(&self) -> Entries<'_>;
 }
-pub fn parse_data_line(line: &str) -> std::result::Result<DataRecordRef<'_>, ParseError>;
-pub fn parse_index_line(line: &str) -> Result<IndexRecord>;
+pub fn index_key(word: &str) -> Cow<'_, str>;
 
 // prebuilt
 impl PrebuiltIndex {
@@ -628,37 +636,48 @@ impl PrebuiltIndex {
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()>;
     pub fn load(path: impl AsRef<Path>) -> Result<Self>;
     pub fn to_bytes(&self) -> Vec<u8>;
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self>;
-    pub fn source_for(&self, name: &str, path: &Path) -> Result<Source>;
+    pub fn from_bytes(path: &Path, bytes: &[u8]) -> Result<Self>;
     pub fn names(&self) -> Vec<&str>;
     pub fn line_count(&self) -> usize;
     pub fn byte_size(&self) -> usize;
     pub fn default_path(dict_dir: impl AsRef<Path>) -> PathBuf;
 }
 
-// sense
-pub struct Sense { pub lemma: String, pub pos: Pos, pub number: Option<usize> }
+// sense addressing — `lemma#pos#number`, all three parts required
+pub struct SenseNumber(NonZeroU16);    // FIRST, new, from_u16, get, as_usize
+pub struct Sense { pub lemma: String, pub pos: PartOfSpeech, pub number: SenseNumber }
 impl std::str::FromStr for Sense { type Err = ParseSenseError; }
-impl std::fmt::Display for Sense { /* "lemma#pos[#n]" */ }
+impl std::fmt::Display for Sense { /* "lemma#pos#number" */ }
 
-// pointer — relation-symbol constants: ANTONYM, HYPERNYM, INSTANCE_HYPERNYM,
-// HYPONYM, INSTANCE_HYPONYM, MEMBER_HOLONYM, SUBSTANCE_HOLONYM, PART_HOLONYM,
-// MEMBER_MERONYM, SUBSTANCE_MERONYM, PART_MERONYM, ATTRIBUTE,
-// DERIVATIONALLY_RELATED, DOMAIN_TOPIC, MEMBER_TOPIC, DOMAIN_REGION,
-// MEMBER_REGION, DOMAIN_USAGE, MEMBER_USAGE, ENTAILMENT, CAUSE, ALSO_SEE,
-// VERB_GROUP, SIMILAR_TO, PARTICIPLE, PERTAINYM
-pub fn describe(symbol: &str) -> Option<&'static str>;
+// pointer — 26 relations: Antonym, Hypernym, InstanceHypernym, Hyponym,
+// InstanceHyponym, MemberHolonym, SubstanceHolonym, PartHolonym, MemberMeronym,
+// SubstanceMeronym, PartMeronym, Attribute, DerivationallyRelatedForm,
+// DomainOfTopic, MemberOfTopic, DomainOfRegion, MemberOfRegion, DomainOfUsage,
+// MemberOfUsage, Entailment, Cause, AlsoSee, VerbGroup, SimilarTo,
+// ParticipleOfVerb, Pertainym
+impl PointerSymbol {
+    pub fn from_symbol(symbol: &str) -> Option<Self>;
+    pub fn symbol(self) -> &'static str;
+    pub fn name(self, pos: PartOfSpeech) -> &'static str;
+}
 
 // error
 pub enum Error {
     Io { path: PathBuf, source: std::io::Error },
-    UnterminatedLine { path: PathBuf, offset: u64 },
-    MissingGloss { path: PathBuf, offset: u64 },
-    InvalidOffset { path: PathBuf, offset: f64 },
-    UnknownPos(String),
-    NegativeProbe { path: PathBuf, position: i64 },
-    CountTooLarge { field: &'static str, value: f64 },
-    Prebuilt(String),
+    DictionaryNotFound { tried: Vec<PathBuf> },
+    MalformedIndexEntry { path: PathBuf, line_start: u64, kind: RecordError },
+    MalformedSynset { path: PathBuf, offset: SynsetOffset, kind: RecordError },
+    OffsetOutOfRange { path: PathBuf, offset: SynsetOffset, file_len: u64 },
+    FileTooLarge { path: PathBuf, len: u64, limit: u64 },
+    Prebuilt { path: PathBuf, reason: String },
+    // #[non_exhaustive]
+}
+pub enum RecordError {
+    MissingField { field: &'static str },
+    InvalidField { field: &'static str, value: String },
+    MissingGloss,
+    SenseCountMismatch { synset_cnt: u32, sense_cnt: u32 },
+    OffsetMismatch { requested: SynsetOffset, found: SynsetOffset },
     // #[non_exhaustive]
 }
 pub type Result<T> = std::result::Result<T, Error>;

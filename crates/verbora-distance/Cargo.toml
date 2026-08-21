@@ -1,6 +1,6 @@
 [package]
 name = "verbora-distance"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -10,8 +10,19 @@ description = "String distance and similarity metrics for Rust"
 keywords = ["levenshtein", "jaro-winkler", "hamming", "dice", "string-distance"]
 categories.workspace = true
 
+# docs.rs bakes one immutable page set per published version: a page built with
+# the wrong flags cannot be re-rendered later, only republished under a new
+# version. Build with every feature enabled, so feature-gated items and the doc
+# links pointing at them resolve, and with `--cfg docsrs`, which is what makes
+# the `#[cfg_attr(docsrs, doc(cfg(...)))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
-verbora-core = { workspace = true }
+# No `verbora-core`, and no Unicode character database of any kind: no metric
+# here folds case, trims or normalises, so results are frozen across Unicode
+# versions (`docs/design/distance-contract.md` §1).
 rustc-hash = { workspace = true }
 # `par_*_batch` functions: data-parallel fan-out over the existing sequential
 # metrics, gated behind the `parallel` feature.
@@ -27,10 +38,11 @@ harness = false
 
 [features]
 default = []
-# Adds `par_levenshtein_batch`, `par_damerau_levenshtein_batch`,
-# `par_jaro_winkler_batch`, `par_dice_coefficient_batch` and
-# `par_hamming_batch` — `rayon`-backed fan-outs over the existing sequential
-# metrics. See each function's doc comment for when to reach for it.
+# Adds six `rayon`-backed fan-outs over the existing sequential metrics, one
+# per metric: `par_levenshtein_batch`, `par_damerau_levenshtein_batch`,
+# `par_osa_batch`, `par_jaro_winkler_batch`, `par_dice_coefficient_batch` and
+# `par_hamming_batch`. See each function's doc comment for when to reach for
+# it.
 parallel = ["dep:rayon"]
 
 [lints]

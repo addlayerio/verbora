@@ -1,68 +1,166 @@
-//! Text normalization and diacritic folding for Rust.
+//! Rewrites text, and says in each function's name exactly what the rewrite is.
 //!
-//! A port of the reference `normalizers` module: five independent normalizers that share
-//! nothing but a habit of doing surprising things to Unicode.
+//! Five functions. Four are the Unicode normalization forms of [UAX #15]; the
+//! fifth is a Verbora-defined fold built out of them.
 //!
-//! | Rust | the reference | Job |
+//! | Function | Rewrite | Annex |
 //! |---|---|---|
-//! | [`normalize`] | `normalize(tokens)` (`normalizeTokens`) | expand English contractions |
-//! | [`normalize_token`] | `normalize(string)` | the same, for the bare-string call |
-//! | [`remove_diacritics`] | `removeDiacritics` | fold Latin diacritics to base letters |
-//! | [`normalize_no`] | `normalizeNo` | fold Norwegian diacritics |
-//! | [`normalize_sv`] | `normalizeSv.removeDiacritics` | fold Swedish diacritics |
-//! | [`normalize_ja`] | `normalizeJa` | normalize Japanese widths, kana and symbols |
-//! | [`ja::converters`] | `Converters` | the seventeen individual Japanese conversions |
+//! | [`nfd`] | Canonical Decomposition | [UAX #15] §1.2 |
+//! | [`nfc`] | Canonical Decomposition, then Canonical Composition | [UAX #15] §1.2 |
+//! | [`nfkd`] | Compatibility Decomposition | [UAX #15] §1.2 |
+//! | [`nfkc`] | Compatibility Decomposition, then Canonical Composition | [UAX #15] §1.2 |
+//! | [`remove_diacritics`] | NFD, drop every scalar with `Canonical_Combining_Class != 0`, NFC | Verbora, defined on the item |
 //!
-//! # Everything returns a [`Cow`](std::borrow::Cow)
+//! This is the one crate in Verbora's text-shaping group whose job *is*
+//! rewriting. `verbora-tokenizers` and `verbora-ngrams` never alter the text
+//! they are given; every function here does, and none of them hides it behind
+//! a name that suggests otherwise.
 //!
-//! These functions are usually called on text that needs no change at all — a
-//! Latin sentence handed to the katakana converter, an ASCII token handed to the
-//! diacritic folder. Every single-string API therefore returns
-//! `Cow::Borrowed` when it changed nothing, and allocates only at the first
-//! replacement. The multi-stage pipelines ([`normalize_ja`],
-//! [`ja::converters::hiragana_to_katakana`]) carry the borrow through every
-//! stage rather than allocating once per stage as the reference does.
+//! ```
+//! use verbora_normalizers::{nfc, nfkc, remove_diacritics};
 //!
-//! # Deliberate divergences from the reference
+//! assert_eq!(nfc("e\u{0301}"), "é");            // compose
+//! assert_eq!(nfkc("ｶﾞ"), "ガ");                 // width- and mark-fold
+//! assert_eq!(remove_diacritics("résumé"), "resume");
+//! ```
 //!
-//! Three, each argued where it lives:
+//! # The unit of text is the Unicode scalar value
 //!
-//! * **`normalizeSv` is callable here.** In the reference it is the module *object*
-//!   and calling it throws; see [`normalize_sv`].
-//! * **`normalize(["constructor"])` does not panic.** The reference's conversion
-//!   table is a plain object literal, so `"constructor"` and `"__proto__"` find
-//!   `Object.prototype` members and throw `TypeError: ....split is not a
-//!   function`. A Rust lookup has no prototype chain, so both come back as
-//!   ordinary unmatched tokens. See [`normalize`].
-//! * **`normalize_ja` cannot emit a lone surrogate.** Its first stage matches
-//!   UTF-16 code units and can split a surrogate pair; the reference renders the
-//!   result as an unpaired surrogate, which a Rust `String` cannot hold, so it
-//!   becomes U+FFFD. See [`normalize_ja`].
+//! [UAX #15] defines all four forms as maps over sequences of code points, and
+//! `Canonical_Combining_Class` is a per-code-point property, so this is the
+//! unit the operation is written in rather than a choice this crate makes.
+//! There is no smaller unit at which normalization is defined, and a grapheme
+//! cluster would be strictly larger than the sequences being reordered.
 //!
-//! Everything else is byte-exact against `fixtures/normalizers.json`, which
-//! records 127,902 calls into the real library, replayed by `tests/parity.rs`.
+//! There is no UTF-16 anywhere in this crate — no public type, no internal
+//! buffer, no index. The direct consequence is that **nothing here can emit
+//! `U+FFFD` unless `U+FFFD` was in the input**: an astral scalar has no halves
+//! to split, so `nfkc("😀々")` is `"😀々"`.
 //!
-//! # Generated data
+//! # Every function returns `Cow`, and the borrow means something
 //!
-//! `src/ja/tables.rs` and `src/diacritics/table.rs` were machine-derived by
-//! dumping the reference's own tables at runtime rather than transcribing them —
-//! several of them do not exist in the reference source at all, being built at
-//! load time by `flip()` and `merge()` whose collision rules are observable.
-//! Derivation also re-proved,
-//! on every run, the two properties the scanners depend on: that no key is a
-//! proper prefix of a later key, and that the 86-pass diacritics algorithm is
-//! equivalent to a single per-character lookup.
+//! Each of the five returns [`Cow::Borrowed`](std::borrow::Cow::Borrowed) **if
+//! and only if** the result is byte-identical to the input. That is a
+//! guarantee, not a description of a fast path: branching on
+//!
+//! ```
+//! # use std::borrow::Cow;
+//! # use verbora_normalizers::nfc;
+//! # let text = "already composed";
+//! let key = match nfc(text) {
+//!     Cow::Borrowed(s) => s.to_owned(), // the input was already in NFC
+//!     Cow::Owned(s) => s,               // it was not, and `s` is the NFC form
+//! };
+//! # assert_eq!(key, "already composed");
+//! ```
+//!
+//! is correct code, not an optimization that might stop working. The
+//! quick-check properties of [UAX #15] §9 decide it without materialising the
+//! result in the common case; where a quick check answers `Maybe` the
+//! implementation compares and still returns `Borrowed` when it can.
+//!
+//! # The Unicode version is part of the contract
+//!
+//! Normalization is defined by UCD properties — `Decomposition_Mapping`,
+//! `Canonical_Combining_Class`, `Composition_Exclusion` — so this crate cannot
+//! promise results frozen for all time. A frozen table would be wrong for
+//! every character encoded after the freeze, which is worse than a moving one.
+//! Instead:
+//!
+//! * The Unicode version is whichever version `unicode-normalization` ships,
+//!   pinned in `Cargo.lock`. At the version this crate is built against that is
+//!   **Unicode 17.0.0**; [`unicode_version`] reports it at runtime, and
+//!   `tests/conformance.rs` replays the UCD's own `NormalizationTest.txt` for
+//!   it, so a dependency bump that moves any mapping fails loudly there.
+//! * A UCD upgrade is a **semver-visible behaviour change** for this crate and
+//!   is released as one.
+//! * **Any structure that persists normalizer-derived keys must stamp the
+//!   Unicode version and refuse to load across a change.** A search index, a
+//!   trained model or an interned term table built before an upgrade does not
+//!   match one built after it, and nothing else will tell you.
+//!
+//! Within one Unicode version the crate is fully deterministic: same input,
+//! same output, on every platform and every build. There is no global mutable
+//! state, no hash-order dependence, no interior mutability, and no floating
+//! point.
+//!
+//! # Choosing the right API
+//!
+//! All five functions have the same shape — `&str` in, `Cow<str>` out — so the
+//! choice is entirely about which rewrite you want.
+//!
+//! | Call | Use when | Loses | Allocates |
+//! |---|---|---|---|
+//! | [`nfc`] | you want one canonical spelling per abstract character, for storage, comparison or hashing. **The default for text you will show a human again.** | nothing: the result is canonically equivalent to the input, so only the spelling changes | one `String`, and only if the input was not already NFC |
+//! | [`nfd`] | you are about to inspect or filter combining marks yourself | nothing, for the same reason | as `nfc` |
+//! | [`nfkc`] | you want a *matching* key that ignores width, ligation and circling — halfwidth katakana, fullwidth Latin, `ﬁ`, `Ⅻ` | formatting distinctions, irreversibly | as `nfc` |
+//! | [`nfkd`] | the same, and you will inspect the marks yourself | as `nfkc` | as `nfc` |
+//! | [`remove_diacritics`] | you want accent-insensitive matching of Latin-script text | every combining mark, and for Thai and Devanagari that changes the word rather than de-accenting it — read the function's own table before using it on non-Latin text | nothing for ASCII; one `String` otherwise |
+//! | `par_remove_diacritics_batch` (feature `parallel`) | many independent documents at once | the same as `remove_diacritics` | one `Vec` plus the per-input cost |
+//!
+//! A decision tree, for the common question "which one do I store?":
+//!
+//! ```text
+//! Do you need the text back, readable, exactly as written?
+//!  ├─ yes → nfc
+//!  └─ no, it is a lookup key
+//!      ├─ must "ｱ" match "ア" and "Ａ" match "A"?
+//!      │   ├─ yes → nfkc
+//!      │   └─ no  → nfc
+//!      └─ must "resume" match "résumé"?
+//!          └─ yes → remove_diacritics (after nfkc, if you also wanted that)
+//! ```
+//!
+//! The forms compose in the obvious way and nothing here does it for you:
+//! `remove_diacritics(&nfkc(text))` is the width-, ligature- and
+//! accent-insensitive key, spelled out so the two rewrites are both visible at
+//! the call site.
+//!
+//! There is deliberately no `par_nfc_batch` and no sibling for the other three
+//! forms. They are adapters over `unicode-normalization` with no Verbora-side
+//! per-item work to fan out, so `inputs.par_iter().map(nfc).collect()` at the
+//! call site is the same code with one fewer name to learn.
+//!
+//! # Performance
+//!
+//! **Unmeasured.** Every function in this crate was reimplemented in the
+//! Rust-native migration, and no benchmark has been run against the new code.
+//! The allocation behaviour above is a property of the implementation and is
+//! stated as such; no timing claim is made, and none should be inferred.
+//!
+//! [UAX #15]: https://www.unicode.org/reports/tr15/
 
-mod table;
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-pub mod diacritics;
-pub mod english;
-pub mod ja;
-pub mod nordic;
+mod diacritics;
+mod forms;
 
 #[cfg(feature = "parallel")]
 pub use diacritics::par_remove_diacritics_batch;
 pub use diacritics::remove_diacritics;
-pub use english::{normalize, normalize_token};
-pub use ja::normalize_ja;
-pub use nordic::{normalize_no, normalize_sv};
+pub use forms::{nfc, nfd, nfkc, nfkd};
+
+/// The Unicode version whose `Decomposition_Mapping`,
+/// `Canonical_Combining_Class` and `Composition_Exclusion` assignments this
+/// crate's results are computed from, as `(major, minor, update)`.
+///
+/// Stamp this into anything that persists normalizer-derived keys, and refuse
+/// to load an artifact whose stamp differs: mappings move between Unicode
+/// versions, so an index built under one and queried under another silently
+/// mismatches rather than failing.
+///
+/// ```
+/// // The version is a fact about the build, not a constant to assert against
+/// // in application code — record it, compare it, do not hardcode it.
+/// let (major, _minor, _update) = verbora_normalizers::unicode_version();
+/// assert!(major >= 17);
+/// ```
+#[must_use]
+pub fn unicode_version() -> (u64, u64, u64) {
+    let (major, minor, update) = unicode_normalization::UNICODE_VERSION;
+    // Widened so that this and `verbora_tokenizers::unicode_version` have the
+    // same type: a consumer stamping both into one persisted artifact should
+    // not have to reconcile two integer widths that mean the same thing.
+    (u64::from(major), u64::from(minor), u64::from(update))
+}

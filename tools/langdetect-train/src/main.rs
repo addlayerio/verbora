@@ -5,7 +5,7 @@
 //! prepare --corpus-dir <tatoeba dumps> --data-dir <workdir>
 //! train   --data-dir <workdir> [--weights-out <path>] [--manifest-out <path>]
 //! <rebuild: the generated weights are Rust source compiled into the crate>
-//! eval    --data-dir <workdir> --dataset <dataset.json>
+//! eval    [--data-dir <workdir>] [--dataset <dataset.json>]
 //! golden  < inputs.json
 //! ```
 
@@ -22,7 +22,8 @@ use langdetect_train::{
 };
 use verbora_language::train_support::{CYRILLIC_CLASSES, DIMENSION, LATIN_CLASSES};
 use verbora_language::{
-    HashedLinearDetector, Language, LanguageDetector, Script, WhatlangDetector, detect_script,
+    FallbackDetector, HashedLinearDetector, Language, LanguageDetector, Script, WhatlangDetector,
+    detect_script,
 };
 
 /// One corpus language: Tatoeba ISO 639-3 file stem, this crate's ISO
@@ -456,7 +457,17 @@ fn codegen(
          //\n\
          // The published evaluation set (UDHR-derived dataset.json under\n\
          // benchmarks/competitive/datasets/language-accuracy) is NOT part of\n\
-         // the training data.\n",
+         // the training data.\n\
+         //\n\
+         // FEATURE_EXTRACTOR_FINGERPRINT below identifies the feature\n\
+         // transform these tables were trained through. A weight is a number\n\
+         // about a bucket, so weights and extractor are one artifact:\n\
+         // changing hashed_features or hashed_features_cyrillic without\n\
+         // regenerating this file leaves every weight pointing at a bucket\n\
+         // that no longer means what it meant. verbora-language's\n\
+         // committed_weights_were_trained_through_this_extractor recomputes\n\
+         // the fingerprint from the shipped extractors and fails when it\n\
+         // stops matching, so that drift cannot be silent.\n",
     );
     write_report_comment(&mut out, "latin", &LATIN_CLASSES, latin_report);
     write_report_comment(&mut out, "cyrillic", &CYRILLIC_CLASSES, cyr_report);
@@ -472,6 +483,14 @@ fn codegen(
     writeln!(
         out,
         "pub const CYRILLIC_ABSTAIN_MARGIN: f32 = {cyr_abstain:?};"
+    )
+    .unwrap();
+    // Emitted last so it is impossible to regenerate the tables without
+    // also regenerating the fingerprint that says what produced them.
+    writeln!(
+        out,
+        "pub const FEATURE_EXTRACTOR_FINGERPRINT: u64 = {:#018X};",
+        verbora_language::train_support::feature_extractor_fingerprint()
     )
     .unwrap();
     out
@@ -517,11 +536,37 @@ fn write_table(out: &mut String, name: &str, values: &[f32]) {
 /// `HashedLinearDetector` (abstentions counted separately, and as
 /// incorrect in the accuracy column) plus the repository's UDHR tier
 /// dataset, side by side with `WhatlangDetector`.
+///
+/// Both sections are optional and independent, because the two inputs
+/// have very different availability: the held-out splits exist only in a
+/// maintainer's `prepare` workdir (the Tatoeba corpus is not committed —
+/// see README.md), while `dataset.json` *is* committed. Requiring
+/// `--data-dir` for a dataset-only run would make the committed half of
+/// the evaluation unreproducible for anyone who has not downloaded ~95 MB
+/// of corpus, so `--data-dir` is honoured when given and skipped (with a
+/// printed note, never silently) when it is not.
 fn run_eval(args: &[String]) {
-    let data_dir = PathBuf::from(required_flag(args, "--data-dir"));
     let fast = HashedLinearDetector::new();
     let whatlang = WhatlangDetector::new();
 
+    match flag(args, "--data-dir") {
+        Some(dir) => eval_heldout_splits(&PathBuf::from(dir), &fast),
+        None => println!(
+            "== held-out, end-to-end: skipped (no --data-dir; run `prepare` first to produce one) =="
+        ),
+    }
+
+    match flag(args, "--dataset") {
+        Some(dataset) => eval_tier_dataset(&dataset, &fast, &whatlang),
+        None => println!("== UDHR tier dataset: skipped (no --dataset) =="),
+    }
+}
+
+/// Held-out accuracy per language through the shipped detector.
+/// Abstentions are reported separately *and* counted as not-correct in
+/// the accuracy column — an abstention is a non-answer, and letting it
+/// quietly leave the denominator would inflate every number here.
+fn eval_heldout_splits(data_dir: &Path, fast: &HashedLinearDetector) {
     println!("== held-out, end-to-end (HashedLinearDetector) ==");
     for cl in LATIN_CORPUS.iter().chain(&CYRILLIC_CORPUS) {
         let path = data_dir.join(format!("{}.heldout.txt", cl.lang.iso639_1()));
@@ -542,33 +587,72 @@ fn run_eval(args: &[String]) {
             100.0 * abstain as f64 / total.max(1) as f64,
         );
     }
+}
 
-    if let Some(dataset) = flag(args, "--dataset") {
-        let body = fs::read_to_string(&dataset).expect("dataset.json must be readable");
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let languages = json["languages"].as_array().unwrap();
-        println!("== UDHR tier dataset (eval only — never trained on) ==");
-        for tier in ["short_word", "short_phrase", "sentence", "paragraph"] {
-            let (mut fast_ok, mut wl_ok) = (0usize, 0usize);
-            for entry in languages {
-                let iso = entry["iso639_1"].as_str().unwrap();
-                let text = entry["items"][tier].as_str().unwrap();
-                if fast.detect(text).best().map(|c| c.language.iso639_1()) == Some(iso) {
-                    fast_ok += 1;
-                }
-                if whatlang.detect(text).best().map(|c| c.language.iso639_1()) == Some(iso) {
-                    wl_ok += 1;
+/// The committed UDHR tier dataset, every shipped detector side by side,
+/// with a per-tier miss list. The misses are printed rather than
+/// summarised because the decision this evaluation feeds — whether the
+/// fast detector may become anyone's default — turns on *which* languages
+/// it loses, not only on how many.
+///
+/// The third column is `FallbackDetector<HashedLinear, Whatlang>`, the
+/// composition the crate documents: it is the only configuration that can
+/// be both fast and (on this set) as accurate as the reference, so the
+/// numbers backing that claim have to come from the same run as the
+/// numbers backing the other two, not from a separate hand-check.
+fn eval_tier_dataset(dataset: &str, fast: &HashedLinearDetector, whatlang: &WhatlangDetector) {
+    let composed = FallbackDetector::new(*fast, *whatlang);
+    let body = fs::read_to_string(dataset).expect("dataset.json must be readable");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let languages = json["languages"].as_array().unwrap();
+    let n = languages.len();
+    println!("== UDHR tier dataset (eval only — never trained on) ==");
+    let mut totals = [0usize; 3];
+    for tier in ["short_word", "short_phrase", "sentence", "paragraph"] {
+        let mut correct = [0usize; 3];
+        let mut misses: [Vec<String>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for entry in languages {
+            let iso = entry["iso639_1"].as_str().unwrap();
+            let text = entry["items"][tier].as_str().unwrap();
+            let got = [
+                fast.detect(text).best().map(|c| c.language.iso639_1()),
+                whatlang.detect(text).best().map(|c| c.language.iso639_1()),
+                composed.detect(text).best().map(|c| c.language.iso639_1()),
+            ];
+            for (i, answer) in got.iter().enumerate() {
+                if *answer == Some(iso) {
+                    correct[i] += 1;
+                } else {
+                    misses[i].push(format!("{iso}->{}", answer.unwrap_or("(abstain)")));
                 }
             }
-            println!(
-                "  {tier:<12} fast {fast_ok}/{} ({:.1}%)  whatlang {wl_ok}/{} ({:.1}%)",
-                languages.len(),
-                100.0 * fast_ok as f64 / languages.len() as f64,
-                languages.len(),
-                100.0 * wl_ok as f64 / languages.len() as f64,
-            );
+        }
+        for (i, c) in correct.iter().enumerate() {
+            totals[i] += c;
+        }
+        println!(
+            "  {tier:<12} fast {}/{n} ({:.1}%)  whatlang {}/{n} ({:.1}%)  fallback {}/{n} ({:.1}%)",
+            correct[0],
+            100.0 * correct[0] as f64 / n as f64,
+            correct[1],
+            100.0 * correct[1] as f64 / n as f64,
+            correct[2],
+            100.0 * correct[2] as f64 / n as f64,
+        );
+        for (label, list) in ["fast", "whatlang", "fallback"].iter().zip(&misses) {
+            println!("    {label:<9} misses: {}", list.join(" "));
         }
     }
+    println!(
+        "  {:<12} fast {}/{}  whatlang {}/{}  fallback {}/{}",
+        "TOTAL",
+        totals[0],
+        4 * n,
+        totals[1],
+        4 * n,
+        totals[2],
+        4 * n
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +674,7 @@ fn run_golden() {
             Some(c) => println!(
                 "({input:?}, Some((Language::{:?}, {:#010X}))),",
                 c.language,
-                c.confidence.to_bits()
+                c.confidence.get().to_bits()
             ),
         }
     }

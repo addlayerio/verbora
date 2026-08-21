@@ -1,23 +1,37 @@
 [package]
 name = "verbora-util"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Utilities: stopwords, graphs, storage backends"
+description = "Stop-word and abbreviation tables, edge-weighted digraphs and DAG path trees"
 keywords = ["stopwords", "graph", "nlp"]
 categories.workspace = true
+
+# docs.rs bakes one immutable page set per published version: a page built with
+# the wrong flags cannot be re-rendered later, only republished under a new
+# version. Build with every feature enabled, so feature-gated items and the doc
+# links pointing at them resolve, and with `--cfg docsrs`, which is what makes
+# the `#[cfg_attr(docsrs, doc(cfg(...)))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 verbora-core = { workspace = true }
 rustc-hash = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Test-only. `every_entry_is_already_nfc` enumerates every stop-word and
+# abbreviation entry against UAX #15 NFC; asserting that property without a
+# normalizer would mean hand-listing the answer, which is the kind of frozen
+# table this migration exists to remove. Nothing in the shipped crate
+# normalises, so this stays out of `[dependencies]`.
+unicode-normalization = { workspace = true }
+# Test-only. `benches/util.rs` reads the shared `benches/data/words.json`.
 serde_json = { workspace = true }
 
 [[bench]]

@@ -1,6 +1,7 @@
 //! Compiles the vendored `pixelglow/double_metaphone` C++11 header (via a
 //! thin C-ABI shim in the same directory) so
-//! `benches/double_metaphone_cpp.rs` can time it through FFI. See
+//! `tests/double_metaphone_cpp_correctness.rs` can check Verbora against
+//! it through FFI. See
 //! `vendor/pixelglow-double_metaphone/README.md` for the library's
 //! provenance and license, and `src/double_metaphone_cpp.rs` for the Rust
 //! side of the binding.

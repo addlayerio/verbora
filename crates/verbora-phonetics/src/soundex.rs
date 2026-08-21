@@ -1,472 +1,209 @@
-//! Russell/NARA-style SoundEx, as the reference implements it.
-//!
-//! Ports the reference `soundex`. This is **not** textbook SoundEx —
-//! see [`SoundEx::process`] for the three places it deviates, each of which is
-//! reachable from ordinary input.
+//! Russell Soundex, as codified by the U.S. National Archives.
 
-use std::borrow::Cow;
+use crate::letters::Letters;
 
-use crate::PhoneticError;
-use crate::units::{clamp_take, coerce_or_default, utf16_len, utf16_to_lowercase};
-
-/// Russell/NARA-style SoundEx.
+/// Russell Soundex — one retained letter followed by three digits.
+///
+/// # Publication
+///
+/// Robert C. Russell, *Index*, U.S. Patent 1,261,167 (filed 1917, granted
+/// 1918) and U.S. Patent 1,435,663 (1922). The coding rules Verbora
+/// implements are the ones the U.S. National Archives and Records
+/// Administration publishes for the federal census indexes, *The Soundex
+/// Indexing System* — the only widely-cited normative statement of the
+/// algorithm, and the source of the eleven worked examples pinned in this
+/// crate's tests.
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar.** Every scalar of the input is
+///   examined once, left to right.
+/// * **Only the twenty-six Latin letters `A`–`Z` are coded**, matched after
+///   simple ASCII case folding. Every other scalar — an accented letter, a
+///   digit, a space, a hyphen, an apostrophe, a CJK ideograph, an emoji — is
+///   *skipped*: it neither contributes a digit nor separates two equal
+///   digits. Soundex is defined over the Roman alphabet of an English-language
+///   surname index and has no code for anything else; inventing one would be
+///   behaviour with no citable basis. Transliterate first (`ö` → `oe`) if you
+///   want accented names to code as their Latin spelling.
+/// * **The code is exactly four characters, or empty.** A token containing at
+///   least one `A`–`Z` letter yields the retained first letter plus three
+///   digits, zero-padded. A token containing none — `""`, `"…"`, `"日本語"` —
+///   yields `""`, because there is no letter to retain. That empty string is
+///   the absence of a code, not a sentinel standing in for one: no non-empty
+///   input can produce it.
+/// * **Total.** No input panics, and there is no error type.
+///
+/// # The coding rules
+///
+/// | Letters | Digit |
+/// |---|---|
+/// | `B` `F` `P` `V` | `1` |
+/// | `C` `G` `J` `K` `Q` `S` `X` `Z` | `2` |
+/// | `D` `T` | `3` |
+/// | `L` | `4` |
+/// | `M` `N` | `5` |
+/// | `R` | `6` |
+/// | `A` `E` `I` `O` `U` `Y` `H` `W` | *(not coded)* |
+///
+/// 1. The first letter is retained, uppercased, and is **not** re-emitted as a
+///    digit — but its own digit still primes rule 2, which is why `Pfister` is
+///    `P236` and not `P123`.
+/// 2. Two letters with the same digit that are adjacent, or separated only by
+///    `H` or `W`, are coded once (`Ashcraft` → `A261`: the `S` and the `C`
+///    across the `H` are one `2`).
+/// 3. `A` `E` `I` `O` `U` `Y` separate: two same-digit letters on either side
+///    of one are coded twice (`Tymczak` → `T522`).
+/// 4. The digits are truncated to three, or padded with `0` to three.
+///
+/// # Examples
 ///
 /// ```
 /// use verbora_phonetics::SoundEx;
 ///
 /// let soundex = SoundEx::new();
-/// assert_eq!(soundex.process("render"), "R536");
-/// assert_eq!(soundex.process("phonetics"), "P532");
-/// assert!(soundex.compare("ant", "and"));
+/// assert_eq!(soundex.process("Robert"), "R163");
+/// assert_eq!(soundex.process("Rupert"), "R163");
+/// assert_eq!(soundex.process("Ashcraft"), "A261");
+/// assert!(soundex.compare("Robert", "Rupert"));
+///
+/// // No Latin letter, so no code at all.
+/// assert_eq!(soundex.process("日本語"), "");
 /// ```
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SoundEx;
 
-/// Maps a code unit to its SoundEx digit, or leaves it alone.
-///
-/// The reference composes six global regular expressions
-/// (`transformR`, `transformHum`, `transformL`, `transformToungue`,
-/// `transformThroats`, `transformLipps`). Their character classes are pairwise
-/// disjoint and every output is a digit, so no later pass can re-match an
-/// earlier pass's output: the composition is *exactly* one per-code-unit map,
-/// which is what this table is. All six patterns are **lowercase-only** — there
-/// is no `/i` flag — so uppercase input passes through untouched, and callers of
-/// [`SoundEx::transform`] see that.
+/// The Soundex digit for an uppercase ASCII letter, or `None` when the letter
+/// is one of the eight the table leaves uncoded.
 #[inline]
-const fn soundex_digit(c: char) -> Option<u8> {
-    match c {
-        'b' | 'f' | 'p' | 'v' => Some(b'1'),
-        'c' | 'g' | 'j' | 'k' | 'q' | 's' | 'x' | 'z' => Some(b'2'),
-        'd' | 't' => Some(b'3'),
-        'l' => Some(b'4'),
-        'm' | 'n' => Some(b'5'),
-        'r' => Some(b'6'),
+const fn digit(letter: u8) -> Option<u8> {
+    match letter {
+        b'B' | b'F' | b'P' | b'V' => Some(b'1'),
+        b'C' | b'G' | b'J' | b'K' | b'Q' | b'S' | b'X' | b'Z' => Some(b'2'),
+        b'D' | b'T' => Some(b'3'),
+        b'L' => Some(b'4'),
+        b'M' | b'N' => Some(b'5'),
+        b'R' => Some(b'6'),
         _ => None,
     }
 }
 
-/// Whether a character is a digit *after* `transform` has run.
-///
-/// Two kinds of digit reach the `/\D/g` filter: the ones the class map produces,
-/// and the ones that were already in the input. `transform` leaves the latter
-/// alone, so `SoundEx::process("12345")` is `"1234"` — the input's own digits
-/// become part of the code.
+/// How a letter affects the "same digit already seen" state of rule 2.
+enum Step {
+    /// A coded letter: emit its digit unless the previous coded letter, across
+    /// any run of `H`/`W`, carried the same one.
+    Coded(u8),
+    /// `H` or `W`: transparent. Rule 2 explicitly reaches across it.
+    Transparent,
+    /// A vowel (`A` `E` `I` `O` `U` `Y`): rule 3's separator. It clears the
+    /// memory of the previous digit, so the same digit may be emitted again.
+    Separator,
+}
+
 #[inline]
-const fn transformed_digit(c: char) -> Option<u8> {
-    match soundex_digit(c) {
-        Some(d) => Some(d),
-        None if c.is_ascii_digit() => Some(c as u8),
-        None => None,
-    }
-}
-
-/// What `transformed.replace(new RegExp('^' + transform(token.charAt(0))), '')`
-/// does for a given first character.
-///
-/// The reference builds a regular expression **out of user input**, so the first
-/// character is not merely compared — it is interpreted. This enum enumerates
-/// every behaviour that interpretation can have.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Initial {
-    /// `^<digit>`: strips one leading occurrence of that digit. This is the
-    /// intended case — "deal with duplicate INITIAL consonant SOUNDS".
-    Digit(u8),
-    /// `^.`: strips *any* leading code unit. Only digit removal is observable,
-    /// because the `\D` filter that follows would have dropped anything else.
-    AnyChar,
-    /// `^^`, `^$`, `^|`: the pattern matches the empty string, so the replace is
-    /// a no-op.
-    Nothing,
-    /// A literal that is not a digit. It can only ever delete a character the
-    /// `\D` filter deletes anyway, so it too is unobservable.
-    NonDigitLiteral,
-    /// `new RegExp` itself throws: `(`, `)`, `*`, `+`, `?`, `[`, `\`.
-    Invalid,
-}
-
-impl Initial {
-    /// Classifies the first character of the (already lowercased) token.
-    fn classify(first: char) -> Self {
-        if let Some(d) = soundex_digit(first) {
-            return Self::Digit(d);
-        }
-        match first {
-            // A literal digit survives `transform` unchanged and then anchors a
-            // perfectly ordinary `^<digit>` pattern.
-            '0'..='9' => Self::Digit(first as u8),
-            '.' => Self::AnyChar,
-            '^' | '$' | '|' => Self::Nothing,
-            '(' | ')' | '*' | '+' | '?' | '[' | '\\' => Self::Invalid,
-            // `{`, `}`, `]` and `-` are literals outside a character class under
-            // the Annex B grammar every browser and Node implements.
-            _ => Self::NonDigitLiteral,
-        }
+const fn classify(letter: u8) -> Step {
+    match digit(letter) {
+        Some(d) => Step::Coded(d),
+        None if letter == b'H' || letter == b'W' => Step::Transparent,
+        None => Step::Separator,
     }
 }
 
 impl SoundEx {
-    /// Creates a SoundEx encoder. It holds no state; the type exists to mirror
-    /// The reference `SoundEx`.
+    /// Creates a Soundex encoder.
+    ///
+    /// The encoder is stateless and zero-sized; the type exists so that
+    /// [`verbora_core::Phonetic`] can be implemented for it and so that
+    /// call sites read as `soundex.process(word)`.
     #[must_use]
     pub const fn new() -> Self {
         Self
     }
 
-    /// Encodes `token` with the default code length of four characters.
+    /// Encodes `token` as its four-character Soundex code.
     ///
-    /// # Divergence from the reference
+    /// Returns `""` — and only then — when `token` contains no `A`–`Z`
+    /// letter. See the [type documentation](Self) for the coding rules and
+    /// the text unit.
     ///
-    /// When the first character is `(`, `)`, `*`, `+`, `?`, `[` or `\`, the
-    /// reference throws a `SyntaxError` from the regular expression it builds
-    /// out of that character. This method instead performs no initial-sound
-    /// strip and returns a code, because a text-processing library should not
-    /// fail on punctuation. [`SoundEx::try_process`] reproduces the throw
-    /// exactly.
+    /// ```
+    /// use verbora_phonetics::SoundEx;
+    ///
+    /// let soundex = SoundEx::new();
+    /// // NARA's own worked examples.
+    /// assert_eq!(soundex.process("Washington"), "W252");
+    /// assert_eq!(soundex.process("Lee"), "L000");
+    /// assert_eq!(soundex.process("Gutierrez"), "G362");
+    /// assert_eq!(soundex.process("Pfister"), "P236");
+    /// assert_eq!(soundex.process("Tymczak"), "T522");
+    /// ```
     #[must_use]
     pub fn process(&self, token: &str) -> String {
-        self.process_with(token, None)
+        let mut out = String::with_capacity(4);
+        self.process_into(token, &mut out);
+        out
     }
 
-    /// Encodes `token`, honouring the reference's `maxLength` coercion.
+    /// Appends `token`'s Soundex code to `out`.
     ///
-    /// `max_length` is `Option<f64>` rather than `Option<usize>` because the
-    /// argument is a reference number whose *non*-integral and negative values
-    /// are observable: The reference computes `(maxLength && maxLength - 1) || 3`
-    /// and feeds it to `String#substr`. So `Some(1.0)` behaves like the default
-    /// (`1 && 0` is falsy), `Some(-1.0)` yields just the initial letter, and
-    /// `Some(1.5)` yields the initial letter too (`substr(0, 0.5)` truncates to
-    /// zero).
+    /// Appends nothing when `token` has no `A`–`Z` letter, exactly as
+    /// [`SoundEx::process`] returns `""` for the same input. `out` is never
+    /// cleared, so a caller accumulating many codes into one buffer keeps what
+    /// is already there.
     ///
-    /// See [`Self::process`] for the one divergence.
-    #[must_use]
-    pub fn process_with(&self, token: &str, max_length: Option<f64>) -> String {
-        self.encode(token, max_length, false)
-            .unwrap_or_else(|_| unreachable!("lenient mode never fails"))
-            .into_string()
+    /// # Choosing the right API
+    ///
+    /// | | [`process`](Self::process) | `process_into` |
+    /// |---|---|---|
+    /// | Use case | one word, one code | encoding a dictionary into a buffer you already own |
+    /// | Allocation | one `String` per call | none, once `out` has grown |
+    /// | Trade-off | none | you manage `out`, including clearing it when you want one code at a time |
+    /// | Recommendation | **the default** | reach for it only when a profile shows the per-call `String` matters |
+    pub fn process_into(&self, token: &str, out: &mut String) {
+        let mut letters = Letters::new(token);
+        let Some(first) = letters.next() else {
+            return;
+        };
+        out.push(char::from(first));
+
+        // Rule 1: the retained letter's own digit primes rule 2 without being
+        // emitted. `Pfister` -> P236, not P123.
+        let mut previous = digit(first);
+        let mut digits = 0;
+        for letter in letters {
+            if digits == 3 {
+                break;
+            }
+            match classify(letter) {
+                Step::Coded(d) => {
+                    if previous != Some(d) {
+                        out.push(char::from(d));
+                        digits += 1;
+                    }
+                    previous = Some(d);
+                }
+                // Rule 2 reaches across `H` and `W`, so they change nothing.
+                Step::Transparent => {}
+                // Rule 3: a vowel breaks the run, so the same digit may repeat.
+                Step::Separator => previous = None,
+            }
+        }
+
+        // Rule 4: pad to three digits.
+        for _ in digits..3 {
+            out.push('0');
+        }
     }
 
-    /// Encodes `token` with exact the reference semantics, including the
-    /// `SyntaxError` it throws for tokens whose first character is a regular
-    /// expression metacharacter.
+    /// Whether `a` and `b` share a Soundex code.
     ///
-    /// # Errors
-    ///
-    /// Returns [`PhoneticError::InvalidInitialPattern`] for a token beginning
-    /// with `(`, `)`, `*`, `+`, `?`, `[` or `\`.
-    pub fn try_process(
-        &self,
-        token: &str,
-        max_length: Option<f64>,
-    ) -> Result<String, PhoneticError> {
-        Ok(self.encode(token, max_length, true)?.into_string())
-    }
-
-    /// Like [`Self::try_process`], but returns UTF-16 code units.
-    ///
-    /// The reference keeps `token.charAt(0)` — the first **code unit** — so a
-    /// token starting with an astral character produces a code that begins with
-    /// an unpaired high surrogate (`SoundEx.process("😀")` is `"\u{D83D}000"`).
-    /// A Rust `String` cannot hold that; [`Self::try_process`] therefore
-    /// substitutes `U+FFFD`, and this method exists for callers that need the
-    /// exact sequence.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::try_process`].
-    pub fn try_process_utf16(
-        &self,
-        token: &str,
-        max_length: Option<f64>,
-    ) -> Result<Vec<u16>, PhoneticError> {
-        Ok(self.encode(token, max_length, true)?.into_utf16())
-    }
-
-    /// Whether two strings share a SoundEx code, at the default length.
-    ///
-    /// Mirrors the inherited `Phonetic#compare`, and therefore uses the lenient
-    /// [`Self::process`].
+    /// Two tokens with no `A`–`Z` letter both encode to `""` and therefore
+    /// compare equal; that is the honest reading of "same code", since neither
+    /// carries a name Soundex can index.
     #[must_use]
     pub fn compare(&self, a: &str, b: &str) -> bool {
         self.process(a) == self.process(b)
     }
-
-    /// The whole pipeline, once, shared by every entry point.
-    fn encode(
-        &self,
-        token: &str,
-        max_length: Option<f64>,
-        strict: bool,
-    ) -> Result<Encoded, PhoneticError> {
-        let lower = utf16_to_lowercase(token);
-
-        let mut chars = lower.chars();
-        let Some(first) = chars.next() else {
-            // `''.charAt(0)` is `''`, so the code is the padding alone: three
-            // characters, with no initial letter. Every other input yields four.
-            return Ok(Encoded {
-                head: Head::Empty,
-                tail: pad_and_take(Vec::new(), max_length),
-            });
-        };
-        // `substr(1, …)` drops one CODE UNIT. For an astral first character that
-        // leaves its low surrogate at the front of the remainder — a non-digit,
-        // so it cannot affect condensation or the digit filter, and dropping the
-        // whole character here is observationally identical.
-        let rest = chars.as_str();
-
-        let initial = Initial::classify(first);
-        if strict && initial == Initial::Invalid {
-            return Err(PhoneticError::InvalidInitialPattern(first));
-        }
-
-        // `condense(transform(rest))` runs BEFORE non-digits are stripped, so
-        // vowels, `h` and `w` separate two equal digits instead of merging with
-        // them. This is why `Ashcraft` encodes as `A226` here and `A261` in the
-        // textbook algorithm.
-        let mut digits: Vec<u8> = Vec::with_capacity(rest.len().min(16));
-        let mut prev_digit: Option<u8> = None;
-        let mut first_emitted: Option<Option<u8>> = None;
-        for c in rest.chars() {
-            match transformed_digit(c) {
-                Some(d) => {
-                    if prev_digit == Some(d) {
-                        continue; // collapsed by `/(\d)?\1+/g`
-                    }
-                    prev_digit = Some(d);
-                    first_emitted.get_or_insert(Some(d));
-                    digits.push(d);
-                }
-                None => {
-                    prev_digit = None;
-                    first_emitted.get_or_insert(None);
-                }
-            }
-        }
-
-        // The initial-strip removes at most the first code unit, and only a
-        // digit removal survives the `\D` filter that follows.
-        let leading_digit = first_emitted.flatten();
-        let strips = match (initial, leading_digit) {
-            (Initial::Digit(d), Some(l)) => d == l,
-            (Initial::AnyChar, Some(_)) => true,
-            _ => false,
-        };
-        if strips {
-            digits.remove(0);
-        }
-
-        Ok(Encoded {
-            head: Head::of(first),
-            tail: pad_and_take(digits, max_length),
-        })
-    }
-
-    // -- prototype methods, exposed because the reference exposes them ----------
-
-    /// `token.replace(/[bfpv]/g, '1')`. Lowercase-only, like the reference.
-    #[must_use]
-    pub fn transform_lipps<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        map_class(token, |c| matches!(c, 'b' | 'f' | 'p' | 'v'), b'1')
-    }
-
-    /// `token.replace(/[cgjkqsxz]/g, '2')`. Lowercase-only.
-    #[must_use]
-    pub fn transform_throats<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        map_class(
-            token,
-            |c| matches!(c, 'c' | 'g' | 'j' | 'k' | 'q' | 's' | 'x' | 'z'),
-            b'2',
-        )
-    }
-
-    /// `token.replace(/[dt]/g, '3')`. Lowercase-only.
-    ///
-    /// The reference spells this `transformToungue`; the misspelling is part of
-    /// its public API, but is not reproduced here.
-    #[must_use]
-    pub fn transform_toungue<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        map_class(token, |c| matches!(c, 'd' | 't'), b'3')
-    }
-
-    /// `token.replace(/l/g, '4')`. Lowercase-only.
-    #[must_use]
-    pub fn transform_l<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        map_class(token, |c| c == 'l', b'4')
-    }
-
-    /// `token.replace(/[mn]/g, '5')`. Lowercase-only.
-    #[must_use]
-    pub fn transform_hum<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        map_class(token, |c| matches!(c, 'm' | 'n'), b'5')
-    }
-
-    /// `token.replace(/r/g, '6')`. Lowercase-only.
-    #[must_use]
-    pub fn transform_r<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        map_class(token, |c| c == 'r', b'6')
-    }
-
-    /// The composition of the six class transforms, in one pass.
-    ///
-    /// See `soundex_digit` for why collapsing six sequential regular
-    /// expressions into a single map is exact rather than merely equivalent.
-    #[must_use]
-    pub fn transform<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        if !token.chars().any(|c| soundex_digit(c).is_some()) {
-            return Cow::Borrowed(token);
-        }
-        let mut out = String::with_capacity(token.len());
-        for c in token.chars() {
-            match soundex_digit(c) {
-                Some(d) => out.push(char::from(d)),
-                None => out.push(c),
-            }
-        }
-        Cow::Owned(out)
-    }
-
-    /// Collapses each maximal run of the same digit to one occurrence.
-    ///
-    /// The reference writes this as `token.replace(/(\d)?\1+/g, '$1')` — an
-    /// optional capture group with a **backreference**, which the Rust `regex`
-    /// crate cannot express at all. The pattern also matches the empty string at
-    /// every position (the group does not participate, so `\1` matches empty and
-    /// `$1` expands to nothing); those matches are no-ops, which is why a
-    /// literal translation is both impossible and unnecessary. Non-digits are
-    /// never collapsed: `condense("aabbcc") == "aabbcc"`.
-    #[must_use]
-    pub fn condense<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        let mut prev: Option<char> = None;
-        let has_run = token.chars().any(|c| {
-            let run = c.is_ascii_digit() && prev == Some(c);
-            prev = Some(c);
-            run
-        });
-        if !has_run {
-            return Cow::Borrowed(token);
-        }
-
-        let mut out = String::with_capacity(token.len());
-        let mut prev: Option<char> = None;
-        for c in token.chars() {
-            if c.is_ascii_digit() && prev == Some(c) {
-                continue;
-            }
-            prev = Some(c);
-            out.push(c);
-        }
-        Cow::Owned(out)
-    }
-
-    /// Pads a code to three characters, and only to three.
-    ///
-    /// `Array(4 - n).join('0')` yields `3 - n` zeros, so anything shorter than
-    /// four characters becomes exactly three and anything else is returned
-    /// unchanged. The length measured is the reference's, in UTF-16 code units.
-    #[must_use]
-    pub fn pad_right0<'a>(&self, token: &'a str) -> Cow<'a, str> {
-        let len = utf16_len(token);
-        if len >= 3 {
-            return Cow::Borrowed(token);
-        }
-        let mut out = String::with_capacity(token.len() + 3 - len);
-        out.push_str(token);
-        for _ in len..3 {
-            out.push('0');
-        }
-        Cow::Owned(out)
-    }
-}
-
-/// `padRight0(digits).substr(0, (maxLength && maxLength - 1) || 3)`, fused.
-fn pad_and_take(mut digits: Vec<u8>, max_length: Option<f64>) -> Vec<u8> {
-    // `1` is falsy after the decrement, so it selects the default rather than
-    // producing a one-character code — a genuine quirk, not an off-by-one.
-    let want = match max_length {
-        Some(m) if m != 0.0 && !m.is_nan() => coerce_or_default(Some(m - 1.0), 3.0),
-        _ => 3.0,
-    };
-    if digits.len() < 4 {
-        digits.resize(3, b'0');
-    }
-    digits.truncate(clamp_take(want, digits.len()));
-    digits
-}
-
-/// `token.charAt(0).toUpperCase()` — the first **code unit**, uppercased.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Head {
-    /// The token was empty, so `charAt(0)` returned `''`.
-    Empty,
-    /// A BMP character's uppercase form. It can be longer than one character:
-    /// `ß` uppercases to `SS`, giving a five-character code.
-    Text(String),
-    /// The high surrogate of an astral first character, orphaned by `charAt(0)`.
-    Surrogate(u16),
-}
-
-impl Head {
-    fn of(first: char) -> Self {
-        if first.len_utf16() == 2 {
-            let mut buf = [0u16; 2];
-            Self::Surrogate(first.encode_utf16(&mut buf)[0])
-        } else {
-            Self::Text(first.to_uppercase().collect())
-        }
-    }
-}
-
-/// A finished code, held in the form that keeps every representation exact.
-struct Encoded {
-    head: Head,
-    tail: Vec<u8>,
-}
-
-impl Encoded {
-    /// Lossy rendering: an orphaned surrogate becomes `U+FFFD`.
-    fn into_string(self) -> String {
-        // The tail is nothing but ASCII digits.
-        let tail = std::str::from_utf8(&self.tail).expect("digits are ASCII");
-        match self.head {
-            Head::Empty => tail.to_owned(),
-            Head::Text(mut s) => {
-                s.push_str(tail);
-                s
-            }
-            Head::Surrogate(u) => {
-                let mut units = vec![u];
-                units.extend(self.tail.iter().map(|&b| u16::from(b)));
-                String::from_utf16_lossy(&units)
-            }
-        }
-    }
-
-    /// Exact rendering, code unit for code unit.
-    fn into_utf16(self) -> Vec<u16> {
-        let mut units: Vec<u16> = match &self.head {
-            Head::Empty => Vec::with_capacity(self.tail.len()),
-            Head::Text(s) => s.encode_utf16().collect(),
-            Head::Surrogate(u) => vec![*u],
-        };
-        units.extend(self.tail.iter().map(|&b| u16::from(b)));
-        units
-    }
-}
-
-/// `token.replace(/[class]/g, digit)` for one of the six class transforms.
-fn map_class<'a>(token: &'a str, in_class: impl Fn(char) -> bool, digit: u8) -> Cow<'a, str> {
-    if !token.chars().any(&in_class) {
-        return Cow::Borrowed(token);
-    }
-    let mut out = String::with_capacity(token.len());
-    for c in token.chars() {
-        if in_class(c) {
-            out.push(char::from(digit));
-        } else {
-            out.push(c);
-        }
-    }
-    Cow::Owned(out)
 }
 
 impl verbora_core::Phonetic for SoundEx {
@@ -483,31 +220,24 @@ impl verbora_core::Phonetic for SoundEx {
 mod tests {
     use super::*;
 
-    fn sx() -> SoundEx {
-        SoundEx::new()
-    }
-
+    /// Every worked example NARA publishes with *The Soundex Indexing System*,
+    /// transcribed from the standard rather than from this implementation.
+    ///
+    /// Each one exercises a different clause: `Washington` rule 4's
+    /// truncation, `Lee` rule 4's padding, `Pfister` rule 1's priming,
+    /// `Ashcraft` rule 2's reach across `H`, `Tymczak` rule 3's separation.
     #[test]
-    fn encodes_the_reference_vectors() {
-        let s = sx();
+    fn nara_worked_examples() {
+        let s = SoundEx::new();
         for (input, want) in [
-            ("render", "R536"),
-            ("super", "S160"),
-            ("but", "B300"),
-            ("butt", "B300"),
-            ("blackberry", "B421"),
-            ("BLACKBERRY", "B421"),
-            ("calculate", "C424"),
-            ("fox", "F200"),
-            ("jump", "J510"),
-            ("phonetics", "P532"),
-            ("Lloyd", "L300"),
+            ("Washington", "W252"),
+            ("Lee", "L000"),
+            ("Gutierrez", "G362"),
             ("Pfister", "P236"),
-            ("manhattan", "M535"),
-            ("Lukasiewicz", "L222"),
-            ("Gauss", "G200"),
-            ("Tymczak", "T522"),
             ("Jackson", "J250"),
+            ("Tymczak", "T522"),
+            ("VanDeusen", "V532"),
+            ("Ashcraft", "A261"),
             ("Robert", "R163"),
             ("Rupert", "R163"),
             ("Honeyman", "H555"),
@@ -516,153 +246,125 @@ mod tests {
         }
     }
 
+    /// Rule 2 is stated as "adjacent, **or separated only by `H` or `W`**".
+    /// Both halves need their own witness, because an implementation that
+    /// dropped `H`/`W` before deduplicating would pass the adjacent case and
+    /// fail this one — that is exactly the difference between `A261` and the
+    /// `A226` a "condense first, filter later" order produces.
     #[test]
-    fn condensation_before_filtering_separates_equal_codes() {
-        // Textbook SoundEx gives A261: `h` and `w` are supposed to be removed
-        // BEFORE adjacent duplicates are merged. The reference merges first.
-        assert_eq!(sx().process("Ashcraft"), "A226");
+    fn rule_two_reaches_across_h_and_w() {
+        let s = SoundEx::new();
+        // S(2) H C(2): one 2.  R(6). A separates. F(1). T truncated.
+        assert_eq!(s.process("Ashcraft"), "A261");
+        // S(2) W C(2): one 2, same as across an H.
+        assert_eq!(s.process("Aswcraft"), "A261");
+        // Adjacent, no separator at all: S(2) C(2) -> one 2.
+        assert_eq!(s.process("Ascraft"), "A261");
+        // With a vowel between them rule 3 wins and both are coded: 2, 2, 6.
+        assert_eq!(s.process("Asocraft"), "A226");
     }
 
+    /// Rule 3's separators are the five vowels **and `Y`**; `H` and `W` are
+    /// not separators. `Honeyman` is NARA's own witness for `Y`: N(5), Y
+    /// separates, M(5), A separates, N(5) — three fives, `H555`.
     #[test]
-    fn digits_in_the_input_survive() {
-        assert_eq!(sx().process("12345"), "1234");
+    fn rule_three_separators_are_the_vowels_and_y() {
+        let s = SoundEx::new();
+        assert_eq!(s.process("Honeyman"), "H555");
+        // Without the Y the two 5s would merge: N(5) M(5) adjacent -> one 5.
+        assert_eq!(s.process("Honman"), "H550");
     }
 
+    /// Rule 1: the retained letter primes the duplicate check but is not
+    /// itself a digit. `Pfister` is NARA's witness; the negative control is a
+    /// first letter whose digit differs from the second letter's.
     #[test]
-    fn empty_input_has_no_initial_letter() {
-        assert_eq!(sx().process(""), "000");
+    fn rule_one_primes_the_duplicate_check() {
+        let s = SoundEx::new();
+        // P(1) F(1) -> the F is swallowed. S(2) T(3) E R(6) -> 236.
+        assert_eq!(s.process("Pfister"), "P236");
+        // B(1) L(4): different digits, so the L is coded. A C(2) K(2) -> 42.
+        assert_eq!(s.process("Black"), "B420");
     }
 
+    /// Rule 4 in both directions, and the boundary where truncation begins.
     #[test]
-    fn single_character_inputs() {
-        assert_eq!(sx().process("a"), "A000");
-        assert_eq!(sx().process("Z"), "Z000");
-        assert_eq!(sx().process("'"), "'000");
+    fn rule_four_pads_and_truncates_to_three_digits() {
+        let s = SoundEx::new();
+        assert_eq!(s.process("Lee"), "L000"); // zero digits
+        assert_eq!(s.process("Ely"), "E400"); // one
+        assert_eq!(s.process("Elm"), "E450"); // two
+        assert_eq!(s.process("Elms"), "E452"); // exactly three
+        assert_eq!(s.process("Elmset"), "E452"); // four, truncated
+        assert_eq!(s.process(&"b".repeat(500)), "B000");
     }
 
+    /// The text unit and the skip rule, enumerated over one scalar of every
+    /// class the contract names. A skipped scalar is *transparent*: it may not
+    /// act as a rule-3 separator, or `"a-b"` would differ from `"ab"`.
     #[test]
-    fn all_uppercase_matches_all_lowercase() {
-        let s = sx();
+    fn only_ascii_letters_are_coded_and_everything_else_is_skipped() {
+        let s = SoundEx::new();
+
+        // No A-Z letter anywhere: no code at all.
+        for empty in ["", " ", "...", "1234", "日本語", "😀", "Москва", "\u{301}"] {
+            assert_eq!(s.process(empty), "", "for {empty:?}");
+        }
+
+        // A skipped scalar neither codes nor separates.
+        assert_eq!(s.process("a-b"), s.process("ab"));
+        assert_eq!(s.process("O'Brien"), s.process("OBrien"));
+        assert_eq!(s.process("caf\u{e9}"), s.process("caf")); // é is skipped
+        assert_eq!(s.process("na\u{ef}ve"), s.process("nave"));
+        // An astral scalar is one unit and is skipped like any other non-letter.
+        assert_eq!(s.process("R\u{1F600}obert"), "R163");
+        // A digit is not a letter, and does not leak into the code.
+        assert_eq!(s.process("12345"), "");
+        assert_eq!(s.process("R2D2"), "R300");
+    }
+
+    /// Case folding is simple ASCII folding, so the retained letter is always
+    /// one uppercase ASCII byte and the code is always four bytes.
+    #[test]
+    fn case_folding_is_ascii_and_the_code_is_always_four_bytes() {
+        let s = SoundEx::new();
         assert_eq!(s.process("BLACKBERRY"), s.process("blackberry"));
+        assert_eq!(s.process("BlAcKbErRy"), "B421");
+        // `ß` uppercases to `SS` in Unicode; it is not an A-Z letter here, so
+        // it is skipped outright and cannot lengthen the code.
+        assert_eq!(s.process("\u{df}"), "");
+        for word in ["Robert", "\u{df}x", "a", "Zzzzzz"] {
+            let code = s.process(word);
+            assert!(code.is_empty() || code.len() == 4, "for {word:?}: {code:?}");
+        }
     }
 
     #[test]
-    fn accented_and_non_latin_letters_pass_through() {
-        let s = sx();
-        assert_eq!(s.process("café"), "C100");
-        assert_eq!(s.process("naïve"), "N100");
-        assert_eq!(s.process("ÉCOLE"), "É240");
-        assert_eq!(s.process("ç"), "Ç000");
-        // Cyrillic and CJK have no SoundEx class at all.
-        assert_eq!(s.process("Москва"), "М000");
-        assert_eq!(s.process("日本語"), "日000");
+    fn single_letter_inputs() {
+        let s = SoundEx::new();
+        assert_eq!(s.process("a"), "A000");
+        assert_eq!(s.process("Z"), "Z000");
+        assert_eq!(s.process("h"), "H000");
     }
 
     #[test]
-    fn case_mapping_can_lengthen_the_code() {
-        // charAt(0).toUpperCase() of 'ß' is "SS", so the code is five long.
-        assert_eq!(sx().process("ß"), "SS000");
-    }
-
-    #[test]
-    fn astral_first_character_orphans_a_surrogate() {
-        let s = sx();
-        // Exact: the high surrogate, then the padding.
-        assert_eq!(
-            s.try_process_utf16("😀", None).unwrap(),
-            vec![0xD83D, 0x30, 0x30, 0x30]
-        );
-        // Lossy: a Rust String cannot hold the orphan.
-        assert_eq!(s.process("😀"), "\u{FFFD}000");
-    }
-
-    #[test]
-    fn punctuation_and_whitespace() {
-        let s = sx();
-        assert_eq!(s.process("  "), " 000");
-        assert_eq!(s.process("x y"), "X000");
-        assert_eq!(s.process("a-b"), "A100");
-    }
-
-    #[test]
-    fn very_long_input() {
-        assert_eq!(sx().process("supercalifragilisticexpialidocious"), "S162");
-        assert_eq!(sx().process(&"a".repeat(500)), "A000");
-    }
-
-    #[test]
-    fn max_length_coercion() {
-        let s = sx();
-        assert_eq!(s.process_with("phonetics", Some(1.0)), "P532"); // 1 && 0 -> falsy
-        assert_eq!(s.process_with("phonetics", Some(2.0)), "P5");
-        assert_eq!(s.process_with("phonetics", Some(0.0)), "P532"); // falsy
-        assert_eq!(s.process_with("phonetics", Some(f64::NAN)), "P532");
-        assert_eq!(s.process_with("phonetics", Some(-1.0)), "P");
-        assert_eq!(s.process_with("phonetics", Some(1.5)), "P");
-        assert_eq!(s.process_with("jump", Some(8.0)), "J510");
-        assert_eq!(
-            s.process_with("supercalifragilisticexpialidocious", Some(8.0)),
-            "S1624162"
-        );
-    }
-
-    #[test]
-    fn regex_metacharacters_throw_only_in_strict_mode() {
-        let s = sx();
-        assert_eq!(
-            s.try_process("(abc", None),
-            Err(PhoneticError::InvalidInitialPattern('('))
-        );
-        assert_eq!(s.process("(abc"), "(120");
-        // `.` really is a wildcard: it eats the first transformed character.
-        assert_eq!(s.try_process(".bcd", None).unwrap(), ".230");
-        // `^`, `$` and `|` match the empty string, so nothing is stripped.
-        assert_eq!(s.try_process("^bcd", None).unwrap(), "^123");
-        assert_eq!(s.try_process("|bcd", None).unwrap(), "|123");
-    }
-
-    #[test]
-    fn helper_methods_match_the_reference() {
-        let s = sx();
-        assert_eq!(s.transform_lipps("bopper"), "1o11er");
-        assert_eq!(s.transform_throats("cgjkqsxz"), "22222222");
-        assert_eq!(s.transform_toungue("dat"), "3a3");
-        assert_eq!(s.transform_l("lala"), "4a4a");
-        assert_eq!(s.transform_hum("mummification"), "5u55ificatio5");
-        assert_eq!(s.transform_r("render"), "6ende6");
-        assert_eq!(s.transform("render"), "6e53e6");
-        // Uppercase input is untouched: none of the patterns carry /i.
-        assert_eq!(s.transform("RENDER"), "RENDER");
-    }
-
-    #[test]
-    fn condense_collapses_only_digit_runs() {
-        let s = sx();
-        assert_eq!(s.condense("11222556"), "1256");
-        assert_eq!(s.condense("1112223"), "123");
-        assert_eq!(s.condense("aabbcc"), "aabbcc");
-        assert_eq!(s.condense("1a1"), "1a1");
-        assert_eq!(s.condense("123321"), "12321");
-        assert_eq!(s.condense(""), "");
-    }
-
-    #[test]
-    fn pad_right0_pads_to_exactly_three() {
-        let s = sx();
-        assert_eq!(s.pad_right0(""), "000");
-        assert_eq!(s.pad_right0("1"), "100");
-        assert_eq!(s.pad_right0("12"), "120");
-        assert_eq!(s.pad_right0("123"), "123");
-        assert_eq!(s.pad_right0("1234"), "1234");
-        assert_eq!(s.pad_right0("12345"), "12345");
-    }
-
-    #[test]
-    fn compare_uses_the_default_length() {
-        let s = sx();
+    fn compare_is_code_equality() {
+        let s = SoundEx::new();
+        assert!(s.compare("Robert", "Rupert"));
         assert!(s.compare("ant", "and"));
         assert!(!s.compare("ant", "anne"));
-        assert!(s.compare("band", "bant"));
-        assert!(!s.compare("band", "gand"));
+        // Two codeless tokens share the codeless "code".
+        assert!(s.compare("", "日本語"));
+        assert!(!s.compare("", "a"));
+    }
+
+    #[test]
+    fn process_into_appends_and_never_clears() {
+        let s = SoundEx::new();
+        let mut buf = String::from("keep:");
+        s.process_into("Robert", &mut buf);
+        s.process_into("日本語", &mut buf); // appends nothing
+        s.process_into("Rupert", &mut buf);
+        assert_eq!(buf, "keep:R163R163");
     }
 }

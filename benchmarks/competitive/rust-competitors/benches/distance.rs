@@ -23,15 +23,45 @@
 //! `manifests/competitors.json`'s own `stringmetrics` entry for the exact
 //! source lines.
 //!
-//! `eddie` joins for Jaro and Jaro-Winkler only (matrix `Yes`) — abandoned
-//! since 2020, so `tests/distance_correctness.rs` re-verifies its output
-//! against Verbora's on the shared corpus plus hand-picked edge cases before
-//! any number below is trusted, per the matrix's own "re-verify against
-//! fresh vectors" flag.
+//! **`eddie` is deliberately absent from every group below, and must stay
+//! absent.** `eddie` 0.4.2's published `str` API executes undefined behaviour
+//! on every call (`Buffer::store` writes through `get_unchecked_mut` past a
+//! zeroed length; debug builds abort with SIGABRT, release builds only hide
+//! the check). A timing number measured on UB is not a measurement, so no
+//! `eddie` row may be published. Its sound `slice` API is still used — but
+//! only as a correctness oracle in `tests/distance_correctness.rs`, via
+//! its `eddie_slice` module, never here: timing that path would hand
+//! `eddie` pre-decoded `Vec<char>` operands while Verbora's `jaro(&str, &str)`
+//! decodes scalars inside the timed region, which is exactly the
+//! "excluding real costs from only one implementation" that `AGENTS.md`
+//! § *Cross-Implementation Benchmark Fairness* forbids. See
+//! that module's doc comment and `../../README.md`.
+//!
+//! **Comparability caveat on the `jaro` and `jaro_winkler` groups.** The
+//! `strsim` and `rapidfuzz` rows there do **not** compute the same function
+//! Verbora does, so they time comparable work but are not an
+//! output-equivalence comparison. Two independent divergences, both found by
+//! `tests/distance_correctness.rs` and pinned there as fixtures:
+//!
+//! 1. **Transposition halving.** `docs/design/distance-contract.md` §3.4
+//!    makes `t` exactly half the raw transposition count, so an odd count
+//!    contributes `x.5`. `strsim` 0.11.1's `generic_jaro` and `rapidfuzz`
+//!    0.5.0 both **truncate** with integer division. Measured over 82,000
+//!    random pairs: 23,428 disagreements (28.6%), smallest diverging operand
+//!    length 6 — inside the corpus timed here. `jaro("abccba", "abbaca")` is
+//!    `0.788…` for Verbora, `0.822…` for both.
+//! 2. **The Winkler boost threshold.** Verbora applies the prefix boost
+//!    unconditionally (§3.4: Winkler's later `sim > 0.7` variant "is **not**
+//!    implemented"). Both competitors gate it behind `sim > 0.7`.
+//!
+//! Neither is a Verbora defect and neither invalidates a timing row, but
+//! `docs/COMPETITIVE_BENCHMARKS.md` §1.8 still marks all four rows `Yes` for
+//! algorithmic equivalence, which is wrong on both counts and needs
+//! amending before any of these numbers is published as like-for-like.
 //!
 //! **Byte-level, ASCII-only fair (matrix `Selected cases`/`Partial`):**
 //! `triple_accel` and `editdistancek` operate on raw `&[u8]`, not
-//! chars/UTF-16 units — genuinely different from every char-indexed
+//! Unicode scalars — genuinely different from every char-indexed
 //! competitor above on non-ASCII input, but numerically identical to it on
 //! ASCII, which is all `load_ascii_pairs` ever supplies. `triple_accel`
 //! covers Levenshtein, restricted-only Damerau (`rdamerau` — benchmarked
@@ -89,19 +119,20 @@
 //! iteration, but the discipline is applied uniformly rather than assumed.
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use eddie::{Jaro as EddieJaro, JaroWinkler as EddieJaroWinkler};
 
 use verbora_distance::{
-    hamming, jaro, jaro_winkler,
-    levenshtein::{Options as LevOptions, damerau_levenshtein, levenshtein, levenshtein_search},
+    damerau_levenshtein, hamming, jaro, jaro_winkler, levenshtein, levenshtein_search,
+    osa as verbora_osa,
 };
 
 /// The shared ASCII pairs, read from the same file every sibling benchmark
 /// (Verbora's own Criterion suite, the reference harness) reads. Kept to
 /// ASCII only in this file: `rapidfuzz`'s and `strsim`'s Levenshtein/
-/// Damerau/Jaro family are `char`-indexed like Verbora's UTF-16-unit
-/// indexing only up to the Basic Multilingual Plane — ASCII input sidesteps
-/// that distinction entirely, keeping this specific comparison unambiguous.
+/// Damerau/Jaro family are `char`-indexed, and so is Verbora
+/// (`docs/design/distance-contract.md` §2), so the two now agree on the
+/// unit for *every* input rather than only up to the Basic Multilingual
+/// Plane. The ASCII restriction stays because the byte-level competitors
+/// above share this corpus, not because the char-indexed ones need it.
 fn load_ascii_pairs() -> Vec<(usize, String, String)> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -191,12 +222,11 @@ fn levenshtein_edge_shapes() -> Vec<(&'static str, String, String)> {
 
 fn bench_levenshtein(c: &mut Criterion) {
     let inputs = shaped_pairs();
-    let opts = LevOptions::default();
     let mut g = c.benchmark_group("levenshtein");
     for (id, n, a, b) in &inputs {
         g.throughput(Throughput::Elements((n * n) as u64));
         g.bench_with_input(BenchmarkId::new("verbora", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(levenshtein(black_box(a), black_box(b), &opts)));
+            bch.iter(|| black_box(levenshtein(black_box(a), black_box(b))));
         });
         g.bench_with_input(BenchmarkId::new("strsim", id), &(a, b), |bch, (a, b)| {
             bch.iter(|| black_box(strsim::levenshtein(black_box(a), black_box(b))));
@@ -248,13 +278,12 @@ fn bench_levenshtein(c: &mut Criterion) {
 
 fn bench_levenshtein_edge_shapes(c: &mut Criterion) {
     let inputs = levenshtein_edge_shapes();
-    let opts = LevOptions::default();
     let mut g = c.benchmark_group("levenshtein_edge_shapes");
     for (id, a, b) in &inputs {
         // Nominal DP area, independent of any implementation shortcut.
         g.throughput(Throughput::Elements((a.len() * b.len()) as u64));
         g.bench_with_input(BenchmarkId::new("verbora", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(levenshtein(black_box(a), black_box(b), &opts)));
+            bch.iter(|| black_box(levenshtein(black_box(a), black_box(b))));
         });
         g.bench_with_input(BenchmarkId::new("strsim", id), &(a, b), |bch, (a, b)| {
             bch.iter(|| black_box(strsim::levenshtein(black_box(a), black_box(b))));
@@ -304,15 +333,11 @@ fn bench_levenshtein_edge_shapes(c: &mut Criterion) {
 
 fn bench_damerau_levenshtein_unrestricted(c: &mut Criterion) {
     let inputs = shaped_pairs();
-    let opts = LevOptions {
-        restricted: false,
-        ..Default::default()
-    };
     let mut g = c.benchmark_group("damerau_levenshtein_unrestricted");
     for (id, n, a, b) in &inputs {
         g.throughput(Throughput::Elements((n * n) as u64));
         g.bench_with_input(BenchmarkId::new("verbora", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(damerau_levenshtein(black_box(a), black_box(b), &opts)));
+            bch.iter(|| black_box(damerau_levenshtein(black_box(a), black_box(b))));
         });
         g.bench_with_input(BenchmarkId::new("strsim", id), &(a, b), |bch, (a, b)| {
             bch.iter(|| black_box(strsim::damerau_levenshtein(black_box(a), black_box(b))));
@@ -331,15 +356,11 @@ fn bench_damerau_levenshtein_unrestricted(c: &mut Criterion) {
 
 fn bench_damerau_levenshtein_restricted_osa(c: &mut Criterion) {
     let inputs = shaped_pairs();
-    let opts = LevOptions {
-        restricted: true,
-        ..Default::default()
-    };
     let mut g = c.benchmark_group("damerau_levenshtein_restricted_osa");
     for (id, n, a, b) in &inputs {
         g.throughput(Throughput::Elements((n * n) as u64));
         g.bench_with_input(BenchmarkId::new("verbora", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(damerau_levenshtein(black_box(a), black_box(b), &opts)));
+            bch.iter(|| black_box(verbora_osa(black_box(a), black_box(b))));
         });
         g.bench_with_input(BenchmarkId::new("strsim", id), &(a, b), |bch, (a, b)| {
             bch.iter(|| black_box(strsim::osa_distance(black_box(a), black_box(b))));
@@ -374,12 +395,6 @@ fn bench_damerau_levenshtein_restricted_osa(c: &mut Criterion) {
 
 fn bench_jaro(c: &mut Criterion) {
     let inputs = shaped_pairs();
-    // `eddie::Jaro` holds reusable internal match-flag buffers (see its own
-    // doc comment) — constructed once and reused across calls, exactly like
-    // `strsim`'s/`rapidfuzz`'s stateless calls need no such setup and
-    // `LevOptions`/`jaro_winkler::Options` above are built once outside the
-    // timed loop.
-    let ejaro = EddieJaro::new();
     let mut g = c.benchmark_group("jaro");
     for (id, n, a, b) in &inputs {
         g.throughput(Throughput::Elements(*n as u64));
@@ -400,24 +415,17 @@ fn bench_jaro(c: &mut Criterion) {
                 ))
             });
         });
-        // Crate abandoned since 2020 — output re-verified against Verbora's
-        // in `tests/distance_correctness.rs` before this number is trusted.
-        g.bench_with_input(BenchmarkId::new("eddie", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(ejaro.similarity(black_box(a), black_box(b))));
-        });
     }
     g.finish();
 }
 
 fn bench_jaro_winkler(c: &mut Criterion) {
     let inputs = shaped_pairs();
-    let opts = verbora_distance::jaro_winkler::Options::default();
-    let ejarwin = EddieJaroWinkler::new();
     let mut g = c.benchmark_group("jaro_winkler");
     for (id, n, a, b) in &inputs {
         g.throughput(Throughput::Elements(*n as u64));
         g.bench_with_input(BenchmarkId::new("verbora", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(jaro_winkler(black_box(a), black_box(b), &opts)));
+            bch.iter(|| black_box(jaro_winkler(black_box(a), black_box(b))));
         });
         g.bench_with_input(BenchmarkId::new("strsim", id), &(a, b), |bch, (a, b)| {
             bch.iter(|| black_box(strsim::jaro_winkler(black_box(a), black_box(b))));
@@ -429,10 +437,6 @@ fn bench_jaro_winkler(c: &mut Criterion) {
                     black_box(b.chars()),
                 ))
             });
-        });
-        // Same abandoned-since-2020 caveat as `bench_jaro` above.
-        g.bench_with_input(BenchmarkId::new("eddie", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(ejarwin.similarity(black_box(a), black_box(b))));
         });
     }
     g.finish();
@@ -446,7 +450,7 @@ fn bench_hamming(c: &mut Criterion) {
     for (id, n, a, b) in &inputs {
         g.throughput(Throughput::Elements(*n as u64));
         g.bench_with_input(BenchmarkId::new("verbora", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(hamming(black_box(a), black_box(b), false)));
+            bch.iter(|| black_box(hamming(black_box(a), black_box(b))));
         });
         g.bench_with_input(BenchmarkId::new("strsim", id), &(a, b), |bch, (a, b)| {
             bch.iter(|| black_box(strsim::hamming(black_box(a), black_box(b)).unwrap()));
@@ -527,7 +531,6 @@ fn plant_needle(a: &str, b: &str) -> String {
 
 fn bench_fuzzy_substring_search(c: &mut Criterion) {
     let corpus = load_ascii_pairs();
-    let opts = LevOptions::default();
     // Both shapes built once, outside all timed loops — see `plant_needle`'s
     // own doc comment.
     let mut rows: Vec<(String, String, String)> = Vec::new();
@@ -539,7 +542,7 @@ fn bench_fuzzy_substring_search(c: &mut Criterion) {
     for (id, a, b) in &rows {
         g.throughput(Throughput::Elements((a.len() * b.len()) as u64));
         g.bench_with_input(BenchmarkId::new("verbora", id), &(a, b), |bch, (a, b)| {
-            bch.iter(|| black_box(levenshtein_search(black_box(a), black_box(b), &opts)));
+            bch.iter(|| black_box(levenshtein_search(black_box(a), black_box(b))));
         });
         g.bench_with_input(
             BenchmarkId::new("triple_accel", id),

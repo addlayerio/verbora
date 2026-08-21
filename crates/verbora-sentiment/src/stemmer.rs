@@ -1,20 +1,21 @@
 //! The stemmer the analyzer talks to.
 //!
-//! `SentimentAnalyzer`'s second constructor argument is duck-typed in
-//! The reference: anything with a `.stem(word)` will do, and the reference's own
-//! spec passes six different Porter variants. [`Stemmer`] is that contract,
-//! narrowed to what the analyzer actually calls.
+//! `SentimentAnalyzer`'s second constructor argument is any object that can
+//! stem a word. [`Stemmer`] is that contract, narrowed to the one method the
+//! analyzer actually calls, so a caller can supply a Verbora stemmer, a
+//! wrapper around someone else's, or a closure-like type of their own.
 //!
 //! Every stemmer in [`verbora_stemmers`] implements it, so the two crates
 //! compose without an adapter:
 //!
 //! ```
-//! use verbora_sentiment::{SentimentAnalyzer, Stemmer};
+//! use verbora_sentiment::{Language, SentimentAnalyzer, Stemmer, VocabularyKind};
 //! use verbora_stemmers::PorterStemmer;
 //!
+//! let porter = PorterStemmer::new();
 //! let analyzer =
-//!     SentimentAnalyzer::new("English", Some(PorterStemmer::new()), "afinn").unwrap();
-//! assert_eq!(analyzer.get_sentiment(["not", "good"]), -1.5);
+//!     SentimentAnalyzer::with_stemmer(Language::English, VocabularyKind::Afinn, porter).unwrap();
+//! assert_eq!(analyzer.get_sentiment(["not", "happy"]), Some(-1.5));
 //!
 //! // …and so does anything else that stems a word.
 //! struct Chop;
@@ -23,18 +24,24 @@
 //!         word.get(..4).unwrap_or(word).into()
 //!     }
 //! }
-//! assert!(SentimentAnalyzer::new("English", Some(Chop), "afinn").is_ok());
+//! assert!(SentimentAnalyzer::with_stemmer(Language::English, VocabularyKind::Afinn, Chop).is_ok());
 //! ```
 
 use std::borrow::Cow;
 
 /// Anything the analyzer can stem a word with.
 ///
-/// The reference calls `stemmer.stem(token)` in two places — once per source key
-/// when the vocabulary is built, and once per unmatched token when a sentence is
-/// scored — and does nothing else with the object. Returning [`Cow`] rather than
-/// `String` matters for the first of those: stemming a 24,839-entry vocabulary
-/// allocates nothing for the keys the algorithm leaves alone.
+/// The analyzer calls `stem` in two places — once per *piece* of every key when
+/// the vocabulary is rebuilt, and once per unmatched token (or span piece) when
+/// text is scored — and does nothing else with the object. Returning [`Cow`]
+/// rather than `String` matters for the first of those: rebuilding a
+/// 24,839-entry vocabulary allocates nothing for the pieces the algorithm
+/// leaves alone.
+///
+/// A stemmer is expected to be **pure**: the same word must stem to the same
+/// result whenever it is asked, because the table is built once and queried
+/// afterwards, and a stemmer whose answer drifts would make a key reachable at
+/// build time and unreachable at scoring time.
 pub trait Stemmer {
     /// The stem of `word`, borrowed when the algorithm did not change it.
     fn stem<'a>(&self, word: &'a str) -> Cow<'a, str>;
@@ -61,11 +68,12 @@ impl<T: Stemmer + ?Sized> Stemmer for std::sync::Arc<T> {
 /// The identity stemmer, and the default type parameter of
 /// [`SentimentAnalyzer`](crate::SentimentAnalyzer).
 ///
-/// It exists so that `SentimentAnalyzer::without_stemmer` has a concrete type to
-/// name for its `None`, which the reference gets for free by passing `undefined`.
-/// Installing it deliberately is harmless but pointless: The reference looks a
-/// token up unstemmed *before* it stems it, so an identity stem can only repeat
-/// a lookup that already missed.
+/// It exists so that `SentimentAnalyzer::without_stemmer` has a concrete type
+/// to name for its `None`. Installing it deliberately changes no answer — the
+/// analyzer looks a token up unstemmed *before* it stems it, so an identity
+/// stem can only repeat a lookup that already missed — but it is not free: it
+/// still rebuilds the whole table, which collapses keys that share a lookup
+/// form. Prefer `without_stemmer`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct NoStemmer;
 
@@ -75,7 +83,8 @@ impl Stemmer for NoStemmer {
     }
 }
 
-/// Bridges the reference's stemmers, whose `stem` is an inherent method.
+/// Bridges [`verbora_stemmers`]'s stemmers, whose `stem` is an inherent
+/// method rather than a trait one.
 macro_rules! bridge {
     ($($ty:ty),* $(,)?) => {
         $(
@@ -128,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn reference_stemmers_bridge() {
+    fn verbora_stemmers_bridge() {
         assert_eq!(
             verbora_stemmers::PorterStemmer::new().stem("running"),
             "run"

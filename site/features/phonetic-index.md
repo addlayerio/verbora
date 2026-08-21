@@ -114,15 +114,19 @@ method** — `neighbors()` or `bucket()`.
 
 ### Which encoder
 
-`PhoneticEncoder` is implemented for the four core encoders, keyed by
+`PhoneticEncoder` is implemented for three encoders, keyed by
 how many codes each one produces per entry:
 
 | Encoder | `PhoneticEncoder::Code` | Codes per entry | Buckets an entry occupies |
 |---|---|:--:|:--:|
-| `SoundEx` | `SoundexCode` (`InlineCode<16>`) | 1 | 1 |
+| `SoundEx` | `SoundexCode` (`InlineCode<4>`) | 1 | 1 |
 | `Metaphone` | `MetaphoneCode` (`InlineCode<128>`) | 1 | 1 |
-| `SoundExDM` | `DaitchMokotoffCode` (`InlineCode<6>`) | 1 | 1 |
 | `DoubleMetaphone` | `MetaphoneCode` (`InlineCode<128>`) | **2** | 2 |
+
+The other encoders in [`verbora-phonetics`](phonetics.md) implement
+`verbora_core::Phonetic` but not `PhoneticEncoder`, so they answer
+"what is this word's key?" without plugging into the dictionary index. To
+block a dictionary under one of them, group by `process()` yourself.
 
 The general trade-offs between encoders — coarser vs. tighter buckets, which
 languages each one fits — don't change when you index rather than call
@@ -139,13 +143,17 @@ use verbora_phonetics::{DoubleMetaphone, PhoneticIndexBuilder};
 
 fn main() {
     let mut builder = PhoneticIndexBuilder::new(DoubleMetaphone::new());
-    builder.insert("astromech"); // -> ("ATRMX", "ATRMK"), two distinct codes
+    builder.insert("Smith"); // primary "SM0", alternate "XMT": two distinct codes
     let index = builder.build();
 
     // Matches via EITHER code, and appears exactly once even though it
     // occupies two buckets.
-    let hits: Vec<&str> = index.neighbors("astromech").collect();
-    assert_eq!(hits, vec!["astromech"]);
+    let hits: Vec<&str> = index.neighbors("Smith").collect();
+    assert_eq!(hits, vec!["Smith"]);
+
+    // "Schmidt"'s primary key is "Smith"'s alternate, so it finds it.
+    let hits: Vec<&str> = index.neighbors("Schmidt").collect();
+    assert_eq!(hits, vec!["Smith"]);
 }
 ```
 
@@ -218,9 +226,10 @@ fn main() {
     // describes it — PhoneticIndex never calls into verbora-distance itself.
     let mut ranked: Vec<(&str, f64)> = index
         .neighbors("Smith")
-        .map(|candidate| (candidate, jaro_winkler("Smith", candidate, &Default::default())))
+        .map(|candidate| (candidate, jaro_winkler("Smith", candidate)))
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    // The score is always a finite f64, so `total_cmp` orders it outright.
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     assert_eq!(ranked[0].0, "Smith"); // exact match ranks first
     assert!(ranked.iter().any(|&(name, _)| name == "Smyth"));
@@ -403,12 +412,11 @@ behind `Arc`, and query it as many times as you need.
 | `PhoneticIndexBuilder<E>` | The mutable build side. `new(encoder)`, `insert`, `extend`, `reserve`, `len`, `is_empty`, `build(self) -> PhoneticIndex<E>` |
 | `PhoneticIndex<E>` | The frozen query side. `len`, `is_empty`, `get(EntryId) -> &str`, `encoder`, `bucket`, `neighbors`. `Send + Sync` whenever `E` is |
 | `Neighbors<'a, E>` | The lazy iterator `neighbors()` returns. `Item = &'a str` |
-| `PhoneticEncoder` | Trait implemented for the four core encoders. `type Code: Copy + Eq + Hash + Ord`; `encode(&self, &str) -> PhoneticCodes<Self::Code>` |
+| `PhoneticEncoder` | Trait implemented for `SoundEx`, `Metaphone` and `DoubleMetaphone`. `type Code: Copy + Eq + Hash + Ord`; `encode(&self, &str) -> PhoneticCodes<Self::Code>` |
 | `PhoneticCodes<C>` | `One(C)` or `Two(C, C)` — what `encode()` produced. `IntoIterator<Item = C>` |
 | `PhoneticCodesIter<C>` | The iterator `PhoneticCodes::into_iter` returns |
-| `InlineCode<const N: usize>` | A stack-stored code, up to `N` bytes, `Copy`. `new(&str) -> Self` (panics past `N` bytes), `as_str(&self) -> &str` |
-| `SoundexCode` | `InlineCode<16>` — `SoundEx`'s code type |
-| `DaitchMokotoffCode` | `InlineCode<6>` — `SoundExDM`'s code type |
+| `InlineCode<const N: usize>` | A stack-stored code, up to `N` bytes, `Copy`. `new(&str) -> Option<Self>` (`None` past `N` bytes), `prefix_of(&str) -> Self` (keeps the longest prefix that fits, cut at a character boundary), `as_str(&self) -> &str` |
+| `SoundexCode` | `InlineCode<4>` — `SoundEx`'s code type |
 | `MetaphoneCode` | `InlineCode<128>` — `Metaphone`'s and `DoubleMetaphone`'s code type |
 | `EntryId` | An opaque, `u32`-addressed handle into one `PhoneticIndex`'s entries |
 

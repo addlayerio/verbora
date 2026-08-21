@@ -1,671 +1,307 @@
-//! Word → part-of-speech dictionaries.
-//!
-//! # The shared-mutation contract
-//!
-//! `new Lexicon(lang, ...)` does
-//!
-//! ```text
-//! this.lexicon = Object.assign(sharedJsonObject, extendedLexicon || {})
-//! ```
-//!
-//! which mutates the module-level JSON object *and* hands out the same object.
-//! Every `Lexicon` for a language in a process therefore shares one mutable
-//! dictionary, and `addWord`, the `extendedLexicon` constructor argument and
-//! [`Corpus::build_lexicon`](crate::Corpus::build_lexicon) all write into it
-//! permanently — visible even to instances created **before** the write.
-//!
-//! That is reproduced here, because programs that build a lexicon from a corpus
-//! and then tag with a different instance depend on it. The mechanism is a
-//! process-global overlay per language, guarded by an `AtomicBool`: a dictionary
-//! that has never been written to is read straight out of the executable with no
-//! lock, no hash lookup and no allocation, so the common case pays nothing for a
-//! quirk it does not use.
-//!
-//! Two escape hatches exist for callers who want determinism instead:
-//! [`Lexicon::detached`] gives an instance-private copy-on-write dictionary, and
-//! [`Lexicon::reset_shared`] discards a language's accumulated mutations.
-//!
-//! # Shipping the data
-//!
-//! The dictionaries are embedded in the binary as a packed index (see
-//! [`crate::data`]) rather than parsed from JSON at start-up:
-//!
-//! | | JSON at first use | packed index |
-//! |---|---|---|
-//! | English lexicon ready | ~55 ms | 0 (no initialisation step) |
-//! | Bytes in the binary | 4.6 MB | 2.4 MB |
-//! | First lookup | after full parse | ~17 byte-compare probes |
-//!
-//! `benches/tagger.rs` measures the first-lookup cost directly; it is
-//! indistinguishable from a warm lookup, which is the point.
+//! The initial-state annotator. The token contract and the tokenizer coupling
+//! it makes explicit are documented on [`Lexicon`] itself, since this module is
+//! private and its own header would not reach the published documentation.
 
-use std::borrow::Cow;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::collections::BTreeMap;
+use std::fmt;
 
-use rustc_hash::FxHashMap;
+use crate::data::{StaticLexicon, StaticTags};
+use crate::language::Language;
+use crate::tag::{LiteralError, Tag};
+use crate::text;
 
-use crate::data::StaticLexicon;
-use crate::error::TaggerError;
-use crate::ruleset::Language;
-use crate::sentence::Tag;
-use crate::utf16;
-
-/// What `Lexicon.tagWord` returned.
-///
-/// Not a plain `Vec<String>`, because three of its outcomes are distinguishable
-/// and the difference reaches the tagged output.
+/// Why a lexicon entry was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Categories {
-    /// The word was in the dictionary. **May be empty**: the English lexicon
-    /// contains the key `""` mapped to `[]`, and an empty array is truthy in
-    /// the reference, so it is returned as-is rather than falling through to the
-    /// default category. The token then ends up with no tag at all.
-    Found(Vec<Tag>),
-    /// The word was absent, so `[tagWordWithDefaults(word)]` was returned — a
-    /// one-element array whose element is `undefined` when no default category
-    /// is set.
-    Default(Option<Tag>),
-    /// The word was `"__proto__"`, whose lookup walks into `Object.prototype`.
-    ///
-    /// That value is truthy and is not a function, so neither of `tagWord`'s two
-    /// guards rejects it and it is returned; `categories[0]` is then `undefined`
-    /// and the token is left untagged. A Rust `HashMap` has no prototype chain,
-    /// so this case exists only to reproduce the reference.
-    ObjectPrototype,
+#[non_exhaustive]
+pub enum LexiconError {
+    /// The key was not a conforming token.
+    InvalidKey(LiteralError),
+    /// The entry carried no tags. A tagless entry could only ever mean "this
+    /// token exists but has no tag", which the initial-state annotator has no
+    /// way to act on; the bundled English `""` entry was exactly that.
+    NoTags {
+        /// The key that was rejected.
+        key: String,
+    },
+    /// A tag in the entry was not a conforming literal.
+    InvalidTag(LiteralError),
 }
 
-impl Categories {
-    /// `categories[0]` — what the tagger actually uses.
-    #[must_use]
-    pub fn first(&self) -> Option<&str> {
+impl fmt::Display for LexiconError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Found(v) => v.first().map(|t| &**t),
-            Self::Default(d) => d.as_deref(),
-            Self::ObjectPrototype => None,
-        }
-    }
-
-    /// The elements as the reference would see them; `None` is `undefined`.
-    ///
-    /// `ObjectPrototype` has no elements — `Object.keys(Object.prototype)` is
-    /// empty — so it yields an empty slice.
-    #[must_use]
-    pub fn to_vec(&self) -> Vec<Option<&str>> {
-        match self {
-            Self::Found(v) => v.iter().map(|t| Some(&**t)).collect(),
-            Self::Default(d) => vec![d.as_deref()],
-            Self::ObjectPrototype => Vec::new(),
+            Self::InvalidKey(e) => write!(f, "invalid lexicon key: {e}"),
+            Self::NoTags { key } => write!(f, "lexicon entry {key:?} has no tags"),
+            Self::InvalidTag(e) => write!(f, "invalid tag in lexicon entry: {e}"),
         }
     }
 }
 
-/// A value handed to [`Lexicon::tag_word_value`].
+impl std::error::Error for LexiconError {}
+
+/// A token → tags dictionary, plus the defaults an unknown token takes.
 ///
-/// `tagWord` indexes a plain object, so the argument is coerced to a property
-/// key first — and three of the resulting keys, `"undefined"`, `"null"` and
-/// `"length"`, are **real entries** in the English lexicon. The lookup therefore
-/// succeeds for `tagWord(undefined)` on an English lexicon and throws on a Dutch
-/// one, where the key is absent and the miss path reaches `word.toLowerCase()`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LookupKey<'a> {
-    /// An ordinary string.
-    Str(&'a str),
-    /// `undefined`; property key `"undefined"`.
-    Undefined,
-    /// `null`; property key `"null"`.
-    Null,
-    /// Any other non-string value, with its property key already coerced —
-    /// `NonString("5")` for the number `5`.
-    ///
-    /// The coercion is the caller's because `String(number)` is a specification
-    /// algorithm in its own right (`1e21` is `"1e+21"`, not 22 digits) and no
-    /// part of this crate needs it.
-    NonString(&'a str),
-}
-
-impl LookupKey<'_> {
-    /// The property key the value is coerced to.
-    #[must_use]
-    pub const fn key(&self) -> &str {
-        match self {
-            Self::Str(s) | Self::NonString(s) => s,
-            Self::Undefined => "undefined",
-            Self::Null => "null",
-        }
-    }
-
-    /// The error a missed lookup produces, because the fallback calls
-    /// `word.toLowerCase()` on something that is not a string.
-    const fn miss_error(&self) -> TaggerError {
-        match self {
-            // A string can always be lowercased, so this never fires for `Str`.
-            Self::Str(_) | Self::NonString(_) => TaggerError::WordNotAString,
-            Self::Undefined => TaggerError::undefined("toLowerCase"),
-            Self::Null => TaggerError::ReadOfUndefined {
-                object: "null",
-                property: "toLowerCase",
-            },
-        }
-    }
-}
-
-/// One runtime-added or runtime-overridden entry.
-#[derive(Debug, Clone)]
-struct Added {
-    key: Box<str>,
-    tags: Vec<Tag>,
-    /// `true` when this shadows a key the packed base already has, in which case
-    /// it does not change the key count or the enumeration position.
-    shadows_base: bool,
-}
-
-/// A dictionary: an immutable packed base plus an ordered overlay.
-#[derive(Debug, Clone, Default)]
-struct Dictionary {
-    base: Option<StaticLexicon>,
-    added: Vec<Added>,
-    index: FxHashMap<Box<str>, usize>,
-    new_keys: usize,
-}
-
-/// Result of one raw key lookup.
-enum Hit<'d> {
-    Owned(&'d [Tag]),
-    Static(StaticLexicon, usize),
-    /// `Object.prototype`, reached only through the key `"__proto__"`.
-    Proto,
-    Miss,
-}
-
-/// Whether `key` is a reference language array index — the keys the reference engine hoists to the front
-/// of `Object.keys` and sorts numerically. Mirrors the same test in `build.rs`.
-fn array_index(key: &str) -> Option<u32> {
-    if key.is_empty() || key.len() > 10 || !key.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    if key.len() > 1 && key.starts_with('0') {
-        return None;
-    }
-    let n: u64 = key.parse().ok()?;
-    (n < u64::from(u32::MAX)).then_some(n as u32)
-}
-
-impl Dictionary {
-    fn base_only(base: StaticLexicon) -> Self {
-        Self {
-            base: Some(base),
-            ..Self::default()
-        }
-    }
-
-    fn lookup(&self, key: &str) -> Hit<'_> {
-        if let Some(i) = self.index.get(key) {
-            return Hit::Owned(&self.added[*i].tags);
-        }
-        if let Some(b) = self.base {
-            if let Some(i) = b.find(key) {
-                return Hit::Static(b, i);
-            }
-        }
-        // No own property: the plain object still inherits from Object.prototype,
-        // and `__proto__` is the one inherited name whose value is not a function.
-        if key == "__proto__" {
-            return Hit::Proto;
-        }
-        Hit::Miss
-    }
-
-    fn first_tag(&self, key: &str) -> Option<Option<Tag>> {
-        match self.lookup(key) {
-            Hit::Owned(t) => Some(t.first().cloned()),
-            Hit::Static(b, i) => Some(b.tags(i).next().map(Cow::Borrowed)),
-            Hit::Proto => Some(None),
-            Hit::Miss => None,
-        }
-    }
-
-    fn set(&mut self, key: &str, tags: Vec<Tag>) {
-        // `obj['__proto__'] = value` runs the inherited setter instead of
-        // creating an own property, so the key count does not change. The
-        // prototype swap it performs is not reproduced; see the crate docs.
-        if key == "__proto__" {
-            return;
-        }
-        if let Some(i) = self.index.get(key) {
-            self.added[*i].tags = tags;
-            return;
-        }
-        let shadows_base = self.base.is_some_and(|b| b.find(key).is_some());
-        if !shadows_base {
-            self.new_keys += 1;
-        }
-        self.index.insert(key.into(), self.added.len());
-        self.added.push(Added {
-            key: key.into(),
-            tags,
-            shadows_base,
-        });
-    }
-
-    fn len(&self) -> usize {
-        self.base.map_or(0, StaticLexicon::len) + self.new_keys
-    }
-
-    /// Visits every entry in the reference's `Object.keys` order.
-    fn for_each(&self, f: &mut impl FnMut(&str, &[&str])) {
-        let mut buf: Vec<&str> = Vec::new();
-        let base_numeric = self.base.map_or(0, StaticLexicon::numeric_prefix_len);
-
-        // Runtime-added keys, partitioned the way the reference engine partitions them.
-        let mut added_numeric: Vec<(u32, usize)> = Vec::new();
-        let mut added_plain: Vec<usize> = Vec::new();
-        for (i, a) in self.added.iter().enumerate() {
-            if a.shadows_base {
-                continue; // keeps the base's position, not a new one
-            }
-            match array_index(&a.key) {
-                Some(n) => added_numeric.push((n, i)),
-                None => added_plain.push(i),
-            }
-        }
-        added_numeric.sort_unstable();
-
-        let emit = |key: &str, tags: &[&str], f: &mut dyn FnMut(&str, &[&str])| f(key, tags);
-
-        // 1. Array-index keys, ascending: the base's hoisted prefix merged with
-        //    any added ones. Both sequences are already sorted.
-        let mut bi = 0usize;
-        let mut ai = 0usize;
-        while bi < base_numeric || ai < added_numeric.len() {
-            let take_base = if bi >= base_numeric {
-                false
-            } else if ai >= added_numeric.len() {
-                true
-            } else {
-                let b = self.base.expect("base_numeric > 0 implies a base");
-                array_index(b.key(bi)).expect("hoisted keys are array indices")
-                    < added_numeric[ai].0
-            };
-            if take_base {
-                let b = self.base.expect("base_numeric > 0 implies a base");
-                self.collect_tags(b, bi, &mut buf);
-                emit(b.key(bi), &buf, f);
-                bi += 1;
-            } else {
-                let a = &self.added[added_numeric[ai].1];
-                buf.clear();
-                buf.extend(a.tags.iter().map(|t| &**t));
-                emit(&a.key, &buf, f);
-                ai += 1;
-            }
-        }
-
-        // 2. The base's non-index keys, in file order.
-        if let Some(b) = self.base {
-            for i in base_numeric..b.len() {
-                self.collect_tags(b, i, &mut buf);
-                emit(b.key(i), &buf, f);
-            }
-        }
-
-        // 3. Added non-index keys, in insertion order.
-        for i in added_plain {
-            let a = &self.added[i];
-            buf.clear();
-            buf.extend(a.tags.iter().map(|t| &**t));
-            emit(&a.key, &buf, f);
-        }
-    }
-
-    /// Fills `buf` with the effective tags of base entry `i`, honouring any
-    /// overlay entry that shadows it.
-    fn collect_tags<'s>(&'s self, b: StaticLexicon, i: usize, buf: &mut Vec<&'s str>) {
-        buf.clear();
-        let key = b.key(i);
-        if let Some(slot) = self.index.get(key) {
-            buf.extend(self.added[*slot].tags.iter().map(|t| &**t));
-        } else {
-            buf.extend(b.tags(i).map(|t| -> &'s str { t }));
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Process-global dictionaries
-// ---------------------------------------------------------------------------
-
-static ENGLISH: OnceLock<RwLock<Dictionary>> = OnceLock::new();
-static DUTCH: OnceLock<RwLock<Dictionary>> = OnceLock::new();
-/// Set the first time a language's shared dictionary is written to. Until then
-/// every read skips the lock entirely.
-static ENGLISH_DIRTY: AtomicBool = AtomicBool::new(false);
-static DUTCH_DIRTY: AtomicBool = AtomicBool::new(false);
-
-fn shared(language: Language) -> &'static RwLock<Dictionary> {
-    match language {
-        Language::English => {
-            ENGLISH.get_or_init(|| RwLock::new(Dictionary::base_only(StaticLexicon::english())))
-        }
-        Language::Dutch => {
-            DUTCH.get_or_init(|| RwLock::new(Dictionary::base_only(StaticLexicon::dutch())))
-        }
-    }
-}
-
-fn dirty_flag(language: Language) -> &'static AtomicBool {
-    match language {
-        Language::English => &ENGLISH_DIRTY,
-        Language::Dutch => &DUTCH_DIRTY,
-    }
-}
-
-fn base_of(language: Language) -> StaticLexicon {
-    match language {
-        Language::English => StaticLexicon::english(),
-        Language::Dutch => StaticLexicon::dutch(),
-    }
-}
-
-/// Where a `Lexicon`'s entries live.
-#[derive(Debug, Clone)]
-enum Store {
-    /// Aliases the process-global dictionary, as every the reference `Lexicon` does.
-    Shared(Language),
-    /// Instance-private, after `parseLexicon` or [`Lexicon::detached`].
-    Owned(Dictionary),
-}
-
-/// A word → categories dictionary with default categories for unknown words.
+/// # The token contract, and the tokenizer coupling it makes explicit
+///
+/// A `Lexicon` key is a **token**: non-empty, and containing no scalar with the
+/// Unicode `White_Space` property. [`Lexicon::insert`] rejects anything else,
+/// and the crate's build script holds the bundled JSON to exactly the same rule.
+///
+/// That contract is this crate's half of a coupling that would otherwise go
+/// unstated: **this crate never tokenizes**, so whatever produced the tokens
+/// decides which keys can ever be hit. Verbora's bundled dictionaries are keyed
+/// by the whitespace-delimited tokens of the corpora they were derived from —
+/// `well-known`, `A.A.U.`, `%CHG` and `Asia/Pacific` are each a single key — so a
+/// producer that splits inside those keys simply never reaches them.
+///
+/// This is measured, not asserted. Feeding every bundled key through [UAX #29]
+/// word segmentation, which is what `verbora_tokenizers::WordTokenizer`
+/// implements:
+///
+/// | Lexicon | keys | never emitted whole by a UAX #29 word tokenizer | share |
+/// |---|---|---|---|
+/// | English | 92,538 | 15,543 | 16.8% |
+/// | Dutch | 11,699 | 313 | 2.7% |
+///
+/// The English figure breaks down as: 14,417 keys containing U+002D
+/// HYPHEN-MINUS, which is `Word_Break=Other`, so `well-known` segments as
+/// `["well", "known"]`; 864 containing a full stop (`A.A.U.`); 151 containing
+/// `/` (`Asia/Pacific`); 49 containing `&`; 9 containing `$`; 34 that are pure
+/// punctuation and are dropped entirely; and 19 others. `tests/tokenization.rs`
+/// walks **every** bundled key, pins those counts and pins the breakdown, so a
+/// change on either side breaks a test instead of quietly costing one key in six.
+///
+/// The guidance follows from the numbers:
+///
+/// * with the **bundled** dictionaries, split on whitespace —
+///   `str::split_whitespace` yields exactly conforming tokens and reaches every
+///   key;
+/// * with a **UAX #29** tokenizer, build the lexicon from a corpus tokenized the
+///   same way, with [`Corpus::build_lexicon`](crate::Corpus::build_lexicon).
+///   Every key it produces is then reachable by construction.
+///
+/// # What it guarantees
+///
+/// * Every key is a conforming token, and every entry has **at least one** tag,
+///   so [`Lexicon::primary_tag`] never has to invent one and never returns an
+///   empty answer for a present key.
+/// * Tags are ordered **most frequent first**, which is what makes
+///   [`Lexicon::primary_tag`] the "most likely tag" annotator Brill (1995) §2
+///   specifies. The bundled data is stored in that order; a lexicon built by
+///   [`crate::Corpus::build_lexicon`] is sorted into it.
+/// * A `Lexicon` owns its entries. Two lexicons never share state, and
+///   [`Lexicon::insert`] on one is invisible to every other.
+/// * Nothing here rewrites a token. The lowercase retry described on
+///   [`Lexicon::tag_of`] changes what is *looked up*, never what is stored or
+///   returned.
+///
+/// [UAX #29]: https://www.unicode.org/reports/tr29/
 #[derive(Debug, Clone)]
 pub struct Lexicon {
-    store: Store,
-    /// Category assigned to an unknown word. `None` is `undefined`, which
-    /// produces a token with no tag rather than an error.
-    pub default_category: Option<Tag>,
-    /// Category assigned to an unknown word starting with an ASCII `A`–`Z`.
-    pub default_category_capitalised: Option<Tag>,
+    /// The packed dictionary this lexicon started from, if any.
+    base: Option<StaticLexicon>,
+    /// Entries added or overridden at runtime. Ordered, so iteration and
+    /// `Debug` are deterministic.
+    overlay: BTreeMap<Box<str>, Box<[Tag]>>,
+    /// How many overlay keys are not also base keys.
+    overlay_new: usize,
+    default_tag: Tag,
+    capitalized_default_tag: Tag,
+    lowercase_retry: bool,
 }
 
 impl Lexicon {
-    /// `new Lexicon(language, defaultCategory, defaultCategoryCapitalised)`.
+    /// An empty lexicon in which every token takes `default_tag`.
     ///
-    /// # The language switch
-    ///
-    /// `'EN'` selects English and **everything else selects Dutch**, including
-    /// `None` — `Lexicon::new(None, ..)` is a Dutch lexicon. (`RuleSet`'s switch
-    /// defaults the other way; see [`Language::for_rule_set`].)
-    ///
-    /// # The nested default-category guard
-    ///
-    /// `defaultCategoryCapitalised` is stored **only if `defaultCategory` is
-    /// truthy**, because the reference nests the two assignments. So
-    /// `Lexicon::new(Some("EN"), None, Some("NNP"))` and
-    /// `Lexicon::new(Some("EN"), Some(""), Some("NNP"))` both leave *both*
-    /// defaults unset. [`Lexicon::set_default_categories`] has different rules
-    /// again.
+    /// The capitalised default starts equal to `default_tag`; set it with
+    /// [`Lexicon::with_capitalized_default_tag`].
     #[must_use]
-    pub fn new(
-        language: Option<&str>,
-        default_category: Option<&str>,
-        default_category_capitalised: Option<&str>,
-    ) -> Self {
-        let (dc, dcc) = nested_defaults(default_category, default_category_capitalised);
+    pub fn new(default_tag: Tag) -> Self {
         Self {
-            store: Store::Shared(Language::for_lexicon(language)),
-            default_category: dc,
-            default_category_capitalised: dcc,
+            base: None,
+            overlay: BTreeMap::new(),
+            overlay_new: 0,
+            capitalized_default_tag: default_tag.clone(),
+            default_tag,
+            lowercase_retry: true,
         }
     }
 
-    /// `new Lexicon(language, dc, dcc, extendedLexicon)`.
+    /// The bundled dictionary for `language`, with that language's documented
+    /// defaults (see [`Language::default_tag`]).
     ///
-    /// The extension is written into the **shared** dictionary for the language,
-    /// exactly as `Object.assign` does — every other `Lexicon` for that language,
-    /// including ones constructed earlier, sees it from this point on.
+    /// Costs nothing at construction: the entries are read in place from bytes
+    /// embedded in the executable, so there is no parse step and no lazily
+    /// initialised table.
     #[must_use]
-    pub fn with_extension(
-        language: Option<&str>,
-        default_category: Option<&str>,
-        default_category_capitalised: Option<&str>,
-        extended: &[(&str, Vec<Tag>)],
-    ) -> Self {
-        let lang = Language::for_lexicon(language);
-        if !extended.is_empty() {
-            let mut g = shared(lang).write().expect("lexicon lock poisoned");
-            for (word, tags) in extended {
-                g.set(word, tags.clone());
-            }
-            dirty_flag(lang).store(true, Ordering::Release);
-        }
-        Self::new(language, default_category, default_category_capitalised)
-    }
-
-    /// A lexicon that does **not** alias the process-global dictionary.
-    ///
-    /// Same starting contents as [`Lexicon::new`], but `add_word` and friends
-    /// write to this instance only. This has no the reference equivalent; it exists
-    /// so that library users who want reproducible behaviour are not forced to
-    /// inherit a global they never asked for.
-    #[must_use]
-    pub fn detached(
-        language: Option<&str>,
-        default_category: Option<&str>,
-        default_category_capitalised: Option<&str>,
-    ) -> Self {
-        let (dc, dcc) = nested_defaults(default_category, default_category_capitalised);
+    pub fn bundled(language: Language) -> Self {
         Self {
-            store: Store::Owned(Dictionary::base_only(base_of(Language::for_lexicon(
-                language,
-            )))),
-            default_category: dc,
-            default_category_capitalised: dcc,
+            base: Some(language.lexicon()),
+            overlay: BTreeMap::new(),
+            overlay_new: 0,
+            default_tag: language.default_tag(),
+            capitalized_default_tag: language.capitalized_default_tag(),
+            lowercase_retry: true,
         }
     }
 
-    /// An empty lexicon with no bundled entries at all.
+    /// Replaces the tag unknown, uncapitalised tokens take.
     #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            store: Store::Owned(Dictionary::default()),
-            default_category: None,
-            default_category_capitalised: None,
-        }
+    pub fn with_default_tag(mut self, tag: Tag) -> Self {
+        self.default_tag = tag;
+        self
     }
 
-    /// Discards every runtime mutation of a language's shared dictionary.
+    /// Replaces the tag unknown, capitalised tokens take.
     ///
-    /// Intended for tests and for long-running processes that need to undo a
-    /// `Corpus::build_lexicon`. No the reference equivalent — there, the pollution
-    /// is permanent for the life of the process.
-    pub fn reset_shared(language: Language) {
-        let mut g = shared(language).write().expect("lexicon lock poisoned");
-        *g = Dictionary::base_only(base_of(language));
-        dirty_flag(language).store(false, Ordering::Release);
-    }
-
-    /// Runs `f` against the effective dictionary.
-    ///
-    /// The fast path constructs a base-only view without touching the lock; a
-    /// `Dictionary` with an empty overlay allocates nothing, so this is free.
-    fn with_dict<R>(&self, f: impl FnOnce(&Dictionary) -> R) -> R {
-        match &self.store {
-            Store::Owned(d) => f(d),
-            Store::Shared(lang) => {
-                if dirty_flag(*lang).load(Ordering::Acquire) {
-                    let g = shared(*lang).read().expect("lexicon lock poisoned");
-                    f(&g)
-                } else {
-                    f(&Dictionary::base_only(base_of(*lang)))
-                }
-            }
-        }
-    }
-
-    fn with_dict_mut<R>(&mut self, f: impl FnOnce(&mut Dictionary) -> R) -> R {
-        match &mut self.store {
-            Store::Owned(d) => f(d),
-            Store::Shared(lang) => {
-                let lang = *lang;
-                let mut g = shared(lang).write().expect("lexicon lock poisoned");
-                let r = f(&mut g);
-                dirty_flag(lang).store(true, Ordering::Release);
-                r
-            }
-        }
-    }
-
-    /// `tagWord(word)`: the categories for a word.
-    ///
-    /// The lookup is: exact key, then lowercased key, then the default category.
-    /// A *present but empty* entry short-circuits the whole chain, because an
-    /// empty array is truthy — see [`Categories::Found`].
+    /// "Capitalised" is the Unicode `Uppercase` property on the token's first
+    /// scalar, so `Ålesund` and `Москва` count and `5`, `.` and `日本` do not.
     #[must_use]
-    pub fn tag_word(&self, word: &str) -> Categories {
-        self.with_dict(|d| match d.lookup(word) {
-            Hit::Owned(t) => Categories::Found(t.to_vec()),
-            Hit::Static(b, i) => Categories::Found(b.tags(i).map(Cow::Borrowed).collect()),
-            Hit::Proto => Categories::ObjectPrototype,
-            Hit::Miss => {
-                let lower = lowercase(word);
-                match d.lookup(&lower) {
-                    Hit::Owned(t) => Categories::Found(t.to_vec()),
-                    Hit::Static(b, i) => Categories::Found(b.tags(i).map(Cow::Borrowed).collect()),
-                    Hit::Proto => Categories::ObjectPrototype,
-                    Hit::Miss => Categories::Default(self.tag_word_with_defaults(word)),
-                }
-            }
-        })
+    pub fn with_capitalized_default_tag(mut self, tag: Tag) -> Self {
+        self.capitalized_default_tag = tag;
+        self
     }
 
-    /// `tagWord(value)` for an argument that is not a `String`.
+    /// Turns the lowercase retry described on [`Lexicon::tag_of`] on or off.
     ///
-    /// Only the *exact* key is tried: the lowercased retry calls
-    /// `word.toLowerCase()`, which throws for every non-string. So the lookup
-    /// either hits on the coerced key or fails — and which of the two happens
-    /// depends on the language, since `"undefined"` and `"null"` are English
-    /// entries but not Dutch ones.
+    /// On by default, because a sentence-initial `The` should find `the`.
+    #[must_use]
+    pub const fn with_lowercase_retry(mut self, on: bool) -> Self {
+        self.lowercase_retry = on;
+        self
+    }
+
+    /// The tag unknown, uncapitalised tokens take.
+    #[inline]
+    #[must_use]
+    pub const fn default_tag(&self) -> &Tag {
+        &self.default_tag
+    }
+
+    /// The tag unknown, capitalised tokens take.
+    #[inline]
+    #[must_use]
+    pub const fn capitalized_default_tag(&self) -> &Tag {
+        &self.capitalized_default_tag
+    }
+
+    /// Whether the lowercase retry is enabled.
+    #[inline]
+    #[must_use]
+    pub const fn lowercase_retry(&self) -> bool {
+        self.lowercase_retry
+    }
+
+    /// Adds or replaces one entry.
     ///
-    /// [`LookupKey::Str`] is accepted too and behaves exactly like
-    /// [`Lexicon::tag_word`].
+    /// Returns the tags the key previously carried, if it had an overlay entry.
     ///
     /// # Errors
     ///
-    /// The `TypeError` the lowercased retry raises: `word.toLowerCase is not a
-    /// function` for a number, `Cannot read properties of undefined/null
-    /// (reading 'toLowerCase')` for those two.
-    pub fn tag_word_value(&self, value: LookupKey<'_>) -> Result<Categories, TaggerError> {
-        if let LookupKey::Str(s) = value {
-            return Ok(self.tag_word(s));
+    /// [`LexiconError::InvalidKey`] when `key` is empty or contains whitespace,
+    /// [`LexiconError::NoTags`] when `tags` is empty, and
+    /// [`LexiconError::InvalidTag`] never in practice — a [`Tag`] is already
+    /// checked — but the variant exists so the contract is stated in one place.
+    pub fn insert(
+        &mut self,
+        key: &str,
+        tags: Vec<Tag>,
+    ) -> Result<Option<Box<[Tag]>>, LexiconError> {
+        if key.is_empty() {
+            return Err(LexiconError::InvalidKey(LiteralError::Empty));
         }
-        self.with_dict(|d| match d.lookup(value.key()) {
-            Hit::Owned(t) => Ok(Categories::Found(t.to_vec())),
-            Hit::Static(b, i) => Ok(Categories::Found(b.tags(i).map(Cow::Borrowed).collect())),
-            Hit::Proto => Ok(Categories::ObjectPrototype),
-            Hit::Miss => Err(value.miss_error()),
-        })
-    }
-
-    /// `tagWord(word)[0]` without materialising the array.
-    ///
-    /// This is the tagging hot path: one binary search over the packed index,
-    /// and — for an already-lowercase ASCII word, which nearly all of them are —
-    /// no allocation for the lowercased fallback either.
-    #[must_use]
-    pub fn first_category(&self, word: &str) -> Option<Tag> {
-        self.with_dict(|d| {
-            if let Some(t) = d.first_tag(word) {
-                return t;
-            }
-            // Only lowercase (and thus allocate) when the word could differ.
-            if word.is_ascii() && !word.bytes().any(|b| b.is_ascii_uppercase()) {
-                return self.tag_word_with_defaults(word);
-            }
-            let lower = lowercase(word);
-            d.first_tag(&lower)
-                .unwrap_or_else(|| self.tag_word_with_defaults(word))
-        })
-    }
-
-    /// `tagWordWithDefaults(word)`.
-    ///
-    /// The capitalisation test is `/[A-Z]/` against the **first UTF-16 code
-    /// unit**: ASCII only, so `"Ålesund"` and `"Москва"` take the ordinary
-    /// default. The capitalised default also has to be *truthy* to be used.
-    #[must_use]
-    pub fn tag_word_with_defaults(&self, word: &str) -> Option<Tag> {
-        if utf16::first_is_ascii_upper(word) {
-            if let Some(c) = self
-                .default_category_capitalised
-                .as_ref()
-                .filter(|c| !c.is_empty())
-            {
-                return Some(c.clone());
-            }
+        if let Some(found) = key.chars().find(|c| c.is_whitespace()) {
+            return Err(LexiconError::InvalidKey(LiteralError::Whitespace { found }));
         }
-        self.default_category.clone()
-    }
-
-    /// `addWord(word, categories)` — unconditional replace.
-    ///
-    /// On a shared lexicon this writes to the **process-global** dictionary for
-    /// the language; see the module documentation.
-    pub fn add_word(&mut self, word: &str, categories: Vec<Tag>) {
-        self.with_dict_mut(|d| d.set(word, categories));
-    }
-
-    /// `parseLexicon(data)`: replaces the contents from `word cat1 cat2 …` text.
-    ///
-    /// The instance **detaches** from the shared dictionary, which is left
-    /// untouched. Lines are split on the reference `\s+`, so `U+FEFF` separates
-    /// tokens and `U+0085` does not — `split_whitespace` gets both backwards.
-    /// A line with a single token stores an *empty* category list, which
-    /// [`Lexicon::tag_word`] then returns as-is.
-    ///
-    /// # Errors
-    ///
-    /// Input with no non-newline characters (`""`, `"\n\n"`) makes
-    /// `String.match` with `/g` return `null`, and the reference then calls
-    /// `.forEach` on it. That TypeError is part of the contract.
-    pub fn parse_lexicon(&mut self, data: &str) -> Result<(), TaggerError> {
-        let lines: Vec<&str> = data.split(['\r', '\n']).filter(|l| !l.is_empty()).collect();
-        if lines.is_empty() {
-            return Err(TaggerError::ReadOfUndefined {
-                object: "null",
-                property: "forEach",
+        if tags.is_empty() {
+            return Err(LexiconError::NoTags {
+                key: key.to_owned(),
             });
         }
-        let mut dict = Dictionary::default();
-        for line in lines {
-            let trimmed = line.trim_matches(verbora_core::whitespace::is_whitespace);
-            // `"".split(/\s+/)` is `[""]`, not `[]`, so a blank line stores the
-            // key "" with no categories.
-            let mut parts = split_whitespace_units(trimmed);
-            let key = parts.next().unwrap_or("");
-            let tags: Vec<Tag> = parts.map(|t| Cow::Owned(t.to_string())).collect();
-            dict.set(key, tags);
+        let shadows_base = self.base.is_some_and(|b| b.find(key).is_some());
+        let previous = self.overlay.insert(key.into(), tags.into_boxed_slice());
+        if previous.is_none() && !shadows_base {
+            self.overlay_new += 1;
         }
-        self.store = Store::Owned(dict);
-        Ok(())
+        Ok(previous)
     }
 
-    /// `setDefaultCategories(category, categoryCapitalised)`.
+    /// Whether `key` is present, exactly as spelled.
+    #[must_use]
+    pub fn contains(&self, key: &str) -> bool {
+        self.overlay.contains_key(key) || self.base.is_some_and(|b| b.find(key).is_some())
+    }
+
+    /// The tags of `key`, most frequent first, or `None` when it is absent.
     ///
-    /// Differs from the constructor in both directions: `category` is stored
-    /// **unconditionally** (a falsy value really does become the default), while
-    /// a falsy `categoryCapitalised` leaves any previous value **intact** rather
-    /// than clearing it.
-    pub fn set_default_categories(&mut self, category: Option<&str>, capitalised: Option<&str>) {
-        self.default_category = category.map(|c| Cow::Owned(c.to_string()));
-        if let Some(c) = capitalised.filter(|c| !c.is_empty()) {
-            self.default_category_capitalised = Some(Cow::Owned(c.to_string()));
+    /// The iterator is never empty when it is `Some`.
+    #[must_use]
+    pub fn tags(&self, key: &str) -> Option<Tags<'_>> {
+        if let Some(t) = self.overlay.get(key) {
+            return Some(Tags(TagsInner::Owned(t.iter())));
+        }
+        let base = self.base?;
+        let i = base.find(key)?;
+        Some(Tags(TagsInner::Static(base.tags(i))))
+    }
+
+    /// The most frequent tag of `key`, or `None` when it is absent.
+    ///
+    /// This is the lookup [`Lexicon::tag_of`] is built on. It performs one
+    /// ordered-map probe and, for a bundled lexicon, one binary search over
+    /// bytes embedded in the executable; it allocates nothing.
+    #[inline]
+    #[must_use]
+    pub fn primary_tag(&self, key: &str) -> Option<Tag> {
+        if let Some(t) = self.overlay.get(key) {
+            return t.first().cloned();
+        }
+        let base = self.base?;
+        base.primary_tag(key).map(Tag::from_static)
+    }
+
+    /// The tag the initial-state annotator gives `token`.
+    ///
+    /// Total: every token gets a tag. The chain is, in order:
+    ///
+    /// 1. the most frequent tag of `token` exactly as spelled;
+    /// 2. if [`Lexicon::lowercase_retry`] is on and step 1 missed, the most
+    ///    frequent tag of `token.to_lowercase()` — the Unicode default full
+    ///    lowercase mapping, which is why `İstanbul` is retried as
+    ///    `i̇stanbul` and not as `istanbul`;
+    /// 3. [`Lexicon::capitalized_default_tag`] when the token is capitalised;
+    /// 4. [`Lexicon::default_tag`].
+    ///
+    /// Step 2 changes only what is *looked up*. `token` itself is returned to
+    /// the caller unchanged by every API in this crate.
+    ///
+    /// A token that violates the key contract — empty, or containing
+    /// whitespace — cannot match any entry, because no such entry can exist, so
+    /// it takes a default. That is deliberate: rejecting it would make the whole
+    /// tagging path fallible for an input shape a conforming tokenizer never
+    /// produces.
+    #[must_use]
+    pub fn tag_of(&self, token: &str) -> Tag {
+        if let Some(t) = self.primary_tag(token) {
+            return t;
+        }
+        if self.lowercase_retry && !is_already_lowercase_ascii(token) {
+            let lowered = token.to_lowercase();
+            if let Some(t) = self.primary_tag(&lowered) {
+                return t;
+            }
+        }
+        if text::is_capitalized(token) {
+            self.capitalized_default_tag.clone()
+        } else {
+            self.default_tag.clone()
         }
     }
 
-    /// `nrEntries()` / `size()`: the number of own keys.
+    /// Number of entries.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.with_dict(Dictionary::len)
+        self.base.map_or(0, StaticLexicon::len) + self.overlay_new
     }
 
     /// Whether the lexicon has no entries.
@@ -674,294 +310,357 @@ impl Lexicon {
         self.len() == 0
     }
 
-    /// `prettyPrint()`: one tab-separated line per entry.
+    /// Every entry, in ascending key order, most frequent tag first.
     ///
-    /// Note the **trailing tab** before every newline, and that an entry with no
-    /// categories prints as `word\t\n`. Keys come out in the reference enumeration
-    /// order: array-index-like keys first in ascending numeric order, then the
-    /// rest in insertion order.
-    #[must_use]
-    pub fn pretty_print(&self) -> String {
-        let mut out = String::new();
-        self.for_each_entry(&mut |word, tags| {
-            out.push_str(word);
-            out.push('\t');
-            for t in tags {
-                out.push_str(t);
-                out.push('\t');
-            }
-            out.push('\n');
+    /// The order is by Unicode scalar value (equivalently, by UTF-8 bytes) and
+    /// is stable across runs and platforms, so the output of a
+    /// [`Corpus::build_lexicon`](crate::Corpus::build_lexicon) can be written to
+    /// a file and diffed.
+    pub fn entries(&self) -> Entries<'_> {
+        Entries {
+            lexicon: self,
+            base_at: 0,
+            base_len: self.base.map_or(0, StaticLexicon::len),
+            overlay: self.overlay.iter().peekable(),
+        }
+    }
+}
+
+/// Whether the lowercase retry can be skipped because it would be a no-op.
+///
+/// An all-ASCII token with no uppercase byte lowercases to itself, so the retry
+/// would repeat the probe that just missed. Restricting the fast path to ASCII
+/// is deliberate: `İ`, `ẞ` and the Greek final sigma all lowercase to something
+/// other than themselves and must still be retried.
+#[inline]
+fn is_already_lowercase_ascii(token: &str) -> bool {
+    token.is_ascii() && !token.bytes().any(|b| b.is_ascii_uppercase())
+}
+
+/// The tags of one entry, most frequent first. See [`Lexicon::tags`].
+#[derive(Debug, Clone)]
+pub struct Tags<'a>(TagsInner<'a>);
+
+#[derive(Debug, Clone)]
+enum TagsInner<'a> {
+    Static(StaticTags),
+    Owned(std::slice::Iter<'a, Tag>),
+}
+
+impl Iterator for Tags<'_> {
+    type Item = Tag;
+
+    #[inline]
+    fn next(&mut self) -> Option<Tag> {
+        match &mut self.0 {
+            TagsInner::Static(it) => it.next().map(Tag::from_static),
+            TagsInner::Owned(it) => it.next().cloned(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match &self.0 {
+            TagsInner::Static(it) => it.size_hint(),
+            TagsInner::Owned(it) => it.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for Tags<'_> {}
+
+/// Every entry of a [`Lexicon`], in ascending key order. See
+/// [`Lexicon::entries`].
+#[derive(Debug)]
+pub struct Entries<'a> {
+    lexicon: &'a Lexicon,
+    base_at: usize,
+    base_len: usize,
+    overlay: std::iter::Peekable<std::collections::btree_map::Iter<'a, Box<str>, Box<[Tag]>>>,
+}
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = (&'a str, Tags<'a>);
+
+    fn next(&mut self) -> Option<(&'a str, Tags<'a>)> {
+        // A two-way merge of two ascending sequences. One step per call: an
+        // overlay entry that shadows a base key advances both cursors at once,
+        // so the shadowed base entry is skipped rather than emitted twice.
+        //
+        // Three `expect`s below rest on one invariant, which is worth stating
+        // once because reordering this function is what would break it:
+        // `base_len` is `base.map_or(0, StaticLexicon::len)` fixed at
+        // construction, and `Entries` borrows the `Lexicon` immutably for its
+        // whole lifetime, so `base_len > 0` implies `base.is_some()` and stays
+        // implying it. Every read of `base` here is therefore guarded by
+        // `base_at < base_len`, directly or through `base_key` being `Some`,
+        // and the same guard is what keeps `key(base_at)`/`tags(base_at)` in
+        // bounds. The last `expect` is different in kind: it is `Peekable`'s
+        // own contract, that a `peek()` returning `Some` is followed by a
+        // `next()` returning `Some` — nothing between the two touches
+        // `self.overlay`.
+        let base_key = (self.base_at < self.base_len).then(|| {
+            self.lexicon
+                .base
+                .expect("base_len > 0 implies a base")
+                .key(self.base_at)
         });
-        out
-    }
-
-    /// Visits every entry in the reference key order.
-    pub fn for_each_entry(&self, f: &mut impl FnMut(&str, &[&str])) {
-        self.with_dict(|d| d.for_each(f));
-    }
-}
-
-/// The constructor's nested guard, isolated so both constructors share it.
-fn nested_defaults(dc: Option<&str>, dcc: Option<&str>) -> (Option<Tag>, Option<Tag>) {
-    match dc.filter(|c| !c.is_empty()) {
-        None => (None, None),
-        Some(c) => (
-            Some(Cow::Owned(c.to_string())),
-            dcc.filter(|c| !c.is_empty())
-                .map(|c| Cow::Owned(c.to_string())),
-        ),
-    }
-}
-
-/// `String.prototype.toLowerCase`, with a zero-allocation ASCII fast path.
-fn lowercase(word: &str) -> Cow<'_, str> {
-    if word.is_ascii() {
-        if word.bytes().any(|b| b.is_ascii_uppercase()) {
-            Cow::Owned(word.to_ascii_lowercase())
-        } else {
-            Cow::Borrowed(word)
+        let overlay_key = self.overlay.peek().map(|(k, _)| &***k);
+        let take_base = match (base_key, overlay_key) {
+            (None, None) => return None,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(b), Some(o)) => b < o,
+        };
+        if take_base {
+            let lex = self.lexicon.base.expect("base key exists");
+            let tags = lex.tags(self.base_at);
+            let key = lex.key(self.base_at);
+            self.base_at += 1;
+            return Some((key, Tags(TagsInner::Static(tags))));
         }
-    } else {
-        // Full Unicode: Greek final sigma and the Turkish dotted capital must
-        // fold the way the reference folds them, so `to_ascii_lowercase` will not do.
-        Cow::Owned(word.to_lowercase())
-    }
-}
-
-/// `str.split(/\s+/)` with the reference's `\s`, preserving the leading empty field
-/// that a string starting with whitespace produces.
-fn split_whitespace_units(s: &str) -> impl Iterator<Item = &str> {
-    let mut rest = Some(s);
-    std::iter::from_fn(move || {
-        let cur = rest?;
-        match cur.find(verbora_core::whitespace::is_whitespace) {
-            None => {
-                rest = None;
-                Some(cur)
-            }
-            Some(at) => {
-                let (head, tail) = cur.split_at(at);
-                let tail = tail.trim_start_matches(verbora_core::whitespace::is_whitespace);
-                rest = Some(tail);
-                Some(head)
-            }
+        if base_key == overlay_key {
+            self.base_at += 1;
         }
-    })
+        let (k, v) = self.overlay.next().expect("peeked a Some");
+        Some((k, Tags(TagsInner::Owned(v.iter()))))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn language_switch_defaults_to_dutch() {
-        assert_eq!(
-            Lexicon::detached(Some("EN"), Some("NN"), None).len(),
-            92_662
-        );
-        assert_eq!(Lexicon::detached(Some("DU"), Some("N"), None).len(), 11_699);
-        assert_eq!(Lexicon::detached(None, Some("N"), None).len(), 11_699);
-        assert_eq!(Lexicon::detached(Some("FR"), Some("N"), None).len(), 11_699);
+    fn tag(s: &'static str) -> Tag {
+        Tag::new(s).unwrap()
     }
 
     #[test]
-    fn nested_default_guard() {
-        let l = Lexicon::detached(Some("EN"), None, Some("NNP"));
-        assert!(l.default_category.is_none());
-        assert!(
-            l.default_category_capitalised.is_none(),
-            "a falsy defaultCategory suppresses the capitalised one too"
-        );
-        let l = Lexicon::detached(Some("EN"), Some(""), Some("NNP"));
-        assert!(l.default_category_capitalised.is_none());
-        let l = Lexicon::detached(Some("EN"), Some("NN"), Some("NNP"));
-        assert_eq!(l.default_category_capitalised.as_deref(), Some("NNP"));
+    fn bundled_sizes_and_defaults() {
+        let en = Lexicon::bundled(Language::English);
+        assert_eq!(en.len(), 92_538);
+        assert_eq!(en.default_tag(), &tag("NN"));
+        assert_eq!(en.capitalized_default_tag(), &tag("NNP"));
+        let nl = Lexicon::bundled(Language::Dutch);
+        assert_eq!(nl.len(), 11_699);
+        assert_eq!(nl.default_tag(), &tag("N(soort,ev,neut)"));
+    }
+
+    /// A bundled token whose own text contains `/` or `*` is reachable by that
+    /// text. The source corpora escape both characters, because a bare `/`
+    /// separates a token from its tag and a bare `*` marks a null element; the
+    /// packed keys carry the token, not the escape.
+    #[test]
+    fn tokens_containing_a_slash_or_a_star_are_reachable_by_their_text() {
+        let en = Lexicon::bundled(Language::English);
+        assert_eq!(en.tag_of("Asia/Pacific"), tag("JJ"));
+        assert_eq!(en.tag_of("producer/director"), tag("NN"));
+        assert_eq!(en.tag_of("M*A*S*H"), tag("NNP"));
+        // ...and the markup spellings are gone.
+        for gone in ["Asia\\/Pacific", "Asia\\", "me/PRP", "W/NNP.R.G."] {
+            assert!(!en.contains(gone), "{gone:?} is still a key");
+        }
+    }
+
+    /// The entry under the key `*` is the one the corpus spelled `\*`.
+    ///
+    /// The source holds both `*` and `\*`. In the notation `build.rs` decodes,
+    /// a bare `*` standing alone is the null-element marker and `\*` is how the
+    /// token whose text is an asterisk is written — the same relationship `/`
+    /// has with `\/`. So the entry that survives is the escaped one, with the
+    /// tags the corpus gave the *token*: `SYM`, then the list-item marker `LS`,
+    /// then `NN`. The marker's own entry (`SYM`, `,`, `:`) is markup and is
+    /// dropped, exactly as `me/PRP` and `Asia\` are.
+    ///
+    /// A `*` that is not standing alone is not the marker: `M*A*S*H` above and
+    /// `assets*` here keep theirs.
+    #[test]
+    fn the_asterisk_key_is_the_token_and_not_the_null_element_marker() {
+        let en = Lexicon::bundled(Language::English);
+        let tags: Vec<String> = en
+            .tags("*")
+            .expect("the token `*` is a key")
+            .map(|t| t.to_string())
+            .collect();
+        assert_eq!(tags, ["SYM", "LS", "NN"]);
+        assert_eq!(en.tag_of("*"), tag("SYM"));
+        assert!(en.contains("assets*"), "a `*` inside a token is token text");
     }
 
     #[test]
-    fn set_default_categories_has_different_rules() {
-        let mut l = Lexicon::detached(Some("EN"), Some("AAA"), Some("BBB"));
-        // Unconditional for the first argument...
-        l.set_default_categories(None, None);
-        assert!(l.default_category.is_none());
-        // ...but the second is never cleared.
-        assert_eq!(l.default_category_capitalised.as_deref(), Some("BBB"));
-        l.set_default_categories(Some(""), Some("CCC"));
-        assert_eq!(l.default_category.as_deref(), Some(""));
-        assert_eq!(l.default_category_capitalised.as_deref(), Some("CCC"));
-    }
-
-    #[test]
-    fn empty_entry_beats_the_default_category() {
-        let l = Lexicon::detached(Some("EN"), Some("NN"), None);
-        assert_eq!(l.tag_word(""), Categories::Found(vec![]));
-        assert_eq!(l.first_category(""), None, "no tag, not the default");
-        // ...whereas a genuinely absent word does take the default.
-        assert_eq!(l.first_category("zzzznotaword").as_deref(), Some("NN"));
-    }
-
-    #[test]
-    fn proto_lookup_returns_the_prototype() {
-        let l = Lexicon::detached(Some("EN"), Some("NN"), None);
-        assert_eq!(l.tag_word("__proto__"), Categories::ObjectPrototype);
-        assert_eq!(l.first_category("__proto__"), None);
-        // Uppercased, the lowercase fallback finds it too.
-        assert_eq!(l.tag_word("__PROTO__"), Categories::ObjectPrototype);
-        // The function-valued prototype members behave exactly like a miss.
-        assert_eq!(l.first_category("toString").as_deref(), Some("NN"));
-        assert_eq!(l.first_category("hasOwnProperty").as_deref(), Some("NN"));
-    }
-
-    #[test]
-    fn words_named_after_reference_values_are_real_entries() {
-        let l = Lexicon::detached(Some("EN"), Some("NN"), None);
-        assert_eq!(l.first_category("undefined").as_deref(), Some("JJ"));
-        assert_eq!(l.first_category("null").as_deref(), Some("JJ"));
-        assert_eq!(l.first_category("length").as_deref(), Some("NN"));
-    }
-
-    #[test]
-    fn non_string_lookups_hit_or_throw_depending_on_the_language() {
-        // `tagWord(undefined)` really does find an English entry, because the
-        // dictionary has a word spelled "undefined". Dutch does not.
-        let en = Lexicon::detached(Some("EN"), Some("NN"), None);
+    fn the_entry_contract_is_enforced() {
+        let mut l = Lexicon::new(tag("NN"));
         assert_eq!(
-            en.tag_word_value(LookupKey::Undefined),
-            Ok(Categories::Found(vec![Cow::Borrowed("JJ")]))
+            l.insert("", vec![tag("NN")]),
+            Err(LexiconError::InvalidKey(LiteralError::Empty))
         );
         assert_eq!(
-            en.tag_word_value(LookupKey::Null),
-            Ok(Categories::Found(vec![
-                Cow::Borrowed("JJ"),
-                Cow::Borrowed("NN")
-            ]))
+            l.insert("a b", vec![tag("NN")]),
+            Err(LexiconError::InvalidKey(LiteralError::Whitespace {
+                found: ' '
+            }))
         );
         assert_eq!(
-            en.tag_word_value(LookupKey::NonString("5")),
-            Err(TaggerError::WordNotAString)
-        );
-
-        let du = Lexicon::detached(Some("DU"), Some("N"), None);
-        assert_eq!(
-            du.tag_word_value(LookupKey::Undefined),
-            Err(TaggerError::undefined("toLowerCase"))
-        );
-        assert_eq!(
-            du.tag_word_value(LookupKey::Null),
-            Err(TaggerError::ReadOfUndefined {
-                object: "null",
-                property: "toLowerCase"
+            l.insert("dog", vec![]),
+            Err(LexiconError::NoTags {
+                key: "dog".to_owned()
             })
         );
-        // A string argument is just the ordinary path.
-        assert_eq!(
-            en.tag_word_value(LookupKey::Str("zzzzznotaword")),
-            Ok(Categories::Default(Some(Cow::Borrowed("NN"))))
-        );
+        assert!(l.insert("dog", vec![tag("NN")]).unwrap().is_none());
+        assert!(l.insert("dog", vec![tag("VB")]).unwrap().is_some());
+        assert_eq!(l.len(), 1);
+    }
+
+    /// The empty token cannot be an entry, so it takes a default rather than
+    /// finding a tagless entry and coming back untagged.
+    #[test]
+    fn the_empty_token_takes_the_default() {
+        let en = Lexicon::bundled(Language::English);
+        assert!(!en.contains(""));
+        assert!(en.tags("").is_none());
+        assert_eq!(en.tag_of(""), tag("NN"));
     }
 
     #[test]
-    fn defaults_are_ascii_capitalisation_only() {
-        let l = Lexicon::detached(Some("EN"), Some("NN"), Some("NNP"));
-        assert_eq!(l.tag_word_with_defaults("Zzzzz").as_deref(), Some("NNP"));
-        assert_eq!(l.tag_word_with_defaults("zzzzz").as_deref(), Some("NN"));
-        assert_eq!(l.tag_word_with_defaults("Ålesund").as_deref(), Some("NN"));
-        assert_eq!(l.tag_word_with_defaults("Москва").as_deref(), Some("NN"));
-        assert_eq!(l.tag_word_with_defaults("").as_deref(), Some("NN"));
+    fn lexicons_are_independent() {
+        let mut a = Lexicon::bundled(Language::English);
+        let b = Lexicon::bundled(Language::English);
+        a.insert("zzzprivate", vec![tag("XX")]).unwrap();
+        assert_eq!(a.tag_of("zzzprivate"), tag("XX"));
+        assert_eq!(b.tag_of("zzzprivate"), tag("NN"));
+        assert_eq!(a.len(), b.len() + 1);
     }
 
     #[test]
-    fn parse_lexicon_shapes() {
-        let mut l = Lexicon::detached(Some("EN"), Some("NN"), None);
-        l.parse_lexicon("2 CD\nthe DT IN\ndog NN NNS\ncat").unwrap();
-        assert_eq!(l.len(), 4);
-        assert_eq!(
-            l.pretty_print(),
-            "2\tCD\t\nthe\tDT\tIN\t\ndog\tNN\tNNS\t\ncat\t\n"
-        );
-        // A single-token line stores an EMPTY list, which tag_word returns.
-        assert_eq!(l.tag_word("cat"), Categories::Found(vec![]));
-        assert_eq!(l.first_category("cat"), None);
-        // Detached: the shared English dictionary is untouched.
-        assert_eq!(Lexicon::detached(Some("EN"), None, None).len(), 92_662);
+    fn overriding_a_bundled_key_is_not_a_new_key() {
+        let mut l = Lexicon::bundled(Language::English);
+        let before = l.len();
+        l.insert("dog", vec![tag("ZZ")]).unwrap();
+        assert_eq!(l.len(), before);
+        assert_eq!(l.primary_tag("dog"), Some(tag("ZZ")));
+    }
+
+    /// The four steps, each reached in turn. The bundled data behind them:
+    /// `dog` is present (`NN` first); `Dog` is *also* present as `NNP`, so it
+    /// never reaches the retry, while `Jumps` is absent and `jumps` is present
+    /// as `NNS`; and no key spelled `Zzzzznotaword` exists in either case.
+    #[test]
+    fn the_lookup_chain_runs_in_order() {
+        let en = Lexicon::bundled(Language::English);
+        // 1. exact — and an exact hit always wins, even when a differently
+        //    cased spelling of the same word exists.
+        assert_eq!(en.tag_of("dog"), tag("NN"));
+        assert_eq!(en.tag_of("Dog"), tag("NNP"));
+        // 2. lowercase retry, for a capitalised form with no entry of its own.
+        assert!(!en.contains("Jumps"));
+        assert_eq!(en.tag_of("Jumps"), en.tag_of("jumps"));
+        assert_eq!(en.tag_of("Jumps"), tag("NNS"));
+        // 3. capitalised default
+        assert_eq!(en.tag_of("Zzzzznotaword"), tag("NNP"));
+        // 4. plain default
+        assert_eq!(en.tag_of("zzzzznotaword"), tag("NN"));
+        // The retry can be switched off, and then step 3 takes over.
+        let strict = Lexicon::bundled(Language::English).with_lowercase_retry(false);
+        assert!(!strict.lowercase_retry());
+        assert_eq!(strict.tag_of("Jumps"), tag("NNP"));
+    }
+
+    /// The capitalised default is the Unicode `Uppercase` property, not `A`–`Z`.
+    #[test]
+    fn capitalisation_default_is_unicode() {
+        let en = Lexicon::bundled(Language::English);
+        for capitalised in ["Zzzzznotaword", "Ålesundzzz", "Москвазззз", "Ελλάςζζζ"]
+        {
+            assert_eq!(en.tag_of(capitalised), tag("NNP"), "{capitalised}");
+        }
+        for not in [
+            "zzzzznotaword",
+            "5zzzzz",
+            ".zzzzz",
+            "日本語ずずず",
+            "😀zzzzz",
+        ] {
+            assert_eq!(en.tag_of(not), tag("NN"), "{not}");
+        }
     }
 
     #[test]
-    fn parse_lexicon_rejects_input_without_characters() {
-        let mut l = Lexicon::detached(Some("EN"), None, None);
-        for input in ["", "\n", "\n\n", "\r\n"] {
-            assert_eq!(
-                l.parse_lexicon(input),
-                Err(TaggerError::ReadOfUndefined {
-                    object: "null",
-                    property: "forEach"
-                }),
-                "{input:?}"
+    fn tags_are_most_frequent_first_and_never_empty() {
+        let en = Lexicon::bundled(Language::English);
+        let tags: Vec<Tag> = en.tags("null").expect("a real English word").collect();
+        assert_eq!(tags, [tag("JJ"), tag("NN")]);
+        assert_eq!(en.primary_tag("null"), Some(tag("JJ")));
+        assert!(en.tags("no-such-word-at-all").is_none());
+    }
+
+    #[test]
+    fn entries_merge_base_and_overlay_in_key_order() {
+        let mut l = Lexicon::new(tag("NN"));
+        for (k, t) in [("b", "NN"), ("a", "DT"), ("c", "VB")] {
+            l.insert(k, vec![tag(t)]).unwrap();
+        }
+        let keys: Vec<&str> = l.entries().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+
+        let mut l = Lexicon::bundled(Language::English);
+        l.insert("dog", vec![tag("ZZ")]).unwrap();
+        l.insert("zzzzznew", vec![tag("QQ")]).unwrap();
+        let collected: Vec<(String, Vec<Tag>)> = l
+            .entries()
+            .map(|(k, t)| (k.to_owned(), t.collect()))
+            .collect();
+        assert_eq!(collected.len(), l.len(), "no entry emitted twice or lost");
+        for pair in collected.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "entries are not sorted");
+        }
+        let dog = collected.iter().find(|(k, _)| k == "dog").unwrap();
+        assert_eq!(dog.1, vec![tag("ZZ")], "the overlay shadows the base entry");
+    }
+
+    /// Every bundled entry is reachable by its own key and carries at least one
+    /// tag. Enumerated over all 104,360 entries of both languages, through the
+    /// public API rather than the packed reader.
+    #[test]
+    fn every_bundled_key_is_reachable_through_the_public_api() {
+        for language in [Language::English, Language::Dutch] {
+            let lex = Lexicon::bundled(language);
+            let mut seen = 0usize;
+            for (key, tags) in lex.entries() {
+                seen += 1;
+                let tags: Vec<Tag> = tags.collect();
+                assert!(!tags.is_empty(), "{key:?} has no tags");
+                assert!(lex.contains(key), "{key:?} not found by contains");
+                assert_eq!(lex.primary_tag(key).as_ref(), tags.first(), "{key:?}");
+                assert_eq!(lex.tag_of(key), tags[0], "{key:?}");
+            }
+            assert_eq!(seen, lex.len());
+        }
+    }
+
+    /// The lowercase retry must not make any key unreachable: a key is always
+    /// found by its own spelling, whatever case it is in. Enumerated over every
+    /// bundled key that is not already all-lowercase — the population the retry
+    /// can affect at all.
+    #[test]
+    fn the_lowercase_retry_never_shadows_an_exact_key() {
+        for language in [Language::English, Language::Dutch] {
+            let lex = Lexicon::bundled(language);
+            let mut mixed_case = 0usize;
+            for (key, tags) in lex.entries() {
+                if key.to_lowercase() == key {
+                    continue;
+                }
+                mixed_case += 1;
+                let first = tags.into_iter().next().expect("non-empty");
+                assert_eq!(
+                    lex.tag_of(key),
+                    first,
+                    "{key:?} lost its exact match to the lowercase retry"
+                );
+            }
+            assert!(
+                mixed_case > 0,
+                "{language:?} has no mixed-case keys to check"
             );
         }
-        // A whitespace-only line does have characters, and yields the key "".
-        let mut l = Lexicon::detached(Some("EN"), None, None);
-        l.parse_lexicon("   \n").unwrap();
-        assert_eq!(l.len(), 1);
-        assert_eq!(l.pretty_print(), "\t\n");
-    }
-
-    #[test]
-    fn parse_lexicon_splits_on_reference_whitespace() {
-        let mut l = Lexicon::detached(Some("EN"), None, None);
-        // U+FEFF is \s in the reference but not whitespace to Rust.
-        l.parse_lexicon("x\u{feff}y").unwrap();
-        assert_eq!(l.pretty_print(), "x\ty\t\n");
-        // U+0085 is whitespace to Rust but NOT \s in the reference.
-        let mut l = Lexicon::detached(Some("EN"), None, None);
-        l.parse_lexicon("x\u{0085}y").unwrap();
-        assert_eq!(l.pretty_print(), "x\u{0085}y\t\n");
-    }
-
-    #[test]
-    fn runtime_numeric_keys_are_hoisted() {
-        let mut l = Lexicon::empty();
-        l.add_word("b", vec![Cow::Borrowed("NN")]);
-        l.add_word("10", vec![Cow::Borrowed("CD")]);
-        l.add_word("a", vec![Cow::Borrowed("NN")]);
-        l.add_word("2", vec![Cow::Borrowed("CD")]);
-        let mut keys = Vec::new();
-        l.for_each_entry(&mut |k, _| keys.push(k.to_string()));
-        assert_eq!(keys, ["2", "10", "b", "a"]);
-    }
-
-    #[test]
-    fn overriding_a_base_key_keeps_its_position_and_count() {
-        let mut l = Lexicon::detached(Some("DU"), None, None);
-        let before = l.len();
-        l.add_word("1", vec![Cow::Borrowed("ZZ")]);
-        assert_eq!(l.len(), before, "an override is not a new key");
-        let mut first = None;
-        l.for_each_entry(&mut |k, t| {
-            if first.is_none() {
-                first = Some((
-                    k.to_string(),
-                    t.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
-                ));
-            }
-        });
-        assert_eq!(first, Some(("1".to_string(), vec!["ZZ".to_string()])));
-    }
-
-    #[test]
-    fn detached_instances_do_not_share() {
-        let mut a = Lexicon::detached(Some("EN"), Some("NN"), None);
-        let b = Lexicon::detached(Some("EN"), Some("NN"), None);
-        a.add_word("zzzprivate", vec![Cow::Borrowed("XX")]);
-        assert_eq!(a.first_category("zzzprivate").as_deref(), Some("XX"));
-        assert_eq!(b.first_category("zzzprivate").as_deref(), Some("NN"));
-    }
-
-    #[test]
-    fn assigning_proto_creates_no_key() {
-        let mut l = Lexicon::empty();
-        l.add_word("__proto__", vec![Cow::Borrowed("XX")]);
-        assert_eq!(l.len(), 0);
-        assert_eq!(l.tag_word("__proto__"), Categories::ObjectPrototype);
     }
 }

@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 200259.40625,
-      "upper_bound": 204956.42578125
+      "lower_bound": 24456.113385756013,
+      "upper_bound": 25973.33505116525
     },
-    "point_estimate": 202607.916015625,
-    "standard_error": 1660.569147687607
+    "point_estimate": 25110.98136102004,
+    "standard_error": 392.05383514834705
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 200259.40625,
-      "upper_bound": 204956.42578125
+      "lower_bound": 24169.45535714286,
+      "upper_bound": 24471.242857142857
     },
-    "point_estimate": 202607.916015625,
-    "standard_error": 1660.569147687607
+    "point_estimate": 24322.144684628238,
+    "standard_error": 77.19436222476284
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 3481.900516699534
+      "lower_bound": 620.255500547824,
+      "upper_bound": 1099.6749938102002
     },
-    "point_estimate": 3481.900516699534,
-    "standard_error": 1740.9589544613066
+    "point_estimate": 867.5056818436486,
+    "standard_error": 118.91063126781772
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 200259.40625,
-      "upper_bound": 204956.42578125
+      "lower_bound": 24410.34870858094,
+      "upper_bound": 27198.43324256807
     },
-    "point_estimate": 204017.021875,
-    "standard_error": 1802.7611555521582
+    "point_estimate": 25526.378378967962,
+    "standard_error": 737.9989619443693
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 3321.294361912534
+      "lower_bound": 1002.8862388500553,
+      "upper_bound": 5868.422664346663
     },
-    "point_estimate": 3321.294361912534,
-    "standard_error": 1660.6554759525225
+    "point_estimate": 3926.7308577677372,
+    "standard_error": 1227.6937904587858
   }
 }

@@ -36,3 +36,10 @@ Cargo.lock
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
+
+# Per-target campaign logs. `results/raw`, `results.json` and `metadata.json`
+# are the reproducibility artifacts and stay versioned; these are the build and
+# run chatter around them. One competitor's stray `dbg!` in published code
+# turned a single target's log into 1.5 GB, which is more than GitHub accepts
+# in one file — logs are not a durable record and are not worth carrying.
+/benchmarks/competitive/results/logs/

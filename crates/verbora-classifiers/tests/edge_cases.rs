@@ -1,24 +1,29 @@
 //! Boundary inputs, applied uniformly across the three classifiers.
 //!
-//! The parity suite already proves agreement with the reference on a large recorded
-//! corpus. What it does not do is state, in one readable place, what happens at
-//! the edges — and several of these answers are surprising enough that a future
-//! reader deserves to find them asserted rather than inferred:
+//! `train_parity.rs` and `predict_parity.rs` pin the fit and the prediction
+//! path bit for bit against in-tree oracles over randomized op sequences. What
+//! they do not do is state, in one readable place, what happens at the edges —
+//! and several of these answers are surprising enough that a future reader
+//! deserves to find them asserted rather than inferred:
 //!
 //! * an empty document is dropped in silence, and so is one made entirely of
 //!   stop words;
 //! * a bare `"7"` is a stop word, so a document of digits can vanish;
-//! * an astral-plane token is an ordinary feature key, because feature keys are
-//!   compared for equality and never indexed;
-//! * a maxent context key is `safe-stable-stringify` output, so non-ASCII is
-//!   emitted raw and object keys are sorted by UTF-16 code unit.
-
-use std::cell::RefCell;
-use std::rc::Rc;
+//! * an astral-plane token is an ordinary feature key, because a classifier
+//!   compares feature keys for equality and never indexes into one — note that
+//!   this is a claim about the *classifier*, and the documents below are given
+//!   as token slices, which `Observation::Tokens` hands over without stemming.
+//!   On the `Observation::Text` path a token is very much indexed, by the
+//!   stemmer in front of the classifier, which measures text in Unicode scalar
+//!   values; that boundary is what `ArtifactStamp` fingerprints and what
+//!   `tests/stemmer_stamp.rs` covers;
+//! * a maximum-entropy predicate is an opaque string, so an astral-plane
+//!   predicate is an ordinary feature key and a context of nothing the model
+//!   knows is scored by the uniform distribution rather than refused.
 
 use verbora_classifiers::{
-    BayesClassifier, Context, DynValue, FeatureSet, LogisticRegressionClassifier, MaxEntClassifier,
-    SEElement, Sample, dynval,
+    BayesClassifier, DynValue, Gis, LogisticRegressionClassifier, MaxEntClassifier, StopReason,
+    number_to_string,
 };
 
 /// One document per category of awkward input, all given as token slices so the
@@ -61,10 +66,15 @@ fn bayes_survives_every_category() {
             "{name} should classify as itself"
         );
     }
-    // The vocabulary holds one slot per distinct token, and `"0"` and `"42"` are
-    // array-index keys, so they enumerate first.
-    let order = classifier.feature_order();
-    assert_eq!(&order[..2], &["0", "42"]);
+    // The vocabulary holds one slot per distinct token, in the order the tokens
+    // were first added — every category's tokens land where they were fed, and
+    // the digit tokens `"0"` and `"42"` take their turn like the rest instead of
+    // being sorted to the front.
+    let expected: Vec<String> = categories()
+        .into_iter()
+        .flat_map(|(_, tokens)| tokens)
+        .collect();
+    assert_eq!(classifier.feature_order(), expected);
 }
 
 #[test]
@@ -127,10 +137,7 @@ fn a_single_character_document_trains_and_classifies() {
 // 3.14 is a fixture-style input, not an approximation of pi.
 #[allow(clippy::approx_constant)]
 #[test]
-fn maxent_context_keys_cover_every_category() {
-    // `safe-stable-stringify` emits non-ASCII raw and sorts object keys by
-    // UTF-16 code unit, so none of these are escaped and the astral key sorts
-    // before U+FFFD.
+fn serialised_values_cover_every_category() {
     for (payload, want) in [
         (DynValue::Str(String::new()), "\"\""),
         (DynValue::Str("q".into()), "\"q\""),
@@ -150,67 +157,92 @@ fn maxent_context_keys_cover_every_category() {
         (DynValue::Arr(vec![]), "[]"),
     ] {
         assert_eq!(
-            Context::new(payload.clone()).to_key().as_deref(),
+            payload.json_stringify().as_deref(),
             Some(want),
             "{payload:?}"
         );
     }
-
-    let sorted = DynValue::Obj(vec![
-        ("\u{fffd}".to_owned(), DynValue::Num(1.0)),
-        ("😀".to_owned(), DynValue::Num(2.0)),
-        ("é".to_owned(), DynValue::Num(3.0)),
-        ("a".to_owned(), DynValue::Num(4.0)),
-    ]);
-    assert_eq!(
-        Context::new(sorted).to_key().unwrap(),
-        "{\"a\":4,\"é\":3,\"😀\":2,\"\u{fffd}\":1}"
-    );
 }
 
 #[test]
-fn a_very_long_context_key_round_trips() {
+fn a_very_long_serialised_string_round_trips() {
     let long = "é😀".repeat(20_000);
-    let context = Context::new(DynValue::Str(long.clone()));
-    let key = context
-        .to_key()
-        .expect("a string payload always stringifies");
-    assert_eq!(key.chars().count(), long.chars().count() + 2);
-    // Memoised, so the second call is free and returns the identical string.
-    assert_eq!(context.to_key().as_deref(), Some(key.as_str()));
+    let json = DynValue::Str(long.clone())
+        .json_stringify()
+        .expect("a string always stringifies");
+    assert_eq!(json.chars().count(), long.chars().count() + 2);
+    assert_eq!(DynValue::parse(&json).unwrap(), DynValue::Str(long));
 }
 
 #[test]
-fn maxent_trains_over_unicode_classes_and_contexts() {
-    let mut sample = Sample::new();
-    for (class, data) in [
-        ("Ελλάδα", "0"),
-        ("Ελλάδα", "0"),
-        ("😀", "1"),
-        ("日本語", "1"),
+fn maxent_trains_over_unicode_outcomes_and_predicates() {
+    let mut classifier = MaxEntClassifier::new();
+    for (outcome, predicate) in [
+        ("Ελλάδα", "π=Αθήνα"),
+        ("Ελλάδα", "π=Αθήνα"),
+        ("😀", "π=🎉"),
+        ("日本語", "π=東京"),
     ] {
-        sample.add_element(SEElement::new(class, Rc::new(Context::of_str(data))));
+        classifier.add(outcome, [predicate]);
     }
-    let mut features = FeatureSet::new();
-    sample
-        .generate_features(&mut features)
-        .expect("SE elements");
-    assert_eq!(sample.classes(), ["Ελλάδα", "😀", "日本語"]);
+    assert_eq!(classifier.sample().outcomes(), ["Ελλάδα", "😀", "日本語"]);
 
-    let mut classifier = MaxEntClassifier::new(
-        Rc::new(RefCell::new(features)),
-        Rc::new(RefCell::new(sample)),
-    );
-    classifier.train(20, 0.01).expect("SE features are finite");
-    // None of these classes is "x" or "y", so both features fire zero for every
-    // element: C is 0, the exponent is infinite, and every score stays at 1 —
-    // which makes the classifier abstain rather than guess.
-    assert_eq!(
-        classifier
-            .classify(&Rc::new(Context::of_str("0")))
-            .expect("classes exist"),
-        ""
-    );
+    // Every predicate here occurs with exactly one outcome, so the constraints
+    // ask for p = 1 and the maximum-likelihood weights are unbounded: the fit
+    // approaches them logarithmically and reports that it ran out of iterations
+    // rather than claiming convergence.
+    let report = *classifier
+        .train_with(Gis::new(2_000, 1e-12).unwrap())
+        .expect("four events");
+    assert_eq!(report.stop, StopReason::MaxIterations);
+    assert!(report.log_likelihood.is_finite());
+
+    // Every predicate occurs with exactly one outcome, so each context resolves
+    // to the outcome it was seen with.
+    for (outcome, predicate) in [("Ελλάδα", "π=Αθήνα"), ("😀", "π=🎉"), ("日本語", "π=東京")]
+    {
+        assert_eq!(classifier.classify([predicate]).unwrap(), outcome);
+        let scores = classifier.get_classifications([predicate]).unwrap();
+        assert!(
+            (scores.iter().map(|s| s.value).sum::<f64>() - 1.0).abs() < 1e-12,
+            "{scores:?}"
+        );
+    }
+
+    // A context of nothing the model knows is uniform, which is the
+    // maximum-entropy answer under no constraint — not an abstention.
+    let scores = classifier.get_classifications(["π=unseen"]).unwrap();
+    for score in &scores {
+        assert!((score.value - 1.0 / 3.0).abs() < 1e-15, "{scores:?}");
+    }
+    assert_eq!(classifier.classify(["π=unseen"]).unwrap(), "Ελλάδα");
+}
+
+#[test]
+fn a_maxent_model_round_trips_through_a_file() {
+    let mut classifier = MaxEntClassifier::new();
+    for (name, tokens) in categories() {
+        classifier.add(name, tokens);
+    }
+    classifier
+        .train_with(Gis::new(500, 1e-12).unwrap())
+        .expect("one event per category");
+
+    let path = std::env::temp_dir().join(format!(
+        "verbora-maxent-edge-{}-{}.json",
+        std::process::id(),
+        line!()
+    ));
+    classifier
+        .save(&path)
+        .expect("the temp directory is writable");
+    let revived = MaxEntClassifier::load(&path).expect("what was just written parses");
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(revived.to_json(), classifier.to_json());
+    for (name, tokens) in categories() {
+        assert_eq!(revived.classify(&tokens).expect("trained"), name);
+    }
 }
 
 #[test]
@@ -226,7 +258,7 @@ fn number_formatting_matches_the_reference_at_the_boundaries() {
         (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
         (f64::MAX, "1.7976931348623157e+308"),
     ] {
-        assert_eq!(dynval::number_to_string(value), want, "{value}");
+        assert_eq!(number_to_string(value), want, "{value}");
     }
 }
 

@@ -1,357 +1,185 @@
-//! Topological ordering, ported from the reference `topological`.
+//! Topological ordering of an [`EdgeWeightedDigraph`].
 
-use std::collections::{HashMap, HashSet};
-use std::error::Error;
+use std::collections::VecDeque;
 use std::fmt;
 
-use crate::graph::{DirectedEdge, EdgeWeightedDigraph};
-use crate::vertex::{Vertex, VertexKey};
+use crate::graph::{EdgeWeightedDigraph, VertexId};
 
-/// The error `Topological` throws when the graph contains a cycle.
+/// The error [`Topological::new`] reports for a graph that is not acyclic.
 ///
-/// The message is reproduced byte for byte, including the missing space after
-/// the colon and the `JSON.stringify` rendering of the vertex — so a cycle
-/// through the number `2` reports `Cyclic dependency:2` and one through the
-/// string `'b'` reports `Cyclic dependency:"b"`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CyclicDependency {
-    /// The vertex the traversal met twice on one path.
-    pub vertex: Vertex,
+/// [`Cycle::vertices`] holds every vertex that could not be ordered, in
+/// ascending [`VertexId`] order. That set is precisely the vertices lying on a
+/// cycle together with those reachable only through one — Kahn's algorithm
+/// emits a vertex exactly when its in-degree reaches zero, and no vertex in that
+/// set ever does. It is deliberately not a single "the" vertex: a graph can
+/// contain several disjoint cycles, and naming one of them would suggest the
+/// others are not there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cycle {
+    unordered: Vec<VertexId>,
+    total: usize,
 }
 
-impl fmt::Display for CyclicDependency {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Cyclic dependency:{}", self.vertex.to_json())
+impl Cycle {
+    /// The vertices that could not be ordered, ascending by id.
+    pub fn vertices(&self) -> &[VertexId] {
+        &self.unordered
     }
 }
 
-impl Error for CyclicDependency {}
+impl fmt::Display for Cycle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "graph is cyclic: {} of {} vertices lie on or behind a cycle",
+            self.unordered.len(),
+            self.total
+        )
+    }
+}
+
+impl std::error::Error for Cycle {}
 
 /// A topological ordering of an [`EdgeWeightedDigraph`].
 ///
-/// # `is_dag` is always true
+/// # The order, and why it is exactly this one
 ///
-/// The reference sets `this.isDag = true` in the constructor and never assigns
-/// it again, so `isDAG()` cannot return `false`. A cyclic graph is reported by
-/// the constructor *throwing* instead, which here is the [`CyclicDependency`]
-/// error from [`Topological::new`]. The accessor is kept so the surface matches.
+/// A directed acyclic graph usually admits many topological orders. Verbora
+/// specifies one, so that the ordering — and therefore every distance a
+/// [`crate::PathTree`] derives from it — is reproducible rather than incidental.
 ///
-/// # The traversal, and why its exact shape matters
+/// The algorithm is Kahn's (A. B. Kahn, "Topological sorting of large
+/// networks", *Communications of the ACM* 5(11):558–562, 1962), with these two
+/// tie-breaking rules making it deterministic:
 ///
-/// The reference walks vertex indices from last to first, and for each one
-/// recurses over the edges whose **head** is that vertex — that is, over its
-/// *incoming* edges, despite the local variable being named `outgoing`. Each
-/// vertex is appended on the way out, filling a result array from the back,
-/// which is then reversed. The result is a valid topological order, but *which*
-/// valid order depends on:
+/// 1. the queue is seeded with every in-degree-zero vertex in **ascending
+///    [`VertexId`] order**, which is first-seen order;
+/// 2. it is a **FIFO** queue, and a vertex is enqueued at the moment its
+///    in-degree reaches zero.
 ///
-/// * the order [`EdgeWeightedDigraph::edges`] yields edges (grouped by tail),
-///   since that is the order `uniqueVertexs` discovers vertices in and the order
-///   the incoming edges of a vertex are visited in;
-/// * the back-to-front outer loop.
+/// Nothing consults a hash map's iteration order, so the result is identical
+/// across runs, platforms and compiler versions for the same sequence of
+/// [`EdgeWeightedDigraph::add`] calls.
 ///
-/// Both are observable through `order()`, and every path tree relaxes vertices
-/// in exactly this sequence, so any deviation changes the reported distances.
+/// Building an ordering is O(V + E) in time and O(V) in scratch space, and it
+/// recurses nowhere — a chain of a million vertices costs a million queue
+/// operations, not a million stack frames.
+///
+/// # Choosing the right API
+///
+/// | Want | Call | Cost |
+/// |---|---|---|
+/// | Feed the order to something else in this crate | [`Topological::order`] | free — a borrowed slice |
+/// | Print or match on the caller's own labels | [`Topological::labels`] | one indexed lookup per vertex, lazily |
+///
+/// `order` is the primitive and allocates nothing; `labels` is a lazy adapter
+/// over it, so neither materialises a second vector. Prefer `order` when the
+/// ids are what the next step wants — [`crate::PathTree::from_id`] takes one
+/// directly — and `labels` at the edge of the program, where a human reads the
+/// result.
+///
+/// ```
+/// use verbora_util::{EdgeWeightedDigraph, Topological};
+///
+/// let mut g: EdgeWeightedDigraph<&str> = EdgeWeightedDigraph::new();
+/// g.add(&"parse", &"typecheck", 1.0).unwrap();
+/// g.add(&"typecheck", &"codegen", 1.0).unwrap();
+/// g.add(&"parse", &"codegen", 1.0).unwrap();
+///
+/// let order = Topological::new(&g).unwrap();
+/// assert_eq!(
+///     order.labels().copied().collect::<Vec<_>>(),
+///     ["parse", "typecheck", "codegen"]
+/// );
+/// ```
 #[derive(Debug, Clone)]
-pub struct Topological {
-    sorted: Vec<Vertex>,
-    is_dag: bool,
+pub struct Topological<'g, V> {
+    graph: &'g EdgeWeightedDigraph<V>,
+    order: Vec<VertexId>,
 }
 
-impl Topological {
-    /// Sorts `graph`.
+impl<'g, V> Topological<'g, V> {
+    /// Orders `graph`.
     ///
     /// # Errors
     ///
-    /// Returns [`CyclicDependency`] if the graph contains a cycle, mirroring the
-    /// reference's `throw`.
-    pub fn new(graph: &EdgeWeightedDigraph) -> Result<Self, CyclicDependency> {
-        let edges: Vec<&DirectedEdge> = graph.edges().collect();
-        let vertices = unique_vertices(&edges);
-        let sorted = topo_sort(&vertices, &edges)?;
-        Ok(Self {
-            sorted,
-            is_dag: true,
-        })
+    /// [`Cycle`] if the graph is not acyclic. A self-loop is a cycle.
+    pub fn new(graph: &'g EdgeWeightedDigraph<V>) -> Result<Self, Cycle> {
+        let n = graph.vertex_count();
+        // `usize` rather than `u32`: the in-degree counts edges, and
+        // `EdgeWeightedDigraph` admits up to `u32::MAX + 1` of them
+        // (`GraphError::EdgeLimit` refuses the next), so a `u32` counter could
+        // wrap on a graph whose edges all point into one vertex. A wrapped
+        // counter would emit a vertex early and silently produce a non-order.
+        let mut in_degree = vec![0usize; n];
+        for edge in graph.edges() {
+            in_degree[edge.to().index()] += 1;
+        }
+
+        // Rule 1: seed in ascending id order.
+        let mut queue: VecDeque<VertexId> = (0..n)
+            .map(VertexId::from_index)
+            .filter(|id| in_degree[id.index()] == 0)
+            .collect();
+
+        let mut order = Vec::with_capacity(n);
+        // Rule 2: FIFO, enqueued the moment the in-degree reaches zero.
+        while let Some(id) = queue.pop_front() {
+            order.push(id);
+            for edge in graph.edges_from(id) {
+                let head = edge.to().index();
+                in_degree[head] -= 1;
+                if in_degree[head] == 0 {
+                    queue.push_back(edge.to());
+                }
+            }
+        }
+
+        if order.len() != n {
+            let unordered = (0..n)
+                .map(VertexId::from_index)
+                .filter(|id| in_degree[id.index()] != 0)
+                .collect();
+            return Err(Cycle {
+                unordered,
+                total: n,
+            });
+        }
+        Ok(Self { graph, order })
     }
 
-    /// Always `true`; see the type-level note.
-    pub fn is_dag(&self) -> bool {
-        self.is_dag
-    }
-
-    /// The vertices in topological order.
+    /// The vertices in topological order, as ids.
     ///
-    /// The reference returns `this.sorted.slice()`, a fresh copy per call. A
-    /// borrowed slice is observationally identical, since nothing can mutate a
-    /// `Topological` after construction.
-    pub fn order(&self) -> &[Vertex] {
-        &self.sorted
-    }
-}
-
-/// Every vertex mentioned by `edges`, in first-seen order: for each edge its
-/// tail then its head, skipping any already present.
-///
-/// The reference's membership test is `indexOf(...) < 0`, i.e. strict equality,
-/// which is why the number `1` and the string `'1'` both appear, and why a `NaN`
-/// vertex would be appended once per occurrence. The hash map below reproduces
-/// that exactly: [`Vertex::key`] returns `None` for `NaN`, so `NaN` never
-/// matches anything, including itself.
-fn unique_vertices(edges: &[&DirectedEdge]) -> Vec<Vertex> {
-    let mut out: Vec<Vertex> = Vec::new();
-    let mut seen: HashMap<VertexKey<'_>, ()> = HashMap::new();
-    // Two passes over the borrow checker's expectations are avoided by keying on
-    // the *edge's* vertices, which outlive `out`.
-    for edge in edges {
-        for vertex in [&edge.start, &edge.end] {
-            match vertex.key() {
-                Some(k) => {
-                    if seen.insert(k, ()).is_none() {
-                        out.push(vertex.clone());
-                    }
-                }
-                // NaN: never found, so always pushed.
-                None => out.push(vertex.clone()),
-            }
-        }
-    }
-    out
-}
-
-/// One step of the iterative traversal.
-enum Frame {
-    /// The body of `visit(vertex, i, predecessors)`.
-    Enter {
-        vertex: Vertex,
-        /// `vertexs.indexOf(vertex)`, or -1 — see [`VertexPositions`].
-        index: i64,
-    },
-    /// The trailing `sorted[--cursor] = vertex`, plus the path bookkeeping the
-    /// reference gets for free by returning from a recursive call.
-    Exit {
-        vertex: Vertex,
-        index: i64,
-        /// Whether this vertex was pushed onto the ancestor set on the way in.
-        leaves_path: bool,
-    },
-}
-
-/// The reference's `topoSort`, with the recursion turned into an explicit stack.
-///
-/// # Two changes, neither of them observable
-///
-/// **The recursion is gone.** Its depth is the length of the longest chain, so
-/// The reference overflows the reference stack on deep graphs. The explicit
-/// stack removes that ceiling without changing an ordering decision: children
-/// are pushed in reverse so they pop in source order, and the `Exit` frame is
-/// pushed first so it pops last — exactly where the recursive call would have
-/// returned.
-///
-/// **The cycle check is a set, not a list.** The reference carries a
-/// `predecessors` array, copies it at every level with `concat`, and scans it
-/// with `indexOf` — quadratic in the path length, in both time and allocation.
-/// Between a vertex's `Enter` and its `Exit` the explicit stack processes
-/// exactly that vertex's subtree, so the set of vertices currently "entered but
-/// not exited" *is* `predecessors`. Membership is then O(1).
-///
-/// A `NaN` vertex is never in the set, because `indexOf` can never find one:
-/// `NaN !== NaN`. Such a vertex has no position, which is what `index < 0` marks.
-fn topo_sort(
-    vertices: &[Vertex],
-    edges: &[&DirectedEdge],
-) -> Result<Vec<Vertex>, CyclicDependency> {
-    // `sorted` is filled from the back by a decrementing cursor.
-    let mut sorted: Vec<Option<Vertex>> = vec![None; vertices.len()];
-    let mut cursor = vertices.len();
-    // The reference keys `visited` by the vertex *index*, not the vertex.
-    let mut visited: HashSet<i64> = HashSet::with_capacity(vertices.len());
-    // The `predecessors` chain of the frame currently being processed.
-    let mut on_path: HashSet<i64> = HashSet::new();
-
-    let positions = VertexPositions::build(vertices);
-    let incoming = IncomingEdges::build(edges);
-
-    let mut stack: Vec<Frame> = Vec::new();
-
-    // `let i = cursor; while (i--)` walks indices n-1 down to 0.
-    for i in (0..vertices.len()).rev() {
-        if visited.contains(&(i as i64)) {
-            continue;
-        }
-        stack.push(Frame::Enter {
-            vertex: vertices[i].clone(),
-            index: i as i64,
-        });
-
-        while let Some(frame) = stack.pop() {
-            match frame {
-                Frame::Exit {
-                    vertex,
-                    index,
-                    leaves_path,
-                } => {
-                    if leaves_path {
-                        on_path.remove(&index);
-                    }
-                    if cursor > 0 {
-                        cursor -= 1;
-                        sorted[cursor] = Some(vertex);
-                    }
-                    // A cursor underflow writes to `sorted[-1]` in the reference,
-                    // which is an ordinary property that `reverse()` and
-                    // `slice()` both ignore. Dropping the value matches. It is
-                    // reachable only through a NaN vertex, which inflates the
-                    // vertex list without inflating the cursor.
-                }
-                Frame::Enter { vertex, index } => {
-                    // The cycle check precedes the visited check in the
-                    // reference, so a vertex already visited in THIS path still
-                    // throws.
-                    if index >= 0 && on_path.contains(&index) {
-                        return Err(CyclicDependency { vertex });
-                    }
-                    if !visited.insert(index) {
-                        continue;
-                    }
-
-                    let into = incoming.of(&vertex);
-                    // The reference extends `predecessors` only when there is
-                    // something to recurse into, and resets it to `[]`
-                    // otherwise — unobservably, since nothing reads it then.
-                    let leaves_path = index >= 0 && !into.is_empty();
-                    if leaves_path {
-                        on_path.insert(index);
-                    }
-
-                    stack.push(Frame::Exit {
-                        vertex,
-                        index,
-                        leaves_path,
-                    });
-                    for &edge_index in into.iter().rev() {
-                        let from = &edges[edge_index].start;
-                        stack.push(Frame::Enter {
-                            vertex: from.clone(),
-                            index: positions.position_of(from),
-                        });
-                    }
-                }
-            }
-        }
+    /// This is the primitive: a borrowed slice, no allocation, and the form
+    /// [`crate::PathTree`] consumes. Use [`Topological::labels`] when you want
+    /// the caller's own labels back.
+    pub fn order(&self) -> &[VertexId] {
+        &self.order
     }
 
-    // `sorted.reverse()`, holes dropped.
-    sorted.reverse();
-    Ok(sorted.into_iter().flatten().collect())
-}
-
-/// A lookup table keyed the way the reference's `===` compares vertices.
-///
-/// Split into a numeric and a string half rather than keyed by a single
-/// [`VertexKey`]: a borrowed key type forces the borrow checker to tie every
-/// lookup result to the *query*'s lifetime, and these tables outlive their
-/// queries. Numbers are keyed by bit pattern with `-0` normalised to `+0`;
-/// `NaN` is never inserted and never found, which is what makes `indexOf`
-/// return -1 for it.
-struct VertexTable<'a, T> {
-    by_num: HashMap<u64, T>,
-    by_str: HashMap<&'a str, T>,
-}
-
-impl<'a, T> VertexTable<'a, T> {
-    fn with_capacity(n: usize) -> Self {
-        Self {
-            by_num: HashMap::with_capacity(n),
-            by_str: HashMap::with_capacity(n),
-        }
+    /// The vertices in topological order, as labels.
+    ///
+    /// One indexed lookup per vertex on top of [`Topological::order`]; prefer
+    /// `order` when the ids are what you need.
+    pub fn labels(&self) -> impl ExactSizeIterator<Item = &'g V> {
+        let graph = self.graph;
+        // The invariant a future edit must preserve: `order` holds only ids
+        // below `graph.vertex_count()`. `new` seeds it from
+        // `(0..graph.vertex_count()).map(VertexId::from_index)` and afterwards
+        // pushes only `edge.to()` for edges of that same graph; `graph` is an
+        // immutable borrow with no interior mutability, so its vertex count
+        // cannot move underneath it; the fields are private and `new` is the
+        // only constructor, so a `Topological` holding a foreign id is
+        // unconstructible — and `VertexId::from_index` is `pub(crate)`, so a
+        // caller cannot mint one to smuggle in either.
+        self.order
+            .iter()
+            .map(move |id| graph.label(*id).expect("id minted by this graph"))
     }
 
-    fn get(&self, vertex: &Vertex) -> Option<&T> {
-        match vertex {
-            Vertex::Num(n) if n.is_nan() => None,
-            Vertex::Num(n) => self.by_num.get(&normalised_bits(*n)),
-            Vertex::Str(s) => self.by_str.get(s.as_str()),
-        }
-    }
-
-    /// Inserts `value` unless the vertex already has one, mirroring the fact
-    /// that `indexOf` reports the FIRST match.
-    fn insert_first(&mut self, vertex: &'a Vertex, value: T) {
-        match vertex {
-            Vertex::Num(n) if n.is_nan() => {}
-            Vertex::Num(n) => {
-                self.by_num.entry(normalised_bits(*n)).or_insert(value);
-            }
-            Vertex::Str(s) => {
-                self.by_str.entry(s.as_str()).or_insert(value);
-            }
-        }
-    }
-
-    fn entry_or_default(&mut self, vertex: &'a Vertex) -> Option<&mut T>
-    where
-        T: Default,
-    {
-        match vertex {
-            Vertex::Num(n) if n.is_nan() => None,
-            Vertex::Num(n) => Some(self.by_num.entry(normalised_bits(*n)).or_default()),
-            Vertex::Str(s) => Some(self.by_str.entry(s.as_str()).or_default()),
-        }
-    }
-}
-
-/// `f64::to_bits` with `-0` folded onto `+0`, so the two hash alike as `0 === -0`
-/// requires.
-fn normalised_bits(n: f64) -> u64 {
-    if n == 0.0 { 0.0f64 } else { n }.to_bits()
-}
-
-/// `vertexs.indexOf(v)`, precomputed.
-struct VertexPositions<'a> {
-    positions: VertexTable<'a, usize>,
-}
-
-impl<'a> VertexPositions<'a> {
-    fn build(vertices: &'a [Vertex]) -> Self {
-        let mut positions = VertexTable::with_capacity(vertices.len());
-        for (i, v) in vertices.iter().enumerate() {
-            positions.insert_first(v, i);
-        }
-        Self { positions }
-    }
-
-    /// Returns the index, or `-1` — the value `indexOf` reports for a miss, and
-    /// the value the reference then uses as a `visited` key.
-    fn position_of(&self, v: &Vertex) -> i64 {
-        self.positions.get(v).map_or(-1, |&i| i as i64)
-    }
-}
-
-/// `edges.filter(e => e.to() === vertex)`, precomputed.
-///
-/// The reference re-filters the whole edge list for every vertex, which is
-/// O(V*E). Bucketing by head vertex is O(E) once and yields the same edges in
-/// the same order, because the buckets are filled in edge order.
-struct IncomingEdges<'a> {
-    buckets: VertexTable<'a, Vec<usize>>,
-}
-
-impl<'a> IncomingEdges<'a> {
-    fn build(edges: &'a [&'a DirectedEdge]) -> Self {
-        let mut buckets: VertexTable<'a, Vec<usize>> = VertexTable::with_capacity(edges.len());
-        for (i, edge) in edges.iter().enumerate() {
-            // A NaN head is `!==` everything, itself included, so it gets no
-            // bucket and no vertex ever finds it.
-            if let Some(bucket) = buckets.entry_or_default(&edge.end) {
-                bucket.push(i);
-            }
-        }
-        Self { buckets }
-    }
-
-    fn of(&self, vertex: &Vertex) -> &[usize] {
-        self.buckets.get(vertex).map_or(&[], Vec::as_slice)
+    /// The graph this ordering was built from.
+    pub fn graph(&self) -> &'g EdgeWeightedDigraph<V> {
+        self.graph
     }
 }
 
@@ -359,113 +187,148 @@ impl<'a> IncomingEdges<'a> {
 mod tests {
     use super::*;
 
-    fn graph(edges: &[(i32, i32, f64)]) -> EdgeWeightedDigraph {
+    fn graph(edges: &[(u32, u32, f64)]) -> EdgeWeightedDigraph<u32> {
         let mut g = EdgeWeightedDigraph::new();
         for &(a, b, w) in edges {
-            g.add(a, b, w);
+            g.add(&a, &b, w).unwrap();
         }
         g
     }
 
-    fn nums(order: &[Vertex]) -> Vec<f64> {
-        order
+    fn labels(t: &Topological<'_, u32>) -> Vec<u32> {
+        t.labels().copied().collect()
+    }
+
+    /// Checks the defining property directly: every edge points forward.
+    fn is_topological(g: &EdgeWeightedDigraph<u32>, order: &[VertexId]) -> bool {
+        let mut position = vec![usize::MAX; g.vertex_count()];
+        for (i, id) in order.iter().enumerate() {
+            position[id.index()] = i;
+        }
+        g.edges()
             .iter()
-            .map(|v| match v {
-                Vertex::Num(n) => *n,
-                Vertex::Str(s) => panic!("expected a numeric vertex, got {s:?}"),
-            })
-            .collect()
+            .all(|e| position[e.from().index()] < position[e.to().index()])
     }
 
     #[test]
-    fn canonical_order() {
-        let g = graph(&[
-            (5, 4, 0.35),
-            (4, 7, 0.37),
-            (5, 7, 0.28),
-            (5, 1, 0.32),
-            (4, 0, 0.38),
-            (0, 2, 0.26),
-            (3, 7, 0.39),
-            (1, 3, 0.29),
-            (7, 2, 0.34),
-            (6, 2, 0.40),
-            (3, 6, 0.52),
-            (6, 0, 0.58),
-            (6, 4, 0.93),
-        ]);
+    fn the_order_satisfies_the_definition() {
+        let g = crate::graph::sample_dag();
         let t = Topological::new(&g).unwrap();
-        assert!(t.is_dag());
-        assert_eq!(
-            nums(t.order()),
-            vec![5.0, 1.0, 3.0, 6.0, 4.0, 7.0, 0.0, 2.0]
-        );
+        assert_eq!(t.order().len(), g.vertex_count());
+        assert!(is_topological(&g, t.order()));
+    }
+
+    /// The documented tie-break, worked through by hand.
+    ///
+    /// In-degrees of the sample graph: 5 has none, so it alone seeds the queue.
+    /// Removing 5 drops 4 to one (6 still points at it), 7 to two and 1 to zero,
+    /// so 1 is enqueued; then 1 frees 3, 3 frees 6, 6 frees 4, 4 frees 7 and 0,
+    /// and 7 and 0 together free 2.
+    #[test]
+    fn the_tie_break_is_the_documented_one() {
+        let g = crate::graph::sample_dag();
+        let t = Topological::new(&g).unwrap();
+        assert_eq!(labels(&t), vec![5, 1, 3, 6, 4, 7, 0, 2]);
+    }
+
+    /// Two independent sources: the seed order is ascending id, i.e. first-seen.
+    #[test]
+    fn independent_sources_come_out_in_first_seen_order() {
+        // Vertices are first seen as 7, 8, 9, 0 — so ids 0, 1, 2, 3.
+        let g = graph(&[(7, 9, 1.0), (8, 9, 1.0), (0, 9, 1.0)]);
+        let t = Topological::new(&g).unwrap();
+        assert_eq!(labels(&t), vec![7, 8, 0, 9]);
     }
 
     #[test]
-    fn empty_graph_sorts_to_nothing() {
-        let t = Topological::new(&EdgeWeightedDigraph::new()).unwrap();
+    fn empty_and_single_edge_graphs() {
+        let g: EdgeWeightedDigraph<u32> = EdgeWeightedDigraph::new();
+        let t = Topological::new(&g).unwrap();
         assert!(t.order().is_empty());
-        assert!(t.is_dag());
-    }
+        assert_eq!(t.labels().count(), 0);
+        assert_eq!(t.graph().vertex_count(), 0);
 
-    #[test]
-    fn string_vertices() {
-        let mut g = EdgeWeightedDigraph::new();
-        g.add("a", "b", 1.0);
-        g.add("b", "c", 2.0);
+        let g = graph(&[(1, 2, 0.5)]);
         let t = Topological::new(&g).unwrap();
-        assert_eq!(
-            t.order(),
-            &[Vertex::from("a"), Vertex::from("b"), Vertex::from("c")]
-        );
+        assert_eq!(labels(&t), vec![1, 2]);
     }
 
     #[test]
-    fn cycles_report_the_vertex_met_twice() {
-        let e = Topological::new(&graph(&[(0, 0, 1.0)])).unwrap_err();
-        assert_eq!(e.to_string(), "Cyclic dependency:0");
-
-        let e = Topological::new(&graph(&[(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0)])).unwrap_err();
-        assert_eq!(e.to_string(), "Cyclic dependency:2");
-
-        let mut g = EdgeWeightedDigraph::new();
-        g.add("a", "b", 1.0);
-        g.add("b", "a", 1.0);
-        assert_eq!(
-            Topological::new(&g).unwrap_err().to_string(),
-            "Cyclic dependency:\"b\""
-        );
-    }
-
-    #[test]
-    fn number_and_numeric_string_are_distinct_vertices() {
-        let mut g = EdgeWeightedDigraph::new();
-        g.add(1, 2, 0.5);
-        g.add("1", 3, 0.25);
+    fn a_disconnected_graph_orders_every_component() {
+        let g = graph(&[(0, 1, 1.0), (2, 3, 1.0)]);
         let t = Topological::new(&g).unwrap();
+        assert_eq!(labels(&t), vec![0, 2, 1, 3]);
+        assert!(is_topological(&g, t.order()));
+    }
+
+    #[test]
+    fn parallel_edges_do_not_disturb_the_order() {
+        let g = graph(&[(0, 1, 1.0), (0, 1, 2.0), (1, 2, 3.0)]);
+        let t = Topological::new(&g).unwrap();
+        assert_eq!(labels(&t), vec![0, 1, 2]);
+        assert!(is_topological(&g, t.order()));
+    }
+
+    #[test]
+    fn a_self_loop_is_a_cycle() {
+        let g = graph(&[(0, 0, 1.0)]);
+        let err = Topological::new(&g).unwrap_err();
+        assert_eq!(err.vertices(), &[VertexId::from_index(0)]);
         assert_eq!(
-            t.order(),
-            &[
-                Vertex::from("1"),
-                Vertex::Num(3.0),
-                Vertex::Num(1.0),
-                Vertex::Num(2.0)
-            ]
+            err.to_string(),
+            "graph is cyclic: 1 of 1 vertices lie on or behind a cycle"
         );
     }
 
     #[test]
-    fn deep_chain_does_not_overflow_the_stack() {
-        // The reference recurses once per link and dies somewhere in the tens of
-        // thousands; the iterative traversal here has no such ceiling.
-        let mut g = EdgeWeightedDigraph::new();
-        for i in 0..50_000 {
-            g.add(i, i + 1, 0.001);
+    fn a_cycle_reports_every_vertex_it_traps() {
+        // 0 -> 1 -> 2 -> 0, plus 2 -> 3 which is downstream of the cycle, plus
+        // 4 -> 5 which is a clean component and must still be ordered out.
+        let g = graph(&[
+            (0, 1, 1.0),
+            (1, 2, 1.0),
+            (2, 0, 1.0),
+            (2, 3, 1.0),
+            (4, 5, 1.0),
+        ]);
+        let err = Topological::new(&g).unwrap_err();
+        // Ids: 0->0, 1->1, 2->2, 3->3, 4->4, 5->5 in first-seen order.
+        let trapped: Vec<usize> = err.vertices().iter().map(|v| v.index()).collect();
+        assert_eq!(trapped, vec![0, 1, 2, 3]);
+        assert_eq!(
+            err.to_string(),
+            "graph is cyclic: 4 of 6 vertices lie on or behind a cycle"
+        );
+    }
+
+    #[test]
+    fn two_disjoint_cycles_are_both_reported() {
+        let g = graph(&[(0, 1, 1.0), (1, 0, 1.0), (2, 3, 1.0), (3, 2, 1.0)]);
+        let err = Topological::new(&g).unwrap_err();
+        assert_eq!(err.vertices().len(), 4);
+    }
+
+    #[test]
+    fn a_deep_chain_costs_no_stack() {
+        // Recursive depth-first ordering overflows here; Kahn's does not
+        // recurse at all.
+        let mut g: EdgeWeightedDigraph<u32> = EdgeWeightedDigraph::new();
+        for i in 0..200_000u32 {
+            g.add(&i, &(i + 1), 0.001).unwrap();
         }
         let t = Topological::new(&g).unwrap();
-        assert_eq!(t.order().len(), 50_001);
-        assert_eq!(t.order()[0], Vertex::Num(0.0));
-        assert_eq!(t.order()[50_000], Vertex::Num(50_000.0));
+        assert_eq!(t.order().len(), 200_001);
+        assert_eq!(t.labels().next(), Some(&0));
+        assert_eq!(t.labels().last(), Some(&200_000));
+    }
+
+    #[test]
+    fn string_labels() {
+        let mut g: EdgeWeightedDigraph<String> = EdgeWeightedDigraph::new();
+        g.add("a", "b", 1.0).unwrap();
+        g.add("b", "c", 2.0).unwrap();
+        let t = Topological::new(&g).unwrap();
+        let seen: Vec<&str> = t.labels().map(String::as_str).collect();
+        assert_eq!(seen, vec!["a", "b", "c"]);
     }
 }

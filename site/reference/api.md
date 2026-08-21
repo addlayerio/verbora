@@ -10,8 +10,8 @@ one costs.
 | Crate | What is in it | Guide | Rustdoc |
 |---|---|---|---|
 | `verbora-core` | Shared traits, `Token`, stop words, whitespace helpers | [Core vocabulary](../features/core.md) | <a href="../api/verbora_core/">API</a> |
-| `verbora-tokenizers` | 25 tokenizers behind one `Tokenize` trait | [Tokenizers](../features/tokenizers.md) | <a href="../api/verbora_tokenizers/">API</a> |
-| `verbora-distance` | 8 metrics: Levenshtein, Damerau, Jaro–Winkler, Dice, Hamming | [String distance](../features/distance.md) | <a href="../api/verbora_distance/">API</a> |
+| `verbora-tokenizers` | 3 UAX #29 tokenizers behind one borrowing trait | [Tokenizers](../features/tokenizers.md) | <a href="../api/verbora_tokenizers/">API</a> |
+| `verbora-distance` | 7 metrics: Levenshtein, unrestricted Damerau, OSA, Jaro, Jaro–Winkler, Dice, Hamming | [String distance](../features/distance.md) | <a href="../api/verbora_distance/">API</a> |
 | `verbora-phonetics` | SoundEx, Metaphone, Double Metaphone, Daitch–Mokotoff | [Phonetics](../features/phonetics.md) | <a href="../api/verbora_phonetics/">API</a> |
 | `verbora-ngrams` | n-gram windows, frequency statistics, Chinese n-grams | [N-grams](../features/ngrams.md) | <a href="../api/verbora_ngrams/">API</a> |
 | `verbora-normalizers` | Diacritics, English contractions, Japanese width and kana | [Normalizers](../features/normalizers.md) | <a href="../api/verbora_normalizers/">API</a> |

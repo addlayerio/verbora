@@ -12,10 +12,54 @@
 //! `symspell`, `harper-core` and `spellbook` were selected, and
 //! `../../README.md` for why this crate lives outside the main workspace.
 //!
+//! # Owned vs. borrowed suggestions: two Verbora rows, on purpose
+//!
+//! The Criterion group names keep their pre-migration spelling
+//! (`spellcheck_get_corrections_d1`/`_d2`) even though `get_corrections` is
+//! gone, so this row's result directory — and the raw Criterion output
+//! already committed under it — stays continuous across the rename.
+//!
+//! The pre-migration Verbora had one entry point, `get_corrections(word,
+//! max_distance) -> Vec<String>`, which allocated a `String` per suggestion.
+//! It now has two, and they differ in exactly that:
+//!
+//! * `corrections(word, max_distance) -> Vec<Correction<'_>>` — each
+//!   `Correction` borrows `word: &'a str` from the `Spellcheck` and carries
+//!   the `distance` and `frequency` the ranking used. **No allocation per
+//!   suggestion.**
+//! * `correction_words(word, max_distance) -> Vec<String>` — the same
+//!   suggestions reduced to owned words. **One `String` per suggestion**, and
+//!   the direct migration of the old `get_corrections`.
+//!
+//! The competitors are split down the same line, which is why both are
+//! benchmarked rather than one being picked:
+//!
+//! | competitor | suggestion shape | allocates per suggestion |
+//! |---|---|---|
+//! | `symspell` 0.5.2 | `Suggestion { term: String, .. }` | yes |
+//! | `fast_symspell` 0.1.10 | `Suggestion { term: String, .. }` | yes |
+//! | `harper_core` 2.8.0 | `FuzzyMatchResult<'a> { word: &'a [char], .. }` | no |
+//!
+//! So every group below carries a **`verbora`** row (`correction_words`, the
+//! like-for-like match for the two SymSpell implementations) and a
+//! **`verbora-borrowed`** row (`corrections`, the like-for-like match for
+//! `harper_core`). This follows `AGENTS.md`'s "Benchmark API Variants" rule —
+//! "when multiple APIs exist, benchmark them independently" — and the same
+//! `verbora`/`verbora-lazy` two-row convention `benches/tokenizers.rs`
+//! already uses.
+//!
+//! Reading them: comparing `verbora-borrowed` against `symspell` credits
+//! Verbora with skipping an allocation `symspell`'s API forces its callers to
+//! pay, and comparing `verbora` against `harper_core` charges Verbora for an
+//! allocation `harper_core` avoids. Neither cross-reading is a like-for-like
+//! result. The rows exist so that both comparisons can be made correctly, not
+//! so that the flattering half of each can be quoted.
+//!
 //! # Four competitors, four different fairness shapes
 //!
 //! - **`symspell`** (0.5.2) — same task shape as Verbora's
-//!   `get_corrections`: `SymSpell::lookup(word, Verbosity, max_edit_distance)`
+//!   `corrections`/`correction_words`: `SymSpell::lookup(word, Verbosity,
+//!   max_edit_distance)`
 //!   against a loaded frequency dictionary. Loaded with the **exact same
 //!   `words.json` corpus** Verbora is (same words, same per-word
 //!   frequencies, same `max_distance`) — the matrix's explicit "load both
@@ -34,7 +78,7 @@
 //!   `Cargo.toml`) — `spell::FstDictionary::new` accepts an arbitrary word
 //!   list, so it is **also** loaded with Verbora's own `words.json` corpus
 //!   (via `Dictionary::fuzzy_match_str`, the closest analogue to
-//!   `get_corrections`) rather than `FstDictionary::curated()` — the
+//!   `corrections`) rather than `FstDictionary::curated()` — the
 //!   matrix's "load a comparable dictionary" branch, not the "label the
 //!   comparison explicitly" one, because harper-core's constructor happens
 //!   to make the first branch possible.
@@ -461,7 +505,10 @@ fn bench_get_corrections(c: &mut Criterion) {
         let fast_symspell = build_fast_symspell(slice, 1);
 
         g.bench_with_input(BenchmarkId::new("verbora", n), &n, |b, _| {
-            b.iter(|| black_box(sc.get_corrections(black_box(&probe), 1)));
+            b.iter(|| black_box(sc.correction_words(black_box(&probe), 1)));
+        });
+        g.bench_with_input(BenchmarkId::new("verbora-borrowed", n), &n, |b, _| {
+            b.iter(|| black_box(sc.corrections(black_box(&probe), 1)));
         });
         g.bench_with_input(BenchmarkId::new("symspell", n), &n, |b, _| {
             b.iter(|| black_box(symspell.lookup(black_box(&probe), Verbosity::All, 1)));
@@ -489,7 +536,10 @@ fn bench_get_corrections(c: &mut Criterion) {
         let fast_symspell = build_fast_symspell(slice, 2);
 
         g.bench_with_input(BenchmarkId::new("verbora", n), &n, |b, _| {
-            b.iter(|| black_box(sc.get_corrections(black_box(&probe), 2)));
+            b.iter(|| black_box(sc.correction_words(black_box(&probe), 2)));
+        });
+        g.bench_with_input(BenchmarkId::new("verbora-borrowed", n), &n, |b, _| {
+            b.iter(|| black_box(sc.corrections(black_box(&probe), 2)));
         });
         g.bench_with_input(BenchmarkId::new("symspell", n), &n, |b, _| {
             b.iter(|| black_box(symspell.lookup(black_box(&probe), Verbosity::All, 2)));
@@ -576,7 +626,7 @@ fn bench_fast_symspell_archived_load(c: &mut Criterion) {
 /// spell-checking a whole document or a column of free-text input actually
 /// runs, as opposed to `spellcheck_get_corrections_d1`/`_d2`'s one-word-at-
 /// a-time numbers above. Sequential on every side, deliberately: `Spellcheck`
-/// does expose a `rayon`-parallel `par_get_corrections_batch`, but it sits
+/// does expose a `rayon`-parallel `par_corrections_batch`, but it sits
 /// behind the `parallel` feature, which this workspace's `Cargo.toml` does
 /// not enable for its `verbora-spellcheck` dependency (`[dependencies]
 /// verbora-spellcheck = { path = "../../../crates/verbora-spellcheck" }`, no
@@ -605,7 +655,14 @@ fn bench_batch_correction(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("verbora", n), &n, |b, _| {
             b.iter(|| {
                 for w in &probes {
-                    black_box(sc.get_corrections(black_box(w), 1));
+                    black_box(sc.correction_words(black_box(w), 1));
+                }
+            });
+        });
+        g.bench_with_input(BenchmarkId::new("verbora-borrowed", n), &n, |b, _| {
+            b.iter(|| {
+                for w in &probes {
+                    black_box(sc.corrections(black_box(w), 1));
                 }
             });
         });
@@ -834,7 +891,7 @@ fn bench_spellbook(c: &mut Criterion) {
         BenchmarkId::new("verbora_own_corpus", "typo8"),
         &verbora_probe,
         |b, w| {
-            b.iter(|| black_box(sc.get_corrections(black_box(w), 1)));
+            b.iter(|| black_box(sc.correction_words(black_box(w), 1)));
         },
     );
     g.finish();

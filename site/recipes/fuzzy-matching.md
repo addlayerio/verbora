@@ -12,13 +12,18 @@ The interesting part is not which distance metric you pick. It is that you must
 // and no amount of making levenshtein() faster fixes it.
 let best = names
     .iter()
-    .map(|n| (n, levenshtein(query, n, &opts)))
-    .min_by(|a, b| a.1.total_cmp(&b.1));
+    .map(|n| (n, levenshtein(query, n)))
+    .min_by_key(|&(_, d)| d);
 ```
 
-`levenshtein/ascii/16` measures 41.8 ns. Against 100,000 candidates that is
+`levenshtein/ascii/16` measures 41.8 ns †. Against 100,000 candidates that is
 ~4 ms of pure comparison per query — roughly 240 queries per second per core,
 and it grows linearly with your dictionary. Bucketing does not.
+
+† Pending re-measurement, and left as recorded rather than replaced with a
+guess. See [Benchmarks: string distance](../benchmarks/distance.md). The shape
+of the argument does not depend on it: the bucketing win is a change of
+complexity class, not a constant factor.
 
 ## The shape that works
 
@@ -72,7 +77,7 @@ assert_eq!(buckets["R163"], ["Robert", "Rupert"]);
 assert_eq!(buckets["R150"], ["Rubin"]);
 
 // Ashcraft and Ashcroft collide, which is the point.
-assert_eq!(buckets["A226"], ["Ashcraft", "Ashcroft"]);
+assert_eq!(buckets["A261"], ["Ashcraft", "Ashcroft"]);
 ```
 
 ## Step 2: rank within the bucket
@@ -80,7 +85,7 @@ assert_eq!(buckets["A226"], ["Ashcraft", "Ashcroft"]);
 ```rust
 use std::collections::HashMap;
 
-use verbora_distance::{jaro_winkler, jaro_winkler::Options};
+use verbora_distance::jaro_winkler;
 use verbora_phonetics::SoundEx;
 
 fn best_matches<'a>(
@@ -89,7 +94,6 @@ fn best_matches<'a>(
     limit: usize,
 ) -> Vec<(&'a str, f64)> {
     let soundex = SoundEx::new();
-    let opts = Options::default();          // hoisted
 
     let key = soundex.process(query);
 
@@ -98,7 +102,7 @@ fn best_matches<'a>(
         .map(|candidates| {
             candidates
                 .iter()
-                .map(|n| (*n, jaro_winkler(query, n, &opts)))
+                .map(|n| (*n, jaro_winkler(query, n)))
                 .collect()
         })
         .unwrap_or_default();
@@ -122,12 +126,15 @@ Two distance calls instead of six. At real scale it is a few dozen instead of a
 hundred thousand.
 
 <div class="callout callout-warn">
-<strong>Direction is not uniform.</strong> Jaro–Winkler and Dice are
-<em>similarities</em> — higher is closer. Levenshtein, Damerau and Hamming are
-<em>distances</em> — lower is closer. Verbora deliberately does not normalise
-this, because doing so would change every caller's results. The
-<code>StringMetric</code> trait records which convention each metric uses in its
-<code>IS_SIMILARITY</code> associated constant, so generic code can adapt.
+<strong>Direction is not uniform.</strong> Jaro, Jaro–Winkler and Dice are
+<em>similarities</em> — a finite <code>f64</code> in <code>0.0..=1.0</code>,
+higher is closer, and identical inputs score exactly <code>1.0</code>.
+Levenshtein, Damerau, OSA and Hamming are <em>distances</em> — a
+<code>usize</code> count of edits, lower is closer, and identical inputs score
+<code>0</code>. Sort a similarity descending and a distance ascending, and never
+mix the two in one ranking. Verbora does not fold them into a single convention:
+a count and a ratio are different quantities, and normalising would throw away
+the exact, <code>Ord</code>, <code>Hash</code> integer the distances return.
 </div>
 
 ## Choosing the metric for step 2
@@ -137,8 +144,8 @@ this, because doing so would change every caller's results. The
 | Personal names | `jaro_winkler` | Weights a shared prefix; names rarely differ at the front |
 | Free-text typos | `levenshtein` | Models insert/delete/substitute directly |
 | Typos including swapped letters | `damerau_levenshtein` | Adds transposition — `teh` → `the` is one edit, not two |
-| Short codes of equal length | `hamming` | Position-wise; returns `-1` if the lengths differ |
-| Word-order-insensitive overlap | `dice_coefficient` | Bigram set overlap; `NaN` for two empty strings |
+| Short codes of equal length | `hamming` | Position-wise; returns `None` when the scalar counts differ, so an incomparable candidate drops out of a `filter_map` instead of scoring |
+| Word-order-insensitive overlap | `dice_coefficient` | Bigram set overlap. Case and whitespace are significant — fold both operands first if that is not what you want |
 
 See [Choosing a distance API](../choosing/distance.md).
 
@@ -146,16 +153,21 @@ See [Choosing a distance API](../choosing/distance.md).
 
 | Encoder | Buckets by | Good for |
 |---|---|---|
-| `SoundEx` | 4 characters, English consonant classes | English surnames; wide buckets |
-| `Metaphone` | up to 32 characters, English pronunciation rules | General English words; tighter buckets |
-| `DoubleMetaphone` | **two** keys | Names with more than one plausible pronunciation — index under both |
-| `SoundExDM` | 6 digits, Daitch–Mokotoff | Slavic, Germanic and Jewish surnames |
+| `SoundEx` | a letter and 3 digits, English consonant classes | English surnames; wide buckets |
+| `Metaphone` | letters, unbounded, English pronunciation rules | General English words; tighter buckets |
+| `DoubleMetaphone` | **two** keys of up to 4 characters | Names with more than one plausible pronunciation — index under both |
+| `DaitchMokotoff` | 6 digits, branching on ambiguous clusters | Slavic, Germanic and Ashkenazi-Jewish surnames |
+| `Nysiis` | letters, US-census name rules | American surnames, where it was designed and evaluated |
+| `Cologne` | digits, German phonology | German-language names and words |
+| `BeiderMorse` | a candidate list, per language set | Names whose language of origin is itself uncertain |
 
 `DoubleMetaphone` is worth the extra index entry when your data is genuinely
 multilingual: a name gets a primary and an alternate key, and a query matching
-either finds it.
+either finds it. `DaitchMokotoff::codes` goes further and returns *every* branch
+an ambiguous cluster produces — index a name under all of them.
 
-See [Phonetics](../features/phonetics.md).
+Twelve encoders ship in all; the seven above are the ones whose publications
+were written for personal names. See [Phonetics](../features/phonetics.md).
 
 ## Tuning the recall/precision trade-off
 
@@ -165,22 +177,25 @@ short prefix.
 
 **Buckets too wide** — you are back to scanning. Narrow with a longer key
 (`Metaphone` over `SoundEx`), or add a cheap second filter before the distance
-call: a length gate rejects most non-matches for the cost of a subtraction.
+call: a length gate rejects most non-matches for the cost of two linear scans
+and a subtraction, against an `O(nm)` metric.
 
 ```rust
-use verbora_distance::units::utf16_len;
-
 /// Two strings cannot be within `max_edits` if their lengths differ by more.
 fn plausible(a: &str, b: &str, max_edits: usize) -> bool {
-    utf16_len(a).abs_diff(utf16_len(b)) <= max_edits
+    a.chars().count().abs_diff(b.chars().count()) <= max_edits
 }
 
 assert!(plausible("Robert", "Robbert", 2));
 assert!(!plausible("Robert", "Ro", 2));
 ```
 
-Use `utf16_len`, not `str::len` or `chars().count()` — it reports the UTF-16
-length the metrics actually use.
+Count scalars, not bytes. `s.chars().count()` is the length every metric here
+measures in — one Unicode scalar value is one unit — and the gate is sound
+because `|a.chars().count() - b.chars().count()| <= levenshtein(a, b)` holds for
+every pair: an insertion or deletion moves the scalar count by exactly one, a
+substitution by zero. `str::len()` counts bytes, so a gate built on it starts
+rejecting true matches the moment the input leaves ASCII.
 
 ## Normalising first
 
@@ -215,16 +230,27 @@ generation, not a distance metric run over every entry.
 use verbora_spellcheck::FuzzyIndexBuilder;
 
 let mut builder = FuzzyIndexBuilder::new();
-for name in ["Smith", "Smyth", "Smithe", "Jones"] {
-    builder.insert(name);
-}
+builder.insert_all(["Smith", "Smit", "Smyth", "Smithe", "Jones"]);
 let index = builder.build();
 
-let candidates: Vec<&str> = index.neighbors("Smith", 2).collect();
-assert!(candidates.contains(&"Smyth"));
-assert!(candidates.contains(&"Smithe"));
-assert!(!candidates.contains(&"Jones"));
+// Each hit carries the exact edit distance the index already computed to
+// decide it was a hit, so ranking needs no second pass over a metric.
+// `Neighbor`'s own ordering is nearest first, then alphabetical, so
+// sorting the collected neighbors directly is the ranking.
+let mut hits: Vec<_> = index.neighbors("Smith", 2).collect();
+hits.sort();
+
+// The exact match leads even though "Smit" sorts alphabetically ahead of
+// it: distance is compared first, and only ties fall back to the word.
+assert_eq!(
+    hits.iter().map(|n| (n.word, n.distance)).collect::<Vec<_>>(),
+    [("Smith", 0), ("Smit", 1), ("Smithe", 1), ("Smyth", 1)]
+);
+assert!(!hits.iter().any(|n| n.word == "Jones"));
 ```
+
+`neighbors` is lazy and its order is depth-first from the root, not ranked — sort
+the collected neighbors, as above, when you want a ranking.
 
 The two bucketing strategies are complementary, not competing: phonetic
 bucketing catches "sounds the same, spelled differently"; edit-distance

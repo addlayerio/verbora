@@ -57,8 +57,10 @@ Several of these are bugs by any standards-conformance measure. **They are also
 the contract.** `verbora-transliterators` is a parity crate: its correctness
 criterion is byte-equality against `fixtures/transliterators.json`, which the
 book records as **143,060 calls** across 7 suites (including all 36,481 ordered
-kana pairs) with the status *Verified*. The reference is right by definition
-(`docs/PARITY.md`). The crate is not permitted to emit `vu`, to romanize `漢字`,
+kana pairs) with the status *Verified*. The reference is right by
+definition — this project's own parity principle, not a citable file
+(`docs/PARITY.md` does not exist in this repository; see
+`docs/design/text-shaping-contract.md`'s own finding). The crate is not permitted to emit `vu`, to romanize `漢字`,
 to fix the `ッA` case, or to learn what a particle is.
 
 Its public surface, per the same page, is `transliterate_ja` plus
@@ -74,8 +76,10 @@ Three independent reasons, any one of which is sufficient:
    Hepburn-with-`b` variants write `bu`). A single crate cannot satisfy both, and
    a runtime flag that switches between them makes the parity fixture replay
    depend on configuration — which is exactly how recorded-parity suites rot.
-2. **Parity percentage integrity.** `docs/PARITY.md` reports coverage of the
-   the reference API surface. If Verbora-native romanization lived in the same
+2. **Parity percentage integrity.** Parity coverage is meant to be reported
+   for the reference API surface only (no `docs/PARITY.md` file exists in
+   this repository to do that reporting — see
+   `docs/design/text-shaping-contract.md`'s own finding). If Verbora-native romanization lived in the same
    crate, every new script would either dilute the denominator or require an
    ad-hoc "not part of parity" carve-out inside a crate whose entire point is
    that there is no carve-out. **PARITY_VERIFIED status and parity percentages
@@ -1022,8 +1026,9 @@ graph acyclic and lets someone use romanization without pulling phonetics.
 
 ### 9.1 Conformance vectors
 
-Recorded, never transcribed — the same principle `docs/PARITY.md` states for
-The reference parity, for the same reason: hand-written expectations encode the
+Recorded, never transcribed — the same principle this project states for
+The reference parity (no `docs/PARITY.md` file exists in this repository to
+point to; see `docs/design/text-shaping-contract.md`'s own finding), for the same reason: hand-written expectations encode the
 implementer's reading of the standard, not the standard.
 
 The difference from parity testing is that there is no executable reference to
@@ -1143,8 +1148,11 @@ invented numbers):
 * The identity function, to establish the floor.
 
 Report throughput (MiB/s), allocations per call, and the borrowed-vs-owned ratio
-on mixed input. Results go in `docs/PERFORMANCE.md`; nothing goes in the book
-until it is in there.
+on mixed input. Results go in `site/benchmarks/competitive.md` (backed by
+`docs/COMPETITIVE_BENCHMARKS.md`), following this project's actual
+benchmark-publishing convention — no `docs/PERFORMANCE.md` file has ever
+existed in this repository; nothing goes in the book until it is published
+there.
 
 ---
 

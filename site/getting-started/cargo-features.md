@@ -11,7 +11,12 @@ you nothing you did not ask for.
 | 14 crates, listed below | `parallel` | Explicit `par_*` batch APIs backed by Rayon. |
 | `verbora-language` | `language-detection` | `WhatlangDetector`, backed by the optional `whatlang` dependency. |
 | `verbora-language` | `fast-language-detection` | `HashedLinearDetector`, using compiled-in model weights and no extra dependency. |
-| `verbora-core` | `serde` | Pulls in `serde` as a dependency. Core types carry no serialization derives today; the feature reserves the hook. |
+
+Those three are the whole list. Nothing here gates a serialization hook: where
+serialization exists it is unconditional — `verbora-tfidf` persists a corpus
+through `TfIdf::to_json` / `TfIdf::from_json`, and `verbora-classifiers` through
+its own model format — so there is no feature to turn on and no feature that
+compiles to nothing.
 
 ## `parallel`
 
@@ -30,9 +35,9 @@ twice: once to the Cargo feature, once to an explicitly named `par_*` call.
 
 ```toml
 [dependencies]
-verbora-tokenizers = { version = "0.1", features = ["parallel"] }
+verbora-tokenizers = { version = "0.2", features = ["parallel"] }
 verbora-language = {
-  version = "0.1",
+  version = "0.2",
   features = ["fast-language-detection", "parallel"]
 }
 ```
@@ -44,9 +49,9 @@ the measured crossover points.
 
 ## Crates without optional features
 
-`verbora-inflectors`, `verbora-ngrams`, `verbora-trie` and `verbora-util` have
-no optional features. `default-features = false` is harmless anywhere in the
-workspace, because every default feature set is empty.
+`verbora-core`, `verbora-inflectors`, `verbora-ngrams`, `verbora-trie` and
+`verbora-util` have no optional features. `default-features = false` is harmless
+anywhere in the workspace, because every default feature set is empty.
 
 Both extremes of the feature matrix are supported:
 

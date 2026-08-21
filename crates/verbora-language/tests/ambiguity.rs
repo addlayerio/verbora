@@ -16,22 +16,24 @@
 //! --features language-detection`.
 #![cfg(feature = "language-detection")]
 
-use verbora_language::{LanguageDetector, WhatlangDetector};
+use verbora_language::{Confidence, LanguageDetector, WhatlangDetector};
 
 /// A threshold a caller could reasonably pick for "safe to act on
 /// automatically". Not a value this crate bakes in anywhere itself (see
 /// [`verbora_language::AutoPhoneticStrategy::new`]'s own doc comment) — it
 /// exists only so these tests have one fixed number to check ambiguous
 /// input against.
-const REASONABLE_THRESHOLD: f32 = 0.6;
+fn reasonable_threshold() -> Confidence {
+    Confidence::new(0.6).expect("0.6 is in range")
+}
 
-/// Asserts `word`, detected alone, never clears [`REASONABLE_THRESHOLD`] —
+/// Asserts `word`, detected alone, never clears [`reasonable_threshold`] —
 /// the honest outcome for a word this short and this ambiguous, whichever
 /// language `whatlang` happens to lean towards.
 fn assert_ambiguous(word: &str) {
     let detection = WhatlangDetector::new().detect(word);
     assert!(
-        detection.best_above(REASONABLE_THRESHOLD).is_none(),
+        detection.best_above(reasonable_threshold()).is_none(),
         "{word:?} resolved to a single confident language ({:?}); a single \
          short word shared across multiple languages must not clear a \
          normal confidence threshold",
@@ -96,7 +98,7 @@ fn long_unambiguous_text_is_not_treated_as_ambiguous() {
          clearly above every other candidate language.",
     );
     assert!(
-        detection.best_above(REASONABLE_THRESHOLD).is_some(),
+        detection.best_above(reasonable_threshold()).is_some(),
         "a long, clearly English paragraph must clear a normal confidence \
          threshold — otherwise ambiguity handling would be indistinguishable \
          from detection simply not working"
@@ -108,5 +110,5 @@ fn long_unambiguous_text_is_not_treated_as_ambiguous() {
 #[test]
 fn empty_input_has_no_candidates_at_all() {
     let detection = WhatlangDetector::new().detect("");
-    assert!(detection.candidates.is_empty());
+    assert!(detection.is_empty());
 }

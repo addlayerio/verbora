@@ -1,527 +1,416 @@
 # N-grams
 
-`verbora-ngrams` turns a sequence into its sliding windows: bigrams, trigrams,
-arbitrary `n`, optionally padded with start and end symbols, optionally with a
-frequency table attached. One generic engine backs every entry point, so the
-token path (`&str`), the numeric path (`i64`) and the Chinese code-unit path
-(`&[u16]`) cannot drift apart.
+An n-gram is every window of `n` consecutive elements of a sequence, in order.
+`verbora-ngrams` is that operation, the padding convention that stops the
+elements at the two ends being under-represented, and the same operation over
+the Unicode scalars of a `&str`.
 
-The primitive is a lazy iterator that yields `Cow`: it borrows every unpadded
-window and allocates only for the `2(n-1)` tuples that genuinely mix pad symbols
-with sequence elements. Every other entry point is a wrapper that trades some of
-that back for a more convenient shape.
+It is four public items and no dependencies:
+
+| Item | Windows | Yields |
+|---|---|---|
+| `ngrams(seq, n)` | the caller's `&[T]`, exactly as given | `&[T]` |
+| `Padded::new(seq, n, start, end)` | a copy of it with boundary symbols attached | `&[T]` |
+| `char_ngrams(text, n)` | the Unicode scalars of a `&str` | `&str` |
+| `CharNGrams<'a>` | the iterator `char_ngrams` returns | — |
 
 <div class="callout callout-spec">
-<strong>Specification status.</strong> Both n-gram APIs are documented and
-test-pinned. Nothing in this crate is fallible: every <code>n</code>, sequence
-length and pad symbol is a defined input.
-<code>cargo test -p verbora-ngrams</code> runs <strong>43</strong> unit tests
-and <strong>13</strong> doctests.
+<strong>Specification status.</strong> Every item is documented and test-pinned,
+and <strong>no function in this crate panics on any input</strong>, in debug or
+in release. <code>cargo test -p verbora-ngrams --all-features</code> runs
+<strong>34</strong> tests and <strong>22</strong> doctests.
 </div>
 
 ## When to use it
 
-- You need bigrams, trigrams or arbitrary `n`-grams over tokens you already have.
-- You need precise padding at the boundaries, including `n` longer than the
-  sequence — see [Padding semantics](#padding-semantics).
-- You want a frequency table and a Good–Turing count-of-counts (`Nr`) in one pass.
-- You are windowing Chinese (or other per-character) text and need UTF-16
-  code-unit boundaries rather than Unicode scalar values — see [Chinese: `zh`](#chinese-zh).
+- You need bigrams, trigrams or arbitrary `n`-grams over elements you already
+  have — tokens, tags, IDs, numbers, anything.
+- You need boundary padding, so that the first and last element appear in as
+  many windows as the elements in the middle.
+- You need character n-grams as borrowed substrings, for language
+  identification or fuzzy matching.
 - You want to stream windows over a large corpus without allocating per window.
 
 ## When not to use it
 
-- **You want a language model.** This crate produces windows and counts. There is
-  no smoothing and no probability estimation; `nr` is the raw count-of-counts a
-  Good–Turing estimator would consume, and the estimator is yours to write.
-- **You want linguistic tokenization.** The default `WordTokenizer`'s character
-  class is `[A-Za-zА-Яа-я0-9_]` and nothing else, so `café` becomes `caf`. Pick a
-  real tokenizer from [Tokenizers](./tokenizers.md) and pass it to
-  `ngrams_str_with`.
-- **You want parallel, batched or buffer-reusing generation.** There is no
-  `par_*` API, no `_batch` entry point and no `_into` variant. The lazy iterator
-  is the memory-frugal path instead.
+- **You want a language model.** This crate produces windows. There is no
+  smoothing, no probability estimation and no count-of-counts table; counting is
+  a three-line fold you write at the call site, shown below.
+- **You want string input with a tokenizer built in.** There is deliberately no
+  string entry point for word n-grams: tokenize with
+  [Tokenizers](./tokenizers.md), then window the slice, so the tokenizer is an
+  argument rather than a hidden policy.
+- **You want grapheme-cluster windows.** `char_ngrams` works in Unicode scalars.
+  Segment first with a grapheme segmenter and build a `Padded` over the result.
 
 ## Quick example
 
 ```rust
-use verbora_ngrams::{bigrams, ngrams_str, tokenize, trigrams};
+use std::num::NonZeroUsize;
+use verbora_ngrams::{Padded, char_ngrams, ngrams};
 
 fn main() {
-    // Pre-tokenized input: windows borrow from the slice, nothing is copied.
+    let n = NonZeroUsize::new(2).expect("2 is not zero");
     let tokens = ["the", "quick", "brown", "fox"];
-    let grams = bigrams(&tokens, None, None);
-    assert_eq!(grams.len(), 3);
-    assert_eq!(grams[0].to_vec(), vec!["the", "quick"]);
 
-    // String input: tokenized with the process-global tokenizer first.
-    assert_eq!(
-        ngrams_str("a b c", 2, None, None),
-        vec![vec!["a", "b"], vec!["b", "c"]]
-    );
+    // Windows over the caller's slice: nothing allocated, nothing copied.
+    let grams: Vec<&[&str]> = ngrams(&tokens, n).collect();
+    assert_eq!(grams, [["the", "quick"], ["quick", "brown"], ["brown", "fox"]]);
 
-    // Tokenize once, window many times.
-    let toks = tokenize("the quick brown fox");
-    assert_eq!(trigrams(&toks, None, None).len(), 2);
+    // With boundary symbols, so "the" and "fox" each appear in n windows.
+    let padded = Padded::new(&tokens, n, Some(&"<s>"), Some(&"</s>"));
+    assert_eq!(padded.ngrams().len(), 5);
+    assert_eq!(padded.ngrams().next(), Some(&["<s>", "the"][..]));
+
+    // Character windows, borrowed from the input text.
+    let chars: Vec<&str> = char_ngrams("👍你好", n).collect();
+    assert_eq!(chars, ["👍你", "你好"]);
 }
 ```
+
+## `n` is a `NonZeroUsize`, and that is the point
+
+`slice::windows` panics when the window size is zero. `ngrams` cannot, because
+there is no zero to pass: the precondition is discharged by the type rather than
+checked at the point of use, so no call site needs a guard and no input can reach
+a panic. That is the entire difference between `ngrams` and `slice::windows`, and
+the entire justification for the function existing.
+
+```rust
+use std::num::NonZeroUsize;
+use verbora_ngrams::ngrams;
+
+fn main() {
+    let n = NonZeroUsize::new(3).expect("3 is not zero");
+
+    // The elements are yours; nothing here assumes text.
+    let seq = [1_i64, 2, 3, 4];
+    let grams: Vec<&[i64]> = ngrams(&seq, n).collect();
+    assert_eq!(grams, [[1, 2, 3], [2, 3, 4]]);
+
+    // A window wider than the sequence is empty — the only available answer.
+    assert_eq!(ngrams(&["a", "b"], n).count(), 0);
+}
+```
+
+The iterator is `std::slice::Windows`, so it is `ExactSizeIterator`,
+`DoubleEndedIterator` and `FusedIterator`, `len()` is free, and `collect()`
+reserves exactly once.
 
 ## Choosing the right API
 
-| API | Input | Output | Lazy | Windows borrowed | Allocations |
-|---|---|---|:--:|:--:|---|
-| `ngrams_iter` | `&[T]` | `NGramIter<'a, T>` | ✅ | ✅ | none for windows; one `Vec` per pad tuple |
-| `ngrams` | `&[T]` | `Vec<Cow<'a, [T]>>` | ❌ | ✅ | one `Vec`; one per pad tuple |
-| `ngrams_owned` | `&[T]` | `Vec<Vec<T>>` | ❌ | ❌ | one `Vec` per n-gram + one `T::clone` per element |
-| `bigrams` / `trigrams` | `&[T]` | `Vec<Cow<'a, [T]>>` | ❌ | ✅ | as `ngrams` |
-| `multrigrams` | `&[T]` | `Vec<Cow<'a, [T]>>` | ❌ | ✅ | exact alias of `ngrams` |
-| `ngrams_with_stats` | `&[T]` | `NGramStats<'a, T>` | ❌ | ✅ | as `ngrams`, plus one key `String` per n-gram and two maps |
-| `ngrams_str` | `&str` | `Vec<Vec<String>>` | ❌ | ❌ | full tokenization + one `String` per element per tuple |
-| `ngrams_str_with` | `&str` + tokenizer | `Vec<Vec<String>>` | ❌ | ❌ | as `ngrams_str`, but reads no global |
-| `ngrams_str_with_stats` | `&str` | `NGramStats<'static, String>` | ❌ | ❌ | as `ngrams_str` plus statistics, then a full copy |
-| `ngrams_zh` | `&str` | `Vec<Vec<Cow<'a, str>>>` | ❌ | ✅ (elements) | one split `Vec` + one `Vec` per n-gram |
-| `ngrams_zh_utf16` | `&[u16]` | `Vec<Vec<&'a [u16]>>` | ❌ | ✅ | one element `Vec` + one `Vec` per n-gram |
+There is one operation in this crate — slide a window of `n` over a sequence —
+and the three entry points differ only in *which sequence* is windowed.
 
-**Tokens already in hand** → `ngrams` for indexable windows, `ngrams_iter` to fold
-or stop early, `ngrams_owned` only when the tuples must outlive the slice.
-**A string in hand** → `ngrams_str_with(&tokenizer, …)`; if you will window the
-same text twice, call `tokenize()` first and use the slice API. **Per-character
-text** → `zh::ngrams_zh`. The full lazy-versus-materialised trade-off is on
+| | `ngrams` | `Padded` | `char_ngrams` |
+|---|---|---|---|
+| Sequence windowed | the caller's `&[T]` | a padded copy of it | the scalars of a `&str` |
+| Yields | `&[T]` borrowed from the caller's slice | `&[T]` borrowed from the `Padded` | `&str` borrowed from the input text |
+| Allocates | **nothing** | one `Vec<T>`, once, in `Padded::new` | **nothing** |
+| Clones elements | none | `len + k_start + k_end`, once | none |
+| Windows | `len - n + 1`, or `0` | `len + k_start + k_end - n + 1`, or `0` | `scalars - n + 1`, or `0` |
+| The first and last element appear in | `1` window each when `n > 1` | exactly `n` windows each, with both symbols supplied | `1` window each when `n > 1` |
+| The borrow lives as long as | the caller's slice | the `Padded` value | the input `&str` |
+
+None of the three is the fast one and none is the correct one. `ngrams` is the
+right choice for the large majority of programs; the other two exist because
+they answer a question it cannot.
+
+```text
+Is the input text rather than a sequence of elements?
+├── yes, and the windows should be characters → char_ngrams(text, n)
+├── yes, and the windows should be words      → tokenize first, then below
+└── no
+    └── Should the elements at the two ends appear in as many windows
+        as the elements in the middle?
+        ├── no  → ngrams(seq, n)
+        │         (no allocation; the right default)
+        └── yes → Padded::new(seq, n, Some(&start), Some(&end)).ngrams()
+                  (one allocation, once; the windows are then free)
+```
+
+The full lazy-versus-materialised trade-off is on
 [Choosing: n-grams](../choosing/ngrams.md).
 
-<div class="callout callout-note">
-<strong>Note.</strong> Blocks marked <code>rust,ignore</code> on this page are
-bare signatures. Every other Rust block is a complete program that compiles and
-whose assertions pass in CI.
-</div>
+## Padding
 
-## The slice API
+`Padded::new(seq, n, start, end)` is the sequence formed by prepending `k` copies
+of `start` (if supplied) and appending `k` copies of `end` (if supplied), where
+`k = n - 1`. `Padded::ngrams()` is `ngrams` over that sequence, and
+`Padded::as_slice()` is the sequence itself.
 
-```rust  ignore
-pub fn ngrams_iter<T: Clone>(sequence: &[T], n: usize, start_symbol: Option<T>, end_symbol: Option<T>) -> NGramIter<'_, T>
-pub fn ngrams<T: Clone>(sequence: &[T], n: usize, start_symbol: Option<T>, end_symbol: Option<T>) -> Vec<Cow<'_, [T]>>
-pub fn ngrams_owned<T: Clone>(sequence: &[T], n: usize, start_symbol: Option<T>, end_symbol: Option<T>) -> Vec<Vec<T>>
-pub fn bigrams<T: Clone>(sequence: &[T], start_symbol: Option<T>, end_symbol: Option<T>) -> Vec<Cow<'_, [T]>>
-pub fn trigrams<T: Clone>(sequence: &[T], start_symbol: Option<T>, end_symbol: Option<T>) -> Vec<Cow<'_, [T]>>
-pub fn multrigrams<T: Clone>(sequence: &[T], n: usize, start_symbol: Option<T>, end_symbol: Option<T>) -> Vec<Cow<'_, [T]>>
-```
+The `n - 1` is Jurafsky & Martin, *Speech and Language Processing* (3rd ed.)
+§3.1, which augments each sequence with `n - 1` start symbols so that every real
+element appears as the final element of exactly one window. The **symmetry** —
+`n - 1` end symbols rather than the single `</s>` a language model uses for
+probability normalisation — is a Verbora decision, and the reason is that the two
+symbols here are independent options: a rule reading "`n - 1` of the start symbol
+but exactly one of the end symbol" is asymmetric for a reason that does not apply
+when only the end symbol is supplied. Symmetric padding makes the first and last
+real element each appear in exactly `n` windows, which is the property feature
+extraction wants.
 
-`NGramIter<'a, T>` yields `Cow<'a, [T]>` in three phases: `n - 1` left-padded
-tuples (`Cow::Owned`) when `start_symbol` is `Some`, then every window of length
-`n` (`Cow::Borrowed` — a pointer and a length), then `n - 1` right-padded tuples.
-It implements `Iterator`, `ExactSizeIterator` and `FusedIterator`, derives `Debug`
-and `Clone`, and is **not** `DoubleEndedIterator`. `size_hint` is exact, so
-`len()` is free and `collect()` reserves once.
+### What padding guarantees
 
-```rust
-use verbora_ngrams::ngrams_iter;
-use std::borrow::Cow;
+Writing `len` for `seq.len()`, `k_start` for `k` when a start symbol was supplied
+and `0` otherwise, and `k_end` likewise:
 
-fn main() {
-    let tokens = ["a", "b", "c", "d"];
-    let mut it = ngrams_iter(&tokens, 2, None, None);
-    assert_eq!(it.len(), 3);                       // ExactSizeIterator
-    let first = it.next().expect("three bigrams");
-    assert!(matches!(first, Cow::Borrowed(_)));    // no copy was made
-    assert_eq!(it.len(), 2);
-}
-```
-
-Nothing is computed until the iterator is advanced, so `.take(k)`, `.find(…)` and
-`.any(…)` genuinely stop early.
-
-- `ngrams` is `ngrams_iter(…).collect()`, and the recommended default for
-  pre-tokenized input: random-access windows that still point back into
-  `sequence`, so they cannot outlive it.
-- `ngrams_owned` is `ngrams_iter(…).map(Cow::into_owned).collect()`. For
-  `T = String` with `n = 2` over `k` tokens that is roughly `2k` string
-  allocations — reach for it only when the lifetime demands it.
-- `bigrams` and `trigrams` fix `n` at 2 and 3. **`multrigrams` is an exact alias
-  of `ngrams`**; there is no behavioural difference to look for.
-
-`T` is any `Clone` type — token IDs, part-of-speech tags, `i64`s — and only the
-statistics family adds a bound (`fmt::Display`). The pad symbol has the element's
-type, not `&str`, so a `&[String]` needs a `String` pad symbol; taking a
-`Vec<&str>` view of the tokens first is usually both cheaper and more convenient.
-
-## The string API
-
-```rust  ignore
-pub fn ngrams_str(text: &str, n: usize, start_symbol: Option<&str>, end_symbol: Option<&str>) -> Vec<Vec<String>>
-pub fn bigrams_str(text: &str, start_symbol: Option<&str>, end_symbol: Option<&str>) -> Vec<Vec<String>>
-pub fn trigrams_str(text: &str, start_symbol: Option<&str>, end_symbol: Option<&str>) -> Vec<Vec<String>>
-pub fn multrigrams_str(text: &str, n: usize, start_symbol: Option<&str>, end_symbol: Option<&str>) -> Vec<Vec<String>>
-
-pub fn ngrams_str_with<T: NGramTokenizer + ?Sized>(tokenizer: &T, text: &str, n: usize, start_symbol: Option<&str>, end_symbol: Option<&str>) -> Vec<Vec<String>>
-
-// verbora_ngrams::text — NOT re-exported at the crate root
-pub fn ngrams_of_tokens<'a>(tokens: &'a [&'a str], n: usize, start_symbol: Option<&'a str>, end_symbol: Option<&'a str>) -> Vec<Cow<'a, [&'a str]>>
-```
-
-The `_str` family tokenizes with the **process-global** tokenizer and then calls
-`ngrams_owned`: the tokens are created and dropped inside the call, so nothing can
-be borrowed from them. Output is fully owned `Vec<Vec<String>>`.
-
-`ngrams_str_with` is the escape hatch from the global binding — identical output
-and cost, minus the global read, and the tokenizer is visible at the call site.
-Prefer it. There is no `bigrams_str_with`; pass `n = 2`.
-
-`ngrams_of_tokens` is a `&str`-specialised restatement of `ngrams`, living in the
-`text` module so the "I already have tokens" case is discoverable from the
-string-input side. Reach it as `verbora_ngrams::text::ngrams_of_tokens`.
-
-## Padding semantics
-
-**Padding is driven by `Option`, not by emptiness.** `None` disables padding;
-`Some("")` pads with empty strings — two different answers.
-
-**Padded tuples are not always `n` elements long.** Each side clamps its sequence
-half independently, and on the right-hand side an offset that runs past the front
-of the sequence re-anchors to the *end*. Unpadded windows are always exactly `n`
-long; only padded tuples can be short:
+1. **Every window holds exactly `n` elements** — from `ngrams` and from
+   `Padded::ngrams` alike. There is no short window and no ragged edge.
+2. **Windows are emitted in left-to-right position order**, each starting one
+   element after the previous.
+3. **The window count is `len + k_start + k_end - n + 1`** when that is positive,
+   and `0` otherwise.
+4. **`n == 1` adds no padding**, even when both symbols are supplied — not
+   because an argument is discarded, but because `k = n - 1` is zero and zero
+   copies is what the formula says.
+5. **An empty sequence still pads.** With `n = 4` and both symbols the padded
+   sequence is `[S, S, S, E, E, E]` and there are `6 - 4 + 1 = 3` windows.
 
 ```rust
-use verbora_ngrams::ngrams;
-use std::borrow::Cow;
+use std::num::NonZeroUsize;
+use verbora_ngrams::{Padded, ngrams};
 
 fn main() {
-    let seq = ["a", "b", "c"];
-    let got: Vec<Vec<&str>> = ngrams(&seq, 5, Some("<s>"), Some("</s>"))
-        .into_iter()
-        .map(Cow::into_owned)
-        .collect();
-
-    assert_eq!(
-        got,
-        vec![
-            vec!["<s>", "<s>", "<s>", "<s>", "a"],
-            vec!["<s>", "<s>", "<s>", "a", "b"],
-            vec!["<s>", "<s>", "a", "b", "c"],
-            vec!["<s>", "a", "b", "c"],   // tail clamped: only 3 elements exist
-            vec!["c", "</s>"],            // slice(-1, 3) — the LAST element only
-            vec!["a", "b", "c", "</s>", "</s>"],
-            vec!["b", "c", "</s>", "</s>", "</s>"],
-            vec!["c", "</s>", "</s>", "</s>", "</s>"],
-        ]
-    );
-}
-```
-
-The degenerate values of `n` are all defined: **`n = 1` never pads** (there are
-`n - 1` pad positions per side), **`n = 0` yields `len + 1` empty tuples**, and
-**`n > len` yields no windows** — not one short window.
-
-```rust
-use verbora_ngrams::ngrams_owned;
-
-fn main() {
+    let n = NonZeroUsize::new(3).expect("3 is not zero");
     let seq = ["a", "b", "c"];
 
-    // `Some("")` pads with empty strings; `None` does not pad at all.
+    // Unpadded: "a" occurs in one window; there is only one window at all.
+    assert_eq!(ngrams(&seq, n).len(), 1);
+
+    // Padded: 3 + 2 + 2 = 7 elements, so 7 - 3 + 1 = 5 windows — and "a"
+    // occurs in three of them, which is n of them.
+    let padded = Padded::new(&seq, n, Some(&"<s>"), Some(&"</s>"));
+    assert_eq!(padded.ngrams().len(), 5);
+    assert_eq!(padded.ngrams().filter(|w| w.contains(&"a")).count(), 3);
+    assert!(padded.ngrams().all(|w| w.len() == 3));
+
+    // Either symbol may be omitted; they are independent options.
     assert_eq!(
-        ngrams_owned(&seq, 2, Some(""), None),
-        vec![vec!["", "a"], vec!["a", "b"], vec!["b", "c"]]
+        Padded::new(&["a", "b"], n, Some(&"S"), None).as_slice(),
+        ["S", "S", "a", "b"]
+    );
+    assert_eq!(
+        Padded::new(&["a", "b"], n, None, Some(&"E")).as_slice(),
+        ["a", "b", "E", "E"]
     );
 
-    // n == 1: symbols are supplied and ignored.
+    // n == 1 gives k == 0, so nothing is padded even with both symbols.
+    let one = NonZeroUsize::new(1).expect("1 is not zero");
     assert_eq!(
-        ngrams_owned(&seq, 1, Some("<s>"), Some("</s>")),
-        vec![vec!["a"], vec!["b"], vec!["c"]]
+        Padded::new(&["a", "b"], one, Some(&"S"), Some(&"E")).as_slice(),
+        ["a", "b"]
     );
-    // n == 0: four empty tuples for a three-element sequence.
-    assert_eq!(ngrams_owned(&seq, 0, None, None), vec![Vec::<&str>::new(); 4]);
-    // n > len: no windows.
-    assert!(ngrams_owned(&seq, 5, None, None).is_empty());
+
+    // An empty sequence still pads, and the windows are drawn from the symbols.
+    let four = NonZeroUsize::new(4).expect("4 is not zero");
+    let empty: [&str; 0] = [];
+    let from_symbols = Padded::new(&empty, four, Some(&"S"), Some(&"E"));
+    assert_eq!(from_symbols.as_slice(), ["S", "S", "S", "E", "E", "E"]);
+    assert_eq!(from_symbols.ngrams().len(), 3);
 }
 ```
 
-<div class="callout callout-warn">
-<strong>Careful.</strong> Do not write code that assumes
-<code>gram.len() == n</code>. Index a padded result with <code>gram.get(i)</code>,
-or filter to the unpadded windows first. This is the single most common way to
-panic while consuming this crate.
+<div class="callout callout-good">
+<strong>Every window holds exactly <code>n</code> elements</strong>, padded or
+not. There is no case in which a window is short, so
+<code>gram[i]</code> for <code>i &lt; n</code> is always in range.
 </div>
 
-## Frequency statistics: `NGramStats`
+### Overflow is a refusal, not a panic
 
-```rust  ignore
-pub struct NGramStats<'a, T: Clone> {
-    pub ngrams: Vec<Cow<'a, [T]>>,
-    pub frequencies: Vec<(String, u64)>,
-    pub nr: BTreeMap<u64, u64>,
-    pub number_of_ngrams: u64,
-}
-
-pub fn ngrams_with_stats<T: Clone + fmt::Display>(sequence: &[T], n: usize, start_symbol: Option<T>, end_symbol: Option<T>) -> NGramStats<'_, T>
-pub fn ngram_key<T: fmt::Display>(ngram: &[T]) -> String
-impl<'a, T: Clone> NGramStats<'a, T> {
-    pub fn frequency(&self, key: &str) -> u64;        // linear scan
-    pub fn into_owned(self) -> NGramStats<'static, T>;
-}
-```
-
-`bigrams_with_stats`, `trigrams_with_stats` and `multrigrams_with_stats` fix or
-restate `n`; the four `*_str_with_stats` forms tokenize internally and return
-`NGramStats<'static, String>`, which costs a second full copy. The
-`T: fmt::Display` bound is what `ngram_key` needs.
-
-Two fields have an **observable iteration order**, and it is not the same order:
-
-- **`frequencies`** is a `Vec<(String, u64)>` kept in *first-seen* order.
-- **`nr`** is a `BTreeMap<u64, u64>` keyed by a frequency count, so it iterates in
-  ascending numeric order regardless of insertion order.
-
-`number_of_ngrams` counts padded tuples too, so it equals `ngrams.len()`, not the
-number of windows.
+`Padded::new` materialises the padded sequence, so it must be able to hold it
+*and* to finish writing it, and `k = n - 1` is your number. Two things can make
+that impossible: the padded length can overflow `usize`, and a buffer of that
+length can fail to reserve. **Neither is a panic.** In both cases `Padded` holds
+an empty buffer, `as_slice()` is `&[]`, and `ngrams()` yields nothing with a
+`len()` of `0`.
 
 ```rust
-use verbora_ngrams::ngrams_with_stats;
+use std::num::NonZeroUsize;
+use verbora_ngrams::Padded;
 
 fn main() {
-    let seq = ["a", "b", "a", "b", "a"];
-    let stats = ngrams_with_stats(&seq, 2, None, None);
-
-    assert_eq!(stats.number_of_ngrams, 4);
-    // First-seen order, not lexicographic.
-    assert_eq!(
-        stats.frequencies,
-        vec![(String::from("(a, b)"), 2), (String::from("(b, a)"), 2)]
-    );
-    // Two distinct n-grams occur exactly twice.
-    assert_eq!(stats.nr.get(&2), Some(&2));
+    // k = usize::MAX - 1 copies of "S" cannot exist; nothing panics.
+    let padded = Padded::new(&["a"], NonZeroUsize::MAX, Some(&"S"), None);
+    assert!(padded.as_slice().is_empty());
+    assert_eq!(padded.ngrams().len(), 0);
 }
 ```
 
-`frequency()` is a **linear scan** over `frequencies`, returning `0` for a key
-that never occurred — the type exists to preserve first-seen order, not to serve
-lookups. For many lookups, build a `HashMap` from `stats.frequencies` once.
+A **zero-sized** element type reaches neither condition on its own — no
+reservation of it can fail, however long the sequence — while still costing one
+write per element to build. So a zero-sized element is charged **one byte** for
+the reservation test, and is refused exactly where `u8` is refused. Without that
+charge `new` is total but not terminating: it would accept a padded length of
+`usize::MAX - 1` and then count to it.
 
-`into_owned()` detaches the n-grams from the sequence they were built over by
-copying the windows that were still `Cow::Borrowed`; `frequencies`, `nr` and
-`number_of_ngrams` move untouched. Use it when the token sequence is a temporary,
-as in `ngrams_with_stats(&tokenize(text), 2, None, None).into_owned()`.
+## Character n-grams
 
-### `ngram_key`
-
-`ngram_key` renders an n-gram as a parenthesized, comma-separated key: `["a","b"]`
-becomes `"(a, b)"`. Two properties matter at the call site: **the empty n-gram
-keys as `")"`**, not `"()"` (reachable whenever `n == 0`), and **keys are not
-injective**, because a separator inside a token is not escaped.
+`char_ngrams(text, n)` yields `&str` windows holding exactly `n` consecutive
+Unicode scalar values, each a substring of `text`. Because the windows are
+substrings, they are usable as map keys directly, and none can contain `U+FFFD`
+unless `text` does.
 
 ```rust
-use verbora_ngrams::ngram_key;
+use std::num::NonZeroUsize;
+use verbora_ngrams::char_ngrams;
 
 fn main() {
-    assert_eq!(ngram_key(&["a", "b"]), "(a, b)");
-    assert_eq!(ngram_key(&[1, 2]), "(1, 2)");
-    assert_eq!(ngram_key(&["a, b"]), "(a, b)");   // not injective
-    assert_eq!(ngram_key::<&str>(&[]), ")");      // the empty n-gram
+    let n = NonZeroUsize::new(3).expect("3 is not zero");
+
+    let profile: Vec<&str> = char_ngrams("naïve", n).collect();
+    assert_eq!(profile, ["naï", "aïv", "ïve"]);
+    assert!(profile.iter().all(|w| "naïve".contains(w)));
+
+    // Astral scalars are scalars like any other: nothing is split into
+    // surrogate halves and nothing is replaced.
+    let two = NonZeroUsize::new(2).expect("2 is not zero");
+    assert_eq!(char_ngrams("👍你好", two).collect::<Vec<_>>(), ["👍你", "你好"]);
+
+    // A window wider than the input yields nothing.
+    assert_eq!(char_ngrams("ab", n).count(), 0);
+
+    // ExactSizeIterator and DoubleEndedIterator.
+    assert_eq!(char_ngrams("naïve", n).len(), 3);
+    assert_eq!(char_ngrams("abcd", two).rev().next(), Some("cd"));
 }
 ```
 
-## The process-global tokenizer
+**The unit is the scalar, not the grapheme cluster.** A window of `n` scalars may
+split a combining sequence: `char_ngrams("e\u{0301}f", 2)` yields `"e\u{0301}"`
+and `"\u{0301}f"`, the second beginning with a combining acute. That is
+deliberate. Grapheme clusters would avoid it, but they change with the Unicode
+version and would tie character n-gram keys — which language identification
+persists — to that version.
 
-<span class="badge badge-global">GLOBAL STATE</span>
-
-```rust  ignore
-pub fn set_tokenizer<T: NGramTokenizer + 'static>(tokenizer: T)   // process-wide
-pub fn reset_tokenizer()
-pub fn current_tokenizer() -> Option<Arc<dyn NGramTokenizer>>     // None while the default is in force
-pub fn tokenize(text: &str) -> Vec<String>
-```
-
-`verbora-ngrams` keeps a module-level binding holding the default tokenizer.
-`set_tokenizer` rebinds it for the whole process until `reset_tokenizer` restores
-the default `WordTokenizer`. The never-overridden path takes no lock at all, and
-`tokenize` clones the `Arc` out of the lock before calling into it, so a tokenizer
-that itself touches the global cannot deadlock.
-
-What you can rely on across threads: installing a tokenizer while another thread
-reads is well-defined — no data race, no torn value — but visibility is **not**
-prompt, so during the brief window inside `set_tokenizer` / `reset_tokenizer` a
-concurrent reader falls back to the default `WordTokenizer`. Lock poisoning is
-the one reachable panic in the crate: if a thread panics while holding the write
-lock, every later `set_tokenizer` / `reset_tokenizer` / `current_tokenizer` call
-panics.
-
-<div class="callout callout-warn">
-<strong>Careful.</strong> This is shared mutable state with process-wide reach.
-Rust runs tests on multiple threads in one process, so a test that calls
-<code>set_tokenizer</code> changes what every concurrently running test observes.
-Either serialise those tests on a mutex, or — better — do not call it and use
-<code>ngrams_str_with</code>, which produces identical output, reads no global
-and makes the tokenizer visible at the call site.
-</div>
+This crate consults no character database at all: `char_ngrams` decodes UTF-8 and
+does nothing else. Its output is therefore **stable across Unicode versions**,
+which is exactly the property `verbora-tokenizers` and `verbora-normalizers`
+cannot offer.
 
 ```rust
-use verbora_ngrams::{
-    FnTokenizer, current_tokenizer, ngrams_str, reset_tokenizer, set_tokenizer,
-};
+use std::num::NonZeroUsize;
+use verbora_ngrams::char_ngrams;
 
 fn main() {
-    assert!(current_tokenizer().is_none());   // still the default WordTokenizer
-    assert_eq!(ngrams_str("a b", 2, None, None), vec![vec!["a", "b"]]);
-
-    set_tokenizer(FnTokenizer(|s: &str| {
-        s.split('-').map(str::to_owned).collect()
-    }));
-    // "a b" is now a single token, so there is no bigram at all.
-    assert!(ngrams_str("a b", 2, None, None).is_empty());
-
-    reset_tokenizer();
-    assert!(current_tokenizer().is_none());
+    let two = NonZeroUsize::new(2).expect("2 is not zero");
+    let grams: Vec<&str> = char_ngrams("e\u{0301}f", two).collect();
+    assert_eq!(grams, ["e\u{0301}", "\u{0301}f"]);
 }
 ```
 
-### `NGramTokenizer`, `WordTokenizer`, `FnTokenizer`
+## Word n-grams: the composition
 
-```rust  ignore
-pub trait NGramTokenizer: Send + Sync {
-    fn tokenize_text(&self, text: &str) -> Vec<String>;
-}
-impl<T: Tokenizer + Send + Sync + ?Sized> NGramTokenizer for T { /* … */ }
-```
-
-`NGramTokenizer` is the `dyn`-compatible projection of
-[`verbora_core::Tokenizer`](./core.md), which has a generic method and so cannot
-itself go behind a `dyn`. The blanket impl means **any** `verbora_core::Tokenizer`
-that is `Send + Sync` — including everything in [Tokenizers](./tokenizers.md) —
-can be installed or passed to `ngrams_str_with` without implementing anything.
-
-`WordTokenizer` is the default: gaps pattern `/[^A-Za-zА-Яа-я0-9_]+/`, implementing
-both `Tokenizer` and `BorrowingTokenizer`. Because it borrows, it is the entry to
-the fully zero-copy path — `tokenize_borrowed` slices the input, and `ngrams` then
-slices those tokens. `FnTokenizer<F>(pub F)` adapts a closure
-`Fn(&str) -> Vec<String>` for an ad hoc tokenizer without a named type.
-
-## Chinese: `zh`
-
-<span class="badge badge-utf16">UTF-16</span>
-
-```rust  ignore
-// Re-exported at the crate root: ngrams_zh, bigrams_zh, trigrams_zh.
-// Everything else is verbora_ngrams::zh::…
-pub fn code_units(text: &str) -> Vec<u16>
-pub fn split_lossy(text: &str) -> Vec<Cow<'_, str>>
-pub fn ngrams_zh<'a>(text: &'a str, n: usize, start_symbol: Option<&'a str>, end_symbol: Option<&'a str>) -> Vec<Vec<Cow<'a, str>>>
-pub fn ngrams_zh_utf16<'a>(units: &'a [u16], n: usize, start_symbol: Option<&'a [u16]>, end_symbol: Option<&'a [u16]>) -> Vec<Vec<&'a [u16]>>
-// bigrams_zh / trigrams_zh and bigrams_zh_utf16 / trigrams_zh_utf16 fix n at 2 and 3.
-```
-
-The `zh` module is the same engine with two changes: no statistics support, and
-string input is split **per UTF-16 code unit** rather than through a tokenizer.
-There is no tokenizer override, no `multrigrams_zh` and no module-level state.
-Array input needs nothing from this module — window an already-split slice with
-`ngrams` directly.
-
-Splitting per code unit is observable. A single emoji is two UTF-16 code units,
-so it is torn into its surrogate halves and each half becomes its own element;
-combining marks separate too (`"éx"` in NFD yields `['e','◌́']`, `['◌́','x']`).
-
-| Function | Element type | Astral input |
-|---|---|---|
-| `ngrams_zh` | `Cow<'a, str>` | correct **shape and positions**; each torn surrogate half renders as `U+FFFD` |
-| `ngrams_zh_utf16` | `&'a [u16]` | **exact**, surrogates preserved and round-trippable |
-
-`ngrams_zh` is exact for the entire Basic Multilingual Plane, which includes every
-CJK character this module exists to serve; reach for `ngrams_zh_utf16` when astral
-characters must round-trip. `code_units` is `text.encode_utf16().collect()`, and
-`split_lossy` produces one `Cow::Borrowed` element per code unit — the cheap path
-is to split once, then window with the borrowing engine.
+There is no string-input entry point here and no tokenizer. A word n-gram is the
+composition, written out at the call site:
 
 ```rust
+use std::num::NonZeroUsize;
+use verbora_ngrams::{Padded, ngrams};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
+
+fn main() {
+    let tokens = WordTokenizer.tokenize_borrowed("the quick brown fox");
+    let n = NonZeroUsize::new(2).expect("2 is not zero");
+
+    assert_eq!(ngrams(&tokens, n).len(), 3);
+    assert_eq!(ngrams(&tokens, n).next(), Some(&["the", "quick"][..]));
+
+    // Padding a tokenized document is the same two lines.
+    let padded = Padded::new(&tokens, n, Some(&"<s>"), Some(&"</s>"));
+    assert_eq!(padded.ngrams().len(), 5);
+}
+```
+
+Tokenize once and window many times: the tokens are `&str` slices of the input,
+and `ngrams` slices those, so the whole pipeline allocates one `Vec` of pointers
+and nothing else.
+
+## Counting n-grams
+
+This crate ships no frequency table, no count-of-counts and no key function.
+Counting is a fold over the windows, keyed on the n-gram **itself** rather than
+on a rendering of it — a rendering is where two different n-grams collide:
+
+```rust
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use verbora_ngrams::ngrams;
-use verbora_ngrams::zh::{code_units, ngrams_zh, ngrams_zh_utf16, split_lossy};
-use std::borrow::Cow;
 
 fn main() {
-    assert_eq!(
-        ngrams_zh("中文测试", 2, None, None),
-        vec![vec!["中", "文"], vec!["文", "测"], vec!["测", "试"]]
-    );
+    let tokens = ["a", "b", "a", "b", "c"];
+    let n = NonZeroUsize::new(2).expect("2 is not zero");
 
-    // Astral input: three bigrams over four elements, torn halves as U+FFFD.
-    let got = ngrams_zh("a👍b", 2, None, None);
-    assert_eq!(got.len(), 3);
-    assert_eq!(got[0][1], "\u{FFFD}");
+    let mut counts: HashMap<&[&str], u64> = HashMap::new();
+    for window in ngrams(&tokens, n) {
+        *counts.entry(window).or_default() += 1;
+    }
 
-    // Exact round-trip in code-unit space.
-    let units = code_units("a👍b");
-    let exact = ngrams_zh_utf16(&units, 2, None, None);
-    assert_eq!(exact[1], vec![&[0xD83Du16][..], &[0xDC4Du16][..]]);
-
-    // The cheap path: split once, then window with borrowed tuples.
-    let split = split_lossy("中文测试");
-    let windows = ngrams(&split, 2, None, None);
-    assert!(matches!(windows[0], Cow::Borrowed(_)));
+    assert_eq!(counts[&["a", "b"][..]], 2);
+    assert_eq!(counts.get(&["c", "a"][..]), None);
 }
 ```
+
+An n-gram that does not occur is `None`, not `0`. A count of zero is a count; it
+is never "not found".
+
+The same fold over `Padded::ngrams` counts padded n-grams — and the padding
+tuples are then part of the totals, which is why a count-of-counts taken over a
+padded corpus is not a count of the corpus. That is your decision to make
+explicitly.
 
 ## Performance and allocation
 
-Every entry point is **O(len × n)** in time: each window is either a borrow
-(constant time) or a copy of up to `n` elements, and padding adds a fixed
-`2(n-1)` tuples independent of `len`. The Allocations column of the
-[comparison table](#choosing-the-right-api) is the per-call summary; three details
-it cannot fit:
+- **`ngrams` allocates nothing and clones nothing.** Each yielded window is a
+  borrow of the caller's slice at a distinct offset.
+- **`char_ngrams` allocates nothing and clones nothing.** It counts the scalars
+  of `text` once when it is called, so `len()` is exact from the first call; that
+  is one pass over the input. Iteration itself is free.
+- **`Padded` pays once, in `new`**: one allocation and `len + k_start + k_end`
+  element clones, so it is `O(padded length)` in time as well as space. The
+  windows are then ordinary borrows with nothing allocated per window.
 
-- **`ngrams` reserves once** from `NGramIter`'s exact `size_hint`, so the output
-  `Vec` never regrows.
-- **`ngrams_with_stats` allocates a key `String` for every n-gram**, not for every
-  *distinct* n-gram; the keys that survive are moved into `frequencies`, never
-  cloned.
-- **`ngrams_zh` does not allocate per character.** Cloning a `Cow::Borrowed`
-  element is a pointer copy, so a ZH n-gram costs one `Vec`, not `n` `String`s.
-  `split_lossy`'s `Vec` reserves `text.len()` in **bytes**, which over-reserves
-  roughly threefold for CJK.
+**Timings are unmeasured.** No benchmark has been run against the current
+implementation, so no figure is published here and none is estimated in place
+of one. The allocation behaviour above is structural — a property of the
+implementation, not a timing claim. See [Benchmarks](../benchmarks/index.md).
 
-There is no `_into` variant here, but the tokenizer side has one: pairing
-`tokenize_borrowed_into` with `ngrams_iter` streams a corpus through a single
-reused buffer, allocating nothing per document — see
-[Recipes: streaming](../recipes/streaming.md). All entry points are free functions
-with no interior state, so you can parallelise across documents with `rayon` in
-your own crate; avoid `ngrams_str` and `tokenize` in a worker, since they read the
-process-global tokenizer.
-
-No n-gram benchmark results are published yet; the numbers above are allocation
-counts read from the source. See [Benchmarks](../benchmarks/index.md) and
-[Parallelism](../performance/parallelism.md).
+Every entry point is a free function or an inherent method with no interior
+state, so windowing parallelises across documents with `rayon` in your own crate;
+there is no `par_*` API here because there is no per-item work to fan out.
 
 ## Common mistakes
 
-**Assuming every tuple has `n` elements.** Padded tuples can be shorter — see
-[Padding semantics](#padding-semantics). Index with `get`, or filter the padded
-tuples out. Related: `None` disables padding, `Some("")` pads with empty strings.
+**Reaching for `slice::windows` and adding a zero guard.** That is what `ngrams`
+is: the guard is the `NonZeroUsize`, so the guard is not needed.
 
-**Calling `ngrams_str` in a loop over a corpus you already tokenized.** Each call
-runs a full tokenization and then copies every element of every tuple. Tokenize
-once, then use the slice API.
+**Expecting `Padded::ngrams()` to borrow from the original slice.** It borrows
+from the `Padded` value, which owns the padded copy. Keep the `Padded` alive as
+long as its windows.
 
-**Calling `stats.frequency(…)` inside a loop.** It is a linear scan. Build a
-`HashMap` from `stats.frequencies` once.
+**Assuming `Padded::new` cannot fail quietly.** It never panics, but a padded
+length it cannot hold leaves the buffer empty and `ngrams()` yielding nothing.
+Check `as_slice()` if `n` came from untrusted input.
 
-**Calling `set_tokenizer` from a test.** The binding is process-wide and Rust
-runs tests on many threads in one process. Use `ngrams_str_with`.
+**Counting padded n-grams and calling the result a corpus count.** The padding
+tuples are in the totals.
 
-**Expecting `ngrams_zh` to round-trip astral characters.** It renders each half
-of a torn surrogate pair as `U+FFFD` — correct shape, lossy elements. Use
-`code_units` + `ngrams_zh_utf16` when exactness matters.
+**Keying a frequency table on a rendered string.** `"a, b"` as one token and
+`"a"`, `"b"` as two render identically. Key on the window itself, as above.
 
-**Expecting the default tokenizer to be Unicode-aware.** Its class is
-`[A-Za-zА-Яа-я0-9_]`, literally: accented Latin letters are separators
-(`café` → `caf`), `Ё`/`ё` are outside the Cyrillic range (`Ёж ёлка` → `ж` +
-`лка`), and Greek yields no tokens at all. Pass a real tokenizer to
-`ngrams_str_with`. The engine itself is code-point agnostic — it never inspects
-an element's contents, only its position.
+**Expecting `char_ngrams` to respect grapheme clusters.** It works in scalars, on
+purpose, so that its keys do not move with the Unicode version.
 
 ## Related
 
 - [Choosing: n-grams](../choosing/ngrams.md) — the lazy-vs-materialised decision
   in full
-- [Tokenizers](./tokenizers.md) — what to pass to `ngrams_str_with`
-- [Core traits](./core.md) — `Tokenizer`, `BorrowingTokenizer`
-- [Zero-copy](../performance/zero-copy.md) · [Allocation](../performance/allocation.md)
-- [Batch vs streaming](../performance/batch-vs-streaming.md) · [Parallelism](../performance/parallelism.md)
+- [Tokenizers](./tokenizers.md) — what produces the slice you window
+- [Zero-copy](../performance/zero-copy.md) ·
+  [Allocation](../performance/allocation.md)
+- [Batch vs streaming](../performance/batch-vs-streaming.md) ·
+  [Parallelism](../performance/parallelism.md)
 - [Benchmarks](../benchmarks/index.md) · [Recipes](../recipes/index.md)
 
 ## API reference
@@ -530,16 +419,24 @@ an element's contents, only its position.
 cargo doc -p verbora-ngrams --no-deps --open
 ```
 
-| Module | Contents | Re-exported at the crate root |
-|---|---|---|
-| `engine` | `ngrams_iter`, `NGramIter`, `ngrams`, `ngrams_owned`, `bigrams`, `trigrams`, `multrigrams` | all |
-| `stats` | `NGramStats`, `ngram_key`, `ngrams_with_stats`, `bigrams_with_stats`, `trigrams_with_stats`, `multrigrams_with_stats` | all |
-| `text` | the `_str` family, `ngrams_str_with`, the `_str_with_stats` family, `ngrams_of_tokens` | all except `ngrams_of_tokens` |
-| `tokenizer` | `NGramTokenizer`, `WordTokenizer`, `FnTokenizer`, `set_tokenizer`, `reset_tokenizer`, `current_tokenizer`, `tokenize` | all |
-| `zh` | `code_units`, `split_lossy`, the `_zh` and `_zh_utf16` families | `ngrams_zh`, `bigrams_zh`, `trigrams_zh` only |
+```rust ignore
+// verbora_ngrams — the crate root is the whole public surface
+pub fn ngrams<T>(seq: &[T], n: NonZeroUsize) -> std::slice::Windows<'_, T>;
 
-`NGramStats` derives `Debug`, `Clone`, `PartialEq`, `Eq`; `NGramIter` derives
-`Debug` and `Clone`. There is no `Result` anywhere in this crate.
+pub struct Padded<T> { /* private */ }
+impl<T: Clone> Padded<T> {
+    pub fn new(seq: &[T], n: NonZeroUsize, start: Option<&T>, end: Option<&T>) -> Self;
+    pub fn ngrams(&self) -> std::slice::Windows<'_, T>;
+    pub fn as_slice(&self) -> &[T];
+}
 
-Source: `crates/verbora-ngrams/src/`. Benchmarks:
-`crates/verbora-ngrams/benches/ngrams.rs`.
+pub fn char_ngrams(text: &str, n: NonZeroUsize) -> CharNGrams<'_>;
+pub struct CharNGrams<'a> { /* private */ }
+// Iterator<Item = &'a str> + ExactSizeIterator + DoubleEndedIterator + FusedIterator
+```
+
+`Padded` derives `Debug`, `Clone`, `PartialEq` and `Eq`; `CharNGrams` derives
+`Debug` and `Clone`. There is no `Result` anywhere in this crate, and no
+dependency either.
+
+Source: `crates/verbora-ngrams/src/`.

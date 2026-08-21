@@ -7,8 +7,7 @@
 //!
 //! # Why this exists
 //!
-//! [`Phonetic::process`](verbora_core::Phonetic::process) and
-//! [`DoubleKeyPhonetic::process_double`](verbora_core::DoubleKeyPhonetic::process_double)
+//! [`Phonetic::process`] and [`DoubleKeyPhonetic::process_double`]
 //! are cheap: this crate's own benchmarks put a single call at roughly 40–200 ns
 //! depending on the encoder and the word (see `benches/phonetics.rs`). A
 //! [`rayon`] task costs on the order of tens to low hundreds of nanoseconds to
@@ -36,7 +35,7 @@
 //! # When to reach for this vs the sequential loop
 //!
 //! - A handful of words, or words arriving one at a time (e.g. per HTTP
-//!   request): call [`Phonetic::process`](verbora_core::Phonetic::process)
+//!   request): call [`Phonetic::process`]
 //!   directly, or loop with `.iter().map(...)`. Do not reach for this module.
 //! - Building an index over tens of thousands of words or more, where the
 //!   encoding only has to happen once: this is the intended use, and where
@@ -60,22 +59,26 @@
 //!   Cargo features happen to be enabled. [`DEFAULT_CHUNK_SIZE`] documents a
 //!   measured starting point; tune from there for your own word lengths and
 //!   core count.
-//! - `phonetic: &P` is shared read-only across every worker thread. All four
-//!   encoders in this crate ([`SoundEx`](crate::SoundEx), [`Metaphone`](crate::Metaphone),
-//!   [`SoundExDM`](crate::SoundExDM), [`DoubleMetaphone`](crate::DoubleMetaphone))
-//!   are zero-sized `Copy` types with no interior mutability, so sharing one
-//!   `&P` across threads is free and requires no locking.
+//! - `phonetic: &P` is shared read-only across every worker thread. Every
+//!   encoder in this crate is a zero-sized `Copy` type with no interior
+//!   mutability (the one exception, [`Phonex`](crate::Phonex), carries a
+//!   `usize`), so sharing one `&P` across threads is free and requires no
+//!   locking.
 //! - Output order matches input order. Rayon's `map`/`collect` never
 //!   reorders — this is not a property this module has to implement, it falls
 //!   out of using `par_chunks().flat_map_iter().collect()` instead of an
 //!   unordered reduction.
-//! - This module calls the exact same [`Phonetic::process`](verbora_core::Phonetic::process)
-//!   / [`DoubleKeyPhonetic::process_double`](verbora_core::DoubleKeyPhonetic::process_double)
+//! - This module calls the exact same [`Phonetic::process`]
+//!   / [`DoubleKeyPhonetic::process_double`]
 //!   that the sequential API uses. There is no second implementation of
 //!   Soundex, Metaphone, Double Metaphone or Daitch–Mokotoff here to keep in
 //!   sync with the sequential one — only a chunked dispatch strategy around
 //!   it. If the sequential encoder's output ever changes, this module's output
 //!   changes with it automatically.
+//!
+//! User-facing prose for the two functions lives on the functions themselves;
+//! this module is private, so a `//!` comment here would not reach docs.rs.
+//! What remains above is the reasoning a maintainer needs.
 
 use rayon::prelude::*;
 
@@ -104,6 +107,7 @@ use verbora_core::{DoubleKeyPhonetic, Phonetic};
 /// comfortably above Rayon's per-task overhead. It was consistently at or
 /// near the fastest option across repeated runs, not necessarily the single
 /// fastest in every one of them.
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 pub const DEFAULT_CHUNK_SIZE: usize = 64;
 
 /// Encodes `tokens` in parallel, in chunks, using `phonetic`.
@@ -111,12 +115,34 @@ pub const DEFAULT_CHUNK_SIZE: usize = 64;
 /// Equivalent to `tokens.iter().map(|t| phonetic.process(t)).collect()` —
 /// same encoder, same per-word behaviour, same output order — split across
 /// Rayon's thread pool in groups of `chunk_size` words per task instead of one
-/// task per word. See the [module docs](self) for why the chunking matters.
+/// task per word.
+///
+/// # Why chunk, rather than one task per word
+///
+/// A single `process` call costs tens to a couple of hundred nanoseconds — the
+/// same order as scheduling a Rayon task — so `tokens.par_iter().map(process)`
+/// puts the overhead and the work on the same footing. Measured across
+/// repeated runs on a 32-core machine, that naive form ranged from more than
+/// 2x *slower* than the sequential loop to several times faster, depending on
+/// host load and the pool's work-stealing state at the time. Handing each task
+/// an explicit chunk never regressed that badly at any size this crate
+/// measured (64–4096 words per chunk, 500–100,000 words total), and a small
+/// chunk size ([`DEFAULT_CHUNK_SIZE`]) was consistently at or near the
+/// fastest. Predictability, as much as speed, is the point.
+///
+/// # When not to use it
+///
+/// A handful of words, or words arriving one at a time: call
+/// [`Phonetic::process`] directly. The thread pool only pays for itself when
+/// the batch is large enough that the per-item cost dominates the fork-join
+/// cost — building an index over tens of thousands of words is the intended
+/// case. In between, measure: the crossover moves with core count and host
+/// load.
 ///
 /// `chunk_size` is clamped to at least 1 (an input of `0` would otherwise
 /// panic inside `par_chunks`); passing `1` is legal and reproduces the naive
 /// one-task-per-word dispatch this module's docs recommend against — useful
-/// for the parity tests and the benchmark that measures the difference, not
+/// for the equivalence tests and the benchmark that measures the difference, not
 /// for production use. [`DEFAULT_CHUNK_SIZE`] is a reasonable value to start
 /// tuning from.
 ///
@@ -130,6 +156,7 @@ pub const DEFAULT_CHUNK_SIZE: usize = 64;
 /// let keys = par_encode_batch(&soundex, &words, 2);
 /// assert_eq!(keys, ["R163", "R163", "P532"]);
 /// ```
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 pub fn par_encode_batch<P>(phonetic: &P, tokens: &[&str], chunk_size: usize) -> Vec<String>
 where
     P: Phonetic + Sync,
@@ -146,7 +173,13 @@ where
 /// [`DoubleKeyPhonetic`] rather than [`Phonetic`].
 ///
 /// Equivalent to `tokens.iter().map(|t| phonetic.process_double(t)).collect()`,
-/// chunked the same way as [`par_encode_batch`].
+/// chunked the same way as [`par_encode_batch`] — see that function for why
+/// chunking rather than one task per word, and for when not to reach for
+/// either.
+///
+/// The second element is `None` where a name has no second pronunciation —
+/// the same distinction [`DoubleMetaphone::process`](crate::DoubleMetaphone::process)
+/// makes, carried through unchanged.
 ///
 /// # Examples
 ///
@@ -154,21 +187,23 @@ where
 /// use verbora_phonetics::{DoubleMetaphone, par_encode_double_batch};
 ///
 /// let dm = DoubleMetaphone::new();
-/// let words = ["astromech", "Matrix"];
+/// let words = ["Smith", "Thompson"];
 /// let keys = par_encode_double_batch(&dm, &words, 2);
 /// assert_eq!(
 ///     keys,
 ///     [
-///         ("ATRMX".to_owned(), "ATRMK".to_owned()),
-///         ("MTRKS".to_owned(), "MTRKS".to_owned()),
+///         ("SM0".to_owned(), Some("XMT".to_owned())),
+///         // Thompson does not fork, so it has no alternate at all.
+///         ("TMPS".to_owned(), None),
 ///     ]
 /// );
 /// ```
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 pub fn par_encode_double_batch<P>(
     phonetic: &P,
     tokens: &[&str],
     chunk_size: usize,
-) -> Vec<(String, String)>
+) -> Vec<(String, Option<String>)>
 where
     P: DoubleKeyPhonetic + Sync,
 {
@@ -182,14 +217,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DoubleMetaphone, Metaphone, SoundEx, SoundExDM};
+    use crate::{DaitchMokotoff, DoubleMetaphone, Metaphone, SoundEx};
 
     /// Pathological inputs already known to the sequential test suites in
-    /// `soundex.rs`, `metaphone.rs`, `double_metaphone.rs` and `dm_soundex.rs`:
-    /// empty input, digits, the Daitch–Mokotoff `"undefined"` leak, an astral
-    /// character that orphans a surrogate, accented and non-Latin letters,
-    /// punctuation/whitespace, and a long run. Reused here rather than
-    /// reinvented, per this crate's own test conventions.
+    /// `soundex.rs`, `metaphone.rs`, `double_metaphone.rs` and
+    /// `daitch_mokotoff.rs`: empty input, digits, an astral scalar, accented
+    /// and non-Latin letters, punctuation and whitespace, and a long run.
+    /// Reused here rather than reinvented, per this crate's own conventions.
     fn pathological_words() -> Vec<String> {
         let mut words: Vec<String> = [
             "",
@@ -240,7 +274,7 @@ mod tests {
         phonetic: &P,
         tokens: &[&str],
     ) {
-        let sequential: Vec<(String, String)> =
+        let sequential: Vec<(String, Option<String>)> =
             tokens.iter().map(|t| phonetic.process_double(t)).collect();
         for chunk_size in [0, 1, 3, 7, 64, 1024, 100_000] {
             let parallel = par_encode_double_batch(phonetic, tokens, chunk_size);
@@ -282,8 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn par_encode_batch_pathological_and_unicode_dm_soundex() {
-        let dm = SoundExDM::new();
+    fn par_encode_batch_pathological_and_unicode_daitch_mokotoff() {
+        let dm = DaitchMokotoff::new();
         let words = pathological_words();
         let tokens: Vec<&str> = words.iter().map(String::as_str).collect();
         assert_batch_matches_sequential(&dm, &tokens);
@@ -301,7 +335,7 @@ mod tests {
     fn par_encode_double_batch_empty_and_one_item() {
         let double = DoubleMetaphone::new();
         assert_double_batch_matches_sequential(&double, &[]);
-        assert_double_batch_matches_sequential(&double, &["astromech"]);
+        assert_double_batch_matches_sequential(&double, &["Smith"]);
     }
 
     /// Many items, spanning many chunk boundaries at every chunk size under

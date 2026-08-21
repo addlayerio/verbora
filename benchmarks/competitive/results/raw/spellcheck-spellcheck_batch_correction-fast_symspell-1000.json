@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 169329.630859375,
-      "upper_bound": 170803.6015625
+      "lower_bound": 157258.51626220884,
+      "upper_bound": 162216.6222370962
     },
-    "point_estimate": 170066.6162109375,
-    "standard_error": 520.622606416958
+    "point_estimate": 159507.2903849691,
+    "standard_error": 1274.7393865573163
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 169329.630859375,
-      "upper_bound": 170803.6015625
+      "lower_bound": 155810.1274834437,
+      "upper_bound": 161665.0372600174
     },
-    "point_estimate": 170066.6162109375,
-    "standard_error": 520.622606416958
+    "point_estimate": 156770.1723597072,
+    "standard_error": 1591.3546232471986
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 1092.654462828068
+      "lower_bound": 1055.0630611033248,
+      "upper_bound": 6923.44313447099
     },
-    "point_estimate": 1092.654462828068,
-    "standard_error": 546.3289349860148
+    "point_estimate": 2964.6822776033887,
+    "standard_error": 1651.904946775267
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 169329.630859375,
-      "upper_bound": 170803.6015625
+      "lower_bound": 156887.17842353188,
+      "upper_bound": 163796.8615090536
     },
-    "point_estimate": 169624.425,
-    "standard_error": 567.9394048792727
+    "point_estimate": 159514.28147079863,
+    "standard_error": 1867.1193672824438
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 1042.254679449991
+      "lower_bound": 3049.454163441329,
+      "upper_bound": 8242.741151787865
     },
-    "point_estimate": 1042.254679449991,
-    "standard_error": 521.1289647179184
+    "point_estimate": 5841.553886969483,
+    "standard_error": 1477.166402831165
   }
 }

@@ -7,32 +7,35 @@
 //!
 //! Four costs are separated, because the decisions they inform are different:
 //!
-//! * **Cold start** — decoding one embedded blob into a lookup table, the cost
-//!   this crate's data-shipping decision was made against. The reference
-//!   `require`s ~7.5 MB of JSON at import time whether or not it is used; here
-//!   1.2 MB of `key \0 polarity \0` is decoded lazily, once per process, and the
-//!   benchmark says how much that is. Measured with the process-wide cache
-//!   bypassed, since `Vocabulary::shared` would otherwise answer instantly after
-//!   the first sample.
+//! * **Cold start** — decoding one embedded blob into a lookup table and
+//!   indexing every key by its lookup form, the cost this crate's
+//!   data-shipping decision was made against. 1.2 MB of `key \0 polarity \0`
+//!   is decoded lazily, once per process. Measured with the process-wide cache
+//!   bypassed, since `Vocabulary::shared` would otherwise answer instantly
+//!   after the first sample.
 //! * **Construction** — building an analyzer. Without a stemmer this is a
-//!   pointer copy; with one it re-stems the whole vocabulary, which the
-//!   reference measured at 88 ms for English senticon and which is the single
-//!   reason to build an analyzer once and keep it.
+//!   pointer copy; with one it re-stems the whole vocabulary piece by piece,
+//!   which is the single reason to build an analyzer once and keep it.
 //! * **Scoring** — the hot loop, at several document sizes and against all three
 //!   vocabulary families. Throughput is in tokens, since that is what the loop
 //!   iterates.
-//! * **Token shape** — lowercase ASCII (the allocation-free path), uppercase
-//!   ASCII (one `to_ascii_lowercase` per token) and non-ASCII (the full Unicode
+//! * **Token shape** — lowercase ASCII (the cheapest path), uppercase ASCII
+//!   (one `to_ascii_lowercase` per token) and non-ASCII (the full Unicode
 //!   `to_lowercase`, which is what correctness requires and what costs).
+//! * **Phrase density** — the span scan. A token that begins no multi-token key
+//!   reads its span bound out of the same hash slot as its own polarity and
+//!   stops there; a token that does begin one pays a lookahead fill and up to
+//!   one joined probe per candidate length. These two rows bound that cost from
+//!   both sides with text of identical length.
 
 use std::hint::black_box;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use verbora_sentiment::{SentimentAnalyzer, Stemmer, Vocabulary, VocabularyKind};
+use verbora_sentiment::{Language, SentimentAnalyzer, Stemmer, Vocabulary, VocabularyKind};
 use verbora_stemmers::PorterStemmer;
 
-/// A realistic English review, tokenized the way the reference's own spec does.
+/// A realistic English review, split on whitespace.
 fn english_tokens(repeats: usize) -> Vec<String> {
     let text = "Sadly, stereotypes and caricatures of Native Americans are still \
                 prevalent in our society and this film does not help. It is not a good \
@@ -98,15 +101,15 @@ fn accented_tokens(n: usize) -> Vec<String> {
 fn bench_cold_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode");
     for (kind, language) in [
-        (VocabularyKind::Afinn, "English"),
-        (VocabularyKind::Pattern, "German"),
-        (VocabularyKind::Senticon, "English"),
+        (VocabularyKind::Afinn, Language::English),
+        (VocabularyKind::Pattern, Language::German),
+        (VocabularyKind::Senticon, Language::English),
     ] {
         let entries = Vocabulary::shared(kind, language)
             .expect("shipped pair")
             .len();
         group.throughput(Throughput::Elements(entries as u64));
-        group.bench_function(BenchmarkId::new(kind.as_str(), language), |b| {
+        group.bench_function(BenchmarkId::new(kind.name(), language.code()), |b| {
             // `Vocabulary::shared` is cached for the process, so re-measuring it
             // would time a pointer return. Rebuilding through `stemmed` with an
             // identity stemmer walks the same entries and does the same hashing,
@@ -122,23 +125,23 @@ fn bench_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("construct");
     group.sample_size(20);
     for (kind, language) in [
-        (VocabularyKind::Afinn, "English"),
-        (VocabularyKind::Senticon, "English"),
+        (VocabularyKind::Afinn, Language::English),
+        (VocabularyKind::Senticon, Language::English),
     ] {
-        group.bench_function(BenchmarkId::new("no-stemmer", kind.as_str()), |b| {
+        group.bench_function(BenchmarkId::new("no-stemmer", kind.name()), |b| {
             b.iter(|| {
                 black_box(
-                    SentimentAnalyzer::without_stemmer(language, kind.as_str())
+                    SentimentAnalyzer::without_stemmer(language, kind)
                         .expect("shipped pair")
                         .vocabulary()
                         .len(),
                 )
             });
         });
-        group.bench_function(BenchmarkId::new("porter-stemmer", kind.as_str()), |b| {
+        group.bench_function(BenchmarkId::new("porter-stemmer", kind.name()), |b| {
             b.iter(|| {
                 black_box(
-                    SentimentAnalyzer::new(language, Some(PorterStemmer::new()), kind.as_str())
+                    SentimentAnalyzer::with_stemmer(language, kind, PorterStemmer::new())
                         .expect("shipped pair")
                         .vocabulary()
                         .len(),
@@ -151,11 +154,16 @@ fn bench_construction(c: &mut Criterion) {
 
 fn bench_scoring(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_sentiment");
-    let afinn = SentimentAnalyzer::without_stemmer("English", "afinn").expect("English AFINN");
-    let senticon =
-        SentimentAnalyzer::without_stemmer("English", "senticon").expect("English senticon");
-    let stemmed = SentimentAnalyzer::new("English", Some(PorterStemmer::new()), "afinn")
+    let afinn = SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn)
         .expect("English AFINN");
+    let senticon = SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Senticon)
+        .expect("English senticon");
+    let stemmed = SentimentAnalyzer::with_stemmer(
+        Language::English,
+        VocabularyKind::Afinn,
+        PorterStemmer::new(),
+    )
+    .expect("English AFINN");
 
     for repeats in [1_usize, 8, 64] {
         let tokens = english_tokens(repeats);
@@ -183,7 +191,8 @@ fn bench_scoring(c: &mut Criterion) {
 
 fn bench_token_shape(c: &mut Criterion) {
     let mut group = c.benchmark_group("token_shape");
-    let afinn = SentimentAnalyzer::without_stemmer("English", "afinn").expect("English AFINN");
+    let afinn = SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn)
+        .expect("English AFINN");
     for (name, tokens) in [
         ("lowercase-ascii", lowercase_tokens(512)),
         ("uppercase-ascii", uppercase_tokens(512)),
@@ -197,11 +206,45 @@ fn bench_token_shape(c: &mut Criterion) {
     group.finish();
 }
 
+/// Text saturated with multi-token keys against text containing none, at the
+/// same token count: the two ends of the span scan's cost.
+fn bench_phrase_density(c: &mut Criterion) {
+    let mut group = c.benchmark_group("phrase_density");
+    let afinn = SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn)
+        .expect("English AFINN");
+
+    // Every pair here is a shipped English AFINN key, so every other token
+    // starts a span that matches: the worst case for the lookahead.
+    let dense: Vec<String> = ["bad", "luck", "cover", "up", "fed", "up", "not", "good"]
+        .iter()
+        .cycle()
+        .take(512)
+        .map(|s| (*s).to_owned())
+        .collect();
+    // Same length, same vocabulary, but no token begins a multi-token key, so
+    // the scan never fills the buffer past one.
+    let sparse: Vec<String> = ["awful", "great", "terrible", "lovely"]
+        .iter()
+        .cycle()
+        .take(512)
+        .map(|s| (*s).to_owned())
+        .collect();
+
+    for (name, tokens) in [("dense", dense), ("none", sparse)] {
+        group.throughput(Throughput::Elements(tokens.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(name), &tokens, |b, tokens| {
+            b.iter(|| black_box(afinn.get_sentiment(tokens.iter())));
+        });
+    }
+    group.finish();
+}
+
 /// The lazy primitive against the convenience wrapper, to show that composing a
 /// tokenizer costs nothing extra.
 fn bench_contributions(c: &mut Criterion) {
     let mut group = c.benchmark_group("contributions");
-    let afinn = SentimentAnalyzer::without_stemmer("English", "afinn").expect("English AFINN");
+    let afinn = SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn)
+        .expect("English AFINN");
     let tokens = english_tokens(16);
     group.throughput(Throughput::Elements(tokens.len() as u64));
     group.bench_function("sum", |b| {
@@ -237,7 +280,8 @@ fn bench_stem_bridge(c: &mut Criterion) {
 /// this API is for.
 #[cfg(feature = "parallel")]
 fn bench_par_batch(c: &mut Criterion) {
-    let afinn = SentimentAnalyzer::without_stemmer("English", "afinn").expect("English AFINN");
+    let afinn = SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn)
+        .expect("English AFINN");
 
     let mut group = c.benchmark_group("par_batch");
     group.sample_size(30);
@@ -261,7 +305,7 @@ fn bench_par_batch(c: &mut Criterion) {
                 black_box(
                     docs.iter()
                         .map(|d| afinn.get_sentiment(d.iter()))
-                        .collect::<Vec<f64>>(),
+                        .collect::<Vec<Option<f64>>>(),
                 )
             });
         });
@@ -279,6 +323,7 @@ criterion_group!(
     bench_construction,
     bench_scoring,
     bench_token_shape,
+    bench_phrase_density,
     bench_contributions,
     bench_stem_bridge
 );
@@ -290,6 +335,7 @@ criterion_group!(
     bench_construction,
     bench_scoring,
     bench_token_shape,
+    bench_phrase_density,
     bench_contributions,
     bench_stem_bridge,
     bench_par_batch

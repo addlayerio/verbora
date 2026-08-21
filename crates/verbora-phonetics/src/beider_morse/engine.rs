@@ -1,9 +1,13 @@
 //! The rule-application engine: walks an input string left to right,
 //! applying the first matching rule at each position, and merges the
-//! resulting phoneme candidates — a direct algorithmic port of the
-//! `PhonemeBuilder`/`RulesApplication` shape shared by every independent
-//! implementation surveyed during design (Apache Commons Codec's Java,
-//! `rphonetic`'s Rust), not a reinterpretation.
+//! resulting phoneme candidates.
+//!
+//! The shape is dictated by the rule corpus it reads. A rule offers several
+//! phonetic alternatives at once, each valid only under some languages, so a
+//! candidate is a (text, language set) pair and applying a rule cross-products
+//! the candidates against its alternatives; the language sets are what keep
+//! that product from exploding, since a combination whose sets no longer
+//! intersect is dropped on the spot.
 
 use super::languages::LanguageSet;
 use super::rule::Rule;
@@ -48,8 +52,7 @@ impl PhonemeBuilder {
 
     /// Cross-products the current candidates with a rule's phonetic
     /// alternatives, keeping only combinations whose language sets still
-    /// intersect, capped at `max_phonemes` — the same shape as every
-    /// reference implementation's `PhonemeBuilder::apply`.
+    /// intersect, capped at `max_phonemes`.
     pub(super) fn apply(
         &mut self,
         phonemes: &[(std::borrow::Cow<'_, str>, LanguageSet)],
@@ -89,9 +92,8 @@ pub(super) struct RuleTable {
 }
 
 /// What happens at a position no rule matches. The two passes genuinely
-/// differ here (confirmed by reading the reference implementation's own
-/// two call sites, not a shared default): the Rules pass's main loop never
-/// appends anything for an unmatched position, so it's silently skipped;
+/// differ here: the Rules pass's main loop never appends anything for an
+/// unmatched position, so it's silently skipped;
 /// the Approx/Exact final pass's loop explicitly appends the single
 /// character. For ordinary alphabetic input every position always matches
 /// some rule (every rules-pass file ends in a catch-all per letter), so
@@ -148,8 +150,8 @@ impl RuleTable {
 
 /// Deduplicates a finished candidate list into `text -> merged languages`,
 /// merging language sets for identical spellings reached via different
-/// branches (mirrors `apply_final_rule`'s own phoneme-merge-by-text step in
-/// every reference implementation).
+/// branches: two branches that arrive at the same phoneme text are the same
+/// candidate, valid under the union of the languages that reached it.
 pub(super) fn merge_by_text(candidates: Vec<Phoneme>) -> Vec<Phoneme> {
     let mut merged: std::collections::BTreeMap<String, LanguageSet> =
         std::collections::BTreeMap::new();

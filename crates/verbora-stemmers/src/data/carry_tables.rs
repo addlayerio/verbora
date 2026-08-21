@@ -1,11 +1,11 @@
-//! Carry's suffix tables, transcribed from
-//! The reference `stepConfs`.
+//! Carry's suffix tables.
 //!
-//! Generated data. Each table is a suffix -> replacement map; step 1 and step 2
-//! each have two tables (minimum radix 1 then 2) and step 3 has one. The entries
-//! are sorted by key so lookups can binary-search; the reference only ever does exact
-//! key lookups on these objects, never iteration, so reordering is safe — and it
-//! is the *only* reordering in this crate's tables.
+//! Checked-in data. Each table is a suffix -> replacement map: steps 1 and 2
+//! have two tables each (minimum radix 1, then 2) and step 3 has one. Entries
+//! are sorted by key so a lookup is a binary search; only exact-key lookups are
+//! ever performed on them, never iteration, so the sort order is not
+//! observable. Grounding the tables in Carry's published description is an open
+//! item of the stemmers' own migration.
 
 /// Step 1, minimum radix 1 (219 entries).
 static STEP1_T0: &[(&str, &str)] = &[

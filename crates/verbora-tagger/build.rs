@@ -2,31 +2,65 @@
 //!
 //! # Why a build script
 //!
-//! The reference `require()`s 4.6 MB of JSON at module load: 92,662 English lexicon
-//! entries and 11,699 Dutch ones. Three shipping strategies were considered:
+//! The bundled dictionaries are 4.6 MB of JSON: 92,662 English entries and
+//! 11,699 Dutch ones, of which 92,538 and 11,699 survive to be packed. Three shipping strategies were considered:
 //!
-//! | Strategy | Binary size | Startup | Notes |
-//! |---|---|---|---|
-//! | `include_str!` the JSON, parse at first use | +4.6 MB | ~55 ms | also needs an order-preserving map |
-//! | Load the JSON from disk at runtime | +0 | ~55 ms + I/O | needs the files installed beside the binary |
-//! | **Pack at build time, `include_bytes!` the index** | **+2.4 MB** | **~0** | chosen |
+//! | Strategy | Binary size | Startup |
+//! |---|---|---|
+//! | `include_str!` the JSON, parse at first use | +4.6 MB | one full parse |
+//! | Load the JSON from disk at runtime | +0 | one full parse, plus I/O |
+//! | **Pack at build time, `include_bytes!` the index** | **+2.4 MB** | **none** |
 //!
-//! The packed form is a sorted string arena plus offset tables, so a lookup is a
-//! binary search directly over the bytes embedded in the executable: nothing is
-//! parsed, allocated, or copied at startup, and the process pays only for the
-//! entries it actually touches. It is also *smaller* than JSON, because tags
-//! are interned (122 distinct tags cover all 112,502 English tag references) and
-//! The JSON's punctuation and whitespace disappear.
+//! The packed form is a byte-sorted string arena plus offset tables, so a lookup
+//! is a binary search directly over bytes embedded in the executable: nothing is
+//! parsed, allocated or copied at start-up, and the process pays only for the
+//! entries it touches. It is also *smaller* than the JSON, because tags are
+//! interned (316 distinct tags cover both languages) and the JSON's punctuation
+//! disappears.
 //!
-//! # Key order is part of the format
+//! # Source keys become tokens here
 //!
-//! The reference enumerates array-index-like keys first, in ascending numeric
-//! order, then every other key in insertion order — and that order is observable
-//! through `Lexicon.prettyPrint()`, `Object.keys`, and the sequence of
-//! `addWord` calls `Corpus.buildLexicon()` makes. Entries are therefore stored
-//! in the reference enumeration order, with `n_numeric` recording the length of the
-//! hoisted numeric prefix so the runtime can splice newly added numeric keys
-//! into it. A separate permutation table gives the sorted order used for lookup.
+//! The source dictionaries were derived from tagged corpora, and their keys are
+//! written in the corpus's own escaped notation rather than as plain tokens: a
+//! `/` inside a token appears as `\/`, because a bare `/` separates a token from
+//! its tag, and a `*` appears as `\*`. [`decode_key`] undoes that, so the packed
+//! key is the token text a caller can actually look up — `Asia/Pacific`, not
+//! `Asia\/Pacific`. A key that decoding shows to be markup rather than a token
+//! is dropped; see [`decode_key`] for the three shapes of that.
+//!
+//! # The entry contract is enforced here
+//!
+//! `verbora_tagger::Lexicon` accepts a key only when it is non-empty and
+//! contains no Unicode `White_Space` scalar, and accepts an entry only when it
+//! carries at least one tag, none of which is `*`. The decoded entries are
+//! filtered against exactly that contract.
+//!
+//! Every entry the source had and the crate does not ship is counted, per
+//! language and per reason, into a constant `data::tests` asserts — so the loss
+//! is a number in a test rather than a claim in a comment. The keys behind those
+//! counts are written to `$OUT_DIR/ENGLISH-dropped.txt` and
+//! `$OUT_DIR/DUTCH-dropped.txt`, one `reason<TAB>key` line each, for whoever is
+//! changing the data. Nothing is emitted on `cargo:warning=`: the bundled data
+//! is vendored and fixed, so the drop count can never reach zero, and a warning
+//! that can never clear is one every downstream build would have to read past.
+//!
+//! # Layout
+//!
+//! All integers little-endian. Entries are stored **sorted by key bytes**, which
+//! for well-formed UTF-8 is the same order as by Unicode scalar value, so a
+//! lookup is a plain binary search with no permutation table.
+//!
+//! ```text
+//! 0   magic "LEX2"
+//! 4   n_entries u32, n_tags u32
+//! 12  tag_off, tag_bytes, key_off, key_bytes, val_off, val_ids   (u32 each)
+//! 36  tag_off[n_tags+1]     u32  -> tag_bytes
+//!     tag_bytes             u8   interned tag strings
+//!     key_off[n_entries+1]  u32  -> key_bytes
+//!     key_bytes             u8   keys, ascending by byte order
+//!     val_off[n_entries+1]  u32  -> val_ids (in u16 units)
+//!     val_ids               u16  tag indices
+//! ```
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -35,28 +69,24 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde::de::{Deserializer, MapAccess, Visitor};
 
-/// A JSON object deserialised into a `Vec` so that key order survives.
-///
-/// `serde_json::Map` is a `BTreeMap` unless the `preserve_order` feature is on,
-/// and enabling that feature workspace-wide to satisfy one build script would be
-/// a poor trade. `MapAccess` visits JSON entries in document order, so a
-/// fifteen-line visitor gets the ordering guarantee without the dependency.
-struct OrderedEntries(Vec<(String, Vec<String>)>);
+/// A JSON object deserialised into a `Vec` so that duplicate detection and
+/// ordering are the packer's decision rather than `serde_json`'s.
+struct Entries(Vec<(String, Vec<String>)>);
 
-impl<'de> Deserialize<'de> for OrderedEntries {
+impl<'de> Deserialize<'de> for Entries {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct V;
         impl<'de> Visitor<'de> for V {
-            type Value = OrderedEntries;
+            type Value = Entries;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("a JSON object mapping words to tag arrays")
             }
-            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<OrderedEntries, A::Error> {
+            fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<Entries, A::Error> {
                 let mut out = Vec::with_capacity(m.size_hint().unwrap_or(1024));
                 while let Some((k, v)) = m.next_entry::<String, Vec<String>>()? {
                     out.push((k, v));
                 }
-                Ok(OrderedEntries(out))
+                Ok(Entries(out))
             }
         }
         d.deserialize_map(V)
@@ -69,46 +99,146 @@ struct RuleFile {
     rules: Vec<String>,
 }
 
-/// Whether `key` is what the reference language calls an array index: the canonical decimal
-/// form of an integer in `0 ..= 2^32 - 2`.
+/// The literal contract `verbora_tagger::Tag` and `verbora_tagger::Word`
+/// enforce: non-empty, and no scalar with the Unicode `White_Space` property.
+fn is_valid_literal(s: &str) -> bool {
+    !s.is_empty() && !s.chars().any(char::is_whitespace)
+}
+
+/// [`is_valid_literal`], plus the restriction only a tag carries: `*` is the
+/// wildcard pattern of a rule string, so it is not available as a tag.
+fn is_valid_tag(s: &str) -> bool {
+    is_valid_literal(s) && s != "*"
+}
+
+/// Decodes one source key out of the escaped notation the source corpora write
+/// their tokens in.
 ///
-/// These are the keys the reference engine hoists to the front of `Object.keys`. `"01"`, `"-1"`,
-/// `"1.0"` and `"4294967295"` are *not* array indices and stay in insertion
-/// order — a distinction the Dutch lexicon's `"1"`…`"2000"` keys make visible.
-fn array_index(key: &str) -> Option<u32> {
-    if key.is_empty() || key.len() > 10 || !key.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+/// A tagged corpus separates a token from its tag with `/` and marks a null
+/// element with `*`, so a token whose own text contains either character writes
+/// it escaped: `Asia\/Pacific` is the token `Asia/Pacific`, and `M\*A\*S\*H`
+/// is `M*A*S*H`. Decoding is the inverse, and nothing else is escaped.
+///
+/// `None` means the key is not a token at all but a piece of the corpus's own
+/// markup, and there are three shapes of that. Each is decided by *position*,
+/// because both marker characters are also ordinary text in some other position:
+///
+/// * a `\` with nothing escapable after it. That is what the left half of an
+///   `A\/B` token looks like once something has truncated it at the `/`, and
+///   the tags on it belong to the whole compound (`Asia\` carries `JJ`, the tag
+///   of `Asia\/Pacific`), not to the fragment.
+/// * a bare `/` with text on both sides — the corpus's own word/tag separator,
+///   left in the key together with the tag it introduced: `me/PRP`, `na/TO`,
+///   `W/NNP.R.G.`. Those tags contradict the entry's own tag list, so neither
+///   half of such an entry can be trusted. A lone `/` is not a separator (a
+///   separator has a word before it and a tag after it); it is the punctuation
+///   token, and it is kept.
+/// * a bare `*` that is the *whole* key — the null-element marker itself. The
+///   token whose text is an asterisk is spelled `\*`, exactly as the token whose
+///   text is a solidus is spelled `\/`, so an unescaped `*` standing alone is
+///   the marker and not the token. A `*` attached to text (`assets*`, `S*`) is
+///   not the marker; it is part of the token, and it is kept.
+fn decode_key(key: &str) -> Option<String> {
+    let mut out = String::with_capacity(key.len());
+    let mut chars = key.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\\' => match chars.peek() {
+                Some(&(_, escaped @ ('/' | '*'))) => {
+                    out.push(escaped);
+                    chars.next();
+                }
+                _ => return None,
+            },
+            '/' if at > 0 && at + 1 < key.len() => return None,
+            '*' if key.len() == 1 => return None,
+            _ => out.push(c),
+        }
     }
-    if key.len() > 1 && key.starts_with('0') {
-        return None;
+    Some(out)
+}
+
+/// What packing one dictionary produced, and everything the source lost on the
+/// way, so the crate can assert the counts instead of trusting them.
+struct Prepared {
+    entries: Vec<(String, Vec<String>)>,
+    /// Source keys that were corpus markup rather than tokens.
+    not_tokens: Vec<String>,
+    /// Source keys that decoded onto a key another entry already held.
+    merged: Vec<String>,
+    /// Source keys the lexicon entry contract rejected.
+    rejected: Vec<String>,
+}
+
+/// Decodes, de-duplicates and filters one dictionary's source entries.
+///
+/// When two source keys decode onto the same token, the entry that was
+/// **escaped** wins and the one already spelled as the bare token is dropped.
+/// The escape is how this notation spells a literal, so between two spellings of
+/// one token the escaped one is the token and the bare one is the marker
+/// character — the same reading that makes a lone `*` markup in [`decode_key`].
+/// Neither is merged into the other: merging would have to concatenate two tag
+/// lists whose relative frequencies are not recorded anywhere, and the order of
+/// a lexicon entry *is* its frequency ranking, since `Lexicon::primary_tag`
+/// reads the first tag. Inventing that order is worse than dropping one entry.
+///
+/// The bundled sources reach this tie-break for no key at all: the one collision
+/// they used to have, `\*` against `*`, is now settled earlier by `decode_key`.
+fn prepare(entries: Vec<(String, Vec<String>)>) -> Prepared {
+    let mut decoded = Vec::with_capacity(entries.len());
+    let mut not_tokens = Vec::new();
+    for (key, tags) in entries {
+        match decode_key(&key) {
+            Some(token) => decoded.push((token, key, tags)),
+            None => not_tokens.push(key),
+        }
     }
-    let n: u64 = key.parse().ok()?;
-    (n < u64::from(u32::MAX)).then_some(n as u32)
+    // Sort so that within one decoded key the entry that *was* escaped comes
+    // first, and the rest in a source order that does not depend on the JSON
+    // reader.
+    decoded.sort_by(|a, b| {
+        a.0.as_bytes()
+            .cmp(b.0.as_bytes())
+            .then_with(|| (a.0 == a.1).cmp(&(b.0 == b.1)))
+            .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
+    });
+
+    let mut kept: Vec<(String, Vec<String>)> = Vec::with_capacity(decoded.len());
+    let mut merged = Vec::new();
+    let mut rejected = Vec::new();
+    for (token, source, tags) in decoded {
+        if kept.last().is_some_and(|(k, _)| *k == token) {
+            merged.push(source);
+        } else if is_valid_literal(&token)
+            && !tags.is_empty()
+            && tags.iter().all(|t| is_valid_tag(t))
+        {
+            kept.push((token, tags));
+        } else {
+            rejected.push(source);
+        }
+    }
+    Prepared {
+        entries: kept,
+        not_tokens,
+        merged,
+        rejected,
+    }
 }
 
 /// Serialises one dictionary into the packed index format.
-fn pack(entries: &[(String, Vec<String>)]) -> Vec<u8> {
-    // ---- the reference enumeration order -------------------------------------
-    let mut numeric: BTreeMap<u32, usize> = BTreeMap::new();
-    let mut plain: Vec<usize> = Vec::new();
-    for (i, (k, _)) in entries.iter().enumerate() {
-        match array_index(k) {
-            Some(n) => {
-                numeric.insert(n, i);
-            }
-            None => plain.push(i),
-        }
+fn pack(mut entries: Vec<(String, Vec<String>)>) -> Vec<u8> {
+    entries.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    for pair in entries.windows(2) {
+        assert_ne!(pair[0].0, pair[1].0, "duplicate key in source JSON");
     }
-    let order: Vec<usize> = numeric.values().copied().chain(plain).collect();
-    let n_numeric = numeric.len();
-    let n = order.len();
-    assert_eq!(n, entries.len(), "duplicate keys in source JSON");
+    let n = entries.len();
 
-    // ---- Tag interning -----------------------------------------------------
+    // ---- Tag interning, in first-seen order over the sorted entries ---------
     let mut tag_ids: BTreeMap<&str, u16> = BTreeMap::new();
     let mut tags: Vec<&str> = Vec::new();
-    for i in &order {
-        for t in &entries[*i].1 {
+    for (_, ts) in &entries {
+        for t in ts {
             if !tag_ids.contains_key(t.as_str()) {
                 tag_ids.insert(
                     t.as_str(),
@@ -132,28 +262,19 @@ fn pack(entries: &[(String, Vec<String>)]) -> Vec<u8> {
     let mut key_bytes: Vec<u8> = Vec::new();
     let mut val_off = Vec::with_capacity(n + 1);
     let mut val_ids: Vec<u16> = Vec::new();
-    for i in &order {
+    for (key, ts) in &entries {
         key_off.push(u32::try_from(key_bytes.len()).unwrap());
-        key_bytes.extend_from_slice(entries[*i].0.as_bytes());
+        key_bytes.extend_from_slice(key.as_bytes());
         val_off.push(u32::try_from(val_ids.len()).unwrap());
-        for t in &entries[*i].1 {
+        for t in ts {
             val_ids.push(tag_ids[t.as_str()]);
         }
     }
     key_off.push(u32::try_from(key_bytes.len()).unwrap());
     val_off.push(u32::try_from(val_ids.len()).unwrap());
 
-    // Permutation giving byte-order-sorted keys, for binary search.
-    let mut sorted: Vec<u32> = (0..u32::try_from(n).unwrap()).collect();
-    sorted.sort_by(|a, b| {
-        entries[order[*a as usize]]
-            .0
-            .as_bytes()
-            .cmp(entries[order[*b as usize]].0.as_bytes())
-    });
-
     // ---- Assemble ----------------------------------------------------------
-    const HEADER: usize = 44;
+    const HEADER: usize = 36;
     let mut off = HEADER;
     let mut take = |len: usize| {
         let at = off;
@@ -166,25 +287,22 @@ fn pack(entries: &[(String, Vec<String>)]) -> Vec<u8> {
     let off_key_bytes = take(key_bytes.len());
     let off_val_off = take(val_off.len() * 4);
     let off_val_ids = take(val_ids.len() * 2);
-    let off_sorted = take(sorted.len() * 4);
 
     let mut out = Vec::with_capacity(off);
-    out.extend_from_slice(&u32::from_le_bytes(*b"LEX1").to_le_bytes());
+    out.extend_from_slice(b"LEX2");
     for v in [
         u32::try_from(n).unwrap(),
         u32::try_from(tags.len()).unwrap(),
-        u32::try_from(n_numeric).unwrap(),
         off_tag_off,
         off_tag_bytes,
         off_key_off,
         off_key_bytes,
         off_val_off,
         off_val_ids,
-        off_sorted,
     ] {
         out.extend_from_slice(&v.to_le_bytes());
     }
-    debug_assert_eq!(out.len(), HEADER);
+    assert_eq!(out.len(), HEADER);
     for v in &tag_off {
         out.extend_from_slice(&v.to_le_bytes());
     }
@@ -199,10 +317,7 @@ fn pack(entries: &[(String, Vec<String>)]) -> Vec<u8> {
     for v in &val_ids {
         out.extend_from_slice(&v.to_le_bytes());
     }
-    for v in &sorted {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    debug_assert_eq!(out.len(), off);
+    assert_eq!(out.len(), off);
     out
 }
 
@@ -226,41 +341,105 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=build.rs");
 
-    for (src, dst) in [
-        ("English/lexicon_from_reference.json", "english.lex"),
-        ("Dutch/brill_Lexicon.json", "dutch.lex"),
+    let mut generated = String::from("// @generated by build.rs — do not edit.\n");
+
+    for (src, dst, prefix) in [
+        (
+            "English/lexicon_from_reference.json",
+            "english.lex",
+            "ENGLISH",
+        ),
+        ("Dutch/brill_Lexicon.json", "dutch.lex", "DUTCH"),
     ] {
-        let entries: OrderedEntries = serde_json::from_str(&read(&data.join(src)))
+        let entries: Entries = serde_json::from_str(&read(&data.join(src)))
             .unwrap_or_else(|e| panic!("cannot parse {src}: {e}"));
-        std::fs::write(out.join(dst), pack(&entries.0)).expect("write packed lexicon");
+        let source_count = entries.0.len();
+        let prepared = prepare(entries.0);
+        // What was dropped, written where a maintainer can read it and a
+        // consumer never has to. `cargo:warning=` would be the obvious channel
+        // and is the wrong one: the bundled data is vendored and fixed, so the
+        // count can never reach zero, and every downstream build of this crate
+        // would print a warning about corpus markup nobody downstream can act
+        // on. The counts are compiled in as constants below and asserted by
+        // `data::tests`; this file adds the keys behind them, which no constant
+        // can carry.
+        let mut report = format!(
+            "{src}: packed {} of {source_count} entries \
+             ({} corpus markup, {} merged by decoding, {} rejected by the entry contract)\n",
+            prepared.entries.len(),
+            prepared.not_tokens.len(),
+            prepared.merged.len(),
+            prepared.rejected.len(),
+        );
+        for (reason, keys) in [
+            ("markup", &prepared.not_tokens),
+            ("merged", &prepared.merged),
+            ("rejected", &prepared.rejected),
+        ] {
+            for key in keys {
+                writeln!(report, "{reason}\t{key}").unwrap();
+            }
+        }
+        std::fs::write(out.join(format!("{prefix}-dropped.txt")), report)
+            .expect("write dropped-entry report");
+        for (name, doc, value) in [
+            (
+                "SOURCE_ENTRIES",
+                "Entries in the source JSON, before anything was dropped.",
+                source_count,
+            ),
+            (
+                "KEYS_NOT_TOKENS",
+                "Source keys that were corpus markup rather than tokens.",
+                prepared.not_tokens.len(),
+            ),
+            (
+                "KEYS_MERGED",
+                "Source keys that decoded onto a key another entry already held.",
+                prepared.merged.len(),
+            ),
+            (
+                "ENTRIES_REJECTED",
+                "Source entries that the lexicon entry contract rejected.",
+                prepared.rejected.len(),
+            ),
+        ] {
+            writeln!(generated, "/// {doc} (`{src}`)").unwrap();
+            writeln!(generated, "#[allow(dead_code)] // read by `data::tests`.").unwrap();
+            writeln!(
+                generated,
+                "pub(crate) const {prefix}_{name}: usize = {value};"
+            )
+            .unwrap();
+        }
+        std::fs::write(out.join(dst), pack(prepared.entries)).expect("write packed lexicon");
     }
 
-    let mut rules = String::from("// @generated by build.rs — do not edit.\n");
     for (src, name, doc) in [
         (
             "English/tr_from_reference.json",
             "ENGLISH_RULES",
-            "The 18 English transformation rules (`data/English/tr_from_reference.json`).",
+            "The 18 bundled English transformation rules (`data/English/tr_from_reference.json`).",
         ),
         (
             "Dutch/brill_CONTEXTRULES.json",
             "DUTCH_RULES",
-            "The 285 Dutch transformation rules (`data/Dutch/brill_CONTEXTRULES.json`).",
+            "The 273 bundled Dutch transformation rules (`data/Dutch/brill_CONTEXTRULES.json`).",
         ),
         (
             "English/tr_from_brill_paper.json",
             "BRILL_PAPER_RULES",
-            "The 10 rules from Brill's paper (`data/English/tr_from_brill_paper.json`).",
+            "The 10 rules published in Brill (1992), Table 1 (`data/English/tr_from_brill_paper.json`).",
         ),
     ] {
         let f: RuleFile = serde_json::from_str(&read(&data.join(src)))
             .unwrap_or_else(|e| panic!("cannot parse {src}: {e}"));
-        writeln!(rules, "/// {doc}").unwrap();
-        writeln!(rules, "pub static {name}: &[&str] = &[").unwrap();
+        writeln!(generated, "/// {doc}").unwrap();
+        writeln!(generated, "pub(crate) static {name}: &[&str] = &[").unwrap();
         for r in &f.rules {
-            writeln!(rules, "    {r:?},").unwrap();
+            writeln!(generated, "    {r:?},").unwrap();
         }
-        writeln!(rules, "];").unwrap();
+        writeln!(generated, "];").unwrap();
     }
-    std::fs::write(out.join("rules.rs"), rules).expect("write rules");
+    std::fs::write(out.join("generated.rs"), generated).expect("write generated.rs");
 }

@@ -1,71 +1,116 @@
-//! Sense addressing — `find_sense` and `query_sense`.
-//!
-//! # These have no reference counterpart
-//!
-//! The reference `wordnet` module exports exactly one thing, the `WordNet` constructor,
-//! and its nine methods are `get`, `lookup`, `lookupFromFiles`, `pushResults`,
-//! `loadResultSynonyms`, `loadSynonyms`, `lookupSynonyms`, `getSynonyms` and
-//! `getDataFile`. There is no `findSense` and no `querySense` anywhere in the
-//! reference tree — verified by an exhaustive grep across the whole reference
-//! tree, including its type declarations and its own specs.
-//!
-//! The two functions here are therefore a `verbora` **extension**, built on
-//! the parity surface rather than beside it, and they are not covered by the
-//! recorded fixtures. They are provided because a sense-addressed lookup is what
-//! most callers actually want from a `word#pos#n` string, and because building
-//! it out of [`WordNet::lookup_iter`] would otherwise invite everyone to
-//! rediscover the sense-numbering subtlety below.
-//!
-//! # Sense numbers run forwards
-//!
-//! [`crate::WordNet::lookup`] returns synsets in the reference's `pop()`-driven
-//! **reverse** order. Sense numbers do not follow that: sense 1 is the *first*
-//! offset on the index line, which is the *last* record `lookup` yields for that
-//! part of speech. Numbering the results as they arrive would number every word
-//! backwards.
+//! Sense addressing: `lemma#pos#number`.
 
 use std::fmt;
+use std::num::NonZeroU16;
 use std::str::FromStr;
 
-use crate::data_file::DataRecord;
-use crate::error::{Error, Result};
-use crate::whitespace::normalize_lookup_word;
-use crate::wordnet::{Pos, WordNet};
+use crate::pos::{PartOfSpeech, SynsetType};
 
-/// A reference to one sense of one word: `lemma#pos#number`.
+/// Which sense of a lemma, counting from one.
 ///
-/// The number is 1-based and optional; `entity#n` denotes every sense.
+/// `wndb(5WN)` numbers the senses of a lemma in the order its index line lists
+/// their offsets, most-frequently-tagged first, starting at 1. Sense zero does
+/// not exist, so this type cannot represent it: the invalid state is
+/// unrepresentable rather than checked at every use.
 ///
 /// ```
-/// use verbora_wordnet::{Pos, Sense};
+/// use verbora_wordnet::SenseNumber;
+///
+/// assert_eq!(SenseNumber::FIRST.as_usize(), 1);
+/// assert_eq!(SenseNumber::from_u16(3).unwrap().to_string(), "3");
+/// assert_eq!(SenseNumber::from_u16(0), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SenseNumber(NonZeroU16);
+
+impl SenseNumber {
+    /// Sense 1 — the sense WordNet lists first.
+    pub const FIRST: Self = Self(NonZeroU16::MIN);
+
+    /// Wraps a number already known to be non-zero.
+    #[must_use]
+    pub const fn new(number: NonZeroU16) -> Self {
+        Self(number)
+    }
+
+    /// The sense numbered `number`, or `None` for zero.
+    #[must_use]
+    pub const fn from_u16(number: u16) -> Option<Self> {
+        match NonZeroU16::new(number) {
+            Some(n) => Some(Self(n)),
+            None => None,
+        }
+    }
+
+    /// The number itself.
+    #[must_use]
+    pub const fn get(self) -> NonZeroU16 {
+        self.0
+    }
+
+    /// The number as a `usize`, for indexing a sense list after subtracting one.
+    #[must_use]
+    pub const fn as_usize(self) -> usize {
+        self.0.get() as usize
+    }
+}
+
+impl fmt::Display for SenseNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<NonZeroU16> for SenseNumber {
+    fn from(number: NonZeroU16) -> Self {
+        Self(number)
+    }
+}
+
+/// A reference to exactly one sense of one word: `lemma#pos#number`.
+///
+/// The `lemma#pos#number` spelling is WordNet's own, as used by the `wn`
+/// command-line browser. All three parts are required here: a `Sense` denotes
+/// one sense, and "every sense of a word" is a different question, answered by
+/// [`WordNet::senses`](crate::WordNet::senses).
+///
+/// The lemma is stored **exactly as written**. No case folding, no whitespace
+/// rewriting: `Display` therefore round-trips whatever was parsed.
+/// [`WordNet::sense`](crate::WordNet::sense) applies [`index_key`](crate::index_key)
+/// when it goes to the file, which is the one place the transform belongs.
+///
+/// ```
+/// use verbora_wordnet::{PartOfSpeech, Sense, SenseNumber};
 ///
 /// let s: Sense = "entity#n#1".parse().unwrap();
 /// assert_eq!(s.lemma, "entity");
-/// assert_eq!(s.pos, Pos::Noun);
-/// assert_eq!(s.number, Some(1));
+/// assert_eq!(s.pos, PartOfSpeech::Noun);
+/// assert_eq!(s.number, SenseNumber::FIRST);
 /// assert_eq!(s.to_string(), "entity#n#1");
 ///
-/// // Whitespace is normalised the same way lookup normalises it.
-/// let s: Sense = "New York#n".parse().unwrap();
-/// assert_eq!(s.lemma, "new_york");
-/// assert_eq!(s.number, None);
+/// // `s` is the adjective-satellite tag, and satellites live in the adjective
+/// // files, so it maps to the adjective category.
+/// assert_eq!("cold#s#2".parse::<Sense>().unwrap().pos, PartOfSpeech::Adjective);
+///
+/// // The lemma is kept verbatim; normalisation happens at lookup time.
+/// assert_eq!("New York#n#1".parse::<Sense>().unwrap().to_string(), "New York#n#1");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Sense {
-    /// The lemma, already lowercased with whitespace runs turned into `_`.
+    /// The word, exactly as supplied.
     pub lemma: String,
-    /// Which part of speech to search.
-    pub pos: Pos,
-    /// 1-based sense number, or `None` for "all senses".
-    pub number: Option<usize>,
+    /// Which part of speech to look in.
+    pub pos: PartOfSpeech,
+    /// Which sense, counting from one.
+    pub number: SenseNumber,
 }
 
 impl Sense {
-    /// Builds a sense reference, normalising `lemma` as `lookup` would.
+    /// Builds a sense reference.
     #[must_use]
-    pub fn new(lemma: &str, pos: Pos, number: Option<usize>) -> Self {
+    pub fn new(lemma: impl Into<String>, pos: PartOfSpeech, number: SenseNumber) -> Self {
         Self {
-            lemma: normalize_lookup_word(lemma),
+            lemma: lemma.into(),
             pos,
             number,
         }
@@ -74,21 +119,42 @@ impl Sense {
 
 impl fmt::Display for Sense {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}#{}", self.lemma, self.pos.tag())?;
-        if let Some(n) = self.number {
-            write!(f, "#{n}")?;
-        }
-        Ok(())
+        write!(f, "{}#{}#{}", self.lemma, self.pos.tag(), self.number)
     }
 }
 
-/// Why a sense string could not be parsed.
+/// Why a `lemma#pos#number` string could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseSenseError(String);
+#[non_exhaustive]
+pub enum ParseSenseError {
+    /// The string did not have exactly three `#`-separated parts.
+    Shape {
+        /// How many parts were found.
+        parts: usize,
+    },
+    /// The lemma part was empty.
+    EmptyLemma,
+    /// The category part was not one of `n`, `v`, `a`, `s`, `r`.
+    UnknownPartOfSpeech(String),
+    /// The sense number was not a positive integer.
+    InvalidSenseNumber(String),
+}
 
 impl fmt::Display for ParseSenseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match self {
+            Self::Shape { parts } => write!(
+                f,
+                "expected lemma#pos#number, found {parts} '#'-separated part(s)"
+            ),
+            Self::EmptyLemma => f.write_str("the lemma is empty"),
+            Self::UnknownPartOfSpeech(tag) => {
+                write!(f, "{tag:?} is not one of n, v, a, s, r")
+            }
+            Self::InvalidSenseNumber(n) => {
+                write!(f, "{n:?} is not a sense number (they start at 1)")
+            }
+        }
     }
 }
 
@@ -98,118 +164,26 @@ impl FromStr for Sense {
     type Err = ParseSenseError;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let mut parts = s.split('#');
-        let lemma = parts
-            .next()
-            .filter(|l| !l.is_empty())
-            .ok_or_else(|| ParseSenseError(format!("{s:?}: empty lemma")))?;
-        let tag = parts
-            .next()
-            .ok_or_else(|| ParseSenseError(format!("{s:?}: expected lemma#pos[#n]")))?;
-        let pos = Pos::from_tag(tag).ok_or_else(|| {
-            ParseSenseError(format!("{s:?}: {tag:?} is not one of n, v, a, s, r"))
-        })?;
-        let number =
-            match parts.next() {
-                None => None,
-                Some(n) => Some(n.parse::<usize>().ok().filter(|&n| n >= 1).ok_or_else(|| {
-                    ParseSenseError(format!("{s:?}: {n:?} is not a sense number"))
-                })?),
-            };
-        if parts.next().is_some() {
-            return Err(ParseSenseError(format!("{s:?}: too many '#' separators")));
+        let parts: Vec<&str> = s.split('#').collect();
+        let [lemma, tag, number] = parts.as_slice() else {
+            return Err(ParseSenseError::Shape { parts: parts.len() });
+        };
+        if lemma.is_empty() {
+            return Err(ParseSenseError::EmptyLemma);
         }
+        let pos = SynsetType::from_tag(tag)
+            .map(SynsetType::part_of_speech)
+            .ok_or_else(|| ParseSenseError::UnknownPartOfSpeech((*tag).to_owned()))?;
+        let number = number
+            .parse::<u16>()
+            .ok()
+            .and_then(SenseNumber::from_u16)
+            .ok_or_else(|| ParseSenseError::InvalidSenseNumber((*number).to_owned()))?;
         Ok(Self {
-            lemma: normalize_lookup_word(lemma),
+            lemma: (*lemma).to_owned(),
             pos,
             number,
         })
-    }
-}
-
-impl WordNet {
-    /// Every sense of a lemma in one part of speech, numbered from 1 in **index
-    /// file order**.
-    ///
-    /// `spec` is `lemma#pos` or `lemma#pos#n`; a sense number narrows the answer
-    /// to that one sense (or none, if the word has fewer). Returns an empty
-    /// vector when the lemma is not found — including when it is present but the
-    /// reference's incomplete bisection cannot find it, since this is built on
-    /// that same search.
-    ///
-    /// # Errors
-    ///
-    /// [`ParseSenseError`] wrapped as [`Error::UnknownPos`] for an unparsable
-    /// spec, or any [`Error`] from reading the index file.
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use verbora_wordnet::WordNet;
-    ///
-    /// let wn = WordNet::from_env()?;
-    /// for sense in wn.query_sense("entity#n")? {
-    ///     println!("{sense}");   // entity#n#1, entity#n#2, …
-    /// }
-    /// # Ok(()) }
-    /// ```
-    pub fn query_sense(&self, spec: &str) -> Result<Vec<Sense>> {
-        let sense: Sense = spec
-            .parse()
-            .map_err(|e: ParseSenseError| Error::UnknownPos(e.to_string()))?;
-        let Some(record) = self.index_file(sense.pos).lookup(&sense.lemma)? else {
-            return Ok(Vec::new());
-        };
-        let count = record.synset_offset.len();
-        let range: Vec<usize> = match sense.number {
-            Some(n) if n <= count => vec![n],
-            Some(_) => Vec::new(),
-            None => (1..=count).collect(),
-        };
-        Ok(range
-            .into_iter()
-            .map(|n| Sense {
-                lemma: sense.lemma.clone(),
-                pos: sense.pos,
-                number: Some(n),
-            })
-            .collect())
-    }
-
-    /// The synset for one numbered sense.
-    ///
-    /// `spec` must carry a sense number (`entity#n#1`); without one, sense 1 is
-    /// assumed. Returns `None` when the lemma is not found or has fewer senses.
-    ///
-    /// # Errors
-    ///
-    /// As [`WordNet::query_sense`], plus anything reading the data file can
-    /// return.
-    ///
-    /// ```no_run
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// use verbora_wordnet::WordNet;
-    ///
-    /// let wn = WordNet::from_env()?;
-    /// if let Some(synset) = wn.find_sense("entity#n#1")? {
-    ///     println!("{}", synset.def);
-    /// }
-    /// # Ok(()) }
-    /// ```
-    pub fn find_sense(&self, spec: &str) -> Result<Option<DataRecord>> {
-        let sense: Sense = spec
-            .parse()
-            .map_err(|e: ParseSenseError| Error::UnknownPos(e.to_string()))?;
-        let Some(record) = self.index_file(sense.pos).lookup(&sense.lemma)? else {
-            return Ok(None);
-        };
-        let n = sense.number.unwrap_or(1);
-        // Sense numbers are 1-based over the index line's own order, which is the
-        // REVERSE of the order `lookup` yields. Indexing forwards here is the
-        // whole point of this function existing.
-        let Some(&offset) = record.synset_offset.get(n - 1) else {
-            return Ok(None);
-        };
-        Ok(Some(self.get_at(offset, sense.pos)?))
     }
 }
 
@@ -218,44 +192,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_spec_forms() {
+    fn parses_the_three_part_spelling() {
         assert_eq!(
             "entity#n#1".parse::<Sense>().unwrap(),
-            Sense::new("entity", Pos::Noun, Some(1))
+            Sense::new("entity", PartOfSpeech::Noun, SenseNumber::FIRST)
         );
         assert_eq!(
-            "entity#n".parse::<Sense>().unwrap(),
-            Sense::new("entity", Pos::Noun, None)
+            "run#v#57".parse::<Sense>().unwrap().number,
+            SenseNumber::from_u16(57).unwrap()
         );
-        // Satellite adjectives route to the adjective files, as everywhere else.
-        assert_eq!("x#s".parse::<Sense>().unwrap().pos, Pos::Adj);
-        // The lemma is normalised exactly as `lookup` normalises it.
-        assert_eq!("New  York#n".parse::<Sense>().unwrap().lemma, "new_york");
-        assert_eq!("CAFÉ#n".parse::<Sense>().unwrap().lemma, "café");
-    }
-
-    #[test]
-    fn rejects_malformed_specs() {
-        for bad in [
-            "",
-            "entity",
-            "entity#",
-            "entity#z",
-            "entity#n#0",
-            "entity#n#x",
-            "entity#n#1#2",
-            "#n#1",
-            "entity#N",
+        // Every documented tag maps in, including the satellite.
+        for (tag, want) in [
+            ("n", PartOfSpeech::Noun),
+            ("v", PartOfSpeech::Verb),
+            ("a", PartOfSpeech::Adjective),
+            ("s", PartOfSpeech::Adjective),
+            ("r", PartOfSpeech::Adverb),
         ] {
-            assert!(bad.parse::<Sense>().is_err(), "{bad:?} should not parse");
+            let spec = format!("x#{tag}#1");
+            assert_eq!(spec.parse::<Sense>().unwrap().pos, want, "{spec}");
         }
     }
 
     #[test]
-    fn round_trips_through_display() {
-        for s in ["entity#n#1", "run#v#12", "fast#a#3", "quickly#r#1"] {
-            assert_eq!(s.parse::<Sense>().unwrap().to_string(), s);
+    fn rejects_every_malformed_shape_with_a_named_reason() {
+        let cases: [(&str, ParseSenseError); 8] = [
+            ("", ParseSenseError::Shape { parts: 1 }),
+            ("entity", ParseSenseError::Shape { parts: 1 }),
+            ("entity#n", ParseSenseError::Shape { parts: 2 }),
+            ("entity#n#1#2", ParseSenseError::Shape { parts: 4 }),
+            ("#n#1", ParseSenseError::EmptyLemma),
+            (
+                "entity#z#1",
+                ParseSenseError::UnknownPartOfSpeech("z".to_owned()),
+            ),
+            (
+                "entity#n#0",
+                ParseSenseError::InvalidSenseNumber("0".to_owned()),
+            ),
+            (
+                "entity#n#x",
+                ParseSenseError::InvalidSenseNumber("x".to_owned()),
+            ),
+        ];
+        for (spec, want) in cases {
+            assert_eq!(spec.parse::<Sense>().unwrap_err(), want, "{spec:?}");
         }
-        assert_eq!("entity#n".parse::<Sense>().unwrap().to_string(), "entity#n");
+        // Case matters, as it does for every tag in the format.
+        assert!("entity#N#1".parse::<Sense>().is_err());
+        // A number too large for the field is refused rather than wrapped.
+        assert!("entity#n#65536".parse::<Sense>().is_err());
+        assert!("entity#n#-1".parse::<Sense>().is_err());
+    }
+
+    #[test]
+    fn display_round_trips_exactly_what_was_parsed() {
+        for spec in [
+            "entity#n#1",
+            "run#v#12",
+            "fast#a#3",
+            "quickly#r#1",
+            "New York#n#1",
+            "CAFÉ#n#2",
+            "日本語#n#1",
+        ] {
+            assert_eq!(spec.parse::<Sense>().unwrap().to_string(), spec, "{spec}");
+        }
+        // The satellite tag maps into the adjective category, so it is the one
+        // spelling that does not survive a round trip — by design, because `s`
+        // names a synset type and `Sense` names a file.
+        assert_eq!("cold#s#2".parse::<Sense>().unwrap().to_string(), "cold#a#2");
+    }
+
+    #[test]
+    fn sense_numbers_start_at_one_and_cannot_be_zero() {
+        assert_eq!(SenseNumber::FIRST.as_usize(), 1);
+        assert_eq!(SenseNumber::from_u16(0), None);
+        for n in 1u16..=1000 {
+            let s = SenseNumber::from_u16(n).unwrap();
+            assert_eq!(s.as_usize(), usize::from(n));
+            assert_eq!(s.to_string(), n.to_string());
+        }
     }
 }

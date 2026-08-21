@@ -6,7 +6,7 @@ Enough work that threads are worth the complexity.
 **Prerequisite:** the sequential version, already optimised and measured.
 
 <div class="callout callout-note">
-<strong>Check for a built-in first.</strong> Thirteen crates ship an optional,
+<strong>Check for a built-in first.</strong> Fourteen crates ship an optional,
 feature-gated <code>par_*_batch</code> function — a thin <code>rayon</code>
 fan-out over the crate's own sequential primitive, benchmarked and tested, not a
 second implementation. If the table on
@@ -18,29 +18,30 @@ version this project has measured.
 
 ## When a built-in already covers your workload
 
-`verbora-tokenizers` is one of the thirteen. Tokenizing a whole corpus in
+`verbora-tokenizers` is one of the fourteen. Tokenizing a whole corpus in
 parallel needs no `rayon` in your own `Cargo.toml` at all:
 
 ```toml
 [dependencies]
-verbora-tokenizers = { version = "0.1", features = ["parallel"] }
+verbora-tokenizers = { version = "0.2", features = ["parallel"] }
 ```
 
 ```rust  ignore
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{WordTokenizer, par_tokenize_batch};
 
 fn tokenize_corpus<'a>(corpus: &[&'a str]) -> Vec<Vec<&'a str>> {
-    let tokenizer = AggressiveTokenizer::new();
-    tokenizer.par_tokenize_batch(corpus)   // one tokenize() call per document, fanned out
+    // One tokenize_borrowed() call per document, fanned out.
+    par_tokenize_batch(&WordTokenizer, corpus)
 }
 ```
 
-`par_tokenize_batch` is a default method on the `Tokenize` trait, so every
-tokenizer in the crate gets it, and output order matches input order. See
-[Parallelism](../performance/parallelism.md) for the other twelve built-ins —
+`par_tokenize_batch` is a free function generic over any `BorrowingTokenizer`,
+so every tokenizer in the crate works with it, and output order matches input
+order. See
+[Parallelism](../performance/parallelism.md) for the other thirteen built-ins —
 WordNet lookups, spellcheck corrections, sentiment, stemming, phonetics,
-distance, classification, TF-IDF ingestion and more — before writing anything
-below by hand.
+distance, classification, TF-IDF ingestion, language detection and more — before
+writing anything below by hand.
 
 ## Rolling your own
 
@@ -70,27 +71,25 @@ it:
 ```toml
 [dependencies]
 rayon = "1"
-verbora-tokenizers = "0.1"
+verbora-tokenizers = "0.2"
 ```
 
 ## The basic fan-out
 
 ```rust  ignore
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
 use rayon::prelude::*;
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn token_counts(corpus: &[String]) -> Vec<usize> {
-    let tokenizer = AggressiveTokenizer::new();   // zero-sized: shared freely
-
     corpus
         .par_iter()
-        .map(|doc| tokenizer.tokens(doc).count())
+        .map(|doc| WordTokenizer.tokens(doc).count())
         .collect()
 }
 ```
 
-`AggressiveTokenizer` is a zero-sized type, so sharing it across threads costs
-nothing and requires no synchronisation.
+`WordTokenizer` is a zero-sized type, so sharing it across threads costs nothing
+and requires no synchronisation.
 
 ## Per-worker buffers
 
@@ -98,17 +97,15 @@ A `&mut Vec` cannot be shared, so buffer reuse and parallelism combine through
 `map_init`, which gives each worker its own:
 
 ```rust  ignore
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
 use rayon::prelude::*;
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn token_counts(corpus: &[String]) -> Vec<usize> {
-    let tokenizer = AggressiveTokenizer::new();
-
     corpus
         .par_iter()
         .map_init(Vec::new, |buf, doc| {
             buf.clear();
-            tokenizer.tokenize_into(doc, buf);
+            WordTokenizer.tokenize_borrowed_into(doc, buf);
             buf.len()
         })
         .collect()
@@ -123,21 +120,19 @@ Per-document tasks over short documents are dominated by scheduling. Give each
 task real work:
 
 ```rust  ignore
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
 use rayon::prelude::*;
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn total_tokens(corpus: &[String]) -> usize {
-    let tokenizer = AggressiveTokenizer::new();
-
     corpus
-        .par_chunks(1024)                       // one task per 1024 documents
+        .par_chunks(1024)                        // one task per 1024 documents
         .map(|chunk| {
-            let mut buf = Vec::new();           // one buffer per chunk
+            let mut buf: Vec<&str> = Vec::new(); // one buffer per chunk
             let mut local = 0;
 
             for doc in chunk {
                 buf.clear();
-                tokenizer.tokenize_into(doc, &mut buf);
+                WordTokenizer.tokenize_borrowed_into(doc, &mut buf);
                 local += buf.len();
             }
 
@@ -166,27 +161,28 @@ fn lookup_all(index: Arc<Trie>, queries: &[String]) -> Vec<bool> {
 ```
 
 `Trie` is `Send + Sync`, so an `Arc<Trie>` can be queried from every thread at
-once. **Construction cannot be parallelised** — `add_string` takes `&mut self`.
-Build it on one thread, then share it.
+once. **Construction cannot be parallelised** — `insert` takes `&mut self`.
+Build it on one thread, then share it. When the index is finished, share
+`trie.freeze()` instead: `FrozenTrie` is `Send + Sync` too, and its `keys_slice`
+lets a worker read a prefix's matches without allocating a `Vec<String>` per
+query.
 
 ## Parallel reduction into a shared map
 
 ```rust  ignore
 use std::collections::HashMap;
 
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
 use rayon::prelude::*;
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn term_frequencies(corpus: &[String]) -> HashMap<String, usize> {
-    let tokenizer = AggressiveTokenizer::new();
-
     corpus
         .par_chunks(512)
         .map(|chunk| {
             // Each task builds its own map — no contention at all.
             let mut local: HashMap<String, usize> = HashMap::new();
             for doc in chunk {
-                for token in tokenizer.tokens(doc) {
+                for token in WordTokenizer.tokens(doc) {
                     *local.entry(token.to_lowercase()).or_insert(0) += 1;
                 }
             }
@@ -205,20 +201,21 @@ Per-task maps plus a merge beats a `Mutex<HashMap>` by a wide margin: no lock is
 taken on the hot path, and the merge is `O(distinct terms)` rather than
 `O(tokens)`.
 
-## The two things you must not share
+## The things you must not share
 
 <div class="callout callout-warn">
-<strong>Process-global state.</strong> Two APIs read a process-wide mutable
-binding. Do not mutate either from a worker, and prefer the explicit sibling in
-all concurrent code:
-<ul>
-<li><code>verbora_ngrams::set_tokenizer</code> → use
-<code>ngrams_str_with(…, &amp;tokenizer)</code></li>
-<li><code>verbora_core::stopwords</code>'s global list → use
-<code>phoneticize_tokens_with(…, &amp;stops, …)</code></li>
-</ul>
-Both globals model process-wide default configuration, set once and read from
-many call sites, and both are read by the convenience entry points.
+<strong>Process-global state.</strong> One binding in the workspace is
+process-wide and mutable: <code>verbora_core</code>'s global stop-word list
+(<code>add_global_stopword</code> and friends), which models a set-once,
+read-everywhere default. Set it before you start workers, never from inside one —
+a reader concurrent with a writer sees a nondeterministic mix of the old and new
+value, with no error to tell you. Its only consumer in the workspace is
+<code>verbora-stemmers</code>' English and Lancaster stop-word helpers.
+<br><br>
+Nothing else needs guarding. <code>phoneticize_tokens</code> takes a
+<code>&amp;StopWords</code> argument and reads no global; a <code>TfIdf</code>
+owns its own <code>Analyzer</code>, so two corpora on two threads cannot change
+each other's notion of a term.
 </div>
 
 ## Verifying it helped

@@ -1,59 +1,53 @@
 //! [`FrozenTrie`]: the precomputed, read-only query representation built by
 //! [`Trie::freeze`](crate::Trie::freeze).
 //!
-//! This is a Verbora-native extension — there is no reference `trie`
-//! counterpart to port, so nothing here is bound by parity. Its only
-//! obligation is to answer `contains`/`keys_with_prefix` identically to the
-//! [`Trie`](crate::Trie) it was built from; see `Trie::freeze`'s own doc
-//! comment for exactly why compression is exact and what it does not yet
-//! cover.
+//! Its only obligation is to answer `contains` and the key enumerations
+//! identically to the [`Trie`](crate::Trie) it was built from; see
+//! `Trie::freeze`'s own doc comment for exactly why compression is exact and
+//! what it does not cover.
 //!
 //! # Freeze = precompute everything
 //!
-//! Freezing does not merely path-compress the arena; it precomputes the
-//! answers enumeration and membership queries would otherwise reconstruct
-//! per call:
+//! Freezing does not merely path-compress the arena; it precomputes the answers
+//! enumeration and membership queries would otherwise reconstruct per call:
 //!
-//! * **The key table.** Every stored word, materialised once, in exactly the
-//!   reference enumeration order. Because the build walk is pre-order, the
-//!   words of *any* subtree form one contiguous range of that table, so each
-//!   frozen node needs only a `(start, end)` pair for `keys_with_prefix` to
-//!   become "descend the prefix, copy a range" — the copy being the measured
-//!   allocation floor of the pinned `Vec<String>` return shape — and for a
-//!   prefix *count* to become a subtraction. [`FrozenTrie::keys_slice`]
-//!   exposes the range itself, borrowed, for callers who do not need owned
-//!   `String`s at all.
-//! * **The membership set.** `contains` answers from a hash set of the
-//!   folded stored words (see `membership.rs` for why that is exactly the
-//!   walk's answer), replacing the frozen walk's per-query unit buffer and
-//!   label scans — the one query freezing used to make *slower* than the
-//!   mutable arena.
+//! * **The key table.** Every stored word, materialised once, in ascending
+//!   scalar order. Because the build walk is pre-order, the words of *any*
+//!   subtree form one contiguous range of that table, so each frozen node needs
+//!   only a `(start, end)` pair for `keys_with_prefix` to become "descend the
+//!   prefix, copy a range" — and for a prefix *count* to become a subtraction.
+//!   [`FrozenTrie::keys_slice`] exposes the range itself, borrowed, for callers
+//!   who do not need owned `String`s at all.
+//! * **The membership set.** `contains` answers from a hash set of the stored
+//!   words (see `membership.rs` for why that is exactly the walk's answer),
+//!   replacing the frozen walk's per-query label scans — the one query freezing
+//!   used to make *slower* than the mutable arena.
 //!
-//! The compressed tree itself is kept for the prefix descent, which is the
-//! only walking any query still does.
+//! The compressed tree itself is kept for the prefix descent, which is the only
+//! walking any query still does.
 
 use std::iter::FusedIterator;
 
 use smallvec::SmallVec;
 
 use crate::membership::HashIndex;
-use crate::trie::fold;
+use crate::trie::{CaseHandling, fold};
 
 /// Arena index of the frozen root.
 const ROOT: u32 = 0;
 
 /// Inline child capacity for a [`FrozenNode`].
 ///
-/// `FrozenChild` is three `u32`s (12 bytes, no padding), so unlike the
-/// mutable [`Trie`](crate::Trie)'s `Child` there is no "free" inline size —
-/// every inline slot costs real bytes. Two is kept anyway, matching the
-/// mutable arena's own reasoning: the overwhelming majority of trie nodes
-/// have one or two children, and that is exactly the shape a frozen,
-/// read-only structure is built to serve fastest.
+/// `FrozenChild` is three `u32`s (12 bytes, no padding), so unlike the mutable
+/// [`Trie`](crate::Trie)'s `Child` there is no "free" inline size — every
+/// inline slot costs real bytes. Two is kept anyway, matching the mutable
+/// arena's own reasoning: the overwhelming majority of trie nodes have one or
+/// two children, and that is exactly the shape a frozen, read-only structure is
+/// built to serve fastest.
 const INLINE_CHILDREN: usize = 2;
 
-/// One compressed edge: a run of UTF-16 code units (a slice into
-/// [`FrozenTrie::units`]) and the frozen node it leads to.
+/// One compressed edge: a run of Unicode scalars (a slice into
+/// [`FrozenTrie::labels`]) and the frozen node it leads to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrozenChild {
     pub(crate) label_start: u32,
@@ -65,9 +59,10 @@ pub(crate) struct FrozenChild {
 /// the root, a stored word, or a branch.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FrozenNode {
-    /// Outgoing compressed edges, in the same order [`Trie::freeze`] read
-    /// them from the original node's children — see that method's own doc
-    /// comment for why this already reproduces the reference `for…in` order.
+    /// Outgoing compressed edges, in the same order [`Trie::freeze`] read them
+    /// from the original node's children: ascending by first scalar, which
+    /// (two edges from one node always differ in their first scalar) is
+    /// ascending lexicographic order of the whole label.
     pub(crate) children: SmallVec<[FrozenChild; INLINE_CHILDREN]>,
     pub(crate) is_word: bool,
 }
@@ -75,11 +70,15 @@ pub(crate) struct FrozenNode {
 /// A read-only, precomputed prefix tree, built once by
 /// [`Trie::freeze`](crate::Trie::freeze).
 ///
+/// Answers [`FrozenTrie::contains`] and every key enumeration exactly as the
+/// [`Trie`](crate::Trie) it was frozen from — same unit, same order, same case
+/// handling.
+///
 /// ```
 /// use verbora_trie::Trie;
 ///
 /// let mut t = Trie::new();
-/// t.add_strings(["a", "ab", "bc", "cd", "abc"]);
+/// t.insert_all(["a", "ab", "bc", "cd", "abc"]);
 /// let frozen = t.freeze();
 ///
 /// assert!(frozen.contains("abc"));
@@ -91,51 +90,51 @@ pub struct FrozenTrie {
     /// Kept (real) nodes, flat. Index 0 is always the frozen root.
     nodes: Vec<FrozenNode>,
     /// Shared buffer every edge's label slices into.
-    units: Vec<u16>,
-    /// Whether stored and queried strings are lowercased first — inherited
-    /// unchanged from the [`Trie`] this was frozen from, since folding
-    /// already happened at insertion time and freezing never re-derives it.
-    folds: bool,
-    /// Every stored word, in the reference enumeration order — the module
-    /// doc's key table. `Vec<String>` rather than one contiguous blob with
-    /// offsets because it is what lets [`FrozenTrie::keys_slice`] hand back a
-    /// borrowed `&[String]` and lets `keys_with_prefix` be a straight
-    /// `to_vec` (measured slightly faster to materialise than re-slicing a
-    /// blob, at the cost of one allocation per key held here).
+    labels: Vec<char>,
+    /// Inherited unchanged from the [`Trie`](crate::Trie) this was frozen from,
+    /// since folding already happened at insertion time and freezing never
+    /// re-derives it.
+    handling: CaseHandling,
+    /// Every stored word, in ascending scalar order — the module doc's key
+    /// table. `Vec<String>` rather than one contiguous blob with offsets
+    /// because it is what lets [`FrozenTrie::keys_slice`] hand back a borrowed
+    /// `&[String]` and lets `keys_with_prefix` be a straight `to_vec`.
     keys: Vec<String>,
-    /// Per frozen node: the `[start, end)` range of `keys` its subtree
-    /// covers. Contiguity is a theorem, not luck: `keys` is emitted by a
-    /// pre-order walk, so everything under one node is consecutive.
+    /// Per frozen node: the `[start, end)` range of `keys` its subtree covers.
+    /// Contiguity is a theorem, not luck: `keys` is emitted by a pre-order
+    /// walk, so everything under one node is consecutive.
     word_range: Vec<(u32, u32)>,
-    /// Hash membership set over the folded stored words, behind
+    /// Hash membership set over the stored words, behind
     /// [`FrozenTrie::contains`] — see `membership.rs`.
     index: HashIndex,
 }
 
-/// Equality compares the compressed tree (`nodes`/`units`) and the folding
-/// flag only: the key table, word ranges, and membership set are all derived
-/// deterministically from those in `from_parts`, so comparing them again
-/// could never change the answer — it would only re-compare megabytes of
-/// redundant data.
+/// Equality compares the compressed tree (`nodes`/`labels`) and the case
+/// handling only: the key table, word ranges, and membership set are all
+/// derived deterministically from those in `from_parts`, so comparing them
+/// again could never change the answer.
 impl PartialEq for FrozenTrie {
     fn eq(&self, other: &Self) -> bool {
-        self.nodes == other.nodes && self.units == other.units && self.folds == other.folds
+        self.nodes == other.nodes && self.labels == other.labels && self.handling == other.handling
     }
 }
 
 impl Eq for FrozenTrie {}
 
 impl FrozenTrie {
-    /// Assembles a `FrozenTrie` from already-computed parts, precomputing
-    /// the key table, per-node word ranges, and membership set (the module
-    /// doc's "freeze = precompute everything" step).
+    /// Assembles a `FrozenTrie` from already-computed parts, precomputing the
+    /// key table, per-node word ranges, and membership set.
     ///
     /// Only [`Trie::freeze`](crate::Trie::freeze) calls this — it is the one
-    /// place that can guarantee `nodes`/`units` satisfy this type's
-    /// invariants (every `FrozenChild::node` is a valid index into `nodes`,
-    /// every label range is a valid slice of `units`).
-    pub(crate) fn from_parts(nodes: Vec<FrozenNode>, units: Vec<u16>, folds: bool) -> Self {
-        let (keys, word_range) = key_table(&nodes, &units);
+    /// place that can guarantee `nodes`/`labels` satisfy this type's invariants
+    /// (every `FrozenChild::node` is a valid index into `nodes`, every label
+    /// range is a valid slice of `labels`).
+    pub(crate) fn from_parts(
+        nodes: Vec<FrozenNode>,
+        labels: Vec<char>,
+        handling: CaseHandling,
+    ) -> Self {
+        let (keys, word_range) = key_table(&nodes, &labels);
         let mut index = HashIndex::new();
         index.reserve(keys.len(), keys.iter().map(String::len).sum());
         for key in &keys {
@@ -143,65 +142,73 @@ impl FrozenTrie {
         }
         Self {
             nodes,
-            units,
-            folds,
+            labels,
+            handling,
             keys,
             word_range,
             index,
         }
     }
 
-    /// Whether this trie compares strings case-sensitively — the same
-    /// answer [`Trie::is_case_sensitive`](crate::Trie::is_case_sensitive)
-    /// gave on the trie this was frozen from.
+    /// How this trie treats letter case — the same answer
+    /// [`Trie::case_handling`](crate::Trie::case_handling) gave on the trie
+    /// this was frozen from.
     #[must_use]
-    pub fn is_case_sensitive(&self) -> bool {
-        !self.folds
+    pub fn case_handling(&self) -> CaseHandling {
+        self.handling
+    }
+
+    /// The number of distinct stored words.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Whether no word is stored.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 
     /// The number of **frozen nodes** — root, stored words, and branches.
     ///
-    /// This is *not* the same number [`Trie::get_size`](crate::Trie::get_size)
-    /// reports on the trie this was frozen from: that counts one node per
-    /// UTF-16 code unit, this counts only the positions compression could
-    /// not remove. A long, branch-free chain (e.g. one word with no other
-    /// word sharing any of its prefixes) is many original nodes but exactly
-    /// one frozen node beyond the root.
+    /// This is *not* the same number
+    /// [`Trie::node_count`](crate::Trie::node_count) reports on the trie this
+    /// was frozen from: that counts one node per Unicode scalar, this counts
+    /// only the positions compression could not remove. A long, branch-free
+    /// chain is many original nodes but exactly one frozen node beyond the
+    /// root.
     ///
     /// ```
     /// # use verbora_trie::Trie;
     /// let mut t = Trie::new();
-    /// t.add_string("hello");
-    /// assert_eq!(t.get_size(), 6); // root + 5 code units
-    /// assert_eq!(t.freeze().get_size(), 2); // root + one compressed edge
+    /// t.insert("hello");
+    /// assert_eq!(t.node_count(), 6); // root + 5 scalars
+    /// assert_eq!(t.freeze().node_count(), 2); // root + one compressed edge
     /// ```
     #[must_use]
-    pub fn get_size(&self) -> usize {
+    pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
-    /// Whether `string` was added as a complete word — see
+    /// Whether `string` was stored as a complete word — see
     /// [`Trie::contains`](crate::Trie::contains).
     ///
     /// Answered from the precomputed membership set: one hash of the folded
-    /// query plus a short probe, instead of walking compressed edges with a
-    /// per-query unit buffer. That walk was this type's one *regression*
-    /// against the mutable arena (wide-node label scans ate the hop savings);
-    /// the hash set removes it and beats the mutable walk as well.
+    /// query plus a short probe, instead of walking compressed edges.
     #[must_use]
     pub fn contains(&self, string: &str) -> bool {
-        let folded = fold(self.folds, string);
+        let folded = fold(self.handling, string);
         self.index.contains_folded(folded.as_bytes())
     }
 
     /// Every stored word that starts with `prefix` — see
-    /// [`Trie::keys_with_prefix`](crate::Trie::keys_with_prefix), including
-    /// its "does not fold `prefix`" note, preserved here unchanged since
-    /// this reads the same already-folded stored data.
+    /// [`Trie::keys_with_prefix`](crate::Trie::keys_with_prefix), whose case
+    /// handling and ordering this reproduces exactly.
     ///
-    /// One descent plus one range copy out of the precomputed key table —
-    /// the cost is the owned `Vec<String>` return shape itself. When a
-    /// borrow is enough, [`FrozenTrie::keys_slice`] skips even that.
+    /// One descent plus one range copy out of the precomputed key table — the
+    /// cost is the owned `Vec<String>` return shape itself. When a borrow is
+    /// enough, [`FrozenTrie::keys_slice`] skips even that.
     #[must_use]
     pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
         self.keys_slice(prefix).to_vec()
@@ -214,28 +221,25 @@ impl FrozenTrie {
     ///
     /// This is the shape to reach for when the strings are only read —
     /// counted, scanned, displayed — rather than kept: the subtree's words
-    /// already sit consecutively in the table (the build walk is pre-order),
-    /// so the whole answer is one descent and one range.
-    ///
-    /// Like `keys_with_prefix`, `prefix` is **not** case-folded — the
-    /// preserved reference bug documented on
-    /// [`Trie::keys_with_prefix`](crate::Trie::keys_with_prefix).
+    /// already sit consecutively in the table (the build walk is pre-order), so
+    /// the whole answer is one descent and one range.
     ///
     /// ```
     /// use verbora_trie::Trie;
     ///
     /// let mut t = Trie::new();
-    /// t.add_strings(["cat", "cats", "car", "cool"]);
+    /// t.insert_all(["cat", "cats", "car", "cool"]);
     /// let frozen = t.freeze();
     ///
     /// let ca: &[String] = frozen.keys_slice("ca");
-    /// assert_eq!(ca, ["cat", "cats", "car"]);
+    /// assert_eq!(ca, ["car", "cat", "cats"]);
     /// assert_eq!(frozen.keys_slice("ca").len(), 3); // count without a copy
     /// assert!(frozen.keys_slice("dog").is_empty());
     /// ```
     #[must_use]
     pub fn keys_slice(&self, prefix: &str) -> &[String] {
-        match self.descend_prefix(prefix) {
+        let folded = fold(self.handling, prefix);
+        match self.descend_prefix(&folded) {
             Some(node) => {
                 let (start, end) = self.word_range[node as usize];
                 &self.keys[start as usize..end as usize]
@@ -247,126 +251,98 @@ impl FrozenTrie {
     /// [`FrozenTrie::keys_with_prefix`] as a lazy iterator.
     ///
     /// A cursor over the precomputed key table's range: `count`, `nth`, and
-    /// `size_hint` are all O(1), and each `next` costs exactly the one
-    /// `String` clone the owned item type demands. To skip even those
-    /// clones, iterate [`FrozenTrie::keys_slice`] directly.
+    /// `size_hint` are all O(1), and each `next` costs exactly the one `String`
+    /// clone the owned item type demands. To skip even those clones, iterate
+    /// [`FrozenTrie::keys_slice`] directly.
     #[must_use]
     pub fn iter_keys_with_prefix<'t>(&'t self, prefix: &str) -> FrozenKeysWithPrefix<'t> {
-        FrozenKeysWithPrefix::new(self, prefix)
+        FrozenKeysWithPrefix {
+            words: self.keys_slice(prefix).iter(),
+        }
     }
 
-    /// Every stored word, in the reference's enumeration order — equivalent
-    /// to `iter_keys_with_prefix("")`.
+    /// Every stored word, in ascending scalar order — equivalent to
+    /// `iter_keys_with_prefix("")`.
     #[must_use]
     pub fn keys(&self) -> FrozenKeysWithPrefix<'_> {
         self.iter_keys_with_prefix("")
     }
 
     #[inline]
-    fn label(&self, child: &FrozenChild) -> &[u16] {
-        &self.units[child.label_start as usize..child.label_end as usize]
+    fn label(&self, child: &FrozenChild) -> &[char] {
+        &self.labels[child.label_start as usize..child.label_end as usize]
     }
 
-    /// The child of `node` whose edge label *starts* with `first_unit`, if
-    /// any. At most one can exist: two children starting with the same unit
-    /// would have been merged into one node during the original trie's own
+    /// The child of `node` whose edge label *starts* with `first`, if any. At
+    /// most one can exist: two children starting with the same scalar would
+    /// have been merged into one node during the original trie's own
     /// `child_or_insert`, long before freezing ever runs.
     #[inline]
-    fn find_child(&self, node: u32, first_unit: u16) -> Option<&FrozenChild> {
+    fn find_child(&self, node: u32, first: char) -> Option<&FrozenChild> {
         self.nodes[node as usize]
             .children
             .iter()
-            .find(|c| self.units[c.label_start as usize] == first_unit)
+            .find(|c| self.labels[c.label_start as usize] == first)
     }
 
-    /// The node whose subtree holds exactly the stored words starting with
-    /// `prefix` (compared unit by unit, unfolded), or `None` when no stored
-    /// word does.
+    /// The node whose subtree holds exactly the stored words starting with the
+    /// already-folded `prefix`, or `None` when no stored word does.
     ///
-    /// The walk may run out strictly *inside* a compressed edge. That is
-    /// still a definite answer: a compressed edge has no branching inside it
-    /// (that is exactly why it compressed), so once the consumed part of
-    /// `prefix` is confirmed a genuine prefix of the edge label, every word
-    /// in the edge's target subtree — and no other word — has `prefix` as a
-    /// true prefix, and the target's word range is the answer. Nothing needs
-    /// the label's unconsumed tail: the range indexes whole stored keys, not
-    /// path reconstructions.
-    fn descend_prefix(&self, prefix: &str) -> Option<u32> {
-        let mut units = prefix.encode_utf16();
-        let Some(mut unit) = units.next() else {
+    /// The walk may run out strictly *inside* a compressed edge. That is still
+    /// a definite answer: a compressed edge has no branching inside it (that is
+    /// exactly why it compressed), so once the consumed part of `prefix` is
+    /// confirmed a genuine prefix of the edge label, every word in the edge's
+    /// target subtree — and no other word — has `prefix` as a true prefix, and
+    /// the target's word range is the answer.
+    fn descend_prefix(&self, folded: &str) -> Option<u32> {
+        let mut scalars = folded.chars();
+        let Some(mut scalar) = scalars.next() else {
             return Some(ROOT);
         };
         let mut node = ROOT;
         loop {
-            let child = self.find_child(node, unit)?;
-            // `find_child` matched the label's first unit; the rest must
+            let child = self.find_child(node, scalar)?;
+            // `find_child` matched the label's first scalar; the rest must
             // keep matching for as long as the query lasts.
-            for &label_unit in &self.label(child)[1..] {
-                match units.next() {
-                    Some(u) if u == label_unit => {}
+            for &label_scalar in &self.label(child)[1..] {
+                match scalars.next() {
+                    Some(s) if s == label_scalar => {}
                     Some(_) => return None,
                     None => return Some(child.node),
                 }
             }
             node = child.node;
-            match units.next() {
-                Some(u) => unit = u,
+            match scalars.next() {
+                Some(s) => scalar = s,
                 None => return Some(node),
             }
         }
     }
 }
 
-/// Appends one UTF-16 code unit to `buf`, holding a high surrogate in
-/// `pending` until its partner arrives — the same reassembly
-/// `KeysWithPrefix::push_unit` documents, needed here because a compressed
-/// label *boundary* can fall between the halves of a surrogate pair even
-/// though a label's interior never does.
-fn push_unit(buf: &mut String, pending: &mut Option<u16>, unit: u16) {
-    if let Some(high) = pending.take() {
-        if let Some(c) = char::decode_utf16([high, unit]).next().and_then(Result::ok) {
-            buf.push(c);
-            return;
-        }
-        // Unreachable through the public API — every stored word came from a
-        // well-formed `&str`; kept total rather than panicking.
-        buf.push(char::REPLACEMENT_CHARACTER);
-    }
-    if (0xD800..0xDC00).contains(&unit) {
-        *pending = Some(unit);
-        return;
-    }
-    buf.push(char::from_u32(u32::from(unit)).unwrap_or(char::REPLACEMENT_CHARACTER));
-}
-
-/// Builds the key table and per-node word ranges in one pre-order walk —
-/// the same traversal order the old per-query iterator used, so the table
-/// *is* the reference enumeration order by construction.
+/// Builds the key table and per-node word ranges in one pre-order walk.
 ///
-/// Pre-order is also what makes each node's words contiguous: a node's range
-/// opens when the walk first reaches it (`start = keys.len()`) and closes
-/// when its frame pops (`end = keys.len()`), and every word emitted in
-/// between lies in its subtree. Depends on `Trie::freeze` preserving child
-/// order, which it does — children are carried over in their original
-/// positions.
-fn key_table(nodes: &[FrozenNode], units: &[u16]) -> (Vec<String>, Vec<(u32, u32)>) {
-    /// One level of the walk; the restore fields turn a fresh string per
-    /// path into one shared buffer that is pushed and truncated.
+/// Pre-order is what makes each node's words contiguous: a node's range opens
+/// when the walk first reaches it (`start = keys.len()`) and closes when its
+/// frame pops (`end = keys.len()`), and every word emitted in between lies in
+/// its subtree. Depends on `Trie::freeze` preserving child order, which it does
+/// — children are carried over in their original, ascending positions.
+fn key_table(nodes: &[FrozenNode], labels: &[char]) -> (Vec<String>, Vec<(u32, u32)>) {
+    /// One level of the walk; `restore_len` turns a fresh string per path into
+    /// one shared buffer that is pushed and truncated.
     struct Frame {
         node: u32,
         next: usize,
         restore_len: usize,
-        restore_pending: Option<u16>,
     }
 
     let mut keys: Vec<String> = Vec::new();
     let mut word_range = vec![(0u32, 0u32); nodes.len()];
     let mut buf = String::new();
-    let mut pending: Option<u16> = None;
     let mut stack: Vec<Frame> = Vec::with_capacity(32);
 
     // The root's range opens at 0 (already so) and its own word — the empty
-    // string — is emitted before any descent, exactly as the iterator did.
+    // string — is emitted before any descent.
     if nodes[ROOT as usize].is_word {
         keys.push(String::new());
     }
@@ -374,9 +350,12 @@ fn key_table(nodes: &[FrozenNode], units: &[u16]) -> (Vec<String>, Vec<(u32, u32
         node: ROOT,
         next: 0,
         restore_len: 0,
-        restore_pending: None,
     });
 
+    // `stack.last_mut()` is `Some` on entry to the body, and between it and
+    // the `pop()` below only `node`/`next` are copied out and `nodes` is
+    // borrowed — a different collection — so nothing can empty the stack
+    // underneath the `expect`.
     while let Some(top) = stack.last_mut() {
         let node = top.node;
         let next = top.next;
@@ -386,16 +365,14 @@ fn key_table(nodes: &[FrozenNode], units: &[u16]) -> (Vec<String>, Vec<(u32, u32
             let frame = stack.pop().expect("frame checked above");
             word_range[frame.node as usize].1 = keys.len() as u32;
             buf.truncate(frame.restore_len);
-            pending = frame.restore_pending;
             continue;
         }
 
         top.next += 1;
         let child = children[next];
         let restore_len = buf.len();
-        let restore_pending = pending;
-        for &unit in &units[child.label_start as usize..child.label_end as usize] {
-            push_unit(&mut buf, &mut pending, unit);
+        for &scalar in &labels[child.label_start as usize..child.label_end as usize] {
+            buf.push(scalar);
         }
         word_range[child.node as usize].0 = keys.len() as u32;
         if nodes[child.node as usize].is_word {
@@ -405,7 +382,6 @@ fn key_table(nodes: &[FrozenNode], units: &[u16]) -> (Vec<String>, Vec<(u32, u32
             node: child.node,
             next: 0,
             restore_len,
-            restore_pending,
         });
     }
 
@@ -416,39 +392,29 @@ impl<'a> IntoIterator for &'a FrozenTrie {
     type Item = String;
     type IntoIter = FrozenKeysWithPrefix<'a>;
 
-    /// Iterates every stored word, in the reference's enumeration order —
-    /// see [`FrozenTrie::keys`].
+    /// Iterates every stored word, in ascending scalar order — see
+    /// [`FrozenTrie::keys`].
     fn into_iter(self) -> Self::IntoIter {
         self.keys()
     }
 }
 
 // ---------------------------------------------------------------------------
-// keysWithPrefix, frozen
+// keys with prefix, frozen
 // ---------------------------------------------------------------------------
 
-/// Iterator over the stored words beneath a prefix, in the reference order —
-/// the frozen counterpart of `verbora_trie::KeysWithPrefix`.
+/// Iterator over the stored words beneath a prefix, in ascending scalar order —
+/// the frozen counterpart of [`KeysWithPrefix`](crate::KeysWithPrefix).
 ///
 /// Created by [`FrozenTrie::iter_keys_with_prefix`] and [`FrozenTrie::keys`].
 /// Same sequence as the mutable trie's iterator, but no walk happens here at
 /// all: the prefix descent ran at construction and pinned down the subtree's
 /// contiguous range of the precomputed key table, so this is a cursor over a
-/// `&[String]` — which is why `count`, `nth`, and `size_hint` are O(1), and
-/// why each item costs one clone rather than a path reconstruction.
+/// `&[String]` — which is why `count`, `nth`, and `size_hint` are O(1), and why
+/// each item costs one clone rather than a path reconstruction.
 pub struct FrozenKeysWithPrefix<'t> {
     /// The remaining words, narrowing from the front as the cursor advances.
     words: std::slice::Iter<'t, String>,
-}
-
-impl<'t> FrozenKeysWithPrefix<'t> {
-    fn new(trie: &'t FrozenTrie, prefix: &str) -> Self {
-        // No folding — `keys_slice` preserves the reference bug documented
-        // on `Trie::keys_with_prefix`.
-        Self {
-            words: trie.keys_slice(prefix).iter(),
-        }
-    }
 }
 
 impl Iterator for FrozenKeysWithPrefix<'_> {
@@ -486,12 +452,13 @@ impl std::fmt::Debug for FrozenKeysWithPrefix<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Trie;
+    use crate::{CaseHandling, Trie};
 
     /// Compares `Trie` and `FrozenTrie` across every probe both directly:
     /// same `contains` answer, same `keys_with_prefix` sequence.
     fn assert_agrees(t: &Trie, probes_contains: &[&str], probes_prefix: &[&str]) {
         let frozen = t.freeze();
+        assert_eq!(t.len(), frozen.len(), "word counts disagree");
         for &s in probes_contains {
             assert_eq!(
                 t.contains(s),
@@ -512,7 +479,8 @@ mod tests {
     fn empty_trie_freezes_to_one_node_and_matches() {
         let t = Trie::new();
         let frozen = t.freeze();
-        assert_eq!(frozen.get_size(), 1);
+        assert_eq!(frozen.node_count(), 1);
+        assert!(frozen.is_empty());
         assert!(!frozen.contains(""));
         assert!(!frozen.contains("a"));
         assert!(frozen.keys_with_prefix("").is_empty());
@@ -522,9 +490,11 @@ mod tests {
     #[test]
     fn empty_string_is_a_word_that_creates_no_frozen_node_either() {
         let mut t = Trie::new();
-        t.add_string("");
+        t.insert("");
         let frozen = t.freeze();
-        assert_eq!(frozen.get_size(), 1, "the root already existed");
+        assert_eq!(frozen.node_count(), 1, "the root already existed");
+        assert_eq!(frozen.len(), 1);
+        assert!(!frozen.is_empty());
         assert!(frozen.contains(""));
         assert_eq!(frozen.keys_with_prefix(""), [""]);
         assert_agrees(&t, &[""], &[""]);
@@ -533,11 +503,11 @@ mod tests {
     #[test]
     fn a_lone_branch_free_word_compresses_to_one_edge() {
         let mut t = Trie::new();
-        t.add_string("hello");
+        t.insert("hello");
         let frozen = t.freeze();
-        // root + one compressed edge, vs. 6 original per-code-unit nodes.
-        assert_eq!(t.get_size(), 6);
-        assert_eq!(frozen.get_size(), 2);
+        // root + one compressed edge, vs. 6 original per-scalar nodes.
+        assert_eq!(t.node_count(), 6);
+        assert_eq!(frozen.node_count(), 2);
         assert!(frozen.contains("hello"));
         assert!(!frozen.contains("hell"));
         assert!(!frozen.contains("helloo"));
@@ -554,7 +524,7 @@ mod tests {
         // must NOT compress across the "car" node -- it has to stay a real,
         // independently reachable stopping point.
         let mut t = Trie::new();
-        t.add_strings(["cat", "cats", "car", "care", "careful"]);
+        t.insert_all(["cat", "cats", "car", "care", "careful"]);
         assert_agrees(
             &t,
             &["cat", "cats", "car", "care", "careful", "ca", "cares", ""],
@@ -565,7 +535,7 @@ mod tests {
     #[test]
     fn branching_and_shared_prefixes_agree() {
         let mut t = Trie::new();
-        t.add_strings([
+        t.insert_all([
             "a", "ab", "abc", "abcd", "abx", "b", "bc", "bcd", "z", "zz", "zzz",
         ]);
         assert_agrees(
@@ -578,42 +548,37 @@ mod tests {
     }
 
     #[test]
-    fn digit_hoisted_children_survive_freezing_in_order() {
+    fn compression_preserves_ascending_order() {
+        // Every branch here is itself a multi-scalar run, so freezing
+        // compresses each one into an edge -- ordering applies to the *first*
+        // scalar of each compressed edge, which is enough because two edges of
+        // one node always differ there.
         let mut t = Trie::new();
-        t.add_strings(["zb", "z9", "za", "z0", "z1"]);
+        t.insert_all(["banana", "9lives", "1derful", "0zone", "zebra"]);
         let frozen = t.freeze();
-        assert_eq!(frozen.keys_with_prefix("z"), ["z0", "z1", "z9", "zb", "za"]);
-        assert_eq!(t.keys_with_prefix("z"), frozen.keys_with_prefix("z"));
-    }
-
-    #[test]
-    fn digit_hoisting_and_compression_interact_correctly() {
-        // Every branch here is itself a multi-character run, so freezing
-        // compresses each one into an edge -- the digit-vs-letter ordering
-        // rule applies to the *first* unit of each compressed edge.
-        let mut t = Trie::new();
-        t.add_strings(["banana", "9lives", "1derful", "0zone", "zebra"]);
+        assert_eq!(
+            frozen.keys_with_prefix(""),
+            ["0zone", "1derful", "9lives", "banana", "zebra"]
+        );
         assert_agrees(
             &t,
             &["banana", "9lives", "1derful", "0zone", "zebra", "b"],
             &["", "b", "9", "1", "0", "z"],
         );
-        assert_eq!(t.keys_with_prefix(""), t.freeze().keys_with_prefix(""));
     }
 
     #[test]
-    fn case_insensitive_folding_and_the_keys_with_prefix_bug_both_survive() {
+    fn case_folding_applies_to_every_frozen_argument_too() {
         let mut t = Trie::case_insensitive();
-        t.add_strings(["thEIr", "And", "theY"]);
+        t.insert_all(["thEIr", "And", "theY"]);
         let frozen = t.freeze();
 
         assert!(frozen.contains("THEIR"));
         assert!(frozen.contains("their"));
         assert_eq!(frozen.keys_with_prefix("th"), ["their", "they"]);
-        // The preserved reference bug: an uppercase prefix matches nothing,
-        // even on a case-insensitive trie.
-        assert!(frozen.keys_with_prefix("TH").is_empty());
-        assert!(!frozen.is_case_sensitive());
+        assert_eq!(frozen.keys_with_prefix("TH"), ["their", "they"]);
+        assert_eq!(frozen.keys_slice("TH"), ["their", "they"]);
+        assert_eq!(frozen.case_handling(), CaseHandling::Folded);
 
         assert_agrees(
             &t,
@@ -623,16 +588,15 @@ mod tests {
     }
 
     #[test]
-    fn astral_characters_and_surrogate_pair_boundaries_agree() {
+    fn astral_scalars_agree() {
         let mut t = Trie::new();
-        t.add_strings(["a👍", "a👍b", "😀", "𝕳𝖊𝖑𝖑𝖔"]);
+        t.insert_all(["a👍", "a👍b", "😀", "𝕳𝖊𝖑𝖑𝖔"]);
         let frozen = t.freeze();
 
         assert!(frozen.contains("a👍"));
         assert!(frozen.contains("a👍b"));
         assert!(frozen.contains("😀"));
         assert!(frozen.contains("𝕳𝖊𝖑𝖑𝖔"));
-        // U+1F44C shares 👍's high surrogate but not its low one.
         assert!(!frozen.contains("a👌"));
 
         assert_agrees(
@@ -645,7 +609,7 @@ mod tests {
     #[test]
     fn cjk_and_cyrillic_and_greek_agree() {
         let mut t = Trie::new();
-        t.add_strings([
+        t.insert_all([
             "日本語",
             "日本",
             "中文测试",
@@ -671,37 +635,23 @@ mod tests {
     }
 
     #[test]
-    fn prototype_polluting_keys_freeze_like_ordinary_words() {
-        let mut t = Trie::new();
-        t.add_strings(["__proto__", "constructor", "toString"]);
-        assert_agrees(
-            &t,
-            &["__proto__", "constructor", "toString", "valueOf"],
-            &["", "__", "constr", "to"],
-        );
-    }
-
-    #[test]
     fn very_long_input_freezes_and_queries_without_overflowing_the_stack() {
-        // freeze()'s pass-through walk and every FrozenTrie query here are
-        // plain loops, not recursion -- this pins that down instead of
-        // trusting it.
         let long: String = "ab".repeat(100_000);
         let mut t = Trie::new();
-        t.add_string(&long);
+        t.insert(&long);
         let frozen = t.freeze();
         assert!(frozen.contains(&long));
         assert!(!frozen.contains(&long[..long.len() - 1]));
         assert_eq!(frozen.keys_with_prefix(&long[..1000]).len(), 1);
         assert_eq!(frozen.keys().count(), 1);
         // One word, no other branch: root + exactly one compressed edge.
-        assert_eq!(frozen.get_size(), 2);
+        assert_eq!(frozen.node_count(), 2);
     }
 
     #[test]
     fn into_iterator_matches_keys() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab", "abc", "b", "0z", "9z", "😀", "日本"]);
+        t.insert_all(["a", "ab", "abc", "b", "0z", "9z", "😀", "日本"]);
         let frozen = t.freeze();
         assert_eq!(
             frozen.keys().collect::<Vec<_>>(),
@@ -713,7 +663,7 @@ mod tests {
     #[test]
     fn iter_keys_with_prefix_matches_its_eager_counterpart() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab", "abc", "abcd", "b"]);
+        t.insert_all(["a", "ab", "abc", "abcd", "b"]);
         let frozen = t.freeze();
         assert_eq!(
             frozen.keys_with_prefix("a"),
@@ -726,8 +676,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A tiny, dependency-free PRNG — this crate has no `rand` dev-dependency
-    /// and does not need one just for this. Same shape as the Xorshift64
-    /// generator `verbora-distance`'s own randomized Levenshtein tests use.
+    /// and does not need one just for this.
     struct Xorshift64(u64);
 
     impl Xorshift64 {
@@ -771,25 +720,23 @@ mod tests {
             let word_count = 5 + rng.next_range(60);
             let mut words: Vec<String> =
                 (0..word_count).map(|_| random_word(&mut rng, 6)).collect();
-            // Every so often, include the empty string too.
             if round % 5 == 0 {
                 words.push(String::new());
             }
-            t.add_strings(&words);
+            t.insert_all(&words);
             let frozen = t.freeze();
 
-            // Probe every stored word, plus every prefix of every stored
-            // word (the cases most likely to land mid-compressed-edge), plus
-            // a handful of pure-random strings that likely miss entirely.
             let mut probes: Vec<String> = Vec::new();
             for w in &words {
                 probes.push(w.clone());
+                probes.push(w.to_uppercase());
                 let mut acc = String::new();
                 for ch in w.chars() {
                     acc.push(ch);
                     probes.push(acc.clone());
                 }
             }
+            probes.push(String::new());
             for _ in 0..20 {
                 probes.push(random_word(&mut rng, 6));
             }
@@ -798,12 +745,12 @@ mod tests {
                 assert_eq!(
                     t.contains(p),
                     frozen.contains(p),
-                    "round {round}: contains({p:?}) disagrees (case_insensitive={case_insensitive})"
+                    "round {round}: contains({p:?}) disagrees"
                 );
                 assert_eq!(
                     t.keys_with_prefix(p),
                     frozen.keys_with_prefix(p),
-                    "round {round}: keys_with_prefix({p:?}) disagrees (case_insensitive={case_insensitive})"
+                    "round {round}: keys_with_prefix({p:?}) disagrees"
                 );
             }
         }
@@ -816,7 +763,7 @@ mod tests {
     #[test]
     fn keys_slice_agrees_with_keys_with_prefix_everywhere() {
         let mut t = Trie::new();
-        t.add_strings(["cat", "cats", "car", "care", "0x", "9x", "a👍", "a👍b", ""]);
+        t.insert_all(["cat", "cats", "car", "care", "0x", "9x", "a👍", "a👍b", ""]);
         let frozen = t.freeze();
         for p in [
             "", "c", "ca", "car", "care", "cares", "cat", "0", "a", "a👍", "z",
@@ -836,20 +783,9 @@ mod tests {
     }
 
     #[test]
-    fn keys_slice_preserves_the_no_folding_bug() {
-        let mut t = Trie::case_insensitive();
-        t.add_strings(["thEIr", "And", "theY"]);
-        let frozen = t.freeze();
-        assert_eq!(frozen.keys_slice("th"), ["their", "they"]);
-        // The preserved reference bug: the prefix argument is never folded,
-        // so an uppercase prefix matches nothing even here.
-        assert!(frozen.keys_slice("TH").is_empty());
-    }
-
-    #[test]
     fn frozen_iterator_count_nth_and_size_hint_are_exact() {
         let mut t = Trie::new();
-        t.add_strings(["a", "ab", "abc", "abd", "b", "😀", "😀a"]);
+        t.insert_all(["a", "ab", "abc", "abd", "b", "😀", "😀a"]);
         let frozen = t.freeze();
         for p in ["", "a", "ab", "😀", "zz"] {
             let full: Vec<String> = frozen.iter_keys_with_prefix(p).collect();
@@ -858,7 +794,6 @@ mod tests {
                 frozen.iter_keys_with_prefix(p).size_hint(),
                 (full.len(), Some(full.len()))
             );
-            // count after partial consumption, at every stopping point.
             for k in 0..=full.len() {
                 let mut it = frozen.iter_keys_with_prefix(p);
                 for expected in full.iter().take(k) {
@@ -866,14 +801,12 @@ mod tests {
                 }
                 assert_eq!(it.count(), full.len() - k, "after {k} of {p:?}");
             }
-            // nth skips exactly, without disturbing what follows.
             for n in 0..full.len() {
                 let mut it = frozen.iter_keys_with_prefix(p);
                 assert_eq!(it.nth(n).as_ref(), Some(&full[n]), "nth({n}) of {p:?}");
                 assert_eq!(it.next().as_ref(), full.get(n + 1), "after nth({n})");
             }
         }
-        // Fused after exhaustion.
         let mut it = frozen.iter_keys_with_prefix("zz");
         assert_eq!(it.next(), None);
         assert_eq!(it.next(), None);
@@ -881,12 +814,11 @@ mod tests {
 
     #[test]
     fn randomized_key_table_and_membership_agree_with_the_mutable_walk() {
-        // Same differential shape as the older randomized test above, but
-        // aimed at the precomputed surfaces it does not cover: `keys_slice`,
-        // the O(1) iterator count, and `contains` against the *arena walk*
-        // oracle (both `Trie::contains` and `FrozenTrie::contains` answer
-        // from hash sets now, so agreeing with each other would not prove
-        // the sets right — the walk is the independent witness).
+        // Aimed at the precomputed surfaces: `keys_slice`, the O(1) iterator
+        // count, and `contains` against the *arena walk* oracle (both
+        // `Trie::contains` and `FrozenTrie::contains` answer from hash sets,
+        // so agreeing with each other would not prove the sets right — the
+        // walk is the independent witness).
         let mut rng = Xorshift64(0xFEED_FACE_CAFE_BEEF);
         for round in 0..40 {
             let case_insensitive = round % 3 == 0;
@@ -901,7 +833,7 @@ mod tests {
             if round % 5 == 0 {
                 words.push(String::new());
             }
-            t.add_strings(&words);
+            t.insert_all(&words);
             let frozen = t.freeze();
 
             let mut probes: Vec<String> = Vec::new();

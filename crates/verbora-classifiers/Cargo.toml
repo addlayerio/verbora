@@ -1,6 +1,6 @@
 [package]
 name = "verbora-classifiers"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -10,12 +10,27 @@ description = "Bayes, logistic regression and maximum entropy text classifiers f
 keywords = ["classifier", "bayes", "maxent", "machine-learning"]
 categories.workspace = true
 
+# docs.rs bakes one immutable page set per published version: a page built with
+# the wrong flags cannot be re-rendered later, only republished under a new
+# version. Build with every feature enabled, so feature-gated items and the doc
+# links pointing at them resolve, and with `--cfg docsrs`, which is what makes
+# the `#[cfg_attr(docsrs, doc(cfg(...)))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
-# `is_js_whitespace`, for `String.prototype.trim` and the BROWN corpus splitter.
-verbora-core = { workspace = true }
-# `tokenizeAndStem`, which is the classifiers' only contact with the rest of the
-# library — and how they inherit the process-global stop-word list.
+# Deliberately no `verbora-core`: the one item this crate used from it — the
+# whitespace class a class label is trimmed against and a Brown corpus is split
+# on — now lives in `src/whitespace.rs`, because this crate was its only caller.
+# `tokenize_and_stem`, the classifiers' only contact with the rest of the
+# library — and how they inherit the process-global stop-word list. Its
+# behaviour is fingerprinted into every saved model; see `src/stamp.rs`.
 verbora-stemmers = { workspace = true }
+# `unicode_version`, stamped into every saved model so one trained under a
+# different set of word boundaries is refused rather than silently mispredicting.
+# See `src/stamp.rs`.
+verbora-tokenizers = { workspace = true }
 rustc-hash = { workspace = true }
 # `par_classify_batch`: data-parallel fan-out over `Classifier::classify`,
 # gated behind the `parallel` feature. See its doc comment in
@@ -24,7 +39,7 @@ rayon = { workspace = true, optional = true }
 
 # Deliberately no `serde_json`: this crate needs a JSON reader whose float
 # parsing is correctly rounded and whose objects keep document order, and
-# `serde_json` (without `preserve_order`) provides neither. See `src/dynval.rs`.
+# `serde_json` (without `preserve_order`) provides neither. See `DynValue`.
 
 [dev-dependencies]
 criterion = { workspace = true }

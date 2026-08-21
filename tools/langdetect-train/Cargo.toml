@@ -4,9 +4,14 @@
 # `[workspace]` table below detaches it): it is a maintainer tool, not a
 # shipped crate — it must never appear in the workspace build graph, its
 # dependencies must never count against the toolkit's dependency-light
-# stance, and its test suite (which includes a counting global allocator,
-# something the workspace's `unsafe_code = "deny"` lint rightly forbids in
-# shipped crates) runs only when a maintainer retrains the model.
+# stance, and its test suite runs only when a maintainer retrains the model.
+#
+# Its counting global allocator needs `unsafe impl GlobalAlloc`. Being outside
+# the workspace, it inherits no lint and needs no justification for that. Note
+# this is a convenience, not a prohibition: `unsafe_code = "deny"` is a deny,
+# not a `forbid`, so a shipped crate may override it at a narrow scope with a
+# recorded reason -- `verbora-spellcheck`'s test-only `counting_alloc` module
+# does exactly that, for the same instrument and the same reason.
 [package]
 name = "langdetect-train"
 version = "0.1.0"

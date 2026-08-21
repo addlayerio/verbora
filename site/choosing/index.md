@@ -38,7 +38,32 @@ The variants exist because these workloads have genuinely different bottlenecks:
 | Find the first token matching a predicate | Splitting the whole string when you needed a prefix of it | `tokens()` |
 | 40M documents in a loop | One allocation per document | `tokenize_into()` |
 | Documents don't fit in memory | Peak memory | `tokens()` |
+| One query against thousands of candidates | Rebuilding the same per-query state on every comparison | A build-once, query-many type — `PreparedPattern`, `FuzzyIndex`, … |
 | 16 idle cores | Wall clock | A crate's own `par_*_batch`, or `rayon` at your call site |
+
+## Build once, query many
+
+[The four API shapes](api-shapes.md) is about how a *call* moves its result to
+you. There is a fifth arrangement that is a **type** choice rather than a call
+shape, and it is the one to reach for whenever one operand is fixed and the
+other varies: build a value from the fixed side, then query it as many times as
+you like.
+
+| Type | Built from | Queried with |
+|---|---|---|
+| [`PreparedPattern`](../features/distance.md#preparedpattern) | one pattern string | `levenshtein`, `osa` against each candidate |
+| [`FuzzyIndex`](../features/spellcheck.md) | a word list, via `FuzzyIndexBuilder` | `neighbors(query, max_distance)` |
+| [`DeletionIndex`](../features/spellcheck.md) | a word list, via `DeletionIndexBuilder` | `candidates(query)` |
+| [`PhoneticIndex`](../features/phonetic-index.md) | a word list plus an encoder, via `PhoneticIndexBuilder` | `neighbors(query)` |
+| `FrozenTrie` | a `Trie`, once insertion is done | prefix and membership queries |
+
+They all share one contract: construction does work proportional to the fixed
+side, queries do not repeat it, and the value is immutable afterwards — so a
+single instance can be shared across threads by reference. What varies is how
+much they save. An index changes the *complexity* of a search by ruling
+candidates out; `PreparedPattern` changes the constant factor of a comparison
+that still visits every candidate. Cutting the candidate set is the bigger win
+where both apply — see [Getting the order right](#getting-the-order-right).
 
 ## Where to start
 
@@ -56,7 +81,7 @@ The variants exist because these workloads have genuinely different bottlenecks:
 
 <a class="card" href="distance">
 <span class="card-title">String distance →</span>
-<span class="card-desc">Which metric for which problem; scalar vs search; free functions vs the <code>StringMetric</code> trait; what to do about bulk comparison.</span>
+<span class="card-desc">Which metric for which problem; unit cost vs weighted; scalar vs search; what to do about bulk comparison.</span>
 </a>
 
 <a class="card" href="ngrams">
@@ -85,7 +110,7 @@ because the choice there is usually *which type* rather than *which call shape*.
 Knowing the absences saves you the search:
 
 <div class="callout callout-warn">
-<strong>Most of Verbora's API is sequential by design.</strong> Thirteen
+<strong>Most of Verbora's API is sequential by design.</strong> Fourteen
 crates ship a curated, opt-in <code>par_*_batch</code> function behind a
 <code>parallel</code> Cargo feature — never on by default, never a second
 implementation, each one added because a benchmark showed a real win.
@@ -102,8 +127,14 @@ pool; this site shows you how to write it at your own call site with your own
   `tokenize_borrowed_into`), inflectors (`pluralize_into`, `singularize_into`),
   the `Stemmer` trait (`stem_into`) and `CaseMode::apply_into` have one. Distance,
   phonetics, normalizers and n-grams do not.
-- **No scratch-buffer API.** There is no `levenshtein_with_scratch`. The
-  Levenshtein family builds its own working state per call.
+- **No scratch-buffer API.** No function anywhere in Verbora takes mutable
+  working memory you lend it for the duration of a call — there is no
+  `levenshtein_with_scratch`, and the Levenshtein family builds its own
+  dynamic-programming working set per call. That is a different thing from
+  *prepared* state derived from one fixed operand, which does exist: see
+  [Build once, query many](#build-once-query-many) above, and
+  [`PreparedPattern`](../features/distance.md#preparedpattern) for the
+  distance case specifically.
 
 Where an absence is inconvenient, the relevant page shows the call-site
 workaround rather than pretending an API exists.
@@ -123,8 +154,11 @@ exist — and it would not be the biggest win available anyway.
 2. **Then pick the metric.** For typos, `levenshtein`; for names,
    `jaro_winkler`, which weights a common prefix. See
    [Choosing a distance API](distance.md).
-3. **Then pick the call shape.** Hoist `Options` out of the loop, keep inputs
-   ASCII where you can so the byte fast path applies, and only then reach for
+3. **Then pick the call shape.** Gate on the character-count difference before
+   paying for a comparison, keep inputs ASCII where you can so the byte fast
+   path applies, build the misspelled word into a
+   [`PreparedPattern`](../features/distance.md#preparedpattern) once since it is
+   fixed and the candidates are what vary, and only then reach for
    `verbora-distance`'s own `par_levenshtein_batch` (behind its `parallel`
    feature) or `rayon` at your call site.
 

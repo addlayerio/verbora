@@ -22,36 +22,32 @@
 //! slides a window of size `n` across the padded sequence, and returns a
 //! `HashMap<SmolStr, usize>` of gram → count. That is exactly what a caller
 //! building character n-grams with frequency counts over Verbora would do:
-//! `verbora_ngrams::ngrams(&chars, n, Some(' '), Some(' '))` folded into a
-//! `HashMap<String, usize>` — see [`verbora_char_grams`] below.
+//! `verbora_ngrams::Padded::new(&chars, n, Some(&' '), Some(&' ')).ngrams()`
+//! folded into a `HashMap<String, usize>` — see [`verbora_char_grams`] below.
 //!
 //! # What is, and is not, claimed
 //!
 //! **Verbora has no dedicated character-n-gram, string-in convenience
-//! function.** `verbora_ngrams`'s string-input helpers (`ngrams_str` and
-//! friends, in `crates/verbora-ngrams/src/text.rs`) tokenize into *words*
-//! first — a different granularity than `ngrammatic`'s character-level
-//! grams, and not what this file compares. The character-level path used
-//! here — `text.chars().collect::<Vec<char>>()` then the generic
-//! `ngrams()` engine — is the same generic primitive every other Verbora
-//! n-gram entry point is built on (`crates/verbora-ngrams/src/engine.rs`),
-//! just called directly rather than through a string-specific wrapper. That
-//! architectural difference (a dedicated `NgramBuilder` vs. a generic engine
-//! called with `T = char`) is disclosed, not hidden — and it is timed
-//! identically on both sides: the `char` collection and the map-folding are
-//! inside the benchmarked closure for Verbora, exactly as `NgramBuilder`'s
-//! own `String` allocation, padding and windowing are for `ngrammatic`.
+//! function that also counts.** `verbora_ngrams::char_ngrams` yields
+//! character windows as borrowed `&str`, but it offers no padding — by
+//! design, so that the allocation padding needs stays visible at the call
+//! site. The padded character path used here — `text.chars().collect::<
+//! Vec<char>>()` then `Padded` with `T = char` — is the shape the crate's own
+//! documentation prescribes for padded character n-grams. That architectural
+//! difference (a dedicated `NgramBuilder` vs. a generic padded sequence) is
+//! disclosed, not hidden — and it is timed identically on both sides: the
+//! `char` collection, the padding and the map-folding are inside the
+//! benchmarked closure for Verbora, exactly as `NgramBuilder`'s own `String`
+//! allocation, padding and windowing are for `ngrammatic`.
 //!
 //! **Output equivalence is verified, not assumed.** Both sides pad with
-//! `arity - 1` copies of the same character and slide the same window —
-//! `tests/ngrams_correctness.rs` checks the two produce byte-identical
-//! `(gram, count)` sets over every word in `benches/data/words.json`, for
-//! both arities benchmarked here. The one known, disclosed divergence
-//! (inputs shorter than `arity - 1`, where Verbora's padding follows the
-//! reference's own negative-slice re-anchoring quirk and `ngrammatic` does
-//! not) is also pinned by that test, and does not affect this file: the
-//! shortest word in the benchmarked list is 3 characters, longer than either
-//! arity tested minus one.
+//! `arity - 1` copies of a space on each side and slide a window of `arity`
+//! over the padded scalar sequence — the same definition, written twice
+//! (`ngrammatic-0.7.0/src/ngram.rs:205-217` against
+//! `docs/design/text-shaping-contract.md` §3.3). `tests/ngrams_correctness.rs`
+//! checks the two produce identical `(gram, count)` maps over every word in
+//! `benches/data/words.json`, for both arities benchmarked here, **and** over
+//! inputs shorter than `arity`, which this file's own input never reaches.
 //!
 //! Two groups are benchmarked, each building a gram → count map for every
 //! word in the shared word list:
@@ -60,10 +56,11 @@
 //! - `trigrams` (arity 3)
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use ngrammatic::{NgramBuilder, Pad};
-use verbora_ngrams::ngrams;
+use verbora_ngrams::Padded;
 
 /// The shared word list, read from `benches/data/words.json` — the same file
 /// `benches/trie.rs` and every other file in this crate reads.
@@ -92,10 +89,11 @@ fn load_words() -> Vec<String> {
 /// and folded into a `(gram, count)` map — the fair comparison point against
 /// `ngrammatic::Ngram::grams`, per this file's own module doc comment.
 /// `tests/ngrams_correctness.rs` verifies the two agree exactly.
-fn verbora_char_grams(word: &str, arity: usize) -> HashMap<String, usize> {
+fn verbora_char_grams(word: &str, arity: NonZeroUsize) -> HashMap<String, usize> {
     let chars: Vec<char> = word.chars().collect();
+    let padded = Padded::new(&chars, arity, Some(&' '), Some(&' '));
     let mut map: HashMap<String, usize> = HashMap::new();
-    for gram in ngrams(&chars, arity, Some(' '), Some(' ')) {
+    for gram in padded.ngrams() {
         *map.entry(gram.iter().collect()).or_insert(0) += 1;
     }
     map
@@ -103,6 +101,7 @@ fn verbora_char_grams(word: &str, arity: usize) -> HashMap<String, usize> {
 
 fn bench_arity(c: &mut Criterion, group_name: &str, arity: usize) {
     let words = load_words();
+    let nz_arity = NonZeroUsize::new(arity).expect("benchmark arities are non-zero");
     let mut g = c.benchmark_group(group_name);
     g.throughput(Throughput::Elements(words.len() as u64));
 
@@ -110,7 +109,7 @@ fn bench_arity(c: &mut Criterion, group_name: &str, arity: usize) {
         b.iter(|| {
             words
                 .iter()
-                .map(|w| verbora_char_grams(black_box(w), arity).len())
+                .map(|w| verbora_char_grams(black_box(w), nz_arity).len())
                 .sum::<usize>()
         });
     });

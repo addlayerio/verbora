@@ -1,72 +1,93 @@
-//! Utilities from the reference `util` module: stop-word and abbreviation data,
-//! edge-weighted digraphs with their path trees, and pluggable object storage.
+//! Shared data tables and graph algorithms for Verbora.
 //!
-//! Nine names are exported from `util/index` and hoisted to the top-level
-//! reference namespace; all nine are here, plus `Bag`, which the index does not
-//! re-export but `EdgeWeightedDigraph` is built out of.
+//! Two things live here, kept together because both are small, both are needed
+//! by more than one part of the toolkit, and neither belongs to a single NLP
+//! subsystem:
 //!
-//! | the reference | here |
-//! |---|---|
-//! | the reference's `stopwords` array | [`stopwords`] (English via `verbora-core`) |
-//! | the reference `abbreviations` | [`ABBREVIATIONS_EN`] |
-//! | the reference `abbreviations_es` | [`ABBREVIATIONS_ES`] |
-//! | the reference `DirectedEdge` | [`DirectedEdge`] |
-//! | the reference `EdgeWeightedDigraph` | [`EdgeWeightedDigraph`] |
-//! | the reference `Topological` | [`Topological`] |
-//! | the reference `ShortestPathTree` | [`ShortestPathTree`] |
-//! | the reference `LongestPathTree` | [`LongestPathTree`] |
-//! | the reference `StorageBackend…` | [`storage`] |
-//! | (`Bag`, internal) | [`Bag`] |
+//! * **Linguistic data tables** — abbreviation lists for two languages
+//!   ([`AbbreviationLanguage`]), plus the stop-word tables re-exported from
+//!   `verbora-core` ([`Language`]). These are data, not algorithms: what
+//!   Verbora specifies about them is the comparison used to look a word up and
+//!   the shape every entry must have, both of which are enumerated entry by
+//!   entry rather than sampled. The stop-word lists themselves live in
+//!   `verbora-core` because two other crates need them and data with two homes
+//!   drifts.
+//! * **Edge-weighted directed graphs** ([`EdgeWeightedDigraph`]) with
+//!   topological ordering ([`Topological`]) and single-source shortest- and
+//!   longest-path trees ([`ShortestPathTree`], [`LongestPathTree`]). The
+//!   algorithms are the classical ones for acyclic graphs — Kahn's topological
+//!   sort, and relaxation in topological order — cited on the types that
+//!   implement them.
 //!
-//! # The graphs are more the reference-shaped than they look
+//! The crate root is the entire public surface; every module is private.
 //!
-//! Three things in this corner of the reference are load-bearing and easy to
-//! "correct" by accident:
+//! # What this crate promises about numbers
 //!
-//! 1. **A vertex is a reference value used as a property key.** `1` and `'1'`
-//!    address the same adjacency slot but are different vertices to
-//!    `Topological`. [`Vertex`] keeps both halves.
-//! 2. **`EdgeWeightedDigraph::v` is `adj.length`, not the vertex count.** One
-//!    edge `10 -> 3` reports eleven vertices.
-//! 3. **Distances are rounded to two decimals as they are stored**, via
-//!    The reference's `toFixed`, which rounds ties away from zero where Rust rounds
-//!    to even. [`numfmt`] reproduces that and the rest of `Number::toString`.
+//! Every guarantee below is pinned by a test in the module that makes it.
 //!
-//! Each is documented where it lives, together with what a naive port would have
-//! produced instead.
+//! * **No sentinels.** Absence is [`Option::None`]. There is no "unreachable"
+//!   distance value, no `-1` index and no magic `f64::MAX`.
+//! * **No `NaN`, and no infinities.** [`EdgeWeightedDigraph::add`] refuses a
+//!   non-finite weight, and a path total that would leave the finite range fails
+//!   the build with [`PathError::Overflow`]. Nothing this crate returns can
+//!   poison a comparison or a sort.
+//! * **No silent rewriting.** A distance is the exact `f64` sum along the path
+//!   the tree reports, rounded nowhere. Case folding, trimming and normalisation
+//!   of a word are the caller's explicit choice, never this crate's.
+//! * **No panics** through the public API on any input a caller can construct.
+//!   Every failure is an [`Option`] or a [`Result`].
 //!
 //! ```
-//! use verbora_util::{EdgeWeightedDigraph, ShortestPathTree, Topological, Vertex};
+//! use verbora_util::{EdgeWeightedDigraph, ShortestPathTree, Topological};
 //!
-//! let mut g = EdgeWeightedDigraph::new();
-//! g.add(5, 4, 0.35);
-//! g.add(4, 7, 0.37);
-//! g.add(5, 7, 0.28);
+//! let mut g: EdgeWeightedDigraph<&str> = EdgeWeightedDigraph::new();
+//! g.add(&"fetch", &"build", 2.0).unwrap();
+//! g.add(&"build", &"test", 5.0).unwrap();
+//! g.add(&"fetch", &"test", 9.0).unwrap();
 //!
-//! assert_eq!(g.to_string(), "4 -> 7, 0.37\n5 -> 4, 0.35\n5 -> 7, 0.28");
-//! assert_eq!(Topological::new(&g).unwrap().order().len(), 3);
+//! assert_eq!(
+//!     Topological::new(&g).unwrap().labels().copied().collect::<Vec<_>>(),
+//!     ["fetch", "build", "test"]
+//! );
 //!
-//! let tree = ShortestPathTree::new(&g, 5).unwrap();
-//! assert_eq!(tree.dist_to(&Vertex::from(7)), Some(0.28));
+//! let tree = ShortestPathTree::new(&g, &"fetch").unwrap();
+//! assert_eq!(tree.distance_of(&"test"), Some(7.0));
+//! assert_eq!(tree.path_labels_of(&"test"), Some(vec![&"fetch", &"build", &"test"]));
 //! ```
+
+#![cfg_attr(doctest, doc = include_str!("../README.md"))]
 
 mod abbreviations;
-mod bag;
 mod data;
 mod graph;
-pub mod numfmt;
 mod paths;
-mod sparse;
-pub mod stopwords;
-pub mod storage;
 mod topological;
-mod vertex;
 
-pub use abbreviations::{ABBREVIATIONS_EN, ABBREVIATIONS_ES, AbbreviationLanguage};
-pub use bag::Bag;
-pub use graph::{DirectedEdge, EdgeWeightedDigraph};
-pub use paths::{Longest, LongestPathTree, PathTree, Relaxation, Shortest, ShortestPathTree};
-pub use stopwords::Language;
-pub use storage::{FileBackend, StorageBackend, StoragePlugin, StorageType};
-pub use topological::{CyclicDependency, Topological};
-pub use vertex::{Vertex, VertexKey};
+pub use abbreviations::{
+    ABBREVIATION_LANGUAGES, ABBREVIATIONS_EN, ABBREVIATIONS_ES, AbbreviationLanguage,
+};
+pub use graph::{DirectedEdge, EdgeWeightedDigraph, GraphError, VertexId};
+pub use paths::{
+    Longest, LongestPathTree, PathError, PathTree, Relaxation, Shortest, ShortestPathTree,
+};
+pub use topological::{Cycle, Topological};
+
+/// The stop-word tables and the process-global English list, both owned by
+/// `verbora-core`.
+///
+/// Re-exported rather than copied. The lists used to exist twice more — once in
+/// this crate's `data.rs` and once in `verbora-stemmers` — with nothing but a
+/// test holding the copies together; they now have one home, which is the crate
+/// both of those depend on. [`Language`] is `verbora_core::StopWordLanguage`
+/// under this crate's older name.
+///
+/// [`Language::En`] and the `*_global_*` functions are **not** the same list.
+/// `Language::En` describes the shipped data and is a pure function of it;
+/// the functions read and write a process-global list that anything in the
+/// process can change. See [`Language`]'s "Choosing the Right API" table for
+/// which one a given program wants.
+pub use verbora_core::{
+    STOPWORD_LANGUAGES as LANGUAGES, StopWordLanguage as Language, StopWords, add_global_stopword,
+    add_global_stopwords, global_stopwords, is_global_stopword, remove_global_stopword,
+    remove_global_stopwords, reset_global_stopwords,
+};

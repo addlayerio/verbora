@@ -33,7 +33,9 @@
 use competitive_rust::language_support::{
     TIERS, lingua_iso, lingua_restricted_languages, load_dataset, whichlang_iso,
 };
-use verbora_language::{LanguageDetector, WhatlangDetector};
+use verbora_language::{
+    FallbackDetector, HashedLinearDetector, LanguageDetector, WhatlangDetector,
+};
 
 #[test]
 fn all_three_detectors_agree_on_english_paragraph() {
@@ -367,4 +369,144 @@ fn abstaining_detectors_abstain_on_scriptless_input_and_none_panics() {
         );
         let _ = whichlang_iso(whichlang::detect_language(text));
     }
+}
+
+// ---------------------------------------------------------------------------
+// The two extra Verbora rows `benches/language.rs` times.
+// ---------------------------------------------------------------------------
+
+/// `benches/language.rs` times three Verbora configurations, so all three
+/// owe this file the same wiring check the other detectors get: correct
+/// answers on the easy tiers, and answers that survive the bench's
+/// paragraph-repetition ladder.
+///
+/// Only the easy tiers, and deliberately so. `HashedLinearDetector`
+/// **does** lose items at the two short tiers (7/13 at `short_word`) —
+/// that is a real, measured accuracy difference, not a wiring bug, and
+/// `examples/language_accuracy.rs` is where it is scored and published.
+/// What must hold here is narrower: on the inputs whose *timings* are
+/// compared as "same classification problem," every row actually solves
+/// that problem.
+#[test]
+fn verboras_fast_and_fallback_rows_are_correct_on_the_easy_tiers() {
+    let dataset = load_dataset();
+    let fast = HashedLinearDetector::new();
+    let fallback = FallbackDetector::new(HashedLinearDetector::new(), WhatlangDetector::new());
+
+    let mut failures = Vec::new();
+    for tier in ["sentence", "paragraph"] {
+        for entry in &dataset {
+            let text = entry.items.get(tier);
+            let expected = entry.iso639_1.as_str();
+            for (name, answer) in [
+                ("verbora_fast", detected_iso(&fast, text)),
+                ("verbora_fallback", detected_iso(&fallback, text)),
+            ] {
+                if answer.as_deref() != Some(expected) {
+                    failures.push(format!("{name} {expected}/{tier}: got {answer:?}"));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Verbora's fast/fallback rows are wrong on the easy tiers \
+         ({} of {} detector-item cells):\n{}",
+        failures.len(),
+        dataset.len() * 2 * 2,
+        failures.join("\n")
+    );
+}
+
+/// The repetition-ladder claim (see
+/// `detection_stays_correct_under_the_benchs_paragraph_repetition_ladder`)
+/// for the two hashed-linear-backed rows. Repetition is *not* a no-op for
+/// this model — its per-feature scale is `1/sqrt(feature_count)`, so a
+/// repeated paragraph is scored with a larger margin, not an identical
+/// one — which is precisely why the invariant has to be executed here
+/// rather than reasoned about in the bench's doc comment.
+#[test]
+fn fast_and_fallback_rows_stay_correct_under_the_benchs_paragraph_repetition_ladder() {
+    let dataset = load_dataset();
+    let fast = HashedLinearDetector::new();
+    let fallback = FallbackDetector::new(HashedLinearDetector::new(), WhatlangDetector::new());
+
+    let mut failures = Vec::new();
+    for entry in &dataset {
+        let paragraph = entry.items.get("paragraph");
+        let expected = entry.iso639_1.as_str();
+        for reps in [4usize, 16, 64] {
+            let text = paragraph.repeat(reps);
+            for (name, answer) in [
+                ("verbora_fast", detected_iso(&fast, &text)),
+                ("verbora_fallback", detected_iso(&fallback, &text)),
+            ] {
+                if answer.as_deref() != Some(expected) {
+                    failures.push(format!("{name} {expected} x{reps}: got {answer:?}"));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "repetition changed a hashed-linear row's answer — the bench's \
+         extended sizes would be timing a different classification \
+         problem:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Determinism and no-panic coverage for the two new rows, over every
+/// dataset item and the degenerate inputs — the same two properties the
+/// other detectors' tests establish, since Criterion's model and the
+/// harness's trustworthiness depend on them identically.
+#[test]
+fn fast_and_fallback_rows_are_deterministic_and_abstain_on_scriptless_input() {
+    let dataset = load_dataset();
+    let fast = HashedLinearDetector::new();
+    let fallback = FallbackDetector::new(HashedLinearDetector::new(), WhatlangDetector::new());
+
+    for tier in TIERS {
+        for entry in &dataset {
+            let text = entry.items.get(tier);
+            let fast_first = detected_iso(&fast, text);
+            let fallback_first = detected_iso(&fallback, text);
+            for _ in 0..2 {
+                assert_eq!(
+                    detected_iso(&fast, text),
+                    fast_first,
+                    "verbora_fast nondeterministic on {}/{tier}",
+                    entry.iso639_1
+                );
+                assert_eq!(
+                    detected_iso(&fallback, text),
+                    fallback_first,
+                    "verbora_fallback nondeterministic on {}/{tier}",
+                    entry.iso639_1
+                );
+            }
+        }
+    }
+
+    for text in ["", "   ", "\t\n", "1234 5678", "!!!", "🙂🙂🙂", "..."] {
+        assert_eq!(
+            detected_iso(&fast, text),
+            None,
+            "verbora_fast unexpectedly committed to a language on {text:?}"
+        );
+        assert_eq!(
+            detected_iso(&fallback, text),
+            None,
+            "verbora_fallback unexpectedly committed to a language on {text:?}"
+        );
+    }
+}
+
+/// One detector's answer as an ISO 639-1 code, or `None` for an
+/// abstention — the shape every assertion above compares.
+fn detected_iso<D: LanguageDetector>(detector: &D, text: &str) -> Option<String> {
+    detector
+        .detect(text)
+        .best()
+        .map(|c| c.language.iso639_1().to_owned())
 }

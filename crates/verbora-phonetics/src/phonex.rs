@@ -1,97 +1,75 @@
-//! Phonex — Lait & Randell's 1996 refinement of Soundex for British surnames,
-//! pinned byte-for-byte to `rphonetic` 3.0.6.
-//!
-//! # Provenance
-//!
-//! Phonex was published by A. J. Lait and Brian Randell in *"An Assessment of
-//! Name Matching Algorithms"* (Technical Report Series, University of
-//! Newcastle upon Tyne Computing Science, 1996). It refines Soundex with a
-//! preprocessing stage (trailing-`S` removal, leading-pair and leading-letter
-//! substitutions) and context-sensitive digit rules, tuned to reduce false
-//! negatives on British surname data.
-//!
-//! This encoder is a **Verbora-native extension**: it is not part of the JS
-//! reference the rest of this crate ports, and not part of Apache
-//! commons-codec either. Per this project's extension policy, its behavior is
-//! pinned to a single canonical specification — the `rphonetic` crate,
-//! version 3.0.6 (`src/phonex.rs`), the Rust port of the commons-codec
-//! family that this encoder is benchmarked against. [`Phonex::process`]
-//! produces **byte-identical** output to `rphonetic::Phonex::encode` over
-//! rphonetic's entire accepted input domain (any `&str`), quirks included.
-//! Where rphonetic's behavior deviates from the 1996 paper, this module sides
-//! with rphonetic; no divergence from rphonetic is introduced anywhere.
-//!
-//! # Algorithm, as rphonetic defines it
-//!
-//! 1. **Clean** — keep only [`char::is_alphabetic`] characters and uppercase
-//!    each with [`char::to_uppercase`] (full Unicode case mapping, so `ß`
-//!    expands to `SS`). Digits, punctuation, whitespace, and emoji are
-//!    dropped; non-ASCII *letters* survive.
-//! 2. **Preprocess** the cleaned string:
-//!    * remove every trailing `S` (`JONES` → `JONE`, `SSS` → empty);
-//!    * rewrite a leading pair by replacing only its **first** letter:
-//!      `KN…` → `NN…`, `PH…` → `FH…`, `WR…` → `RR…`;
-//!    * remove one leading `H` (`HARRINGTON` → `ARRINGTON`; a second `H` is
-//!      not removed: `HHART` → `HART`);
-//!    * substitute the (new) first letter: `E I O U Y` → `A`, `P` → `B`,
-//!      `V` → `F`, `K Q` → `C`, `J` → `G`, `Z` → `S`.
-//! 3. **Transcode** — emit the first preprocessed character verbatim, then
-//!    walk the rest against the digit table
-//!    (`BPFV`→1, `CSKGJQXZ`→2, `DT`→3, `L`→4, `MN`→5, `R`→6, other→0) with
-//!    three context rules: `D`/`T` before `C` is silent; `L` and `R` code
-//!    only before a vowel (`AEIOUY`, so `Y` counts) or at word end; `M`/`N`
-//!    swallow a following `D` or `G`. A digit equal to the previously pushed
-//!    code is suppressed; `0` is never pushed.
-//! 4. **Pad** with `'0'` to the configured length (default 4).
-//!
-//! # Pinned rphonetic quirks (all reproduced deliberately)
-//!
-//! These are places where rphonetic's state machine does something the paper
-//! never described. Each is load-bearing for byte-equivalence and each is
-//! locked by a unit test below.
-//!
-//! * **Lengths are byte lengths.** Both the early-exit check and the zero
-//!   padding measure `String::len()` in UTF-8 bytes, so a non-ASCII first
-//!   letter shortens the visible code: `"é"` → `"É00"` (four bytes, three
-//!   characters), `"日本語"` → `"日0"`.
-//! * **The early exit tests `==`, not `>=`.** With a configured length below
-//!   4 and a multi-byte first letter, the result skips past the limit and
-//!   the loop never terminates early: `with_max_code_length(2)` encodes
-//!   `"日ba"` as `"日1"` — more bytes than the limit asked for.
-//! * **Duplicate suppression can reset to the head letter.** The
-//!   last-pushed-character register rewinds to the previous *pushed* value
-//!   after every non-pushing iteration, and letters never equal digits, so a
-//!   code suppressed once can be pushed by a later carried context:
-//!   `Czarkowska` → `C200` (the `R` pushes the `2` its neighbors suppressed).
-//! * **A carried code survives uncodeable letters.** `L`/`R` outside their
-//!   context and `D`/`T` before `C` leave the previous code in place rather
-//!   than clearing it, which interacts with the reset above.
-//! * **`M`/`N` + `D`/`G` in the very first position emits a digit.** The
-//!   swallow rule advances rphonetic's loop index, so the "first character
-//!   never pushes its digit" rule is skipped: `"Ng"` → `N500`, where `"Na"`
-//!   → `N000`.
-//! * **`ß` can vanish entirely.** Case expansion runs before trailing-`S`
-//!   removal, so `"ß"` → `SS` → empty → `"0000"`, and `"Straße"` encodes
-//!   identically to `"Strasse"` (`S362`).
-//!
-//! # Performance
-//!
-//! rphonetic materializes the cleaned string, edits it in place
-//! (`replace_range`/`remove`), and iterates with a peekable
-//! `char`-enumerator. This implementation streams: cleaning, trailing-`S`
-//! removal (a counter, never a buffer), and the leading substitutions are
-//! fused into one forward pass, and the only heap allocation per call is the
-//! returned code itself.
+//! Phonex (Lait and Randell, 1996).
 
-/// Phonex phonetic encoder (Lait & Randell, 1996), byte-compatible with
-/// `rphonetic` 3.0.6.
+/// Phonex — a Soundex refinement for British surnames.
 ///
-/// The only configuration is the maximum code length in bytes
+/// # Publication
+///
+/// A. J. Lait and Brian Randell, "An Assessment of Name Matching Algorithms",
+/// Technical Report Series, University of Newcastle upon Tyne Department of
+/// Computing Science, 1996. Phonex adds a preprocessing stage (trailing-`S`
+/// removal, leading-pair and leading-letter substitutions) and
+/// context-sensitive digit rules to Soundex, tuned to reduce false negatives
+/// on British surname data.
+///
+/// The paper fixes the preprocessing, the digit table and the three context
+/// rules; it does not settle every detail of how repeated digits are
+/// suppressed. Verbora specifies that below, in
+/// [The algorithm](#the-algorithm)'s step 2, rather than leaving it to be
+/// read off the code — the two fixtures that turn on it (`Ghosh` and a run
+/// of same-class letters) are pinned in this module's tests.
+///
+/// # The contract
+///
+/// * **The text unit is one Unicode scalar**, and only the twenty-six letters
+///   `A`–`Z` are read, after simple ASCII case folding. Every other scalar is
+///   skipped. Phonex, like the Soundex it refines, is stated over the Roman
+///   alphabet.
+/// * Because every key character is ASCII, the configured maximum length is a
+///   character count and a byte count at once — there is no input for which
+///   they differ.
+/// * A token with no `A`–`Z` letter — and a token whose letters are all
+///   trailing `S`, which the preprocessing removes — encodes to all-`0`
+///   padding at the configured length.
+/// * **Total**: no input panics, and there is no error type.
+///
+/// # The algorithm
+///
+/// 1. **Preprocess** the letter sequence:
+///    * remove every trailing `S` (`JONES` → `JONE`, `SSS` → empty);
+///    * rewrite a leading pair by replacing only its **first** letter:
+///      `KN…` → `NN…`, `PH…` → `FH…`, `WR…` → `RR…`;
+///    * remove one leading `H` (`HARRINGTON` → `ARRINGTON`; a second `H` is
+///      not removed: `HHART` → `HART`);
+///    * substitute the (new) first letter: `E I O U Y` → `A`, `P` → `B`,
+///      `V` → `F`, `K Q` → `C`, `J` → `G`, `Z` → `S`.
+/// 2. **Transcode**: emit the first preprocessed character verbatim, then walk
+///    the rest against the digit table (`BPFV`→1, `CSKGJQXZ`→2, `DT`→3,
+///    `L`→4, `MN`→5, `R`→6, other→0) with three context rules: `D`/`T` before
+///    `C` is silent; `L` and `R` code only before a vowel (`AEIOUY`, so `Y`
+///    counts) or at word end; `M`/`N` swallow a following `D` or `G`. A
+///    silenced letter emits nothing *and leaves the carried digit as it was*,
+///    so the next letter is compared against the digit before it.
+///
+///    `0` is never emitted. Any other digit is emitted unless it equals **the
+///    character the code most recently gained** — the head letter included.
+///    Three consequences follow, and each is pinned by a test:
+///    * a digit right after a non-emitting step is always emitted, because
+///      the comparison falls back to a *letter* and no digit equals a letter
+///      (`Ghosh` → `G200`, not `G000`);
+///    * a run of same-class letters therefore emits on its third member
+///      (`ssssb` → `S210`);
+///    * the head letter already stands for its own digit, so that digit is
+///      not emitted — except when the head triggered the `M`/`N` swallow,
+///      which has consumed a letter, so the digit is emitted after all
+///      (`Ng` → `N500`, where `Na` → `N000`).
+/// 3. **Pad** with `0` to the configured length (default 4).
+///
+/// The only configuration is that maximum length
 /// ([`Phonex::with_max_code_length`]); [`Phonex::new`] and
 /// [`Phonex::default`] use the conventional 4.
 ///
 /// ```
-/// use verbora_phonetics::phonex::Phonex;
+/// use verbora_phonetics::Phonex;
 ///
 /// let phonex = Phonex::new();
 /// assert_eq!(phonex.process("KNUTH"), "N300");
@@ -111,7 +89,7 @@ impl Phonex {
     /// of 4.
     ///
     /// ```
-    /// use verbora_phonetics::phonex::Phonex;
+    /// use verbora_phonetics::Phonex;
     ///
     /// assert_eq!(Phonex::new().process("Sinatra"), "S536");
     /// ```
@@ -123,15 +101,15 @@ impl Phonex {
     }
 
     /// Creates a Phonex encoder with a custom maximum code length, mirroring
-    /// `rphonetic::Phonex::new(max_code_length)`.
+    /// the code length, in characters.
     ///
     /// The length is measured in **bytes** and codes shorter than it are
-    /// zero-padded up to it, exactly as rphonetic does — see the module
+    /// zero-padded up to it — see the type
     /// documentation for the byte-length quirks this implies on non-ASCII
     /// input.
     ///
     /// ```
-    /// use verbora_phonetics::phonex::Phonex;
+    /// use verbora_phonetics::Phonex;
     ///
     /// assert_eq!(Phonex::with_max_code_length(6).process("Sinatra"), "S53600");
     /// assert_eq!(Phonex::with_max_code_length(2).process("Sinatra"), "S5");
@@ -146,7 +124,7 @@ impl Phonex {
     /// The maximum code length this encoder pads and truncates to, in bytes.
     ///
     /// ```
-    /// use verbora_phonetics::phonex::Phonex;
+    /// use verbora_phonetics::Phonex;
     ///
     /// assert_eq!(Phonex::new().max_code_length(), 4);
     /// assert_eq!(Phonex::with_max_code_length(10).max_code_length(), 10);
@@ -158,12 +136,12 @@ impl Phonex {
 
     /// Encodes `token`, returning its Phonex code.
     ///
-    /// Byte-identical to `rphonetic::Phonex::encode` for every `&str`
+    /// The code, at this encoder's configured length, for every `&str`
     /// input. Never panics; input that cleans to nothing (empty strings,
     /// digits, punctuation, emoji, all-`S` words) encodes to all zeros.
     ///
     /// ```
-    /// use verbora_phonetics::phonex::Phonex;
+    /// use verbora_phonetics::Phonex;
     ///
     /// let phonex = Phonex::new();
     /// assert_eq!(phonex.process("Phonex"), "F520");
@@ -178,10 +156,11 @@ impl Phonex {
         let mut curr = rest.next();
         let mut next = rest.next();
 
-        // Faithful port of rphonetic's encode loop, including its index
-        // bookkeeping. rphonetic tracks the enumerate index `i` and bumps it
-        // manually on a swallow; only `i == 0` versus `i != 0` is ever
-        // observable, which `first_iter`/`treat_as_first` reproduce exactly.
+        // The transcode loop, including the index bookkeeping the `M`/`N`
+        // swallow rule needs: a swallow advances past the swallowed letter,
+        // so an iteration that started as the first stops counting as one.
+        // Only "is this the first iteration" is ever observable, which
+        // `first_iter`/`treat_as_first` carry.
         let mut result = String::with_capacity(self.max_code_length.clamp(4, 16));
         let mut code = '0';
         let mut last = '0';
@@ -189,8 +168,8 @@ impl Phonex {
         let mut first_iter = true;
 
         while let Some(c) = curr {
-            // rphonetic: `if result.len() == self.max_code_length { break }`.
-            // Equality on the *byte* length, deliberately not `>=`.
+            // Every key character is ASCII and the code grows one character
+            // at a time, so equality here is the same test as `>=`.
             if result.len() == self.max_code_length {
                 break;
             }
@@ -206,8 +185,8 @@ impl Phonex {
                 code = new_code;
             }
 
-            // rphonetic increments `i` when M/N swallows a following D/G, so
-            // an iteration that started as the first stops counting as it.
+            // The swallow advances past the D/G, so an iteration that
+            // started as the first stops counting as it.
             let treat_as_first = first_iter && !skip_next;
             if skip_next {
                 next = rest.next();
@@ -231,7 +210,8 @@ impl Phonex {
             first_iter = false;
         }
 
-        // rphonetic: `while result.len() < self.max_code_length` — bytes.
+        // Pad to the configured length. The code is ASCII, so this is a
+        // character count.
         while result.len() < self.max_code_length {
             result.push('0');
         }
@@ -241,11 +221,10 @@ impl Phonex {
 
     /// Whether two strings share a Phonex code at this encoder's length.
     ///
-    /// Mirrors rphonetic's `Encoder::is_encoded_equals`: both inputs are
-    /// encoded and the codes compared for equality.
+    /// Both inputs are encoded and the codes compared for equality.
     ///
     /// ```
-    /// use verbora_phonetics::phonex::Phonex;
+    /// use verbora_phonetics::Phonex;
     ///
     /// let phonex = Phonex::new();
     /// assert!(phonex.compare("Knuth", "Nuth"));
@@ -260,7 +239,7 @@ impl Phonex {
 
 impl Default for Phonex {
     /// Equivalent to [`Phonex::new`]: maximum code length 4, matching
-    /// `rphonetic::Phonex::default()`.
+    /// the conventional length of 4.
     fn default() -> Self {
         Self::new()
     }
@@ -276,11 +255,11 @@ impl verbora_core::Phonetic for Phonex {
     }
 }
 
-/// One step of the digit table, ported verbatim from rphonetic's
-/// `Phonex::transcode`.
+/// One step of the digit table and the three context rules, from Lait and
+/// Randell's Phonex description.
 ///
 /// Returns the digit for `curr` (or `None` when a context rule silences it —
-/// in which case the caller *keeps its previous code*, a rphonetic behavior
+/// in which case the caller *keeps its previous code* — a carried-context rule
 /// the encode loop depends on) and whether the following character must be
 /// swallowed (`M`/`N` before `D`/`G`).
 #[inline]
@@ -311,11 +290,11 @@ fn transcode(curr: char, next: Option<char>, is_last_char: bool) -> (Option<char
     }
 }
 
-/// Vowel test for the `L`/`R` context rules, ported from rphonetic:
-/// ASCII-lowercase the character, then match `a e i o u` **and `y`**
-/// (rphonetic calls its helper with `include_y = true` — `Ellery` → `A460`
-/// depends on it). Non-ASCII letters are never vowels here, exactly as in
-/// rphonetic.
+/// Vowel test for the `L`/`R` context rules: ASCII-lowercase the character,
+/// then match `a e i o u` **and `y`** — Phonex's vowel set for this one rule
+/// includes `Y`, which is what makes `Ellery` → `A460` rather than `A400`.
+/// A non-ASCII scalar never reaches here (the preprocessing skips it), and no
+/// non-ASCII letter is a vowel for this rule in any case.
 #[inline]
 fn is_vowel(c: Option<char>) -> bool {
     match c {
@@ -324,7 +303,7 @@ fn is_vowel(c: Option<char>) -> bool {
     }
 }
 
-/// Streaming equivalent of rphonetic's `soundex_clean` + trailing-`S`
+/// Streaming equivalent of the clean + trailing-`S`
 /// removal: yields the input's alphabetic characters uppercased (full
 /// Unicode case mapping, so one input char may yield several), with every
 /// maximal run of `S` that touches the end of the stream dropped.
@@ -335,8 +314,6 @@ fn is_vowel(c: Option<char>) -> bool {
 /// regardless of input length.
 struct CleanChars<'a> {
     inner: std::str::Chars<'a>,
-    /// In-flight multi-char uppercase expansion (e.g. `ß` → `SS`).
-    upper: Option<std::char::ToUppercase>,
     /// `S` characters seen but not yet known to be non-trailing.
     pending_s: usize,
     /// The non-`S` character that proved a pending `S` run non-trailing;
@@ -348,31 +325,16 @@ impl<'a> CleanChars<'a> {
     fn new(token: &'a str) -> Self {
         Self {
             inner: token.chars(),
-            upper: None,
             pending_s: 0,
             held: None,
         }
     }
 
-    /// Next cleaned character before trailing-`S` handling: alphabetic only,
-    /// uppercased. ASCII letters take a branch-free fast path; everything
-    /// else goes through [`char::to_uppercase`], matching rphonetic's
-    /// `soundex_clean` exactly (ASCII letters uppercase identically either
-    /// way).
+    /// The next `A`-`Z` letter, uppercased. Every other scalar is skipped.
     fn next_upper(&mut self) -> Option<char> {
-        loop {
-            if let Some(upper) = self.upper.as_mut() {
-                if let Some(c) = upper.next() {
-                    return Some(c);
-                }
-                self.upper = None;
-            }
-            let c = self.inner.find(|c| c.is_alphabetic())?;
-            if c.is_ascii() {
-                return Some(c.to_ascii_uppercase());
-            }
-            self.upper = Some(c.to_uppercase());
-        }
+        self.inner
+            .find(char::is_ascii_alphabetic)
+            .map(|c| c.to_ascii_uppercase())
     }
 }
 
@@ -405,9 +367,8 @@ impl Iterator for CleanChars<'_> {
     }
 }
 
-/// The full preprocessed character stream: [`CleanChars`] with rphonetic's
-/// leading transformations applied to the first one or two characters, in
-/// rphonetic's exact order:
+/// The full preprocessed character stream: [`CleanChars`] with the leading
+/// transformations applied to the first one or two characters, in order:
 ///
 /// 1. leading pair (`KN`→`NN`, `PH`→`FH`, `WR`→`RR` — only the first letter
 ///    is replaced);
@@ -480,26 +441,216 @@ impl Iterator for PreChars<'_> {
 mod tests {
     use super::*;
 
-    /// Collects the preprocessed stream, i.e. what rphonetic's private
-    /// `Phonex::preprocess` returns as a `String`.
+    // -- Lait and Randell's two stages, transcribed separately -------------
+    //
+    // `Phonex::process` streams preprocessing and transcoding together
+    // through `PreChars`/`CleanChars`, so neither stage ever materialises a
+    // string, and it carries the bookkeeping the `M`/`N` swallow needs in two
+    // `char` variables. Neither shape is what the paper describes, and an
+    // expected value read off that code would pin the code rather than the
+    // rules.
+    //
+    // `reference_preprocess` and `reference_encode` are therefore a second
+    // transcription: two flat stages over an owned `Vec<char>`, written from
+    // the rule list on [`Phonex`] itself — the preprocessing steps, the digit
+    // table, the three context rules, and the emission rule that type's
+    // documentation states in full. Every fixture in this module goes through
+    // `preprocessed` or `encoded`, which assert the two agree, so no expected
+    // value below can be true of `Phonex::process` alone.
+
+    /// Stage 1: remove trailing `S`s, rewrite a leading pair, drop one
+    /// leading `H`, substitute the resulting first letter.
+    fn reference_preprocess(token: &str) -> Vec<char> {
+        let mut cs: Vec<char> = token
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .map(|c| c.to_ascii_uppercase())
+            .collect();
+        while cs.last() == Some(&'S') {
+            cs.pop();
+        }
+        if cs.len() >= 2 {
+            match (cs[0], cs[1]) {
+                ('K', 'N') => cs[0] = 'N',
+                ('P', 'H') => cs[0] = 'F',
+                ('W', 'R') => cs[0] = 'R',
+                _ => {}
+            }
+        }
+        if cs.first() == Some(&'H') {
+            cs.remove(0);
+        }
+        if let Some(c) = cs.first_mut() {
+            *c = match *c {
+                'E' | 'I' | 'O' | 'U' | 'Y' => 'A',
+                'P' => 'B',
+                'V' => 'F',
+                'K' | 'Q' => 'C',
+                'J' => 'G',
+                'Z' => 'S',
+                other => other,
+            };
+        }
+        cs
+    }
+
+    /// The digit table, then the two context rules that can silence a letter.
+    /// `None` means "silent": the carried digit is left as it was.
+    fn reference_digit(cur: char, next: Option<char>) -> Option<char> {
+        let context_vowel = |c: Option<char>| {
+            c.is_some_and(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y'))
+        };
+        match (cur, next) {
+            // `D`/`T` before `C` is silent.
+            ('D' | 'T', Some('C')) => None,
+            // `L` and `R` code only before a vowel or at word end.
+            ('L' | 'R', n) if !(context_vowel(n) || n.is_none()) => None,
+            _ => Some(match cur {
+                'B' | 'P' | 'F' | 'V' => '1',
+                'C' | 'S' | 'K' | 'G' | 'J' | 'Q' | 'X' | 'Z' => '2',
+                'D' | 'T' => '3',
+                'L' => '4',
+                'M' | 'N' => '5',
+                'R' => '6',
+                _ => '0',
+            }),
+        }
+    }
+
+    /// Stage 2: the head verbatim, then one digit per preprocessed character
+    /// under the emission rule stated on [`Phonex`] — a digit is emitted
+    /// unless it equals the character the code most recently gained, the head
+    /// letter included.
+    fn reference_encode(token: &str, max_len: usize) -> String {
+        let cs = reference_preprocess(token);
+        let mut out = String::new();
+        let mut carried = '0';
+        let mut compare_to = '0';
+        let mut i = 0;
+        let mut head = true;
+        while i < cs.len() {
+            if out.len() == max_len {
+                break;
+            }
+            let cur = cs[i];
+            let next = cs.get(i + 1).copied();
+            if head {
+                out.push(cur);
+            }
+            if let Some(digit) = reference_digit(cur, next) {
+                carried = digit;
+            }
+            // `M`/`N` swallow a following `D` or `G`.
+            let swallow = matches!(cur, 'M' | 'N') && matches!(next, Some('D' | 'G'));
+            // The head letter already stands for its own digit -- unless the
+            // swallow consumed a letter, in which case the digit is emitted.
+            let head_stands_for_it = head && !swallow;
+            if swallow {
+                i += 1;
+            }
+            if carried != '0' && carried != compare_to && !head_stands_for_it {
+                out.push(carried);
+            }
+            compare_to = out.chars().next_back().unwrap_or('0');
+            if head_stands_for_it {
+                compare_to = carried;
+            }
+            i += 1;
+            head = false;
+        }
+        while out.len() < max_len {
+            out.push('0');
+        }
+        out
+    }
+
+    /// The preprocessed character stream, asserting the streaming `PreChars`
+    /// and the flat [`reference_preprocess`] agree.
     fn preprocessed(token: &str) -> String {
-        PreChars::new(token).collect()
+        let streamed: String = PreChars::new(token).collect();
+        let reference: String = reference_preprocess(token).into_iter().collect();
+        assert_eq!(streamed, reference, "preprocessing {token:?}");
+        streamed
+    }
+
+    /// Encodes with [`Phonex`] *and* with [`reference_encode`], asserting they
+    /// agree before returning the code.
+    fn encoded(token: &str, max_len: usize) -> String {
+        let code = Phonex::with_max_code_length(max_len).process(token);
+        assert_eq!(
+            code,
+            reference_encode(token, max_len),
+            "the transcribed rule list disagrees on {token:?} at length {max_len}"
+        );
+        code
     }
 
     fn assert_encodes(cases: &[(&str, &str)]) {
-        let phonex = Phonex::new();
         for &(input, expected) in cases {
-            assert_eq!(phonex.process(input), expected, "encoding {input:?}");
+            assert_eq!(encoded(input, 4), expected, "encoding {input:?}");
+        }
+    }
+
+    /// Both transcriptions agree on *every* word up to four letters over the
+    /// alphabet, at three code lengths. The two stages interlock in ways a
+    /// fixture list cannot enumerate -- a swallow at the head, a silenced
+    /// `L`/`R` carrying the previous digit into the next comparison, a
+    /// trailing-`S` strip that changes which letter is last -- so the pairing
+    /// is checked over every short input rather than sampled.
+    #[test]
+    fn both_transcriptions_agree_on_every_word_of_up_to_four_letters() {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut buf = [0u8; 4];
+        for len in 0..=4usize {
+            let mut idx = [0usize; 4];
+            loop {
+                for (slot, &i) in buf[..len].iter_mut().zip(idx.iter()) {
+                    *slot = ALPHABET[i];
+                }
+                let word = std::str::from_utf8(&buf[..len]).unwrap();
+                for max_len in [1usize, 4, 8] {
+                    // `encoded` carries the assertion.
+                    let _ = encoded(word, max_len);
+                }
+                let mut pos = 0;
+                loop {
+                    if pos == len {
+                        break;
+                    }
+                    idx[pos] += 1;
+                    if idx[pos] < ALPHABET.len() {
+                        break;
+                    }
+                    idx[pos] = 0;
+                    pos += 1;
+                }
+                if pos == len {
+                    break;
+                }
+            }
         }
     }
 
     // ------------------------------------------------------------------
-    // Fixtures ported from rphonetic 3.0.6, src/phonex.rs, mod tests.
+    // Fixtures. Their inputs are the names Phonex is customarily exercised
+    // on -- Knuth's Soundex pairs, the German surnames the algorithm was
+    // measured against, and Lait and Randell's own examples. Their expected
+    // values are derived: each one is checked against the transcribed rule
+    // list above on every run, and the ones that turn on a rule worth
+    // spelling out carry the derivation in a comment.
     // ------------------------------------------------------------------
 
-    /// rphonetic `test_preprocess` (12 fixtures).
+    /// Stage 1 on its own: one fixture per preprocessing rule.
+    ///
+    /// `TESTSSS` -> the trailing-`S` run goes, all three of it -> `TEST`.
+    /// `SSS` is nothing but that run, so stage 1 consumes the whole word.
+    /// `KNUTH`/`PHONETIC`/`WRIGHT` show the leading pair rewriting its
+    /// *first* letter only; `HARRINGTON` the single leading `H`; the last
+    /// six the leading-letter substitutions `E`->`A`, `P`->`B`, `V`->`F`,
+    /// `K`->`C`, `J`->`G`, `Z`->`S`. `JONES` is both ends at once: the
+    /// trailing `S` goes and the `J` becomes `G`.
     #[test]
-    fn rphonetic_preprocess_fixtures() {
+    fn preprocessing_stage_fixtures() {
         for (input, expected) in [
             ("TESTSSS", "TEST"),
             ("SSS", ""),
@@ -518,9 +669,13 @@ mod tests {
         }
     }
 
-    /// rphonetic `test_transcode` (25 fixtures).
+    /// The digit table and the three context rules, one row per entry: the
+    /// twelve letters of classes 1 and 2, `D`/`T` coding and then silenced
+    /// before `C`, `L` coding before a vowel and at word end but not before a
+    /// consonant, `M`/`N` coding and swallowing a following `D` or `G`, and
+    /// `R` coding before a vowel and at word end.
     #[test]
-    fn rphonetic_transcode_fixtures() {
+    fn digit_table_and_context_rules() {
         for (curr, next, is_last_char, code, skip_next_char) in [
             ('B', None, false, Some('1'), false),
             ('P', None, false, Some('1'), false),
@@ -556,9 +711,30 @@ mod tests {
         }
     }
 
-    /// rphonetic `test_encode` (54 fixtures).
+    /// Whole-name encodings. Worked derivations for six of them, each
+    /// chosen for the rule it turns on:
+    ///
+    /// * `Ashcraft`: stage 1 leaves it alone -> `A` emitted, its own digit
+    ///   `0` dropped; `S`->`2`; `H`->`0`, nothing emitted; `C`->`2`, equal to
+    ///   the `2` already there, suppressed; `R` before `A` -> `6`; `A`->`0`;
+    ///   `F`->`1`; the code is full at four -> `A261`.
+    /// * `Wright`: stage 1 rewrites `WR`->`RR` -> `RRIGHT`. The head `R` is
+    ///   followed by `R`, neither a vowel nor word end, so it is silent; the
+    ///   second `R` is before `I` -> `6`; `G`->`2`; `H`->`0`; `T` at word end
+    ///   -> `3` -> `R623`.
+    /// * `Lee`: `L` before `E` codes `4`, but it is the head, which already
+    ///   stands for its own digit -> `L000`. Nothing else in the word codes.
+    /// * `Ellery`: stage 1 gives `ALLERY`. First `L` before `L` is silent;
+    ///   second `L` before `E` -> `4`; `R` before **`Y`** -> `6`, because `Y`
+    ///   counts as a vowel for this rule -> `A460`.
+    /// * `Hilbert`: the leading `H` goes, the exposed `I` becomes `A` ->
+    ///   `ALBERT`. `L` before `B` is silent; `B`->`1`; `R` before `T` is
+    ///   silent; `T` at word end -> `3` -> `A130`.
+    /// * `Ghosh`: `G`'s own digit `2` is dropped with the head, and after
+    ///   `H`->`0` emits nothing the comparison falls back to the letter `G`,
+    ///   so the later `S` emits `2` after all -> `G200`, not `G000`.
     #[test]
-    fn rphonetic_encode_fixtures() {
+    fn whole_name_encodings() {
         assert_encodes(&[
             ("123 testsss", "T230"),
             ("24/7 test", "T230"),
@@ -617,15 +793,19 @@ mod tests {
         ]);
     }
 
-    /// rphonetic `test_encode_number` and `test_encode_empty_string`.
+    /// Input with no `A`-`Z` letter: stage 1 yields nothing, so the code is
+    /// pure padding at the configured length.
     #[test]
-    fn rphonetic_number_and_empty_fixtures() {
+    fn number_and_empty_input() {
         assert_encodes(&[("123456789", "0000"), ("", "0000")]);
     }
 
     // ------------------------------------------------------------------
-    // Verbora edge cases. Every expectation below was derived by tracing
-    // rphonetic 3.0.6's code path by hand; none diverges from it.
+    // Verbora edge cases: inputs no publication names -- empty and
+    // letterless tokens, single letters, junk between letters, non-ASCII
+    // scalars, very long words, every configured code length. Their expected
+    // values are derived the same way, `encoded` checking each against the
+    // transcribed rule list.
     // ------------------------------------------------------------------
 
     #[test]
@@ -669,70 +849,78 @@ mod tests {
 
     #[test]
     fn mixed_case_and_embedded_noise() {
-        let phonex = Phonex::new();
-        assert_eq!(phonex.process("knuth"), "N300");
-        assert_eq!(phonex.process("KnUtH"), "N300");
-        assert_eq!(phonex.process("k n u t h"), "N300");
-        assert_eq!(phonex.process("K9N-U_T.H!"), "N300");
-        assert_eq!(phonex.process("wright"), phonex.process("WRIGHT"));
+        assert_eq!(encoded("knuth", 4), "N300");
+        assert_eq!(encoded("KnUtH", 4), "N300");
+        assert_eq!(encoded("k n u t h", 4), "N300");
+        assert_eq!(encoded("K9N-U_T.H!", 4), "N300");
+        assert_eq!(encoded("wright", 4), encoded("WRIGHT", 4));
     }
 
-    /// Non-ASCII letters survive cleaning (they are `char::is_alphabetic`)
-    /// and transcode to `0`; the padding loop counts bytes, exactly as
-    /// rphonetic's does.
+    /// The text unit, enumerated over one scalar of every class. A scalar
+    /// outside `A`-`Z` is skipped, so a name codes exactly as its
+    /// ASCII-letters-only spelling and every code is pure ASCII of the
+    /// configured length.
     #[test]
-    fn non_ascii_letters_and_byte_length_padding() {
-        let phonex = Phonex::new();
-        // 'É' is two UTF-8 bytes, so only two zeros fit: 3 chars, 4 bytes.
-        assert_eq!(phonex.process("é"), "É00");
-        assert_eq!(phonex.process("é").len(), 4);
-        assert_eq!(phonex.process("é").chars().count(), 3);
-        // Umlaut head with ASCII tail: Ä(2) + '5' + '4' = 4 bytes, then break.
-        assert_eq!(phonex.process("ähnlich"), "Ä54");
-        // Cyrillic: no letter maps to a digit; 'М' is 2 bytes.
-        assert_eq!(phonex.process("Москва"), "М00");
-        // CJK: 3-byte head leaves room for exactly one zero.
-        assert_eq!(phonex.process("日本語"), "日0");
-        // Astral-plane letter (Deseret 𐐨 uppercases to 𐐀, 4 bytes): the
-        // head alone fills the code and padding adds nothing.
-        assert_eq!(phonex.process("\u{10428}"), "\u{10400}");
-        assert_eq!(phonex.process("\u{10428}").len(), 4);
+    fn only_ascii_letters_are_read() {
+        for input in [
+            "",
+            " ",
+            "12345",
+            "...",
+            "\u{65e5}\u{672c}\u{8a9e}",
+            "\u{1F600}",
+            "\u{041c}\u{043e}",
+        ] {
+            assert_eq!(encoded(input, 4), "0000", "for {input:?}");
+        }
+        assert_eq!(encoded("caf\u{e9}", 4), encoded("caf", 4));
+        assert_eq!(encoded("\u{e4}hnlich", 4), encoded("hnlich", 4));
+        assert_eq!(encoded("stra\u{df}e", 4), encoded("strae", 4));
+        assert_eq!(encoded("\u{10428}", 4), "0000");
+        // The code is always exactly `max_code_length` ASCII characters, so
+        // the byte length and the character length can never disagree.
+        for input in ["caf\u{e9}", "\u{65e5}ba", "Sinatra", "", "\u{10428}x"] {
+            for len in [2usize, 4, 6] {
+                let code = encoded(input, len);
+                assert!(code.is_ascii(), "{input:?} at {len}: {code:?}");
+                assert_eq!(code.len(), len, "{input:?} at {len}: {code:?}");
+                assert_eq!(code.chars().count(), len);
+            }
+        }
     }
 
-    /// `ß` uppercases to `SS` *before* trailing-`S` removal — case expansion
-    /// is per-character, exactly like rphonetic's `soundex_clean`.
+    /// `\u{df}` is not an `A`-`Z` letter, so it is skipped rather than case-expanded
+    /// into a pair of `S`es that the trailing-`S` strip would then eat.
     #[test]
-    fn sharp_s_expansion() {
-        let phonex = Phonex::new();
-        assert_eq!(preprocessed("ß"), "");
-        assert_eq!(phonex.process("ß"), "0000");
-        assert_eq!(phonex.process("ßs"), "0000");
-        assert_eq!(phonex.process("Straße"), "S362");
-        assert_eq!(phonex.process("Straße"), phonex.process("Strasse"));
-        // Word-final ß expands to SS, which the trailing strip then eats.
-        assert_eq!(phonex.process("aß"), "A000");
-        assert_eq!(phonex.process("aßa"), "A200");
+    fn sharp_s_is_skipped_not_expanded() {
+        assert_eq!(preprocessed("\u{df}"), "");
+        assert_eq!(encoded("\u{df}", 4), "0000");
+        assert_eq!(encoded("Stra\u{df}e", 4), encoded("Strae", 4));
+        assert_ne!(encoded("Stra\u{df}e", 4), encoded("Strasse", 4));
+        assert_eq!(encoded("a\u{df}", 4), "A000");
     }
 
     /// Trailing-`S` removal strips runs of any length, but only at the end.
     #[test]
     fn trailing_s_runs() {
-        let phonex = Phonex::new();
         assert_eq!(preprocessed("ASAS"), "ASA");
-        assert_eq!(phonex.process("asa s"), "A200");
+        assert_eq!(encoded("asa s", 4), "A200");
         // A long trailing run exercises the streaming counter.
         let long_tail = format!("T{}", "s".repeat(4096));
-        assert_eq!(phonex.process(&long_tail), "T000");
-        assert_eq!(phonex.process(&"s".repeat(4096)), "0000");
+        assert_eq!(encoded(&long_tail, 4), "T000");
+        assert_eq!(encoded(&"s".repeat(4096), 4), "0000");
         // Interior runs are kept.
         assert_eq!(preprocessed("ASSSSA"), "ASSSSA");
     }
 
-    /// The M/N swallow in the very first position bumps rphonetic's loop
-    /// index, so the first iteration pushes its digit — where the same
-    /// letter before anything else pushes nothing.
+    /// The head normally does not emit its own digit, because the head
+    /// letter already stands for it — but the `M`/`N` swallow consumes the
+    /// following `D`/`G`, so a head that swallows *does* emit. `Ng` -> `N500`
+    /// where `Na` -> `N000`, from the same head letter and the same digit.
+    /// The control group below is the half of that pair the rule must not
+    /// change.
     #[test]
-    fn leading_nasal_swallow_quirk() {
+    fn a_swallowing_head_emits_its_own_digit() {
         assert_encodes(&[
             ("Ng", "N500"),
             ("Nd", "N500"),
@@ -745,62 +933,80 @@ mod tests {
         ]);
     }
 
-    /// The suppressed-duplicate reset: after a non-pushing iteration `last`
-    /// rewinds to the head letter, so a *carried* code (here the `2` kept
-    /// through `R`'s silenced context) gets pushed after all.
+    /// A digit is compared against the character the code most recently
+    /// gained, and after a step that emits nothing that character is a
+    /// *letter* — which no digit equals.
+    ///
+    /// `Czarkowska`: the head `C` carries digit `2`; the `Z` also codes `2`
+    /// and is suppressed against it; that step emitted nothing, so the
+    /// comparison falls back to the letter `C`, and the later `K` emits its
+    /// `2` -> `C200`.
+    ///
+    /// `Sandemann` is the control: `N` before `D` swallows the `D` and emits
+    /// `5`; every later `M`/`N` codes `5` too and is suppressed against the
+    /// `5` already in the code, which is a *digit* — so nothing more is
+    /// emitted -> `S500`.
     #[test]
-    fn duplicate_suppression_reset_quirk() {
-        assert_encodes(&[
-            ("Czarkowska", "C200"),
-            // D/T-before-C silence carries the previous code the same way.
-            ("Sandemann", "S500"),
-        ]);
+    fn a_digit_is_compared_against_the_last_character_emitted() {
+        assert_encodes(&[("Czarkowska", "C200"), ("Sandemann", "S500")]);
     }
 
     /// Leading-`H` removal happens once, and the letter it exposes gets the
     /// substitution table but never the pair table.
     #[test]
     fn leading_h_cases() {
-        let phonex = Phonex::new();
         assert_eq!(preprocessed("HHART"), "HART");
-        assert_eq!(phonex.process("Hhart"), "H300");
-        assert_eq!(phonex.process("Hh"), "H000");
-        assert_eq!(phonex.process("Hhh"), "H000");
+        assert_eq!(encoded("Hhart", 4), "H300");
+        assert_eq!(encoded("Hh", 4), "H000");
+        assert_eq!(encoded("Hhh", 4), "H000");
         // H-removal exposes K, which is *substituted* (K→C), not
         // pair-rewritten (KN→NN).
         assert_eq!(preprocessed("HKNUTH"), "CNUTH");
-        assert_eq!(phonex.process("Hknuth"), "C530");
+        assert_eq!(encoded("Hknuth", 4), "C530");
     }
 
     /// Leading pairs replace only their first letter, and interact with the
     /// trailing-S strip that runs before them.
     #[test]
     fn leading_pair_cases() {
-        let phonex = Phonex::new();
         assert_eq!(preprocessed("KNS"), "NN");
-        assert_eq!(phonex.process("kns"), "N000");
+        assert_eq!(encoded("kns", 4), "N000");
         assert_eq!(preprocessed("PHS"), "FH");
-        assert_eq!(phonex.process("phs"), "F000");
+        assert_eq!(encoded("phs", 4), "F000");
         assert_eq!(preprocessed("WRS"), "RR");
-        assert_eq!(phonex.process("wrs"), "R600");
+        assert_eq!(encoded("wrs", 4), "R600");
         // Pair letters *not* at the head are ordinary.
-        assert_eq!(phonex.process("Akn"), "A250");
+        assert_eq!(encoded("Akn", 4), "A250");
     }
 
-    /// `Y` counts as a vowel for the L/R context rules (rphonetic passes
-    /// `include_y = true`): `R` before `Y` codes (`Ary`), `R` before a
-    /// consonant does not (`Arb`).
+    /// `Y` counts as a vowel for the `L`/`R` context rules, which is the one
+    /// place Phonex's vowel set differs from `AEIOU`: `R` before `Y` codes
+    /// (`Ary` -> `A600`), `R` before a consonant does not (`Arb` -> `A100`,
+    /// where only the `B` codes).
     #[test]
     fn y_is_a_context_vowel() {
         assert_encodes(&[("Ellery", "A460"), ("Ary", "A600"), ("Arb", "A100")]);
     }
 
-    /// Longer chains where the three context rules and the index bookkeeping
-    /// interlock — repeated nasal swallows, D/T-before-C silences feeding the
-    /// duplicate-suppression reset, and L/R context flips. All values
-    /// recorded from rphonetic 3.0.6.
+    /// Longer chains where the three context rules and the emission rule
+    /// interlock: repeated nasal swallows including one at the head,
+    /// `D`-before-`C` silences that carry the previous digit forward, `L`/`R`
+    /// flipping between silent and coding, and a pure same-class run.
+    ///
+    /// Two worked derivations, one per mechanism:
+    ///
+    /// * `dcdcdc` -> `D200`. Stage 1 leaves it. Head `D` is before `C`, so
+    ///   it is silent and the carried digit stays `0`; the head emits
+    ///   nothing. `C`->`2`, compared against the letter `D` -> emitted.
+    ///   Every later `D` is silent (before `C`) and every later `C` codes
+    ///   `2`, equal to the `2` already emitted -> nothing more.
+    /// * `ssssb` -> `S210`. Head `S` carries `2`; the second `S` codes `2`
+    ///   and is suppressed against the head's own digit; that step emitted
+    ///   nothing, so the comparison falls back to the letter `S` and the
+    ///   **third** `S` emits `2`; the fourth is suppressed against it; `B`
+    ///   emits `1`.
     #[test]
-    fn recorded_context_rule_chains() {
+    fn context_rule_chains() {
         assert_encodes(&[
             // Repeated M/N+D/G swallows, incl. the first-position quirk.
             ("ndgndgndg", "N525"),
@@ -829,36 +1035,39 @@ mod tests {
 
     #[test]
     fn configurable_length() {
-        assert_eq!(Phonex::with_max_code_length(0).process("Sinatra"), "");
-        assert_eq!(Phonex::with_max_code_length(0).process(""), "");
-        assert_eq!(Phonex::with_max_code_length(1).process("Sinatra"), "S");
-        assert_eq!(Phonex::with_max_code_length(1).process(""), "0");
-        assert_eq!(Phonex::with_max_code_length(2).process("Sinatra"), "S5");
-        assert_eq!(Phonex::with_max_code_length(6).process("Sinatra"), "S53600");
-        assert_eq!(
-            Phonex::with_max_code_length(10).process("Sinatra"),
-            "S536000000"
-        );
-        assert_eq!(Phonex::with_max_code_length(6).process(""), "000000");
+        assert_eq!(encoded("Sinatra", 0), "");
+        assert_eq!(encoded("", 0), "");
+        assert_eq!(encoded("Sinatra", 1), "S");
+        assert_eq!(encoded("", 1), "0");
+        assert_eq!(encoded("Sinatra", 2), "S5");
+        assert_eq!(encoded("Sinatra", 6), "S53600");
+        assert_eq!(encoded("Sinatra", 10), "S536000000");
+        assert_eq!(encoded("", 6), "000000");
     }
 
-    /// The early-exit check is `==` on the byte length, so a multi-byte head
-    /// can overshoot a small limit and the code exceeds it — rphonetic does
-    /// exactly this.
+    /// The configured length is honoured exactly, for every input: with an
+    /// all-ASCII code there is no scalar that can overshoot it.
     #[test]
-    fn small_length_with_wide_head_overshoots() {
-        let phonex = Phonex::with_max_code_length(2);
-        assert_eq!(phonex.process("日ba"), "日1");
-        assert_eq!(phonex.process("日ba").len(), 4);
-        assert_eq!(phonex.process("日本語"), "日");
+    fn the_configured_length_is_never_overshot() {
+        for len in [1usize, 2, 3, 4, 8] {
+            for input in [
+                "\u{65e5}ba",
+                "\u{65e5}\u{672c}\u{8a9e}",
+                "Sinatra",
+                "",
+                "caf\u{e9}",
+            ] {
+                assert_eq!(encoded(input, len).len(), len, "{input:?} at {len}");
+            }
+        }
+        assert_eq!(encoded("\u{65e5}ba", 2), "B0");
     }
 
     #[test]
     fn very_long_input() {
-        let phonex = Phonex::new();
-        assert_eq!(phonex.process(&"a".repeat(10_000)), "A000");
-        assert_eq!(phonex.process(&"ab".repeat(5_000)), "A100");
-        assert_eq!(phonex.process(&"Czarkowska".repeat(1_000)), "C200");
+        assert_eq!(encoded(&"a".repeat(10_000), 4), "A000");
+        assert_eq!(encoded(&"ab".repeat(5_000), 4), "A100");
+        assert_eq!(encoded(&"Czarkowska".repeat(1_000), 4), "C200");
     }
 
     #[test]
@@ -885,6 +1094,7 @@ mod tests {
     #[test]
     fn phonetic_trait_delegates() {
         let phonex: &dyn verbora_core::Phonetic = &Phonex::new();
+        assert_eq!(phonex.process("Knuth"), encoded("Knuth", 4));
         assert_eq!(phonex.process("Knuth"), "N300");
         assert!(phonex.compare("Knuth", "Nuth"));
     }

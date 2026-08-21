@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 124077.46484375,
-      "upper_bound": 130132.375
+      "lower_bound": 113390.3714877049,
+      "upper_bound": 115535.24772458736
     },
-    "point_estimate": 127104.919921875,
-    "standard_error": 2139.3455087816174
+    "point_estimate": 114398.04405833234,
+    "standard_error": 551.2743677656915
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 124077.46484375,
-      "upper_bound": 130132.375
+      "lower_bound": 111699.50146750524,
+      "upper_bound": 112328.14117881321
     },
-    "point_estimate": 127104.919921875,
-    "standard_error": 2139.3455087816174
+    "point_estimate": 111903.75757575757,
+    "standard_error": 206.59432896692053
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 4488.504819141235
+      "lower_bound": 647.6496875322339,
+      "upper_bound": 1676.4683067702417
     },
-    "point_estimate": 4488.504819141235,
-    "standard_error": 2244.2617924154983
+    "point_estimate": 1004.6529975739736,
+    "standard_error": 303.95434280958824
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 124077.46484375,
-      "upper_bound": 130132.375
+      "lower_bound": 113258.98045715033,
+      "upper_bound": 115086.83878718878
     },
-    "point_estimate": 125288.446875,
-    "standard_error": 2331.2929640830985
+    "point_estimate": 114138.51412606932,
+    "standard_error": 466.03480316077923
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0,
-      "upper_bound": 4281.468030959673
+      "lower_bound": 3636.612537835854,
+      "upper_bound": 7147.399208225577
     },
-    "point_estimate": 4281.468030959673,
-    "standard_error": 2140.7429655315595
+    "point_estimate": 5532.462305795383,
+    "standard_error": 894.938833699154
   }
 }

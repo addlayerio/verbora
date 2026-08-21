@@ -18,20 +18,31 @@
 //! - **Where the conventions differ** (all inside the matrix's documented
 //!   "different romanization convention" domain, refined by execution, not
 //!   widened): u-lengthened vowels and chōonpu (the headline difference),
-//!   the particle kana `を` (`o` vs. `wo`), leftover sokuon before the
-//!   d-row (`ベッド` -> `betdo` vs. `beddo` — the reference's own
-//!   final-sokuon `-> 't'` rule, faithfully ported per
-//!   `crates/verbora-transliterators/src/ja.rs`'s `Phase::FinalSokuon`,
-//!   vs. `wana_kana`'s plain consonant doubling), fullwidth punctuation
-//!   and half-width katakana (Verbora passes both through; `wana_kana`
-//!   rewrites both).
+//!   doubled kana vowels (`おかあさん` -> `okāsan` vs. `okaasan`), the
+//!   particle kana `を` (`o` vs. `wo`), fullwidth punctuation and half-width
+//!   katakana (Verbora passes both through; `wana_kana` rewrites both).
 //! - **Where the two agree exactly** (so "different convention" is never
 //!   inflated into "different everywhere"): plain kana without long
-//!   vowels, doubled `a`/`o` written with kana vowels (`おかあさん` ->
-//!   `okaasan` on *both* sides — Verbora's macrons cover u-lengthened and
-//!   chōonpu shapes, not every phonetically long vowel), `ei` sequences,
-//!   sokuon before the k/s/g/p rows, `ん` apostrophes, and the
-//!   kanji/Latin pass-through domain.
+//!   vowels, `ei` sequences, sokuon before every row including the d-row,
+//!   `ん` apostrophes, and the kanji/Latin pass-through domain.
+//!
+//! # The boundary moved in both directions in the Rust-native migration
+//!
+//! Two shapes changed sides, and both are asserted in their new home rather
+//! than dropped:
+//!
+//! - **Doubled kana vowels moved into the divergence.** Verbora's macron rule
+//!   used to cover only u-lengthened and chōonpu vowels, so `おかあさん` came
+//!   out `okaasan` on both sides. It now covers doubled `あ`/`お` too
+//!   (`okāsan`, `ōkii`). See `doubled_kana_vowels_now_diverge_too`.
+//! - **Sokuon before the d-row moved out of it.** Verbora's final-sokuon pass
+//!   used to emit `t` (`ベッド` -> `betdo`), a faithfully ported reference
+//!   convention. That quirk is gone — Verbora doubles the consonant like
+//!   `wana_kana`, so the two now agree and sokuon handling is uniform across
+//!   rows instead of row-specific. See `sokuon_before_the_d_row_now_agrees`.
+//!
+//! Neither change affects the benchmark's framing: `benches/language.rs`
+//! still times throughput on identical input only, never output equivalence.
 //!
 //! None of this changes the benchmark's framing — throughput on identical
 //! input only — it just replaces a two-example citation with an executed
@@ -133,26 +144,55 @@ fn every_u_lengthened_and_choonpu_vowel_shape_diverges() {
     }
 }
 
-/// The divergence's executed *inner boundary*: Verbora's macrons cover
-/// u-lengthened and chōonpu vowels, not every phonetically long vowel —
-/// doubled `a`/`o` written with the kana vowels `あ`/`お` and `ei`
-/// sequences come out letter-doubled on the Verbora side too, i.e.
-/// *identical* to `wana_kana`. This does not narrow the documented
-/// divergence (the matrix's cited shapes still differ, asserted above); it
-/// stops "different convention" from being misread as "no output ever
-/// matches".
+/// The divergence's executed *inner boundary*, after the Rust-native
+/// migration moved it: `ei` sequences still come out letter-doubled on both
+/// sides, i.e. *identical*. This stops "different convention" from being
+/// misread as "no output ever matches".
+///
+/// **Doubled `a`/`o` moved out of this test.** Verbora's macron rule used to
+/// cover only u-lengthened and chōonpu vowels, so `おかあさん` was `okaasan`
+/// on both sides. It now covers doubled kana vowels too — `おかあさん` is
+/// `okāsan` and `おおきい` is `ōkii` — which puts both shapes squarely inside
+/// the documented macron-vs-doubled-vowel divergence. They are asserted
+/// there, in [`long_vowel_romanization_conventions_genuinely_differ`]'s
+/// companion below, rather than dropped.
 #[test]
-fn doubled_a_o_and_ei_sequences_agree_exactly() {
-    let cases = [
-        ("おかあさん", "okaasan"),
-        ("おおきい", "ookii"),
-        ("せんせい", "sensei"),
-    ];
+fn ei_sequences_agree_exactly() {
+    let cases = [("せんせい", "sensei"), ("えいが", "eiga")];
     for (input, expected) in cases {
         let verbora_output = transliterate_ja(input);
         let wana_kana_output = input.to_romaji();
         assert_eq!(verbora_output.as_ref(), expected, "{input:?}");
         assert_eq!(wana_kana_output, expected, "{input:?}");
+    }
+}
+
+/// The two shapes the migration moved *into* the divergence: doubled kana
+/// vowels. Verbora's macron rule widened to cover them, so it now emits a
+/// macron where `wana_kana` still doubles the letter.
+///
+/// Asserted with both sides' concrete expected output, like every other case
+/// in this file, so a future convention change on either side is a loud
+/// failure rather than a silent re-agreement.
+#[test]
+fn doubled_kana_vowels_now_diverge_too() {
+    let cases = [
+        ("おかあさん", "okāsan", "okaasan"),
+        ("おおきい", "ōkii", "ookii"),
+    ];
+    for (input, verbora_expected, wana_kana_expected) in cases {
+        let verbora_output = transliterate_ja(input);
+        let wana_kana_output = input.to_romaji();
+        assert_eq!(
+            verbora_output.as_ref(),
+            verbora_expected,
+            "Verbora's convention changed on {input:?}"
+        );
+        assert_eq!(
+            wana_kana_output, wana_kana_expected,
+            "wana_kana's convention changed on {input:?}"
+        );
+        assert_ne!(verbora_output.as_ref(), wana_kana_output, "{input:?}");
     }
 }
 
@@ -197,12 +237,14 @@ fn plain_kana_without_long_vowels_agrees_exactly() {
 /// - `を`: Verbora romanizes the particle kana as `o` (modified Hepburn);
 ///   `wana_kana` emits literal `wo`.
 /// - Sokuon before the d-row: the reference's rule table has no `ッ`+d
-///   doubling rule, so its final-sokuon pass emits `t` (`betdo`) — a
-///   faithfully-ported reference convention (see
-///   `crates/verbora-transliterators/src/ja.rs`, `Phase::FinalSokuon`),
-///   vs. `wana_kana`'s doubling (`beddo`). Note the contrast with `ッ`+g
-///   (`ドッグ` above), where both sides double — the divergence is
-///   row-specific, not sokuon-wide.
+///   ~~doubling rule, so its final-sokuon pass emits `t` (`betdo`).~~
+///   **Removed by the Rust-native migration.** That `t` was a faithfully
+///   ported reference convention, and dropping it is exactly the kind of
+///   external-compatibility-only behaviour
+///   `docs/design/rust-native-migration.md` directs crates to shed. Verbora
+///   now doubles the consonant like `wana_kana` does: `ベッド` is `beddo` and
+///   `グッド` is `guddo` on both sides. The two cases moved into
+///   [`sokuon_before_the_d_row_now_agrees`] below rather than being deleted.
 /// - Fullwidth punctuation `、`/`。`: Verbora passes it through untouched;
 ///   `wana_kana` rewrites it to ASCII `,`/`.`.
 /// - Half-width katakana: Verbora passes it through (outside its tables);
@@ -214,8 +256,6 @@ fn particle_wo_sokuon_d_row_punctuation_and_halfwidth_kana_also_diverge() {
         ("を", "o", "wo"),
         ("をとこ", "otoko", "wotoko"),
         ("とを", "too", "towo"),
-        ("ベッド", "betdo", "beddo"),
-        ("グッド", "gutdo", "guddo"),
         ("、", "、", ","),
         ("。", "。", "."),
         (
@@ -316,5 +356,24 @@ fn every_expanded_bench_input_shape_runs_to_completion() {
             "verbora emitted nothing"
         );
         assert!(!input.to_romaji().is_empty(), "wana_kana emitted nothing");
+    }
+}
+
+/// The sokuon shape the migration moved *out* of the divergence: `ッ` before
+/// the d-row.
+///
+/// Verbora's final-sokuon pass used to emit `t` here (`ベッド` -> `betdo`), a
+/// ported reference convention with no counterpart in `wana_kana`'s plain
+/// consonant doubling. It now doubles the consonant, so the two agree — and
+/// the sokuon handling is uniform across rows rather than row-specific, which
+/// is what [`particle_wo_sokuon_d_row_punctuation_and_halfwidth_kana_also_diverge`]'s
+/// doc comment used to have to explain away.
+#[test]
+fn sokuon_before_the_d_row_now_agrees() {
+    for (input, expected) in [("ベッド", "beddo"), ("グッド", "guddo")] {
+        let verbora_output = transliterate_ja(input);
+        let wana_kana_output = input.to_romaji();
+        assert_eq!(verbora_output.as_ref(), expected, "{input:?}");
+        assert_eq!(wana_kana_output, expected, "{input:?}");
     }
 }

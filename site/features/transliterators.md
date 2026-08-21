@@ -5,12 +5,12 @@ Japanese kana to modified-Hepburn romaji. `とうきょう` becomes `tōkyō`, `
 becomes `zasshi`, `ほんや` becomes `hon'ya`. That is the whole subsystem — one
 conversion, in one direction, for one language.
 
-Modified Hepburn is deceptively intricate: thirty of its rules need lookahead
-over neighbouring characters, its closing rule keys on an ASCII-only word
-boundary, and its five transformation passes are order-dependent in ways that
-change the output of ordinary words. This crate implements all of it as five
-ordered phases over generated tables, with no regex engine. Text with no kana
-in it is returned borrowed after a single vectorised byte scan.
+Modified Hepburn is deceptively intricate: the geminate consonant, the syllabic
+nasal and the prolonged sound mark each depend on a neighbouring character
+rather than on themselves, and a long vowel can be written three different ways.
+This crate implements all of it as **one left-to-right pass** over a generated
+index, with no regex engine and no backtracking. Text with no kana in it is
+returned borrowed after a single vectorised byte scan.
 
 ## When to use it
 
@@ -20,28 +20,33 @@ in it is returned borrowed after a single vectorised byte scan.
   punctuation and halfwidth katakana pass through untouched, so running this
   over a mixed-language corpus is safe and — for documents with no kana —
   nearly free.
-- **You want the phases individually**, to debug a surprising result or build
-  on one table. See [Phases and introspection](#phases-and-introspection).
+- **You want the replacements without the string** — byte ranges for
+  highlighting, alignment or counting morae. See
+  [Inspecting the rewrites](#inspecting-the-rewrites).
 - **You have many independent, document-scale inputs.** See
-  [`ja::par_transliterate_ja_batch`](#ja-par-transliterate-ja-batch).
+  [`par_transliterate_ja_batch`](#par-transliterate-ja-batch).
 
 ## When not to use it
 
 - **You want romaji back into kana.** There is no reverse function, and the
-  mapping is not injective: `ā` comes from `aぁ`, `aァ` and `aー` alike.
-- **You want linguistically correct romanisation.** This is character-by-character
-  modified Hepburn with no lexical knowledge. The topic particle `は` is
-  romanised `ha`, so `こんにちは` becomes `konnichiha`, not `konnichiwa`.
+  mapping is not injective: `ā` comes from `ああ` and `あー` alike.
+- **You want linguistically correct romanisation.** This is grapheme-driven
+  modified Hepburn with no dictionary and no notion of a word. The topic
+  particle `は` is romanised `ha`, so `こんにちは` becomes `konnichiha`, not
+  `konnichiwa`; and `おう` is always long, so `おもう` is `omō` where a
+  morphological analyser would say `omou`.
 - **You want kanji read aloud.** Kanji is not touched at all —
   `これは日本語のテストです。` becomes `koreha日本語notesutodesu。`.
-- **Your input is halfwidth katakana.** No table key is a halfwidth character,
-  so `ｱｲｳｴｵ` comes back unchanged. Use
-  [`ja::transliterate_normalized`](#ja-transliterate-normalized), or normalize
-  first with [`normalize_ja`](./normalizers.md).
-- **You want iteration marks expanded.** `々` passes through unchanged;
-  `normalize_ja` expands them.
-- **You want tokens.** This is a character-level rewriter. Use
-  [`TokenizerJa`](./tokenizers.md).
+- **Your input is halfwidth or decomposed.** The index is spelled in NFC, so
+  `ｱｲｳｴｵ` comes back unchanged. Use
+  [`transliterate_ja_normalized`](#transliterate-ja-normalized), or fold widths
+  first with [`nfkc`](./normalizers.md).
+- **You want iteration marks expanded.** `々` passes through unchanged, and
+  nothing in Verbora expands it — iteration-mark expansion is an orthographic
+  rewrite with no Unicode definition, and it is not idempotent.
+- **You want tokens.** This is a character-level rewriter. Verbora ships no
+  Japanese word segmenter; see [Tokenizers](./tokenizers.md) for what UAX #29
+  does and does not do here.
 
 ## Quick example
 
@@ -63,68 +68,123 @@ fn main() {
 }
 ```
 
-## The pipeline
+## The unit is the mora
 
-Five phases, strictly ordered. Each runs over the *whole* string before the
-next begins, and several of them depend on that.
+Not the byte, not the scalar value, not the grapheme cluster. A **mora** is
+spelled in kana as one or two Unicode scalar values, optionally followed by one
+more that lengthens it:
 
-| `Phase` | What it does | Table size |
-|---|---|--:|
-| `CompoundKana` | the u/vu digraphs: `ウァ` → `wa`, `ヴュ` → `vyu`, `ウー` → `ū` | 20 keys |
-| `SokuonAndN` | the geminate consonant, and `ン` before a labial or a vowel | 4 sources, 148 pairs |
-| `Kana` | the main kana table: 191 katakana entries and their 191 hiragana mirrors | 382 keys |
-| `LongVowels` | long vowels and the small-vowel fallback, over the now-mixed Latin+kana text | 21 keys |
-| `FinalSokuon` | whatever small tsu is left, at an ASCII-only word boundary | 2 characters |
+| Spelling | Scalars | Romaji |
+|---|---|---|
+| `か` | 1 | `ka` |
+| `きょ` | 2 (base + small `ょ`) | `kyo` |
+| `かー` | 1 + prolonged sound mark | `kā` |
+| `こう` | 1 + lengthening vowel kana | `kō` |
 
-The order is load-bearing, not stylistic:
+The scalar value is the wrong unit because `きょ` is one mora written with two of
+them; the grapheme cluster is the wrong unit because `かー` is two clusters and
+one mora.
 
-- `ハイジャッンプ` is `haijanmpu` **only** because `ッ` before `ン` is rewritten
-  before `ン` before a labial gets a look at the same `ン`. Swap those and it
-  comes out `haijammpu`.
-- `LongVowels` must run after `Kana`, because eleven of its twenty-one keys
-  begin with a **Latin** vowel — the one `Kana` just produced:
+Three marks carry a mora but have **no reading of their own**, because what they
+romanize as depends on their neighbour. The scanner resolves them rather than a
+table:
+
+| Mark | Rule | Example |
+|---|---|---|
+| sokuon `っ` `ッ` | doubles the following consonant; `t` before `ch` | `ざっし` → `zasshi`, `まっちゃ` → `matcha` |
+| syllabic nasal `ん` `ン` | `m` before `b`/`m`/`p`, `n'` before a vowel or `y`, else `n` | `ばんび` → `bambi`, `ほんや` → `hon'ya`, `まんと` → `manto` |
+| prolonged sound mark `ー` | macron over the preceding vowel | `スーパー` → `sūpā` |
+
+The sokuon rule is applied to the **romanization**, not to the kana, which is
+what reproduces the columns that look like exceptions when written in kana:
+`っし` is `sshi` because `し` is `shi`, and `っふ` is `ffu` because `ふ` is `fu`.
 
 ```rust
-use verbora_transliterators::ja::Phase;
 use verbora_transliterators::transliterate_ja;
 
 fn main() {
-    // Phase 4 on raw kana finds nothing: its key is 'a' + 'ー', not 'カ' + 'ー'.
-    assert_eq!(Phase::LongVowels.apply("カー"), "カー");
-    // Phase 3 produces the Latin vowel phase 4 keys on.
-    assert_eq!(Phase::Kana.apply("カー"), "kaー");
-    // In order, the two compose.
-    assert_eq!(transliterate_ja("カー"), "kā");
+    assert_eq!(transliterate_ja("ざっし"), "zasshi");
+    assert_eq!(transliterate_ja("まっちゃ"), "matcha");
+    assert_eq!(transliterate_ja("かんぱい"), "kampai");
+    assert_eq!(transliterate_ja("しんぶん"), "shimbun");
+    assert_eq!(transliterate_ja("スーパー"), "sūpā");
 }
 ```
 
-The tables are generated, not hand-transcribed, and the generator re-proves the
-model's equivalence over 160,401 inputs before emitting anything.
+A mark with nothing to modify romanizes as **nothing at all**: a sokuon with no
+consonant after it, and a prolonged sound mark with no vowel before it, are
+modifiers with no target. No romanization standard assigns either a segment of
+its own, and leaving the kana in place would put a character in romanized text
+that the caller asked to have romanized.
+
+```rust
+use verbora_transliterators::transliterate_ja;
+
+fn main() {
+    assert_eq!(transliterate_ja("ッ"), "");
+    assert_eq!(transliterate_ja("ー"), "");
+    // A run of prolonged marks lengthens once, rather than lengthening and
+    // then having nothing left to lengthen.
+    assert_eq!(transliterate_ja("あーー"), "ā");
+}
+```
+
+### Where the readings come from
+
+**Modified Hepburn**, as codified in the *ALA-LC Romanization Tables: Japanese*
+(American Library Association / Library of Congress), which follows
+ANSI Z39.11-1972 and BS 4812:1972 — plus 内閣告示第二号「外来語の表記」 (Cabinet
+of Japan, Notification No. 2 of 1991) for the extended syllables Japanese writes
+foreign sounds with (`ファ`, `ティ`, `ヴァ`, `クォ`, …).
+
+Every mora, its reading and the citation for it live in `src/syllabary.rs`,
+which is the crate's single source of truth: `build.rs` derives the katakana
+half, the long-vowel forms and the lookup index from that one file. Six
+characters take their reading from the Unicode Character Database instead,
+because their character names *are* their readings — the four
+`KATAKANA LETTER V*` (U+30F7..U+30FA) and the digraphs `ゟ` U+309F and `ヿ`
+U+30FF.
+
+Two sequences are deliberately **not** treated as long, because ALA-LC does not
+treat them as long — a long `i` is written doubled, and `えい` is two vowels:
+
+```rust
+use verbora_transliterators::transliterate_ja;
+
+fn main() {
+    assert_eq!(transliterate_ja("おいしい"), "oishii");  // not "oishī"
+    assert_eq!(transliterate_ja("せんせい"), "sensei");  // not "sensē"
+}
+```
+
+The prolonged sound mark is not bound by that rule, since it lengthens *any*
+vowel: `シー` is `shī` while `しい` is `shii`.
 
 ## Choosing the right API
 
 One conversion, five ways to ask for it. The genuine decision is between
-`transliterate_ja` (hands you a `Cow`) and `transliterate_into` (writes into a
-buffer you own); the rest is whether you want a single phase instead of the
-pipeline, and whether you want the replacements without the string.
+`transliterate_ja` (hands you a `Cow`) and `transliterate_ja_into` (writes into
+a buffer you own); the rest is whether your input needs normalizing first, and
+whether you want the replacements without the string.
 
 | API | Best for | Lazy | Output | Clears `out` | Allocations |
 |---|---|:--:|---|:--:|---|
-| `transliterate_ja(s)` | one string, simplest call | ❌ | `Cow<'_, str>` | n/a | none when nothing changed; else one `String` per phase that rewrites (0–5) |
-| [`ja::par_transliterate_ja_batch(inputs)`](#ja-par-transliterate-ja-batch) | many independent, document-scale strings | ❌ | `Vec<Cow<'_, str>>` | n/a | the same 0–5 per input, plus one output `Vec`; feature `parallel` |
-| [`ja::transliterate_into(s, &mut out)`](#ja-transliterate-into) | concatenating many results into one buffer | ❌ | `()`, appends | ❌ **appends** | the same 0–5, plus `out`'s growth |
-| [`ja::transliterate_normalized(s)`](#ja-transliterate-normalized) | halfwidth katakana, fullwidth Latin, `々` | ❌ | `Cow<'_, str>` | n/a | `normalize_ja`'s, then the above |
-| `Phase::apply(s)` | one stage of the pipeline | ❌ | `Cow<'_, str>` | n/a | none when that phase matched nothing; else one `String` |
-| `Phase::apply_into(s, &mut out)` | one stage, straight into your buffer | ❌ | `()`, appends | ❌ **appends** | none of its own |
-| `Phase::rewrites(s)` | inspecting *what* would change | ✅ | `Rewrites<'_>` → `Rewrite<'_>` | n/a | **none, ever** |
+| `transliterate_ja(s)` | one string, simplest call | ❌ | `Cow<'_, str>` | n/a | none when no mora matched; else one `String` |
+| [`par_transliterate_ja_batch(inputs)`](#par-transliterate-ja-batch) | many independent, document-scale strings | ❌ | `Vec<Cow<'_, str>>` | n/a | one output `Vec`, plus the above per input; feature `parallel` |
+| [`transliterate_ja_into(s, &mut out)`](#transliterate-ja-into) | concatenating many results into one buffer | ❌ | `()`, appends | ❌ **appends** | none of its own, plus `out`'s growth |
+| [`transliterate_ja_normalized(s)`](#transliterate-ja-normalized) | halfwidth katakana, decomposed kana | ❌ | `Cow<'_, str>` | n/a | up to three `String`s |
+| [`Rewrites::new(s)`](#inspecting-the-rewrites) | inspecting *what* would change | ✅ | `Rewrites<'_>` → `Rewrite<'_>` | n/a | **none, ever** |
 
-Two columns deserve a second look. **Both `_into` functions append** — Verbora
+Two columns deserve a second look. **`transliterate_ja_into` appends** — Verbora
 has two clearing conventions and this crate uses the appending one (see
 [Buffer reuse](../performance/buffer-reuse.md)); `out.clear()` is yours to
-call, and it is safe, since `clear()` never frees capacity. **Only
-`Phase::rewrites` is lazy** — `transliterate_ja` is eager across the five
-phases, though each phase is internally built on that same lazy iterator and
-allocates nothing until a replacement is actually found.
+call, and it is safe, since `clear()` never frees capacity. **Only `Rewrites` is
+lazy** — but every other entry point is built on it, so none of them allocates
+until a replacement is actually spliced.
+
+None of the four is faster than `transliterate_ja` at what `transliterate_ja`
+does: they all drive the same scan, and the only cost they can remove is the
+output `String`.
 
 ### `transliterate_ja`
 
@@ -132,7 +192,7 @@ allocates nothing until a replacement is actually found.
 <a class="badge badge-zerocopy" href="../performance/zero-copy">ZERO-COPY</a>
 
 ```rust  ignore
-pub fn transliterate(text: &str) -> Cow<'_, str>   // re-exported as transliterate_ja
+pub fn transliterate_ja(text: &str) -> Cow<'_, str>   // #[must_use]
 ```
 
 The default. It returns `Cow::Borrowed` for Latin text, kanji, halfwidth
@@ -145,11 +205,11 @@ use std::borrow::Cow;
 use verbora_transliterators::transliterate_ja;
 
 fn main() {
-    // Nothing in U+3000..U+3FFF: one vectorised scan, zero allocations.
+    // No 0xE3 lead byte: one vectorised scan, zero allocations.
     assert!(matches!(transliterate_ja("the quick brown fox"), Cow::Borrowed(_)));
     assert!(matches!(transliterate_ja("ｱｲｳｴｵ"), Cow::Borrowed(_)));
 
-    // Kana: owned, and exactly the phases that fired paid for it.
+    // Kana: owned.
     assert!(matches!(transliterate_ja("カタカナ"), Cow::Owned(_)));
 }
 ```
@@ -157,30 +217,46 @@ fn main() {
 Hold the `Cow` as long as you can — it derefs to `&str` — and call
 `.into_owned()` only at a boundary that genuinely needs a `String`.
 
+The function's contract is four properties, each pinned by the crate's own
+tests:
+
+- **Total.** Every `&str` is accepted and no input panics.
+- **Idempotent.** `transliterate_ja(transliterate_ja(t))` equals
+  `transliterate_ja(t)` for every `t`: the output contains no mora the scanner
+  would rewrite again.
+- **Borrowed exactly when unchanged.** `Cow::Borrowed` is returned if and only
+  if no mora was found, which makes matching on the `Cow` a correct way to ask
+  "did this contain kana?" rather than a fast path that might stop working.
+- **Nothing is invented.** The output contains no `U+FFFD` unless the input did,
+  and no character that was not either a reading from the syllabary or a byte
+  copied from the input.
+
 <div class="callout callout-note">
 <strong>Note.</strong> The gate is a <em>superset</em> test: it admits any
 string containing the UTF-8 lead byte <code>0xE3</code>, which covers all of
 U+3000..U+3FFF. <code>々</code> U+3005 passes the gate and then matches
 nothing, so <code>transliterate_ja("々")</code> still returns
-<code>Cow::Borrowed</code> — just after five scans instead of one.
+<code>Cow::Borrowed</code> — just after a scan instead of after the gate.
 </div>
 
-### `ja::par_transliterate_ja_batch`
+### `par_transliterate_ja_batch`
 
 ```rust  ignore
 #[cfg(feature = "parallel")]
-pub fn par_transliterate_ja_batch(inputs: &[&str]) -> Vec<Cow<'_, str>>
+pub fn par_transliterate_ja_batch<'a>(inputs: &[&'a str]) -> Vec<Cow<'a, str>>
 ```
 
-`transliterate` is a pure function of one `&str` with no shared state, so many
+`transliterate_ja` is a pure function of one `&str` with no shared state, so many
 independent documents are embarrassingly parallel. This function, behind the
 `parallel` Cargo feature, is exactly
-`inputs.par_iter().map(transliterate).collect()` — a thin fan-out over the
+`inputs.par_iter().map(transliterate_ja).collect()` — a thin fan-out over the
 sequential primitive, not a second implementation. Output order matches input
 order, and the `Vec<Cow<'_, str>>` keeps every borrowed document borrowed.
 
 ```rust  ignore
-use verbora_transliterators::ja::par_transliterate_ja_batch;
+// Needs the `parallel` feature, which this site's snippet checker builds
+// without — so this block is marked `ignore` rather than compiled.
+use verbora_transliterators::par_transliterate_ja_batch;
 
 fn main() {
     let inputs = ["あいうえお", "ざっし", "plain ascii"];
@@ -189,46 +265,48 @@ fn main() {
 }
 ```
 
-| Workload | Use |
-|---|---|
-| A handful of short (non-document-scale) inputs | `inputs.iter().map(transliterate).collect()` |
-| 4 document-scale (~23.5 KB) inputs | this function — already ~4× faster |
-| 32–256 document-scale inputs | this function — 6–10× faster |
+A `rayon` task costs on the order of a microsecond to schedule, so a batch of
+short strings can easily cost more to distribute than to romanize. Reach for
+this when the inputs are document-scale and there are more than a handful of
+them; a plain `inputs.iter().map(transliterate_ja).collect()` loop is the better
+answer otherwise. See
+[Performance characteristics](#performance-characteristics) for the shape of the
+trade.
 
 This is the crate's only built-in parallel API. For a different shape (a shared
-output buffer built with `transliterate_into`, say), apply the same
-`par_iter().map(...)` at your own call site — every item here is a free
-function or a `Copy` enum over `&'static` tables, with no state, no interior
-mutability and no globals. Note that collecting `String`s across threads forces
-`.into_owned()`, reintroducing an allocation for documents that would otherwise
-have been borrowed. See [Parallelism](../performance/parallelism.md).
+output buffer built with `transliterate_ja_into`, say), apply the same
+`par_iter().map(...)` at your own call site — every item here is a free function
+over `&'static` tables, with no state, no interior mutability and no globals.
+Note that collecting `String`s across threads forces `.into_owned()`,
+reintroducing an allocation for documents that would otherwise have been
+borrowed. See [Parallelism](../performance/parallelism.md).
 
-### `ja::transliterate_into`
+### `transliterate_ja_into`
 
 <a class="badge badge-reuse" href="../performance/buffer-reuse">BUFFER REUSE</a>
 
 ```rust  ignore
-pub fn transliterate_into(text: &str, out: &mut String)   // APPENDS
+pub fn transliterate_ja_into(text: &str, out: &mut String)   // APPENDS
 ```
 
 **It appends. It does not clear.** That is the contract, and it is what makes
 the accumulate pattern need no special API:
 
 ```rust
-use verbora_transliterators::transliterate_into;
+use verbora_transliterators::transliterate_ja_into;
 
 fn main() {
     let mut doc = String::new();
     for word in ["こんにちは", " ", "せかい"] {
-        transliterate_into(word, &mut doc);   // no clear, ever
+        transliterate_ja_into(word, &mut doc);   // no clear, ever
     }
     assert_eq!(doc, "konnichiha sekai");
 
     // Non-kana fragments are pushed through verbatim, so separators and
     // punctuation can go through the same call.
     let mut mixed = String::from("[");
-    transliterate_into("カナ", &mut mixed);
-    transliterate_into("]", &mut mixed);
+    transliterate_ja_into("カナ", &mut mixed);
+    transliterate_ja_into("]", &mut mixed);
     assert_eq!(mixed, "[kana]");
 }
 ```
@@ -236,199 +314,175 @@ fn main() {
 For one result per iteration rather than one accumulated document, the usual
 [buffer-reuse](../performance/buffer-reuse.md) ritual applies unchanged:
 `String::with_capacity` once outside the loop, `buf.clear()` at the top of each
-iteration, then `transliterate_into(word, &mut buf)`.
+iteration, then `transliterate_ja_into(word, &mut buf)`.
 
-<div class="callout callout-note">
-<strong>The move optimisation.</strong> When <code>out</code> has
-<em>never allocated</em> — a fresh <code>String::new()</code> —
-<code>transliterate_into</code> moves the pipeline's own buffer in instead of
-copying. Reserve capacity up front and that guard is false from the very first
-call, so every call copies with <code>push_str</code> and your reservation
-survives. Either way the buffer's capacity is stable across every later call.
-</div>
+Unlike `transliterate_ja` it never allocates an intermediate `String` — it
+splices directly into `out` — and unlike `Rewrites` it does the splicing for
+you. A loop over `n` inputs therefore performs the growth of one buffer instead
+of `n` allocations and `n` copies.
 
-`transliterate_into` does **not** save the pipeline's own allocations. It wraps
-`transliterate`, so a string that five phases rewrite still allocates up to
-five intermediates inside the call; only the last reaches `out`. The phases
-cannot be fused, because each needs the previous phase's *entire* output. What
-it removes is the caller's side: no `Vec<String>` of fragments, no second
-concatenation pass. See
-[Iterator vs reusable buffer](../performance/iterator-vs-into.md).
-
-### `ja::transliterate_normalized`
+### `transliterate_ja_normalized`
 
 ```rust  ignore
-pub fn transliterate_normalized(text: &str) -> Cow<'_, str>
+pub fn transliterate_ja_normalized(text: &str) -> Cow<'_, str>   // #[must_use]
 ```
 
-`transliterate_ja` alone has no halfwidth-katakana keys, so real-world Japanese
-input needs normalizing first. This composes `normalize_ja` and the pipeline
-for you:
+The index is spelled in NFC — `が` is U+304C, not `か` U+304B followed by U+3099
+— so decomposed kana, halfwidth katakana and fullwidth Latin do not match and
+pass through. This function respells the spacing voiced sound marks, applies
+[`nfkc`](./normalizers.md), and then runs the scan:
 
 ```rust
-use verbora_transliterators::ja::transliterate_normalized;
-use verbora_transliterators::transliterate_ja;
+use verbora_transliterators::{transliterate_ja, transliterate_ja_normalized};
 
 fn main() {
-    // Halfwidth katakana is invisible to every table …
+    // Halfwidth katakana is invisible to the index …
     assert_eq!(transliterate_ja("ｱｲｳｴｵ"), "ｱｲｳｴｵ");
     // … until it is widened first.
-    assert_eq!(transliterate_normalized("ｱｲｳｴｵ"), "aiueo");
+    assert_eq!(transliterate_ja_normalized("ｱｲｳｴｵ"), "aiueo");
 
     // Composed voiced marks come along too: ｶ + ﾞ → ガ → ga.
-    assert_eq!(transliterate_normalized("ｶﾞｯｷ"), "gakki");
+    assert_eq!(transliterate_ja_normalized("ｶﾞｯｷ"), "gakki");
 }
 ```
 
-**Reach for it by default on input you did not produce yourself**, and for
-`transliterate_ja` when you know the text is already fullwidth — or when you
-need byte-exact agreement with a call site that did *not* normalise. For every
-input on which `normalize_ja` is the identity, the composition is asserted to
-agree exactly with the bare transliteration; it never changes an answer
-`transliterate_ja` already gives. There is no `_into` variant.
+**Reach for it by default on input whose spelling you do not control**, and for
+`transliterate_ja` when you know the text is already NFC.
 
-### `Phase::apply` and `Phase::apply_into`
+The extra re-spelling it does before `nfkc` is not cosmetic. The **spacing**
+voiced sound marks U+309B `゛` and U+309C `゜` — the legacy Shift-JIS spelling —
+carry the compatibility mappings `<compat> 0020 3099` and `<compat> 0020 309A`,
+and that `U+0020` is a starter, so NFKC on its own strands the mark on an
+invented space instead of composing it onto the preceding kana. This function
+re-spells those two scalars as the bare combining marks first, which is the
+standard's own mapping without the space, and is what the halfwidth U+FF9E
+already decomposes to. There is no `_into` variant.
 
-```rust
-use verbora_transliterators::ja::Phase;
+## Inspecting the rewrites
 
-fn main() {
-    // One phase, borrowing when it changed nothing.
-    assert_eq!(Phase::Kana.apply("カタカナ"), "katakana");
-    assert_eq!(Phase::Kana.apply("hello"), "hello");
-    assert_eq!(Phase::CompoundKana.apply("ヴァイオリン"), "vaイオリン");
+<a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a>
+<a class="badge badge-alloc" href="../performance/allocation">ALLOCATION-FREE</a>
 
-    // apply_into appends, and allocates nothing of its own.
-    let mut out = String::new();
-    Phase::Kana.apply_into("カナ", &mut out);
-    Phase::Kana.apply_into("カナ", &mut out);
-    assert_eq!(out, "kanakana");
-}
-```
-
-`Phase::apply_into` is the only genuinely allocation-free writer here: it
-splices rewrites directly into your buffer, and never moves, so a caller buffer
-keeps its capacity across every call. `transliterate_into` cannot do that,
-because the pipeline needs each phase's whole output before the next starts.
-
-<div class="callout callout-warn">
-<strong>Careful.</strong> Running the phases yourself is only equivalent to
-<code>transliterate_ja</code> if you run <strong>all five, in
-<code>Phase::ALL</code> order</strong>. Skipping one or reordering two changes
-ordinary words: see <a href="#the-pipeline">The pipeline</a>. Note also that
-<code>transliterate_ja</code> skips all five outright when the input has no
-<code>0xE3</code> byte, which a hand-rolled loop does not.
-</div>
-
-## Phases and introspection
-
-`Phase`, `Rewrite` and `Rewrites` are the crate's whole type surface, and a
-normal caller needs none of them. `Phase::rewrites` is the single description of
-every phase's behaviour — `Phase::apply`, `transliterate_ja` and
-`transliterate_into` are all built on it, so there is no second copy to drift.
-Per-phase test suites mean a failure says *which* of the five broke, and if a
-result surprises you the rewrites tell you exactly which rule fired, over which
-bytes.
+`Rewrites` and `Rewrite` are the crate's whole type surface, and a normal caller
+needs neither. `Rewrites` is the crate's single implementation of what
+romanization *is* — `transliterate_ja`, `transliterate_ja_into` and
+`transliterate_ja_normalized` are all built on it, so there is one description
+of the behaviour and no second copy to drift. Reach for it when you need the
+byte ranges rather than the text: highlighting, alignment, counting morae, or
+stopping early.
 
 ```rust  ignore
 pub struct Rewrite<'a> {
     pub start: usize,        // byte offset where the replaced text begins
     pub end: usize,          // byte offset one past the end
     pub from: &'a str,       // the slice being replaced — &text[start..end]
-    pub to: &'static str,    // the text written in its place
+    pub to: &'static str,    // the text written in its place, possibly empty
 }
 ```
 
 Byte offsets, not character indices, because that is what splicing needs. `to`
-is `&'static str` because every replacement comes from a static table — which
-is why yielding rewrites allocates nothing at all.
-
-<a class="badge badge-lazy" href="../performance/iterator-vs-into">LAZY</a>
-<a class="badge badge-alloc" href="../performance/allocation">ALLOCATION-FREE</a>
+is `&'static str` because every reading comes from a static table — which is why
+yielding rewrites allocates nothing at all.
 
 ```rust
-use verbora_transliterators::ja::Phase;
+use verbora_transliterators::Rewrites;
 
 fn main() {
-    // What the kana table would do, without doing it.
-    let hits: Vec<_> = Phase::Kana.rewrites("カナ").collect();
-    assert_eq!((hits[0].start, hits[0].end, hits[0].from, hits[0].to), (0, 3, "カ", "ka"));
+    // What the scan would do, without doing it.
+    let hits: Vec<_> = Rewrites::new("かんぱい")
+        .map(|r| (r.start, r.end, r.from, r.to))
+        .collect();
+    assert_eq!(
+        hits,
+        [(0, 3, "か", "ka"), (3, 6, "ん", "m"), (6, 9, "ぱ", "pa"), (9, 12, "い", "i")]
+    );
 
-    // The lookahead phase consumes ONLY its source character: the character
-    // that triggered the rule stays in the output and is re-examined next step.
-    let hits: Vec<_> = Phase::SokuonAndN.rewrites("ッカ").collect();
-    assert_eq!((hits[0].from, hits[0].to), ("ッ", "k"));
+    // One mora can span two scalars, and the rewrite reports its whole extent.
+    let hits: Vec<_> = Rewrites::new("とうきょう").map(|r| (r.from, r.to)).collect();
+    assert_eq!(hits, [("とう", "tō"), ("きょう", "kyō")]);
 
-    // Counting matches allocates nothing — no output string is ever built,
-    // and the whole-input gate makes the iterator empty without scanning.
-    assert_eq!(Phase::Kana.rewrites("カタカナ").count(), 4);
-    assert_eq!(Phase::Kana.rewrites("abc").size_hint(), (0, Some(0)));
+    // Counting allocates nothing — no output string is ever built, and the
+    // whole-input gate makes the iterator empty without scanning.
+    assert_eq!(Rewrites::new("カタカナ").count(), 4);
+    assert_eq!(Rewrites::new("abc").size_hint(), (0, Some(0)));
 }
 ```
 
-`size_hint` is `(0, Some(remaining bytes))`: every match consumes at least one
-byte, and nothing is guaranteed to match. `Rewrites` is `Clone` and `Debug`,
-and is **not** declared `FusedIterator`, though it does keep returning `None`
-once the scan is finished. `Phase` is a plain `Copy` enum with `Debug`,
-`PartialEq`, `Eq`, `Hash`, `PartialOrd` and `Ord`, plus `Phase::ALL` in
-pipeline order.
+A mora that romanizes to nothing is reported as a rewrite **to `""`** rather
+than skipped, so the stream describes the whole transformation and not merely
+its visible half:
+
+```rust
+use verbora_transliterators::Rewrites;
+
+fn main() {
+    let hits: Vec<_> = Rewrites::new("ざっし").map(|r| (r.from, r.to)).collect();
+    assert_eq!(hits, [("ざ", "za"), ("っ", "s"), ("し", "shi")]);
+}
+```
+
+`size_hint` is `(0, Some(remaining bytes))`: every rewrite consumes at least one
+byte, and nothing is guaranteed to match. `Rewrites` is `Clone` and `Debug`, and
+is **not** declared `FusedIterator`, though it does keep returning `None` once
+the scan is finished. `Rewrite` is `Copy`, `PartialEq` and `Eq`.
 
 ## Performance characteristics
 
-Every phase is **O(n) in the input length** with a small constant. No
-backtracking, no regex engine, no automaton, no runtime construction step. The
-crate's only dependency is `verbora-normalizers`, and only for
-`transliterate_normalized`.
+The scan is **O(n) in the input length** with a small constant. One left-to-right
+pass, no backtracking, no regex engine, no automaton, no runtime construction
+step. The crate's only dependency is `verbora-normalizers`, and only for
+`transliterate_ja_normalized`.
 
 | Stage | Cost per character when nothing matches |
 |---|---|
-| Whole input, once | One vectorised `slice::contains(&0xE3)`. A document with no such byte skips all five phases |
-| Table phases (1, 3, 4) | One shift and one bitmap test against `codepoint >> 8`, then — only for a character that genuinely begins a key — a second bitmap test on the low byte. All keys are BMP, so astral characters are rejected by the first test |
-| Lookahead phase (2) | One binary search over four source characters |
-| Final sokuon (5) | One `contains` over two characters, then one byte test for the ASCII word class |
+| Whole input, once | One vectorised `slice::contains(&0xE3)`. A document with no such byte skips the scan entirely |
+| The index | One subtraction and one bounds test against `codepoint - 0x3041`, which is a direct slot index rather than a search. All kana are BMP, so astral characters fail the bounds test |
+| A two-scalar mora | A short scan of the slot's own range in the 142-entry two-scalar table, entered only for a character that genuinely begins one |
+| The three marks | Resolved from the neighbouring mora's first letter, which is one more index lookup |
 
-The two-level gate is why the table phases are cheap on realistic text: for the
-compound table, four characters out of 191 reach the key tables at all. Where a
-character *does* begin a key, "longest match here" is decided by the current
-character and at most the next two, since no key is longer than three `char`s.
+The index is 191 slots — one per code point in U+3041..=U+30FF — plus 142
+two-scalar morae. Because a slot is reached by subtraction rather than by
+search, the cost of the lookup does not vary with how much of the syllabary a
+document uses.
 
-Measured with `cargo bench -p verbora-transliterators`:
+<div class="callout callout-warn">
+<strong>No current figure is published for this crate.</strong> The four cases
+below were measured against a five-phase pipeline that no longer exists — this
+crate now makes a single left-to-right pass over a generated mora index — so
+they describe code that is not running and none may be quoted. They stay
+visible only so the next run has something to diff against. Refreshing them is
+one command: <code>cargo bench -p verbora-transliterators</code>.
+</div>
 
-| Case | Cost |
+| Case | Cost † |
 |---|---|
 | Rejection path, Latin prose | under 100 ns |
 | ~20 KB all-kana document | ~81 µs |
 | 4 × ~23.5 KB documents, `par_transliterate_ja_batch` | ~4× the sequential loop |
 | 32–256 × ~23.5 KB documents | 6–10× |
 
+† Pending re-measurement, and left as recorded rather than replaced with a guess.
+
 Benchmarks live in `crates/verbora-transliterators/benches/transliterators.rs`,
-split into rejection cost, work cost, per-phase cost, the
-buffered-vs-fresh-allocation comparison, and the parallel batch group. See
+split into rejection cost, work cost, the buffered-vs-fresh-allocation
+comparison, and the parallel batch group. See
 [Benchmarks](../benchmarks/index.md).
 
 ## Allocation behaviour
 
 <a class="badge badge-alloc" href="../performance/allocation">ALLOCATION-FREE</a>
 
-| Call | Input with no kana | Input the pipeline changes |
+| Call | Input with no kana | Input the scan changes |
 |---|---|---|
-| `transliterate_ja` | **Zero allocations**, `Cow::Borrowed`, after one byte scan | One `String` per phase that rewrites something — at most five, typically one or two. Each is `String::with_capacity(that phase's input length)` |
-| `ja::transliterate_into` | One `push_str` into `out`; `out` grows if it must | The above, then a move into `out` only on its very first call from a never-allocated `String::new()`; every other call copies with `push_str` |
-| `ja::transliterate_normalized` | **Zero**, borrowed through both halves | `normalize_ja`'s allocations, then the pipeline's |
-| `Phase::apply` | **Zero**, `Cow::Borrowed` | Exactly one `String` |
-| `Phase::apply_into` | One `push_str` into `out` | **None of its own** |
-| `Phase::rewrites` | **Zero** | **Zero** — the iterator yields offsets and `&'static str` |
+| `transliterate_ja` | **Zero allocations**, `Cow::Borrowed`, after one byte scan | Exactly one `String`, allocated at the first rewrite |
+| `transliterate_ja_into` | One `push_str` into `out`; `out` grows if it must | **None of its own** — it splices straight into `out` |
+| `transliterate_ja_normalized` | **Zero**, borrowed through both halves | the width fold's allocations, then the scan's |
+| `Rewrites::new` | **Zero** | **Zero** — the iterator yields offsets and `&'static str` |
 
-**No phase buffer ever regrows.** Every replacement in every table is no longer
-in bytes than the text it replaces — three-byte kana become one to three ASCII
-bytes, `キョウ` (nine bytes) becomes `kyō` (four) — so
-`String::with_capacity(text.len())` is always enough.
-
-**The pipeline's intermediates are unavoidable.** Five phases, each needing the
-previous phase's complete output, means a fully-rewritten string can pay for up
-to five buffers. A phase that changes nothing hands the previous buffer forward
-untouched rather than copying it, so the count is "phases that fired", not
-"phases".
+Unmatched runs between rewrites are copied in bulk rather than character by
+character, and the output buffer is allocated at the first rewrite rather than
+up front, so a document that turns out to contain no kana after passing the gate
+still allocates nothing.
 
 See [Allocation](../performance/allocation.md),
 [Zero-copy](../performance/zero-copy.md) and
@@ -438,57 +492,40 @@ See [Allocation](../performance/allocation.md),
 
 <div class="callout callout-note">
 <strong>No UTF-16 semantics here.</strong> Unlike much of Verbora, every
-pattern in this crate matches whole characters and the only zero-width
-assertion is a word boundary, so a surrogate pair can never be split — the
-tests assert that on every output rather than assuming it.
+decision in this crate is made on whole characters, so a surrogate pair can
+never be split — the tests assert that on every output rather than assuming it.
 </div>
 
-**The tables have deliberate holes.** `ジ` is excluded from the `ッ` → `z`
-class and gets its own `j` rule; `フ` is excluded from `ッ` → `h` and gets `f`.
-Writing out "the whole ざ row" would break real words:
+**The sokuon classes have deliberate holes.** `ジ` is excluded from the `ッ` →
+`z` class and gets its own `j`; `フ` is excluded from `ッ` → `h` and gets `f`.
+That falls out of applying the rule to the romanization rather than to the kana,
+and writing out "the whole ざ row" instead would break real words:
 
 ```rust
 use verbora_transliterators::transliterate_ja;
 fn main() {
-    assert_eq!(transliterate_ja("ざっし"), "zasshi");   // し is in the s class
-    assert_eq!(transliterate_ja("ジャッジ"), "jajji");   // ジ is NOT in the z class
-    assert_eq!(transliterate_ja("バッファ"), "baffa");   // フ is NOT in the h class
+    assert_eq!(transliterate_ja("ざっし"), "zasshi");   // し is shi
+    assert_eq!(transliterate_ja("ジャッジ"), "jajji");   // ジ is ji, not zi
+    assert_eq!(transliterate_ja("バッファ"), "baffa");   // フ is fu, not hu
 }
 ```
 
-**`ン` has two faces.** Before a labial (the `ば`, `ぱ` and `ま` rows) it is
-`m` (`かんぱい` → `kampai`, `しんぶん` → `shimbun`); before a vowel or a
-`y`-row kana it is `n'` (`ほんや` → `hon'ya`); everywhere else the kana table's
-plain `n` applies (`まんと` → `manto`).
+**Twelve scalar values in the Hiragana and Katakana blocks are deliberately not
+romanized**, and a test pins the list exactly: U+3040, U+3097 and U+3098
+(unassigned); U+3099 and U+309A (the combining voiced and semi-voiced sound
+marks) and U+309B and U+309C (their spacing forms), which are diacritics rather
+than morae and which `transliterate_ja_normalized` composes; U+309D, U+309E,
+U+30FD and U+30FE (iteration marks); and U+30A0 `゠` KATAKANA-HIRAGANA DOUBLE
+HYPHEN, which is punctuation.
 
-**The final small-tsu pass uses an ASCII-only word boundary.** `\w` is
-`[A-Za-z0-9_]` with no Unicode semantics, so the boundary holds exactly when
-the next code unit is absent or is itself non-word:
-
-```rust
-use verbora_transliterators::transliterate_ja;
-fn main() {
-    assert_eq!(transliterate_ja("ッ漢"), "t漢");   // boundary: 漢 is a non-word character
-    assert_eq!(transliterate_ja("ッ"), "t");
-    assert_eq!(transliterate_ja("ッ."), "t.");
-    assert_eq!(transliterate_ja("ッA"), "ッA");   // no boundary: the tsu SURVIVES
-    assert_eq!(transliterate_ja("ッ1"), "ッ1");
-}
-```
-
-**The long-vowel table is lowercase-only.** Only lowercase `a i u e o`
-participate, so `aー` becomes `ā` while `Aー` is left exactly as it is —
-case-folding the input first would silently produce `Ā`.
-
-**`・` KATAKANA MIDDLE DOT becomes an ASCII space.** It is the module's one
-non-kana key, and only the katakana half of the table has it:
+**`・` KATAKANA MIDDLE DOT becomes an ASCII space.** It is the syllabary's one
+non-kana entry and the one decision the standards do not cover:
 `transliterate_ja("ボージョレー・ヌーヴォー")` is `"bōjorē nūvō"`.
 
 **What passes through untouched.** Halfwidth katakana, kanji, iteration marks
 (`々`), Latin text, digits, punctuation, every non-Japanese script and every
-astral character. A bare `ー` with no vowel in front of it is left alone too,
-and so is the ideographic full stop `。` (U+3002) — inside the gated block, but
-no table has a key for it.
+astral character — including the ideographic full stop `。` (U+3002), which is
+inside the gated block but is not a mora.
 
 ```rust
 use verbora_transliterators::transliterate_ja;
@@ -500,44 +537,42 @@ fn main() {
 
 ## Common mistakes
 
-**Assuming `transliterate_into` clears its buffer.** It appends:
+**Assuming `transliterate_ja_into` clears its buffer.** It appends:
 
 ```rust
-use verbora_transliterators::transliterate_into;
+use verbora_transliterators::transliterate_ja_into;
 fn main() {
     let mut buf = String::from("already here: ");
-    transliterate_into("カナ", &mut buf);
+    transliterate_ja_into("カナ", &mut buf);
     assert_eq!(buf, "already here: kana");   // not "kana"
 }
 ```
 
-**Feeding it halfwidth katakana.** `ｱｲｳｴｵ` comes back unchanged and nothing
-warns you. Use `ja::transliterate_normalized`, or run
-[`normalize_ja`](./normalizers.md) yourself first.
+**Feeding it halfwidth or decomposed kana.** `ｱｲｳｴｵ` comes back unchanged and
+nothing warns you. Use `transliterate_ja_normalized`, or run
+[`nfkc`](./normalizers.md) yourself first.
 
-**Expecting `ッ` before a Latin letter to become `t`.** `ッA` stays `ッA`
-because the ASCII-only word-boundary rule finds no boundary before an ASCII
-word character. It looks like a bug; it is intentional.
+**Expecting a lone `ッ` or `ー` to survive.** Both are modifiers, and a modifier
+with nothing to modify romanizes as the empty string — `transliterate_ja("ッ")`
+is `""`, not `"t"`.
 
-**Running the phases yourself in the wrong order.** `Phase::ALL` is the order,
-and reordering it is observable on ordinary words — `カァ` is `kā` in order and
-`kaa` with `LongVowels` moved before `Kana`; `ハイジャッンプ` is `haijanmpu` in
-order and `haijaッnpu` with `Kana` moved before `SokuonAndN`.
+**Expecting `えい` or `いい` to carry a macron.** They do not: `せんせい` is
+`sensei` and `おいしい` is `oishii`. The prolonged sound mark is the general
+lengthener, and it is the one that does apply to `i`.
 
 **Calling `.into_owned()` on every result.** On any document without kana that
 allocates and copies a string that was already correct. Hold the `Cow`; it
 derefs to `&str`.
 
-**Expecting the romaji to be reversible, or phonetically correct.** `ā` has
-three possible sources, so there is no inverse; and `こんにちは` is
-`konnichiha`, because nothing here knows that `は` is a particle pronounced
-`wa`.
+**Expecting the romaji to be reversible, or phonetically correct.** `ā` has more
+than one source, so there is no inverse; and `こんにちは` is `konnichiha`,
+because nothing here knows that `は` is a particle pronounced `wa`.
 
 ## Related
 
-- [Normalizers](./normalizers.md) — `normalize_ja`, which you almost always
+- [Normalizers](./normalizers.md) — `nfkc`, which you almost always
   want in front of this
-- [Tokenizers](./tokenizers.md) — `TokenizerJa`, for splitting Japanese text
+- [Tokenizers](./tokenizers.md) — what UAX #29 does with Japanese text
 - [Zero-copy](../performance/zero-copy.md),
   [Allocation](../performance/allocation.md),
   [Buffer reuse](../performance/buffer-reuse.md) and
@@ -548,32 +583,16 @@ three possible sources, so there is no inverse; and `こんにちは` is
 
 ## API reference
 
+The crate root is the entire public surface; the modules behind it are private.
+
 ```rust  ignore
-// verbora_transliterators — the crate root re-exports
-pub use ja::par_transliterate_ja_batch;                        // requires feature = "parallel"
-pub use ja::{Phase, Rewrite, Rewrites, transliterate as transliterate_ja, transliterate_into};
+// verbora_transliterators
+pub fn transliterate_ja(text: &str) -> Cow<'_, str>;             // #[must_use]
+pub fn transliterate_ja_into(text: &str, out: &mut String);      // APPENDS to out
+pub fn transliterate_ja_normalized(text: &str) -> Cow<'_, str>;  // #[must_use]
 
-// verbora_transliterators::ja
-pub fn transliterate(text: &str) -> Cow<'_, str>;              // #[must_use]
 #[cfg(feature = "parallel")]
-pub fn par_transliterate_ja_batch(inputs: &[&str]) -> Vec<Cow<'_, str>>; // #[must_use]
-pub fn transliterate_into(text: &str, out: &mut String);       // APPENDS to out
-pub fn transliterate_normalized(text: &str) -> Cow<'_, str>;   // #[must_use]; not re-exported at the root
-
-pub enum Phase {
-    CompoundKana,
-    SokuonAndN,
-    Kana,
-    LongVowels,
-    FinalSokuon,
-}
-
-impl Phase {
-    pub const ALL: [Self; 5];                                  // pipeline order
-    pub fn rewrites(self, text: &str) -> Rewrites<'_>;         // #[must_use]; lazy
-    pub fn apply(self, text: &str) -> Cow<'_, str>;            // #[must_use]
-    pub fn apply_into(self, text: &str, out: &mut String);     // APPENDS to out
-}
+pub fn par_transliterate_ja_batch<'a>(inputs: &[&'a str]) -> Vec<Cow<'a, str>>; // #[must_use]
 
 pub struct Rewrite<'a> {
     pub start: usize,
@@ -583,16 +602,15 @@ pub struct Rewrite<'a> {
 }
 
 pub struct Rewrites<'a> { /* private */ }
+impl<'a> Rewrites<'a> {
+    pub fn new(text: &'a str) -> Self;                           // #[must_use]
+}
 
 // Trait implementations
-impl Debug + Clone + Copy + PartialEq + Eq + Hash + PartialOrd + Ord for Phase;
 impl Debug + Clone + Copy + PartialEq + Eq for Rewrite<'_>;
 impl Debug + Clone for Rewrites<'_>;
 impl<'a> Iterator for Rewrites<'a>;   // Item = Rewrite<'a>; not declared FusedIterator
 ```
 
 No errors, no panics, no configuration, no builder, no trait to implement, and
-no batch or parallel API outside `ja::par_transliterate_ja_batch`.
-`transliterate_normalized` lives at
-`verbora_transliterators::ja::transliterate_normalized` only — it is the one
-public item the crate root does not re-export.
+no batch or parallel API outside `par_transliterate_ja_batch`.

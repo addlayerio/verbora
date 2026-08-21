@@ -2,22 +2,30 @@
 
 `verbora-util` collects the shared utility APIs that are useful outside a
 single NLP pipeline: stop words, abbreviation tables, edge-weighted directed
-graphs, path trees, topological ordering, and pluggable storage backends.
+graphs, topological ordering, and shortest- and longest-path trees.
 
 ## Graph example
 
 ```rust
-use verbora_util::{EdgeWeightedDigraph, ShortestPathTree, Topological, Vertex};
+use verbora_util::{EdgeWeightedDigraph, ShortestPathTree, Topological};
 
 fn main() {
-    let mut graph = EdgeWeightedDigraph::new();
-    graph.add(5, 4, 0.35);
-    graph.add(4, 7, 0.37);
-    graph.add(5, 7, 0.28);
+    let mut graph: EdgeWeightedDigraph<&str> = EdgeWeightedDigraph::new();
+    graph.add(&"fetch", &"build", 2.0).unwrap();
+    graph.add(&"build", &"test", 5.0).unwrap();
+    graph.add(&"fetch", &"test", 9.0).unwrap();
 
-    assert_eq!(Topological::new(&graph).unwrap().order().len(), 3);
-    let paths = ShortestPathTree::new(&graph, 5).unwrap();
-    assert_eq!(paths.dist_to(&Vertex::from(7)), Some(0.28));
+    assert_eq!(
+        Topological::new(&graph).unwrap().labels().copied().collect::<Vec<_>>(),
+        ["fetch", "build", "test"]
+    );
+
+    let tree = ShortestPathTree::new(&graph, &"fetch").unwrap();
+    assert_eq!(tree.distance_of(&"test"), Some(7.0));
+    assert_eq!(
+        tree.path_labels_of(&"test"),
+        Some(vec![&"fetch", &"build", &"test"])
+    );
 }
 ```
 
@@ -25,16 +33,55 @@ fn main() {
 
 | Need | API |
 |---|---|
-| English or language-specific stop words | `stopwords` and `Language` |
-| English or Spanish abbreviations | `ABBREVIATIONS_EN`, `ABBREVIATIONS_ES` |
-| Weighted directed graph | `EdgeWeightedDigraph`, `DirectedEdge` |
+| English or language-specific stop words | `Language`, `StopWords` |
+| English or Spanish abbreviations | `AbbreviationLanguage`, `ABBREVIATIONS_EN`, `ABBREVIATIONS_ES` |
+| Weighted directed graph | `EdgeWeightedDigraph`, `DirectedEdge`, `VertexId` |
 | DAG ordering | `Topological` |
 | Shortest or longest paths | `ShortestPathTree`, `LongestPathTree` |
-| Replaceable persistence | `StorageBackend`, `StoragePlugin`, `FileBackend` |
 
-Graph vertices preserve both numeric and string identity where the public
-contract distinguishes them. Stored path distances are rounded to two decimal
-places using the crate's documented formatting semantics.
+## The vertex model
 
-For exact signatures and storage lifecycle behavior, use the
-[Rust API reference](../reference/api.md).
+A vertex is whatever label you name it by — `&str`, `String`, `u32`, any
+`Eq + Hash + Clone` type. `add` mints a `VertexId` for a label the first time it
+sees one and reuses it afterwards, so identity is the label's own equality and
+nothing else: `5` and `"5"` are different vertices because they are different
+values, not because the graph applies a rule of its own. Every result comes back
+addressable both ways — `distance` / `path` take a `VertexId`, `distance_of` /
+`path_of` / `path_labels_of` take a label.
+
+## What the numbers mean
+
+- **Nothing is rounded.** A distance is the exact `f64` sum of the weights along
+  the path the tree reports.
+- **Absence is `None`.** There is no unreachable-distance sentinel, no `-1`
+  index and no magic `f64::MAX`.
+- **No `NaN` and no infinities escape.** `add` refuses a non-finite weight with
+  `GraphError::NonFiniteWeight`, and a path total that would leave the finite
+  range fails the build with `PathError::Overflow` naming the vertex. Nothing
+  this crate returns can poison a comparison or a sort.
+- **A graph refuses to overflow its own indices, rather than silently
+  truncating one.** Vertex ids and edge indices are both stored as `u32`;
+  `add` returns `GraphError::VertexLimit` before minting a vertex beyond
+  `u32::MAX`, and `GraphError::EdgeLimit` before indexing an edge beyond
+  `u32::MAX + 1`, instead of wrapping an index and pointing adjacency at the
+  wrong edge.
+- **Building a tree over a cyclic graph is an error**, not a partial answer:
+  `PathError::Cyclic` carries the `Cycle` that was found.
+- **Ties keep the edge added first.** When two paths to a vertex cost exactly
+  the same, `ShortestPathTree` and `LongestPathTree` both arrive by whichever
+  tying edge has the lower index in `EdgeWeightedDigraph::edges` — a property
+  of the graph itself, fixed at construction, not of the order relaxation
+  happens to visit vertices in. The same rule applies at every vertex along a
+  path, so a tie in the middle of a route is pinned exactly as one at its end
+  is.
+
+## Abbreviations and stop words
+
+Both are data, and both are compared as Unicode scalar sequences with no case
+folding, no normalisation and no trimming. `AbbreviationLanguage::contains` is
+an exact-membership test over the list; it is deliberately *not* the suffix rule
+`verbora-tokenizers`' sentence tokenizer applies when it consumes these lists.
+The stop-word tables are re-exported from `verbora-core`, which owns them, so
+the list has exactly one home.
+
+For exact signatures, see the [Rust API reference](../reference/api.md).

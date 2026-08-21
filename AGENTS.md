@@ -1639,9 +1639,10 @@ Concretely, permanently:
   execution environment.
 - A type is not made `Send`/`Sync` with `unsafe impl` to satisfy Rayon. If a
   type genuinely cannot be shared safely across threads (interior mutability
-  that is load-bearing, not incidental — see `MaxEntClassifier`'s
-  `Rc<RefCell<_>>` state or `PorterStemmerNl`'s sticky `Cell<bool>` flag),
-  it stays sequential-only, documented as to why, rather than forced.
+  that is load-bearing, not incidental — see `PorterStemmerNl`'s sticky
+  `Cell<bool>` flag, which makes it `!Sync` and is why it has no
+  `par_tokenize_and_stem_batch`), it stays sequential-only, documented as to
+  why, rather than forced.
 
 ---
 
@@ -2222,8 +2223,10 @@ alternative not yet built for lack of that evidence at the time.
   not accept a caller-supplied cost `Options` (same reasoning as
   `FuzzyIndex`), and does not index anything but a flat word list.
   `max_distance` is fixed at construction and any query asking for more is
-  silently capped, never silently over-promised — a real, disclosed
-  structural ceiling, not a soft default a caller could reasonably miss.
+  **rejected** with `Err(DistanceBeyondIndex)` carrying the requested value
+  and the ceiling — never capped and never silently over-promised. A real,
+  disclosed structural ceiling, not a soft default a caller could reasonably
+  miss.
 - **Benchmark-justified like everything else, including the unfavourable
   number.** `DeletionIndex` is **13×–25× slower to build** than `FuzzyIndex`
   at every size measured, and **loses the query benchmark at the smallest
@@ -2231,19 +2234,32 @@ alternative not yet built for lack of that evidence at the time.
   edited out. It wins query speed from 1,000 words up, by a margin widening
   to 54.3× at 20,000 — the same shape `fast_symspell` itself showed against
   `FuzzyIndex`, which is the real evidence that justified building this at
-  all. See `docs/PERFORMANCE_MATRIX.md`'s own entry for the full numbers.
+  all. ⚠ Those ratios are **retired, pending re-measurement**: the map is now
+  keyed on a hash of each deletion sequence rather than on the sequence, which
+  changes both the build and the query path. The structural finding — dearer
+  construction bought against a query cost that grows far more slowly with
+  corpus size — follows from the design and survives. See
+  `docs/PERFORMANCE_MATRIX.md`'s own entry for the full numbers and the same
+  caveat.
 - **Same architectural rules, no separate track.** Build → Freeze → Query:
   `DeletionIndexBuilder` accumulates inserts, `.build()` freezes into an
   immutable `DeletionIndex` with no interior mutability. A real correctness
   bug was found and fixed *during* implementation, before any benchmark
-  number was trusted, not after: deletion generation initially operated on
-  `char`s, which silently mismatches
-  [`verbora_distance::levenshtein`]'s own UTF-16-code-unit granularity for
-  astral (non-BMP) input — the exact class of bug this crate's own
-  `edits.rs`/`units.rs` already documents for `Spellcheck`'s edit generator.
-  Fixed to operate on `Vec<u16>` throughout, with a dedicated
-  astral-character-heavy correctness test added specifically because the
+  number was trusted, not after: deletion generation and the distance metric
+  that verifies its candidates disagreed about what a unit of text is, which
+  changes the answer for astral (non-BMP) input. Both now count **Unicode
+  scalar values** — `to_scalars` collects `Vec<char>`, and
+  `verbora_distance::damerau_levenshtein` counts the same unit — so the two
+  cannot disagree. There is no `u16` anywhere in the crate. An
+  astral-character-heavy correctness test was added specifically because the
   shared ASCII-only benchmark corpus can never exercise this risk class.
+
+  The map that holds the deletion neighbourhood is keyed on a 64-bit hash of
+  each deletion sequence rather than on the sequence, which bounds the index
+  at quadratic in a word's length instead of cubic. Hashing is sound here
+  because a shared deletion sequence was never treated as a match: every
+  candidate has its exact distance computed before it is returned, so a
+  collision is one more candidate of the kind that check already rejects.
   Independently re-verified by a second, adversarial audit agent with no
   visibility into the implementation's own design reasoning — the same
   "independent audit of a major feature" pattern already applied to

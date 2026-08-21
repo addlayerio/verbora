@@ -8,7 +8,8 @@ must be checked.
 **Do not hand-wave this file.** Every ✅ below traces to a real command run
 during the Fase 2 audit (two orchestrated workflows: a per-module
 audit-and-fix pass, then a Rayon rollout pass), not to intuition. See
-`docs/PERFORMANCE.md` for the cross-language benchmark methodology and
+`site/benchmarks/competitive.md`'s own methodology section for the current
+benchmark methodology and
 `AGENTS.md`'s `# Rayon Policy` / `# Data Structures` / `# Build → Freeze →
 Query` / `# Archived Data and Memory Mapping` sections for the permanent
 rules this audit established.
@@ -32,7 +33,7 @@ notes) · ➖ not applicable, with reason.
 | `verbora-spellcheck` | — | ✅ | ➖ | ✅ | ✅ `par_get_corrections_batch` — **strongest candidate found**, ms-scale per call | ✅ | ✅ | ➖ dictionary is caller-supplied at runtime, no bundled dataset | ✅ | ✅ |
 | `verbora-tagger` | — | ✅ zero-parse `include_bytes!` lexicon | ➖ | ✅ | ✅ `par_tag_batch` | ⚠️ one `TransformationRule::apply` clone deferred (would need a lifetime-parameter refactor through the PEG parser; cheap in absolute terms) | ✅ | ✅ already the **reference example** for Build→Freeze→Query — `build.rs` measured and rejected a runtime-parse alternative (+4.6 MB/+55 ms vs. ~0 ms chosen) | ✅ | ✅ |
 | `verbora-tfidf` | ✅ | ✅ term interning, borrowed `RawDocument` index | ✅ incremental idf cache | ✅ | ✅ `par_add_documents_batch` — narrower scope than its siblings (`DocumentInput::Text` + `restore_cache: false` only), see its own doc comment for why a naive per-document or map-reduce design was rejected | ✅ | ✅ `Interner`, `FxHashMap` | ⚠️ flagged — `to_json`/`from_json` restore cost (33 ms for a 3.7 MB/64-doc corpus) is real, but a second on-disk format wasn't attempted this pass | ✅ | ✅ |
-| `verbora-classifiers` | — | ✅ | ➖ | ✅ | ✅ `par_classify_batch` on `Classifier<E>`, after fixing the `Rc<dyn Stemmer>`→`Arc<dyn Stemmer + Send + Sync>` prerequisite; `MaxEntClassifier` correctly excluded (`Rc<RefCell<_>>` state is load-bearing) | ✅ `FxHashMap`/`FxHashSet` swapped into `JsMap`/`features_for`; a `js_order()` caching opportunity deferred (more invasive, needs invalidation-on-mutate design) | ✅ | ➖ | ✅ | ✅ |
+| `verbora-classifiers` | — | ✅ | ➖ | ✅ | ✅ `par_classify_batch` on `Classifier<E>`, after fixing the `Rc<dyn Stemmer>`→`Arc<dyn Stemmer + Send + Sync>` prerequisite; `MaxEntClassifier` excluded — it is `Send + Sync` with no interior mutability, but this workspace ships no `par_*` API without sequential-vs-parallel benchmark evidence, and there is none yet for this model | ✅ `FxHashMap`/`FxHashSet` swapped into `JsMap`/`features_for`; the `js_order()` memo this row once flagged as a deferred caching opportunity was later deleted outright — `OrderedMap` now enumerates in insertion order, so `slot_of` is a direct hash lookup with nothing left to invalidate or cache | ✅ | ➖ | ✅ | ✅ |
 | `verbora-analyzers` | — | ✅ | ➖ | ✅ | ✅ `par_analyze_batch` (composes existing per-sentence calls, no single wrappable primitive existed) | ✅ | ✅ | ➖ | ✅ | ✅ |
 | `verbora-transliterators` | ✅ | ✅ | ✅ `transliterate_into` | ✅ | ✅ `par_transliterate_batch` | ✅ | ✅ | ➖ | ✅ | ✅ |
 | `verbora-util` | — | ✅ `Rc<str>` sharing in `JsSparse` | ➖ | ➖ single shared graph per call, no independent-item batch shape exists | ➖ evaluated and rejected for the reason above | ✅ `FxHashMap` swapped into `JsSparse::named_pos` | ✅ dense `Vec` + `BTreeMap` spill, documented in `sparse.rs` | ⚠️ flagged only, hypothetical (large fixed dictionaries), not this crate's own use case | ✅ | ✅ |
@@ -375,9 +376,13 @@ query speed by a margin that widens with corpus size (2.15×–66.7×).
 exact recommendation `docs/COMPETITIVE_BENCHMARKS.md` §1.17's Architectural
 decision note made. See `crates/verbora-spellcheck/src/deletion_index.rs`'s
 own doc comment for the full algorithm and — importantly — why deletion
-generation operates on UTF-16 code units, not `char`s (a real correctness
-risk for astral/non-BMP input, found and fixed during implementation, not a
-theoretical concern).
+generation counts the same unit the verifier does. That unit is now the
+**Unicode scalar value** (`docs/design/distance-contract.md` §2); it was
+UTF-16 code units when this section was first written, matching what
+`verbora_distance::levenshtein` then counted, and it moved with the
+verifier rather than being left behind. The risk the choice addresses is
+unchanged and real for astral/non-BMP input: a generator coarser than its
+verifier silently under-generates, with nothing failing to compile.
 
 | Aspect | Status | Notes |
 |---|---|---|
@@ -386,8 +391,8 @@ theoretical concern).
 | Reusable memory | ➖ | build-once/freeze/query shape; not an applicable dimension |
 | Batch | ➖ not built this pass | composes with a plain `.map()` over a caller's own query list today |
 | Parallel | ➖ not evaluated this pass | queries are read-only against a shared, immutable `DeletionIndex` and would parallelize trivially if a real batch workload needs it |
-| Alloc reviewed | ✅ by inspection | construction allocates one `Vec<u16>` deletion sequence per (word, depth) combination during build (the real, disclosed combinatorial cost — see the Benchmarked row); queries allocate the same shape, once, then a `Vec<u32>` of deduplicated candidate indices |
-| Data structures reviewed | ✅ | `FxHashMap<Box<[u16]>, Vec<u32>>` (deletion sequence → word indices) plus a flat `Vec<Box<str>>` word list — `rustc-hash`'s `FxHashMap`, already this crate's own choice for short-key hashing (see `Cargo.toml`'s comment on `Spellcheck`'s own edit generator) |
+| Alloc reviewed | ✅ by inspection | build and query both stream their deletion variants through **one reused scratch buffer** (`crate::deletions::for_each_deletion`), so generating the `Θ(n²)` variants of an `n`-scalar word costs `O(n)` live bytes rather than materialising the set; what construction *retains* is one 8-byte key and one `Vec<u32>` of word indices per distinct variant (the real, disclosed combinatorial cost — see the Benchmarked row), and a query additionally allocates one `Vec<u32>` of deduplicated candidate indices. Both bounds are asserted, per allocated byte, in `src/deletions.rs`'s `streaming_holds_one_variant_at_a_time` and `src/deletion_index.rs`'s `an_index_of_one_long_word_stays_quadratic_in_its_length` |
+| Data structures reviewed | ✅ | `FxHashMap<u64, Vec<u32>>` (64-bit hash of the deletion sequence → word indices) plus a flat `Vec<Box<str>>` word list — `rustc-hash`'s `FxHashMap`, already this crate's own choice for short-key hashing (see `Cargo.toml`'s comment on `Spellcheck`'s own edit generator). Keying on the hash rather than on the sequence is a memory bound, not a micro-optimisation: it takes the bytes retained for one `n`-scalar word from `Θ(n³)` to `Θ(n²)`, since an entry's key is 8 bytes instead of one per remaining scalar. It cannot change an answer — a deletion match was never a match, so every candidate was already verified with `verbora_distance::damerau_levenshtein` — which `hashing_the_key_cannot_change_an_answer` checks differentially against a sequence-keyed index |
 | mmap/rkyv reviewed | ➖ | no bundled dataset; built at runtime from a caller-supplied word list |
 | Benchmarked | ✅ | `crates/verbora-spellcheck/benches/deletion_index.rs` — construction and query, `DeletionIndex` vs. `FuzzyIndex` vs. brute-force, at 100/1,000/10,000/20,000 words, `max_distance = 2` |
 | Parity | N/A | not a parity crate; correctness verified directly against a brute-force Levenshtein scan and against `FuzzyIndex` itself (below), not against a reference implementation |
@@ -409,6 +414,26 @@ build-time cap.
 own build-time cap and every query, matching `FuzzyIndex`'s own benchmarked
 query distance):
 
+⚠ **Every `DeletionIndex` column below is retired, pending re-measurement.**
+The structure's map is now keyed on a 64-bit hash of each deletion sequence
+rather than on the sequence itself, which changes both timed paths: `insert`
+no longer allocates and copies a key per deletion variant, and `neighbors`
+hashes each query variant to probe instead of building a sequence to look up.
+That is a change of cost *class*, not a constant factor: indexing one
+`n`-scalar word was cubic in `n` (an entry per deletion sequence, each storing
+`n - 2` scalars) and is now quadratic (an entry per deletion sequence, each
+storing 8 bytes). The figures were taken against the sequence-keyed map and do
+not stand for the code that runs; the direction of the change must not be
+inferred either, in speed — the memory direction *is* known and is a large
+improvement, for exactly that reason. The
+`FuzzyIndex` and brute-force columns are unaffected. Retained for provenance
+and so the re-run has something to diff against; do not cite.
+
+The two *structural* findings this entry rests on survive independently of any
+timing, because they follow from the designs: precomputing deletions costs more
+at construction than building a BK-tree, and buys a query cost that grows far
+more slowly with corpus size.
+
 | Words | Construction: `DeletionIndex` | Construction: `FuzzyIndex` | Query: `DeletionIndex` | Query: `FuzzyIndex` | Query: brute force |
 |---:|---:|---:|---:|---:|---:|
 | 100 | 977.6 µs | 38.7 µs | 1.018 ms | 589.9 µs | 1.602 ms |
@@ -417,29 +442,42 @@ query distance):
 | 20,000 | 407.0 ms | 26.97 ms | 3.206 ms | 174.1 ms | 610.4 ms |
 
 **A genuine, honest trade-off — not a clean win, reported in full.**
-Construction: `DeletionIndex` is **13×–25× slower to build** than
-`FuzzyIndex` at every size — the real, disclosed cost of precomputing every
-deletion sequence up to `max_distance`, the same shape of cost the
-competitive audit already found `fast_symspell` paying against Verbora's
-own `Spellcheck` (entry 35). Query: a genuine **crossover, not a one-sided
-result** — `FuzzyIndex` is actually **faster at the smallest size**
-(100 words, 1.73×) where the BK-tree stays shallow and a deletion index's
-fixed per-query overhead has not yet paid for itself, but `DeletionIndex`
-**wins from 1,000 words up, by a rapidly widening margin** (4.9× → 35.3× →
-54.3× at 20,000) — near-flat growth with corpus size (3.3× slower query
-time over a 200× larger corpus) against `FuzzyIndex`'s roughly 300× growth
-over the same range, the textbook SymSpell shape and the same widening
-pattern the competitive audit measured for `fast_symspell` itself.
-`DeletionIndex` also beats brute force by a wide and widening margin
+⚠ **Every ratio in this paragraph is retired on exactly the ground the table
+above is retired on — they are that table's own numbers, restated — and none
+may be cited.** The caveat is repeated here rather than left to the table's
+heading because a reader landing on the prose would otherwise read the
+narrative as current, and "columns" does not obviously cover a sentence.
+Retained for provenance, in the same shape the table is: Construction:
+`DeletionIndex` was measured **13×–25× slower to build** than `FuzzyIndex` at
+every size — the real, disclosed cost of precomputing every deletion sequence
+up to `max_distance`, the same shape of cost the competitive audit already
+found `fast_symspell` paying against Verbora's own `Spellcheck` (entry 35).
+Query: a genuine **crossover, not a one-sided result** — `FuzzyIndex` was
+**faster at the smallest size** (100 words, 1.73×) where the BK-tree stays
+shallow and a deletion index's fixed per-query overhead has not yet paid for
+itself, but `DeletionIndex` **won from 1,000 words up, by a rapidly widening
+margin** (4.9× → 35.3× → 54.3× at 20,000) — near-flat growth with corpus size
+(3.3× slower query time over a 200× larger corpus) against `FuzzyIndex`'s
+roughly 300× growth over the same range, the textbook SymSpell shape and the
+same widening pattern the competitive audit measured for `fast_symspell`
+itself. `DeletionIndex` also beat brute force by a wide and widening margin
 throughout (1.6× → 190×), the same "speedup grows with scale" justification
 bar `FuzzyIndex`'s own doc comment already established for itself.
+
+What survives the retirement is the *shape*, not any of the ratios: dearer
+construction, bought against a query cost that grows far more slowly with
+corpus size, and a crossover somewhere small where the BK-tree still wins.
+That follows from the two designs. Where the crossover now sits, and how wide
+either margin now is, are open questions until the re-run.
 
 **Recommendation.** Neither structure replaces the other — `FuzzyIndex`
 stays the right default (query-time `max_distance`, cheap construction,
 wins outright at small corpora); reach for `DeletionIndex` when the
-dictionary is large (≥1,000 words in this measurement), `max_distance` is
-known and fixed ahead of time, and query volume is high enough that the
-steep one-time construction cost is worth paying — exactly the situation
+dictionary is large (the retired measurement put the crossover at ≥1,000
+words; the re-run may move it, and no replacement threshold is stated here
+because none has been measured), `max_distance` is known and fixed ahead of
+time, and query volume is high enough that the steep one-time construction
+cost is worth paying — exactly the situation
 `docs/COMPETITIVE_BENCHMARKS.md` §1.17's Architectural decision note
 identified before this was built.
 

@@ -1,51 +1,57 @@
-//! The Spanish Snowball stemmer, ported from
-//! The reference `porter_stemmer_es`.
+//! The Spanish Snowball stemmer.
 //!
 //! # `stem` does not lowercase
 //!
-//! Line 99 of the reference is `word.toLowerCase()` — a statement whose result is
-//! thrown away. Because `isVowel` carries `/i` while every suffix comparison is
-//! case-sensitive, uppercase input flows through the region machinery and then
-//! matches nothing: `stem("ÁRBOL")` is `"ÁRBOL"`, `stem("Efecto")` is `"Efect"`,
-//! `stem("campa")` is `"camp"`. Adding the "obviously missing" fold changes
-//! results for every caller that reaches `stem` directly rather than through
-//! `tokenizeAndStem` (which folds separately).
+//! The vowel test is case-insensitive while every suffix comparison is
+//! case-sensitive, so uppercase input flows through the region machinery and
+//! then matches nothing: `stem("ÁRBOL")` is `"ÁRBOL"`, `stem("Efecto")` is
+//! `"Efect"`, `stem("campa")` is `"camp"`. Verbora keeps it that way rather
+//! than folding inside `stem`: the fold would change the stem of every
+//! non-lowercase token for callers who reach `stem` directly, and
+//! [`TokenizeAndStem`] already lowercases the document before tokenizing.
 //!
-//! # Two more traps
+//! # One more trap
 //!
-//! `removeAccent` calls `String.prototype.replace` with a **string** pattern, so
-//! it rewrites only the first occurrence of each accented vowel:
-//! `removeAccent("ááéé")` is `"aáeé"`. Rust's `str::replace` replaces all.
-//!
-//! The step-2b verb list contains the entry `"  aseis"` — with two leading
-//! spaces. It is dead as written, and it is preserved verbatim: "fixing" it to
-//! `"aseis"` would start matching real words.
+//! [`PorterStemmerEs::remove_accent`] rewrites only the **first** occurrence of
+//! each accented vowel, not every one: `remove_accent("ááéé")` is `"aáeé"`.
 //!
 //! # How `stem` searches its tables
 //!
-//! The reference walks every table linearly per step; this port routes each
-//! step through one [`crate::among`] binary search instead — the else-if
-//! chain's ten step-1 tables are merged into a single union search whose
-//! substring-link walk recovers each table's own longest region-valid match,
-//! and the chain fires the lowest-priority-id table exactly as the reference's
-//! branch order does. The conversion was measured to remove ~78% of the
-//! per-word cost and was verified byte-exact against the linear-scan
-//! implementation over 500k+ differential cases (the same oracle now lives in
-//! this module's test suite). Region slices become `lb` cursor limits — the
-//! search cannot match past them, which is the same restriction slicing
-//! enforced, without the `.to_vec()` snapshots.
+//! Each step goes through one [`crate::among`] binary search rather than a
+//! linear walk of its table: the else-if chain's ten step-1 tables are merged
+//! into a single union search whose substring-link walk recovers each table's
+//! own longest region-valid match, and the chain then fires the
+//! lowest-priority-id table, which is the branch order of the chain itself.
+//! That is worth ~78% of the per-word cost (`docs/PERFORMANCE_GAPS.md` entry
+//! 34), and it is byte-exact against the linear walk it replaced, which lives
+//! on in this module's tests as a differential oracle. Region slices become
+//! `lb` cursor limits — the search cannot match past them, the same restriction
+//! slicing enforced, without the `.to_vec()` snapshots.
+//!
+//! # The text unit
+//!
+//! Every position here is a **Unicode scalar value**: R1, R2 and RV, the
+//! `length < 2` gate, the `length > 3` guard on RV, the literal `rv = 3`, and
+//! every cut. See [`crate::units`] for why a Snowball algorithm is specified
+//! over *letters* and why the scalar value is the letter. `stem("😀iamos")` is
+//! `"😀iam"`: six letters, so RV starts at 3 and leaves three of them, which
+//! the four-letter `-amos` does not fit.
 
 use std::borrow::Cow;
 use std::sync::LazyLock;
-
-use verbora_tokenizers::classes;
 
 use crate::among::{AmongTable, Buf, UnionTable};
 use crate::base::{Casing, TokenizeAndStem};
 use crate::data::charsets::is_es_vowel;
 use crate::data::gates::gate_es;
-use crate::stopwords::{self, Language};
-use crate::units::{ends_with, longest_suffix, slen, text, units};
+use crate::stopwords::Language;
+use crate::units::{ends_with, longest_suffix, slen, text};
+
+/// The working buffer for a `&str`, in this crate's text unit.
+#[inline]
+fn scalars(s: &str) -> Vec<char> {
+    s.chars().collect()
+}
 
 /// The Spanish Snowball stemmer.
 ///
@@ -59,15 +65,22 @@ use crate::units::{ends_with, longest_suffix, slen, text, units};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PorterStemmerEs;
 
+/// The Spanish vowel class, over a whole character.
+///
+/// [`is_es_vowel`] is stated over Basic Multilingual Plane code points and
+/// nothing in the set reaches `U+00FD`, so anything outside that plane is a
+/// consonant for Spanish's purposes — and was under the code-unit reading too,
+/// where an astral character was scanned as two surrogates, neither of them in
+/// the set either.
 #[inline]
-fn is_vowel(c: u16) -> bool {
-    is_es_vowel(c)
+fn is_vowel(c: char) -> bool {
+    (c as u32) < 0x1_0000 && is_es_vowel(c as u16)
 }
 
-/// `(r1, r2, rv)` for a word of length ≥ 2, exactly as the reference marks
-/// them. Callers must uphold the length precondition (`length - 1` underflows
-/// otherwise); `stem` returns early for shorter input.
-fn mark_regions(w: &[u16]) -> (usize, usize, usize) {
+/// `(r1, r2, rv)` for a word of length ≥ 2, in scalar values. Callers must
+/// uphold the length precondition
+/// (`length - 1` underflows otherwise); `stem` returns early for shorter input.
+fn mark_regions(w: &[char]) -> (usize, usize, usize) {
     let length = w.len();
     let (mut r1, mut r2, mut rv) = (length, length, length);
     for i in 0..length - 1 {
@@ -100,32 +113,32 @@ fn mark_regions(w: &[u16]) -> (usize, usize, usize) {
 
 /// First-occurrence-of-each accent removal, in place.
 ///
-/// A single pass with five "already replaced" flags is equivalent to the
-/// reference's five independent first-occurrence `replace` calls: the five
-/// code points are distinct, so replacing one never creates or destroys an
-/// occurrence of another.
-fn remove_accent_inplace(w: &mut [u16]) {
+/// A single pass with five "already replaced" flags is equivalent to five
+/// independent first-occurrence replacements: the five code points are
+/// distinct, so replacing one never creates or destroys an occurrence of
+/// another.
+fn remove_accent_inplace(w: &mut [char]) {
     let (mut a, mut e, mut i, mut o, mut u) = (false, false, false, false, false);
     for c in w.iter_mut() {
         match *c {
-            0x00E1 if !a => {
-                *c = 0x61;
+            'á' if !a => {
+                *c = 'a';
                 a = true;
             }
-            0x00E9 if !e => {
-                *c = 0x65;
+            'é' if !e => {
+                *c = 'e';
                 e = true;
             }
-            0x00ED if !i => {
-                *c = 0x69;
+            'í' if !i => {
+                *c = 'i';
                 i = true;
             }
-            0x00F3 if !o => {
-                *c = 0x6F;
+            'ó' if !o => {
+                *c = 'o';
                 o = true;
             }
-            0x00FA if !u => {
-                *c = 0x75;
+            'ú' if !u => {
+                *c = 'u';
                 u = true;
             }
             _ => {}
@@ -133,27 +146,27 @@ fn remove_accent_inplace(w: &mut [u16]) {
     }
 }
 
-/// Whether `w` ends in the two units `gu`.
+/// Whether `w` ends in the two characters `gu`.
 #[inline]
-fn ends_gu(w: &[u16]) -> bool {
+fn ends_gu(w: &[char]) -> bool {
     let n = w.len();
-    n >= 2 && w[n - 1] == 0x75 && w[n - 2] == 0x67
+    n >= 2 && w[n - 1] == 'u' && w[n - 2] == 'g'
 }
 
 /// The sorted search tables, built once from the `&'static str` rule tables
 /// below — those stay the single source of truth.
 struct EsTables {
-    pronoun: AmongTable,
+    pronoun: AmongTable<char>,
     /// 0 = [`PRONOUN_PRE1`], 1 = [`PRONOUN_PRE2`].
-    pre: UnionTable,
+    pre: UnionTable<char>,
     /// The ten step-1 tables in chain order; id 6 (`amente`) checks R1, the
     /// rest R2.
-    step1: UnionTable,
-    step2a: AmongTable,
+    step1: UnionTable<char>,
+    step2a: AmongTable<char>,
     /// 0 = [`STEP2B`], 1 = [`STEP2B_EN`].
-    step2b: UnionTable,
+    step2b: UnionTable<char>,
     /// 0 = [`STEP3_A`], 1 = [`STEP3_E`].
-    step3: UnionTable,
+    step3: UnionTable<char>,
 }
 
 static TABLES: LazyLock<EsTables> = LazyLock::new(|| EsTables {
@@ -183,47 +196,58 @@ impl PorterStemmerEs {
         Self
     }
 
-    /// `isVowel` — case-insensitive, which is why uppercase words still get
+    /// The vowel test — case-insensitive, which is why uppercase words still get
     /// regions.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn is_vowel(&self, c: &str) -> bool {
-        c.encode_utf16().any(is_vowel)
+        c.chars().any(is_vowel)
     }
 
     /// The index of the next vowel at or after `start`, or the length.
+    ///
+    /// `start`, the answer and the length are all counts of **scalar values**,
+    /// so `next_vowel_position("😀casa", 0)` is 2: the characters are `😀`,
+    /// `c`, `a`, … and the first vowel is the third of them.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn next_vowel_position(&self, word: &str, start: usize) -> usize {
-        let w = units(word);
+        let w = scalars(word);
         (start..w.len())
             .find(|&i| is_vowel(w[i]))
             .unwrap_or(w.len())
     }
 
     /// The index of the next consonant at or after `start`, or the length.
+    ///
+    /// Indexed in **scalar values**, exactly as [`Self::next_vowel_position`]
+    /// is, so the two round-trip.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn next_consonant_position(&self, word: &str, start: usize) -> usize {
-        let w = units(word);
+        let w = scalars(word);
         (start..w.len())
             .find(|&i| !is_vowel(w[i]))
             .unwrap_or(w.len())
     }
 
-    /// Whether `word` ends with `suffix`, guarding on length as the reference does.
+    /// Whether `word` ends with `suffix`, and is at least as long as it.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn ends_in(&self, word: &str, suffix: &str) -> bool {
-        slen(word) >= slen(suffix) && ends_with(&units(word), suffix)
+        slen(word) >= slen(suffix) && ends_with(&scalars(word), suffix)
     }
 
     /// The **longest** matching suffix, or `""`.
@@ -232,17 +256,19 @@ impl PorterStemmerEs {
     /// in array order instead. The two policies are not interchangeable.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn ends_in_arr<'s>(&self, word: &str, suffixes: &[&'s str]) -> &'s str {
-        longest_suffix(&units(word), suffixes).unwrap_or("")
+        longest_suffix(&scalars(word), suffixes).unwrap_or("")
     }
 
     /// Replaces the **first** occurrence of each accented vowel, in the order
     /// á é í ó ú.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     pub fn remove_accent<'a>(&self, word: &'a str) -> Cow<'a, str> {
         if !word
@@ -266,7 +292,8 @@ impl PorterStemmerEs {
     /// Stems one token.
     #[allow(
         clippy::unused_self,
-        reason = "mirrors the reference's method-shaped API"
+        reason = "every stemmer is zero-sized; `stem` is a method so the \
+                  sixteen of them share one call shape"
     )]
     #[expect(
         clippy::too_many_lines,
@@ -274,7 +301,7 @@ impl PorterStemmerEs {
     )]
     pub fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
         let t = &*TABLES;
-        let mut b = Buf::fill(word);
+        let mut b: Buf<char> = Buf::fill(word);
         let length = b.len();
         if length < 2 {
             remove_accent_inplace(b.as_mut_slice());
@@ -296,13 +323,13 @@ impl PorterStemmerEs {
             let mut have_plain = false;
             let mut idx = t.pre.find_longest_index(b.as_slice(), head_end, start);
             while idx >= 0 {
-                let (_, link, tid) = &t.pre.entries[idx as usize];
-                if *tid == 0 {
+                let (_, link, tid) = t.pre.entry(idx);
+                if tid == 0 {
                     have_accented = true;
                 } else {
                     have_plain = true;
                 }
-                idx = *link;
+                idx = link;
             }
             if have_accented {
                 b.truncate(length - n);
@@ -311,7 +338,7 @@ impl PorterStemmerEs {
                 let keep = length - n;
                 let s = b.as_slice();
                 // "uyendo", compared on the stem the truncation would leave.
-                keep >= 6 && s[keep - 6..keep] == [0x75, 0x79, 0x65, 0x6E, 0x64, 0x6F]
+                keep >= 6 && s[keep - 6..keep] == ['u', 'y', 'e', 'n', 'd', 'o']
             } {
                 b.truncate(length - n);
             }
@@ -319,7 +346,7 @@ impl PorterStemmerEs {
 
         // --- Step 1: standard suffixes -------------------------------------
         //
-        // One union search replaces the reference's ten-table else-if chain.
+        // One union search answers the step's ten-table else-if chain at once.
         // The link-walk visits every matching entry longest-first; per table
         // id the longest entry that fits its region is recorded, and the
         // lowest id fires — which is exactly which branch of the chain would
@@ -332,13 +359,12 @@ impl PorterStemmerEs {
             let mut best: [usize; 10] = [0; 10];
             let mut idx = t.step1.find_longest_index(b.as_slice(), len1, 0);
             while idx >= 0 {
-                let (units, link, tid) = &t.step1.entries[idx as usize];
-                let tid = *tid as usize;
+                let (n, link, tid) = t.step1.entry(idx);
                 let lb = if tid == 6 { lb1 } else { lb2 };
-                if units.len() <= len1 - lb && best[tid] == 0 {
-                    best[tid] = units.len();
+                if n <= len1 - lb && best[tid] == 0 {
+                    best[tid] = n;
                 }
-                idx = *link;
+                idx = link;
             }
             for (tid, &m) in best.iter().enumerate() {
                 if m == 0 {
@@ -347,7 +373,7 @@ impl PorterStemmerEs {
                 b.truncate(len1 - m);
                 match tid {
                     2 => b.push_str("log"),
-                    3 => b.push(0x75),
+                    3 => b.push('u'),
                     4 => b.push_str("ente"),
                     _ => {}
                 }
@@ -362,7 +388,7 @@ impl PorterStemmerEs {
             let lbv = rv.min(len);
             let mut step2a_changed = false;
             let n = t.step2a.longest(b.as_slice(), len, lbv);
-            if n > 0 && len > n && b.as_slice()[len - n - 1] == 0x75 {
+            if n > 0 && len > n && b.as_slice()[len - n - 1] == 'u' {
                 b.truncate(len - n);
                 step2a_changed = true;
             }
@@ -374,11 +400,11 @@ impl PorterStemmerEs {
                 let mut best: [usize; 2] = [0; 2];
                 let mut idx = t.step2b.find_longest_index(b.as_slice(), len, lbv);
                 while idx >= 0 {
-                    let (units, link, tid) = &t.step2b.entries[idx as usize];
-                    if best[*tid as usize] == 0 {
-                        best[*tid as usize] = units.len();
+                    let (n, link, tid) = t.step2b.entry(idx);
+                    if best[tid] == 0 {
+                        best[tid] = n;
                     }
-                    idx = *link;
+                    idx = link;
                 }
                 if best[0] > 0 {
                     b.truncate(len - best[0]);
@@ -399,11 +425,11 @@ impl PorterStemmerEs {
             let mut best: [usize; 2] = [0; 2];
             let mut idx = t.step3.find_longest_index(b.as_slice(), len, lbv);
             while idx >= 0 {
-                let (units, link, tid) = &t.step3.entries[idx as usize];
-                if best[*tid as usize] == 0 {
-                    best[*tid as usize] = units.len();
+                let (n, link, tid) = t.step3.entry(idx);
+                if best[tid] == 0 {
+                    best[tid] = n;
                 }
-                idx = *link;
+                idx = link;
             }
             if best[0] > 0 {
                 b.truncate(len - best[0]);
@@ -412,7 +438,7 @@ impl PorterStemmerEs {
                 let len = b.len();
                 let lbv = rv.min(len);
                 // `ends_with(rv_slice, "u")`: RV non-empty and ends in `u`.
-                if len > lbv && b.as_slice()[len - 1] == 0x75 && ends_gu(b.as_slice()) {
+                if len > lbv && b.as_slice()[len - 1] == 'u' && ends_gu(b.as_slice()) {
                     b.truncate(len - 1);
                 }
             }
@@ -481,7 +507,16 @@ static STEP1_IVA: &[&str] = &[
 static STEP2A: &[&str] = &[
     "ya", "ye", "yan", "yen", "yeron", "yendo", "yo", "yó", "yas", "yes", "yais", "yamos",
 ];
-/// The step-2b verb list. `"  aseis"` really does carry two leading spaces.
+/// The step-2b verb list: the finite verb endings deleted in RV.
+///
+/// `"aseis"` was shipped as `"  aseis"`, with two leading spaces. No token
+/// can contain a space, so the rule never fired for any input at all, and the
+/// `-ar` imperfect subjunctive was left with four of its five endings — `ase`,
+/// `ases`, `ásemos` and `asen` are all below, and only the second-person
+/// plural was missing. `hablaseis` came back unstemmed while `hablasteis`
+/// stemmed to `habl`. `data::table_audit` now walks every entry of this table
+/// through the pipeline that searches it, so a space cannot reappear here
+/// unnoticed.
 static STEP2B: &[&str] = &[
     "arían", "arías", "arán", "arás", "aríais", "aría", "aréis", "aríamos", "aremos", "ará", "aré",
     "erían", "erías", "erán", "erás", "eríais", "ería", "eréis", "eríamos", "eremos", "erá", "eré",
@@ -489,7 +524,7 @@ static STEP2B: &[&str] = &[
     "aba", "ada", "ida", "ía", "ara", "iera", "ad", "ed", "id", "ase", "iese", "aste", "iste",
     "an", "aban", "ían", "aran", "ieran", "asen", "iesen", "aron", "ieron", "ado", "ido", "ando",
     "iendo", "ió", "ar", "er", "ir", "as", "abas", "adas", "idas", "ías", "aras", "ieras", "ases",
-    "ieses", "ís", "áis", "abais", "íais", "arais", "ierais", "  aseis", "ieseis", "asteis",
+    "ieses", "ís", "áis", "abais", "íais", "arais", "ierais", "aseis", "ieseis", "asteis",
     "isteis", "ados", "idos", "amos", "ábamos", "íamos", "imos", "áramos", "iéramos", "iésemos",
     "ásemos",
 ];
@@ -501,21 +536,64 @@ impl TokenizeAndStem for PorterStemmerEs {
     const FILTER_ON: Casing = Casing::Raw;
     const STEM_ON: Casing = Casing::Lower;
 
-    fn is_word_char(c: char) -> bool {
-        classes::is_word_es(c)
-    }
-
     fn is_stop_word(word: &str) -> bool {
-        stopwords::contains(Language::Es, word)
+        Language::Es.contains(word)
     }
 
     fn gate(token: &str) -> bool {
-        token.encode_utf16().any(gate_es)
+        token.chars().any(is_spanish_letter)
     }
 
     fn stem_token(&self, token: &str) -> String {
         self.stem(token).into_owned()
     }
+}
+
+/// Whether `c` is one of the letters [`gate_es`] accepts.
+///
+/// The gate is stated over Basic Multilingual Plane code points and nothing in
+/// it reaches `U+00FD`, so an astral character is never a Spanish letter:
+/// neither the character itself nor either half of the surrogate pair encoding
+/// it is in the set.
+#[inline]
+fn is_spanish_letter(c: char) -> bool {
+    (c as u32) < 0x1_0000 && gate_es(c as u16)
+}
+
+/// What [`crate::data::table_audit`] needs to walk this language's tables.
+#[cfg(test)]
+pub(crate) mod audit {
+    /// Every rule table, named.
+    pub(crate) static TABLES: &[(&str, &[&str])] = &[
+        ("PRONOUN", super::PRONOUN),
+        ("PRONOUN_PRE1", super::PRONOUN_PRE1),
+        ("PRONOUN_PRE2", super::PRONOUN_PRE2),
+        ("STEP1_A", super::STEP1_A),
+        ("STEP1_B", super::STEP1_B),
+        ("STEP1_LOGIA", super::STEP1_LOGIA),
+        ("STEP1_UCION", super::STEP1_UCION),
+        ("STEP1_ENCIA", super::STEP1_ENCIA),
+        ("STEP1_MENTE2", super::STEP1_MENTE2),
+        ("STEP1_AMENTE", super::STEP1_AMENTE),
+        ("STEP1_MENTE", super::STEP1_MENTE),
+        ("STEP1_IDAD", super::STEP1_IDAD),
+        ("STEP1_IVA", super::STEP1_IVA),
+        ("STEP2A", super::STEP2A),
+        ("STEP2B", super::STEP2B),
+        ("STEP2B_EN", super::STEP2B_EN),
+        ("STEP3_A", super::STEP3_A),
+        ("STEP3_E", super::STEP3_E),
+    ];
+
+    /// Spanish has no prelude: `stem` marks its regions on the token as it
+    /// arrives. Accent removal is a *postlude*, so the accented spellings the
+    /// tables carry are exactly what the tables are searched against.
+    pub(crate) fn prelude(token: &str) -> String {
+        token.to_owned()
+    }
+
+    /// No marker unit is written before the tables are searched.
+    pub(crate) static MARKERS: &[(&str, &str)] = &[];
 }
 
 impl verbora_core::Stemmer for PorterStemmerEs {
@@ -530,6 +608,21 @@ mod tests {
 
     fn s(t: &str) -> String {
         PorterStemmerEs::new().stem(t).into_owned()
+    }
+
+    /// The `-aseis` ending: the `-ar` imperfect subjunctive, second person
+    /// plural.
+    #[test]
+    fn the_imperfect_subjunctive_paradigm_is_complete() {
+        for (input, want) in [
+            ("hablase", "habl"),
+            ("hablases", "habl"),
+            ("hablásemos", "habl"),
+            ("hablaseis", "habl"),
+            ("hablasen", "habl"),
+        ] {
+            assert_eq!(s(input), want, "stem({input})");
+        }
     }
 
     #[test]
@@ -557,35 +650,205 @@ mod tests {
         assert_eq!(s("123"), "123");
     }
 
+    /// The text unit is the **Unicode scalar value**, and Spanish's region
+    /// arithmetic makes the choice observable.
+    ///
+    /// Derived from the algorithm rather than recorded from it. `"😀iamos"` is
+    /// six letters — `😀 i a m o s`. `w[1]` is `i`, a vowel, so RV skips the
+    /// first arm; `w[0]` is not a vowel, so it skips the second too and takes
+    /// the literal **`rv = 3`**. RV therefore leaves `6 - 3 = 3` letters, which
+    /// the four-letter step-2b entry `-amos` does not fit, so step 2b declines
+    /// and step 3's two-letter `-os` is what cuts: `"😀iam"`.
+    ///
+    /// `"ñiamos"` is the control, and it is a control rather than a decoration:
+    /// `ñ` is a Spanish letter that [`is_vowel`] rejects, exactly as `😀` is
+    /// rejected, so the two words have the same letter classes in the same
+    /// positions and the algorithm cannot tell them apart. Anything that makes
+    /// their stems differ is the encoding leaking through, which is what this
+    /// pins.
+    #[test]
+    fn one_astral_character_is_one_letter() {
+        assert_eq!(s("😀iamos"), "😀iam");
+        assert_eq!(s("ñiamos"), "ñiam");
+    }
+
+    /// The two public position helpers index scalar values, and so index the
+    /// same thing the caller's own `chars()` does.
+    ///
+    /// `"😀casa"` is `😀 c a s a`. The first vowel at or after 0 is the `a` at
+    /// index 2; the first consonant at or after 2 is the `s` at index 3. The
+    /// two are documented as round-tripping, which they can only do while both
+    /// count in the same unit as each other *and* as the string the caller
+    /// passed.
+    #[test]
+    fn the_public_position_helpers_index_scalar_values() {
+        let es = PorterStemmerEs::new();
+        assert_eq!(es.next_vowel_position("😀casa", 0), 2);
+        assert_eq!(es.next_consonant_position("😀casa", 2), 3);
+        // The control, same letter classes in the same positions.
+        assert_eq!(es.next_vowel_position("ñcasa", 0), 2);
+        assert_eq!(es.next_consonant_position("ñcasa", 2), 3);
+    }
+
+    /// [`is_vowel`] and [`is_spanish_letter`] are unit-independent: they answer
+    /// identically over characters and over code units, for every scalar value
+    /// there is.
+    ///
+    /// `is_es_vowel` tops out at `U+00FA` and `gate_es` at `U+00FC`, so neither
+    /// an astral character nor either half of the surrogate pair it encodes to
+    /// is ever admitted by either one.
+    /// Enumerated over the whole scalar range rather than sampled, because a
+    /// set that reached into the surrogate range would fail on exactly the
+    /// characters a spot check does not name.
+    #[test]
+    fn the_character_scans_agree_with_the_code_unit_scans() {
+        let mut buf = [0u16; 2];
+        for cp in 0..=0x10_FFFFu32 {
+            let Some(c) = char::from_u32(cp) else {
+                continue;
+            };
+            let units = c.encode_utf16(&mut buf);
+            assert_eq!(
+                is_vowel(c),
+                units.iter().any(|u| is_es_vowel(*u)),
+                "U+{cp:04X} vowel"
+            );
+            assert_eq!(
+                is_spanish_letter(c),
+                units.iter().any(|u| gate_es(*u)),
+                "U+{cp:04X} gate"
+            );
+        }
+    }
+
+    /// A character that is inert for this algorithm and inside the Basic
+    /// Multilingual Plane: not in [`is_vowel`], not spelled in any rule table,
+    /// its own lower case, and untouched by accent removal.
+    const INERT_TWIN: char = 'ж';
+
+    /// Every entry of the Spanish stop-word list and of every Spanish rule
+    /// table, walked through `stem` with one astral character inserted at
+    /// **every** position, against the same word carrying an inert
+    /// Basic-Multilingual-Plane character instead.
+    ///
+    /// # What the twin proves, and why it needs no second implementation
+    ///
+    /// [`INERT_TWIN`] is inert for this algorithm in exactly the way an astral
+    /// character is: neither is a vowel, neither is spelled in any rule table,
+    /// neither is rewritten by the lower-casing or by accent removal. So the
+    /// only thing that can possibly distinguish the two words is **how long
+    /// each of them is** — one character each under the contract, one and two
+    /// under a code-unit reading. One build run over both therefore measures
+    /// the unit directly, and a divergence here is a position being counted in
+    /// code units.
+    ///
+    /// # Why every entry and every position, rather than a sample
+    ///
+    /// This is the shape of defect that has already cost this crate 116 Swedish
+    /// stop words and two dead rules: a stage transforms text before a later
+    /// stage measures or looks it up, and the entries that die are exactly the
+    /// ones a spot check does not name. So the walk is over every entry of
+    /// every table and of the stop-word list, behind every alphabetic entry of
+    /// that same list — the probe construction `crate::data::table_audit` uses
+    /// — and the astral character goes in at every position of each, including
+    /// the two ends. The counts are pinned by equality so that a walk which
+    /// quietly stops enumerating cannot report a clean sweep of nothing.
+    ///
+    /// # What it catches
+    ///
+    /// Run against a code-unit reading, this walk reports **233 of 138 335**
+    /// probes measuring an astral character as more than one letter. It reports
+    /// **0** here. Every one of the 233 has the same shape:
+    /// a word that opens with a non-vowel and whose second letter is a vowel,
+    /// so that RV takes its third arm and is the literal `rv = 3`. That 3 is an
+    /// absolute position rather than a relative one, so the extra code unit
+    /// lengthened the region past it, and a suffix that does not fit the
+    /// region by one letter fitted it by one code unit.
+    /// [`one_astral_character_is_one_letter`] states one such word with its
+    /// arithmetic written out; this walk is what shows the shape is the only
+    /// one, and that no other shipped entry can see the unit at all.
+    #[test]
+    fn every_shipped_entry_measures_the_same_under_either_unit() {
+        let stemmer = PorterStemmerEs::new();
+        let stops = Language::Es.defaults();
+        let fillers: Vec<&str> = std::iter::once("")
+            .chain(
+                stops
+                    .iter()
+                    .copied()
+                    .filter(|w| !w.is_empty() && w.chars().all(char::is_alphabetic)),
+            )
+            .collect();
+        let mut entries: Vec<&str> = audit::TABLES
+            .iter()
+            .flat_map(|(_, table)| table.iter().copied())
+            .collect();
+        assert_eq!(
+            entries.len(),
+            213,
+            "the Spanish rule-table entry count moved"
+        );
+        entries.extend(stops.iter().copied());
+        assert_eq!(entries.len(), 283, "the Spanish entry count moved");
+        assert_eq!(fillers.len(), 60, "the Spanish filler count moved");
+
+        let twin = INERT_TWIN.to_string();
+        let mut probes = 0usize;
+        let mut diverging: Vec<String> = Vec::new();
+        for entry in &entries {
+            for filler in &fillers {
+                let word: Vec<char> = format!("{filler}{entry}").chars().collect();
+                for pos in 0..=word.len() {
+                    let mut astral: String = word[..pos].iter().collect();
+                    astral.push('\u{1F600}');
+                    astral.extend(&word[pos..]);
+                    let bmp = astral.replace('\u{1F600}', &twin);
+                    probes += 1;
+                    let from_astral = stemmer.stem(&astral).replace('\u{1F600}', &twin);
+                    let from_bmp = stemmer.stem(&bmp).into_owned();
+                    if from_astral != from_bmp {
+                        diverging.push(format!("{astral:?}: {from_astral:?} vs {from_bmp:?}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            diverging.is_empty(),
+            "{} of {probes} probes measure an astral character as more than one \
+             letter: {:#?}",
+            diverging.len(),
+            &diverging[..diverging.len().min(10)]
+        );
+        assert_eq!(
+            probes, 138_335,
+            "the number of probes this walk builds moved"
+        );
+    }
+
     // -----------------------------------------------------------------------
-    // Differential oracle: the pre-find_among implementation, verbatim.
+    // Differential oracle: the same steps written as plain linear table scans.
     //
     // `stem` above is a restructuring of this code — the whole point is that
-    // the two are byte-identical on every input, so the old linear-scan port
-    // is kept here as the oracle and the tests below replay the bench word
-    // list, the documented edge cases and a seeded random corpus through both.
+    // the two are byte-identical on every input — so the linear-scan form is
+    // kept here as the oracle and the tests below replay the bench word list,
+    // the documented edge cases and a seeded random corpus through both.
     // -----------------------------------------------------------------------
     mod oracle {
         use super::super::*;
-        use crate::units::{ends_with, longest_suffix, slen, text, u, units};
+        use crate::units::{ends_with, longest_suffix, slen, text};
 
-        fn from(w: &[u16], at: usize) -> &[u16] {
+        fn from(w: &[char], at: usize) -> &[char] {
             &w[at.min(w.len())..]
         }
 
-        fn drop_last(w: &[u16], n: usize) -> Vec<u16> {
+        fn drop_last(w: &[char], n: usize) -> Vec<char> {
             w[..w.len().saturating_sub(n)].to_vec()
         }
 
-        fn remove_accent_units(w: &[u16]) -> Vec<u16> {
+        fn remove_accent_units(w: &[char]) -> Vec<char> {
             let mut out = w.to_vec();
-            for (accented, plain) in [
-                (u('á'), u('a')),
-                (u('é'), u('e')),
-                (u('í'), u('i')),
-                (u('ó'), u('o')),
-                (u('ú'), u('u')),
-            ] {
+            for (accented, plain) in [('á', 'a'), ('é', 'e'), ('í', 'i'), ('ó', 'o'), ('ú', 'u')]
+            {
                 if let Some(i) = out.iter().position(|&c| c == accented) {
                     out[i] = plain;
                 }
@@ -593,9 +856,12 @@ mod tests {
             out
         }
 
-        #[expect(clippy::too_many_lines, reason = "verbatim copy of the reference port")]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "the oracle is one straight-line transcription of the steps"
+        )]
         pub(super) fn stem(word: &str) -> String {
-            let mut w = units(word);
+            let mut w = scalars(word);
             let length = w.len();
             if length < 2 {
                 return text(&remove_accent_units(&w));
@@ -652,13 +918,13 @@ mod tests {
                 w = drop_last(&w, slen(s));
             } else if let Some(s) = longest_suffix(from(&w, r2), STEP1_LOGIA) {
                 w = drop_last(&w, slen(s));
-                w.extend("log".encode_utf16());
+                w.extend("log".chars());
             } else if let Some(s) = longest_suffix(from(&w, r2), STEP1_UCION) {
                 w = drop_last(&w, slen(s));
-                w.push(u('u'));
+                w.push('u');
             } else if let Some(s) = longest_suffix(from(&w, r2), STEP1_ENCIA) {
                 w = drop_last(&w, slen(s));
-                w.extend("ente".encode_utf16());
+                w.extend("ente".chars());
             } else if let Some(s) = longest_suffix(from(&w, r2), STEP1_MENTE2) {
                 w = drop_last(&w, slen(s));
             } else if let Some(s) = longest_suffix(from(&w, r1), STEP1_AMENTE) {
@@ -677,7 +943,7 @@ mod tests {
                 let mut step2a_changed = false;
                 if let Some(s) = longest_suffix(from(&w, rv), STEP2A) {
                     let n = slen(s);
-                    if w.len() > n && w[w.len() - n - 1] == u('u') {
+                    if w.len() > n && w[w.len() - n - 1] == 'u' {
                         w = drop_last(&w, n);
                         step2a_changed = true;
                     }

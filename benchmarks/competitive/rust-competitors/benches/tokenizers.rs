@@ -9,94 +9,117 @@
 //! `tokenizers`, `unicode-segmentation` and `segtok` were selected, and
 //! `../../README.md` for why this crate lives outside the main workspace.
 //!
-//! # Which matrix rows are benchmarked here, and why
+//! # What the text-shaping migration did to this file
 //!
-//! `tantivy`/`WhitespaceTokenizer` and Hugging Face `tokenizers`/
-//! `WordTokenizer` (the file's original two groups):
+//! `docs/design/text-shaping-contract.md` reduced `verbora-tokenizers` to
+//! three tokenizers over one token shape — [`WordTokenizer`],
+//! `SegmentTokenizer`, [`SentenceTokenizer`], every token a borrowed `&str`
+//! substring of the input — and deleted everything else. Two of this file's
+//! six groups measured APIs that are gone, and neither was re-pointed at a
+//! lookalike so the group could keep its shape:
 //!
-//! * **Whitespace tokenization** (§1.1, "Whitespace tokenization
-//!   (`RegexpTokenizer` configured with `\s+`)") — `verbora`:
-//!   `RegexpTokenizer::new(Pattern::new(Regex::new(r"\s+")))`; `tantivy`:
-//!   `tantivy::tokenizer::WhitespaceTokenizer`; `huggingface`:
-//!   `tokenizers::pre_tokenizers::whitespace::WhitespaceSplit`, called via
-//!   `PreTokenizer::pre_tokenize` on a fresh `PreTokenizedString` — the
-//!   isolated pre-tokenizer component, never `Tokenizer::encode`'s full
-//!   BPE/WordPiece pipeline (which would do categorically more work — model
-//!   lookup, merges, vocabulary — per the matrix's own caveat).
-//! * **`WordTokenizer`** (§1.1) — `verbora`: `WordTokenizer` (splits on
-//!   `[^A-Za-zА-Яа-я0-9_]+`); `tantivy`: `tantivy::tokenizer::SimpleTokenizer`
-//!   (splits on `char::is_alphanumeric()`); `huggingface`:
+//! * **`whitespace_tokenization` — deleted.** Its Verbora side was
+//!   `RegexpTokenizer::new(Pattern::new(Regex::new(r"\s+")))`. `RegexpTokenizer`
+//!   and `Pattern` are removed by contract §3.4, which also drops
+//!   `verbora-tokenizers`' `regex` dependency outright: Verbora no longer
+//!   performs regex or whitespace tokenization at *any* API, and a caller who
+//!   wants it is told to use `regex` directly. Timing
+//!   `tantivy::WhitespaceTokenizer` and Hugging Face `WhitespaceSplit`
+//!   against nothing would measure nothing about Verbora, so the group and
+//!   the `regex` dependency went together. **Coverage lost:** those two
+//!   competitor rows have no Verbora counterpart in this harness any more.
+//!   `docs/COMPETITIVE_BENCHMARKS.md` §1.1's "Whitespace tokenization
+//!   (`RegexpTokenizer` configured with `\s+`)" row describes a capability
+//!   Verbora does not have.
+//! * **`aggressive_tokenization_en` — deleted.** `AggressiveTokenizer` and
+//!   its fifteen language variants are removed by contract §3.4; §4.1 records
+//!   why (the per-language content was nineteen hand-derived character
+//!   classes with documented bugs, not linguistics). Nothing is lost
+//!   measurably: that group timed `AggressiveTokenizer` against
+//!   `unicode_words()`, and [`WordTokenizer`] — which now *is*
+//!   `str::unicode_words()` — carries that comparison in
+//!   [`bench_word_tokenization_wrapper_overhead`] below.
+//!
+//! Every published figure for both deleted groups measures code that no
+//! longer exists, as do the surviving groups' Verbora rows: `WordTokenizer`
+//! and `SentenceTokenizer` were both reimplemented on UAX #29. Per
+//! `CLAUDE.md`, `results/raw/tokenizers-*` and the `tokenizers` rows of
+//! `results/results.json` are stale, not approximately right, and must not be
+//! republished from anything but a fresh run.
+//!
+//! # Rival comparisons and wrapper-overhead baselines are now different groups
+//!
+//! This is the migration's sharpest effect on fairness, and it is structural
+//! rather than a caveat. `WordTokenizer::tokens` is *literally*
+//! `text.unicode_words()` and `SentenceTokenizer::tokens` is built directly
+//! on `text.split_sentence_bound_indices()`
+//! (`crates/verbora-tokenizers/src/word.rs`, `src/sentence.rs`) — Verbora
+//! delegates to `unicode-segmentation` rather than competing with it. Leaving
+//! those rows inside `word_tokenization`/`sentence_tokenization` would report
+//! Verbora-against-its-own-dependency as a competitive result, which
+//! `AGENTS.md` § Cross-Implementation Benchmark Fairness forbids. They are
+//! therefore split into explicit `*_wrapper_overhead` groups, following
+//! `benches/language.rs`'s existing `whatlang_wrapper_overhead` precedent:
+//! those numbers say what Verbora's wrapper costs over the primitive, and are
+//! never to be reported as "Verbora beats/loses to unicode-segmentation".
+//!
+//! What remains a genuine rival comparison:
+//!
+//! * **`word_tokenization`** — `verbora`: [`WordTokenizer`]; `tantivy`:
+//!   `tantivy::tokenizer::SimpleTokenizer` (splits on
+//!   `char::is_alphanumeric()`); `huggingface`:
 //!   `tokenizers::pre_tokenizers::whitespace::Whitespace` (pattern
-//!   `\w+|[^\w\s]+`), again called in isolation.
+//!   `\w+|[^\w\s]+`), called via `PreTokenizer::pre_tokenize` on a fresh
+//!   `PreTokenizedString` — the isolated pre-tokenizer component, never
+//!   `Tokenizer::encode`'s full BPE/WordPiece pipeline. Three independent
+//!   implementations, and Verbora's now does categorically *more* than the
+//!   other two: full UAX #29 WB1–WB999 word segmentation versus a character
+//!   class test. On the narrowed domain below they draw identical boundaries
+//!   (proved in `tests/tokenizers_correctness.rs`); off it they cannot, and
+//!   a reader must not generalise this group into "Verbora tokenizes faster
+//!   than tantivy" for arbitrary text.
+//! * **`sentence_tokenization`** and its input-shape variant
+//!   **`sentence_tokenization_boundary_density`** — `verbora`:
+//!   [`SentenceTokenizer`]; `segtok`: `segtok::segmenter::split_single` with
+//!   `SegmentConfig::default()`, a rule-based orthographic-feature segmenter
+//!   and a genuinely different algorithm family. `segtok`'s own adoption
+//!   signal is ambiguous — 452K/90d crates.io downloads against only 2 GitHub
+//!   stars, most plausibly transitive rather than direct use
+//!   (`docs/COMPETITIVE_BENCHMARKS.md` §2.1 records the same caveat) —
+//!   flagged here rather than silently omitted.
 //!
-//! Three further rows the matrix selected but that were never wired into
-//! `Cargo.toml`/benchmarked in the first Fase 6 pass — this file's own
-//! audit-round addition:
+//! `WordPunctTokenizer` and `TreebankWordTokenizer` are still not benchmarked
+//! here, and now for a second reason on top of the matrix's `NO FAIR
+//! COMPETITOR FOUND` (§1.1): contract §3.4 deletes both, and §4.5 records why
+//! re-deriving the Penn Treebank tokenizer was deferred rather than
+//! half-done.
 //!
-//! * **`word_tokenization_unicode_segmentation`** (§1.1, `WordTokenizer` row,
-//!   `unicode-segmentation` 1.13.3, "Selected cases") — `verbora`:
-//!   `WordTokenizer::tokenize`; `unicode-words`:
-//!   `str::unicode_words().count()`; `unicode-bounds`:
-//!   `str::split_word_bounds()`, filtered to non-whitespace-only spans and
-//!   counted — the extra filter is real, necessary work a caller of this
-//!   lower-level "every run, word and separator alike" API must do to get a
-//!   `WordTokenizer`-equivalent word list, so it is timed, not elided.
-//! * **`aggressive_tokenization_en`** (§1.1, `AggressiveTokenizer` English
-//!   variant row, `unicode-segmentation`, "Selected cases") — `verbora`:
-//!   `AggressiveTokenizer::tokenize`; `unicode-words`: the same
-//!   `unicode_words().count()` as above.
-//! * **`sentence_tokenization`** (§1.1, `SentenceTokenizer` row,
-//!   `unicode-segmentation` "Yes" + `segtok` 0.1.5 "Selected cases") —
-//!   `verbora`: `SentenceTokenizer::tokenize`; `unicode-sentences`:
-//!   `str::unicode_sentences().count()`; `unicode-bounds`:
-//!   `str::split_sentence_bounds().count()`; `segtok`:
-//!   `segtok::segmenter::split_single` with `SegmentConfig::default()`.
-//!   `segtok`'s own adoption signal is ambiguous — 452K/90d crates.io
-//!   downloads against only 2 GitHub stars, most plausibly transitive rather
-//!   than direct use (`docs/COMPETITIVE_BENCHMARKS.md` §2.1 records the same
-//!   caveat) — flagged here rather than silently omitted, per the matrix's
-//!   own instruction not to hide a weak adoption signal just because a crate
-//!   cleared the bar on algorithmic grounds.
+//! # Both Verbora API shapes are timed, not just one
 //!
-//! A later coverage-doubling round added **no new matrix rows** — it widened
-//! the measurement grid over the rows already justified above: [`SIZES`] and
-//! [`SENTENCE_COUNTS`] each grew from four points to eight (the original
-//! four preserved unchanged, so existing figures stay comparable — see each
-//! constant's own doc comment), and one input-*shape* group was added,
-//! `sentence_tokenization_boundary_density` (same `SentenceTokenizer` row,
-//! same four implementations, fixed word budget, words-per-sentence swept
-//! 3→24 — see [`bench_sentence_tokenization_boundary_density`]'s doc comment
-//! for why boundary density reveals a cost axis document *size* cannot).
-//! Every new input is derived from the same shared `words.json` corpus by
-//! the same `document`/`sentence_prose` builders and stays inside the same
-//! narrowed domains documented below.
+//! `AGENTS.md` § Benchmark API Variants asks for each API to be measured
+//! independently, and the pre-migration file did not: it timed Verbora
+//! collecting a `Vec` against competitors that merely counted, quietly
+//! charging Verbora an allocation nobody else paid. Every Verbora row below
+//! is therefore two rows:
 //!
-//! `WordPunctTokenizer` and `TreebankWordTokenizer` are **not** benchmarked
-//! here: the matrix records `NO FAIR COMPETITOR FOUND` for both on the Rust
-//! side (§1.1) — every candidate either does less work (drops punctuation)
-//! or produces a different token count on common input (groups punctuation
-//! runs into one token), which is exactly the "comparing different things"
-//! the project's fairness rules forbid.
+//! * `verbora` — `tokenize_borrowed(text).len()`: one `Vec<&str>`, the
+//!   correct default for most programs and the closest match to what
+//!   `tantivy`'s `TokenStream` and Hugging Face's `PreTokenizedString`
+//!   materialise internally.
+//! * `verbora-lazy` — `tokens(text).count()`: the allocation-free primitive,
+//!   the floor the collecting path is built on.
 //!
 //! # Why the word-boundary input domain is narrowed to punctuation-free ASCII words
 //!
-//! The five word-boundary implementations above (verbora, tantivy, HF,
-//! `unicode-segmentation` ×2) are only `Partial` equivalents even within the
-//! rows chosen — they use different character classes (Verbora: ASCII +
-//! Cyrillic; tantivy `SimpleTokenizer`/HF `Whitespace`: Unicode
-//! alphanumeric/`\w`; `unicode-segmentation`: the full UAX#29 word-boundary
-//! algorithm, which treats an internal apostrophe as part of a contraction
-//! rather than a separator) and different whitespace definitions (Verbora/HF:
-//! `char::is_whitespace`-equivalent; tantivy `WhitespaceTokenizer`: ASCII
-//! whitespace only — `is_ascii_whitespace()` in the actual 0.26.1 source,
-//! narrower than the matrix's own "`char::is_whitespace()`" note, confirmed
-//! by reading `tantivy-0.26.1/src/tokenizer/whitespace_tokenizer.rs`
-//! directly). None of those divergences are reachable from the shared
-//! `words.json` corpus: every word is lowercase ASCII `[a-z]`, joined by
-//! exactly one U+0020 space, with no digits, no underscores, no punctuation
-//! (in particular no apostrophes or hyphens — the exact edge cases UAX#29
-//! disagrees with Verbora's fixed regex class on, per the matrix's own note
-//! on both the `WordTokenizer` and `AggressiveTokenizer`(en) rows) and no
+//! The implementations above are only `Partial` equivalents even within the
+//! rows chosen — they use different character classes (Verbora: UAX #29
+//! `Word_Break` plus an `Alphabetic`/`Nd`/`Nl`/`No` filter; tantivy
+//! `SimpleTokenizer`: `char::is_alphanumeric()`; HF `Whitespace`: `\w`) and
+//! disagree in practice on apostrophes, hyphens, decimal points and
+//! underscores — the exact cases contract §3.1's own migration table lists.
+//! None of those divergences is reachable from the shared `words.json`
+//! corpus: every word is lowercase ASCII `[a-z]`, joined by exactly one
+//! U+0020 space, with no digits, no underscores, no punctuation and no
 //! non-ASCII whitespace anywhere in the input. On that narrowed domain every
 //! one of these implementations draws token boundaries at exactly the same
 //! byte offsets — proven by the `#[test]`s in
@@ -106,28 +129,28 @@
 //!
 //! # Why the sentence-boundary input domain is narrowed to plain declarative sentences
 //!
-//! Verbora's `SentenceTokenizer` (placeholder-substitution + abbreviation
-//! list), `unicode-segmentation`'s UAX#29 sentence-boundary algorithm, and
-//! `segtok`'s rule-based orthographic-feature segmenter are three genuinely
-//! different algorithm families that disagree on abbreviations, URIs,
-//! decimal numbers, quotes, brackets, and (`segtok` specifically) whether the
-//! sentence *following* a boundary starts with an upper-case letter or number
-//! — none of that is exercised by `sentence_prose`'s output: short
-//! all-lowercase-except-first-letter sentences, each ending in exactly one
-//! `.`, separated by exactly one space, with no digits, quotes, brackets,
-//! abbreviations or embedded newlines anywhere. On that domain, the three
-//! implementations' sentence *boundaries* coincide exactly; the only
-//! remaining difference is formatting, not disagreement — Verbora and
-//! `segtok` both `trim()` each returned sentence (confirmed by reading
-//! `segtok-0.1.5/src/segmenter/mod.rs`'s `sentences()`, `res.push(last.trim()
-//! .to_string())`, directly), while `unicode-segmentation`'s
-//! `unicode_sentences()`/`split_sentence_bounds()` keep the trailing
-//! delimiter-adjacent whitespace attached to the preceding span by design (its
-//! own doc example: `"Mr. Fox jumped..."` → `["Mr. ", "Fox jumped. ", ...]`).
-//! `tests/tokenizers_correctness.rs` proves the four implementations agree
-//! exactly once `unicode-segmentation`'s spans are trimmed for comparison —
-//! a documented, honest normalization of a whitespace-attachment convention,
-//! not a boundary disagreement being papered over.
+//! Verbora's `SentenceTokenizer` (UAX #29 §5 plus an optional abbreviation
+//! tailoring, unused here) and `segtok`'s rule-based segmenter disagree on
+//! abbreviations, URIs, decimal numbers, quotes, brackets, and (`segtok`
+//! specifically) whether the sentence *following* a boundary starts with an
+//! upper-case letter or number — none of which `sentence_prose` produces:
+//! short all-lowercase-except-first-letter sentences, each ending in exactly
+//! one `.`, separated by exactly one space, with no digits, quotes, brackets,
+//! abbreviations or embedded newlines anywhere.
+//!
+//! One formatting difference is left, and the migration made it Verbora's:
+//! contract §3.1 removed sentence trimming outright, because a tokenizer that
+//! trims does not return substrings. A Verbora sentence therefore carries its
+//! own trailing whitespace (so concatenation reproduces the input exactly),
+//! `segtok` trims each sentence internally (confirmed by reading
+//! `segtok-0.1.5/src/segmenter/mod.rs`'s `sentences()`,
+//! `res.push(last.trim().to_string())`, directly), and
+//! `unicode-segmentation` keeps the whitespace attached exactly as Verbora
+//! now does. `tests/tokenizers_correctness.rs` proves the *boundaries*
+//! coincide once that whitespace-attachment convention is normalized — a
+//! documented, honest normalization, not a boundary disagreement being
+//! papered over. The groups below count sentences, which the convention does
+//! not affect.
 //!
 //! Every call's input and output is wrapped in `black_box`.
 
@@ -136,25 +159,22 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use segtok::segmenter::{SegmentConfig, split_single};
 use tantivy::tokenizer::{
     SimpleTokenizer, TokenStream as TantivyTokenStream, Tokenizer as TantivyTokenizer,
-    WhitespaceTokenizer,
 };
-use tokenizers::pre_tokenizers::whitespace::{Whitespace, WhitespaceSplit};
+use tokenizers::pre_tokenizers::whitespace::Whitespace;
 use tokenizers::{OffsetReferential, OffsetType, PreTokenizedString, PreTokenizer};
 use unicode_segmentation::UnicodeSegmentation;
 
-use verbora_tokenizers::{
-    AggressiveTokenizer, Pattern, RegexpTokenizer, SentenceTokenizer, Tokenize, WordTokenizer,
-};
+use verbora_tokenizers::{BorrowingTokenizer, SentenceTokenizer, WordTokenizer};
 
 /// Document sizes, in words — a superset of
 /// `crates/verbora-tokenizers/benches/tokenizers.rs`'s `scaling` grid
 /// (`[16, 128, 1024, 8192]`): those four original sizes are preserved
 /// unchanged so figures still line up across both files even though they run
-/// independently. The coverage-doubling round then halves each original ×8
-/// gap with a geometric midpoint (64, 512, 4096) and extends the top by one
-/// step (32768 — the 20 000-word shared corpus simply cycles, exactly as
-/// [`document`] already does for every size), so scaling kinks between the
-/// original points are observable rather than interpolated.
+/// independently. Each original ×8 gap is halved with a geometric midpoint
+/// (64, 512, 4096) and the top extended by one step (32768 — the 20 000-word
+/// shared corpus simply cycles, exactly as [`document`] already does for
+/// every size), so scaling kinks between the original points are observable
+/// rather than interpolated.
 const SIZES: [usize; 8] = [16, 64, 128, 512, 1024, 4096, 8192, 32768];
 
 /// Reads the shared word list, failing loudly if it has not been generated.
@@ -212,44 +232,29 @@ fn tantivy_tokenize(tok: &mut impl TantivyTokenizer, text: &str) -> usize {
 fn hf_pretokenize(pt: &impl PreTokenizer, text: &str) -> usize {
     let mut pretokenized = PreTokenizedString::from(text);
     pt.pre_tokenize(&mut pretokenized)
-        .expect("Whitespace/WhitespaceSplit::pre_tokenize never fails");
+        .expect("Whitespace::pre_tokenize never fails");
     pretokenized
         .get_splits(OffsetReferential::Original, OffsetType::Byte)
         .len()
 }
 
-fn bench_whitespace_tokenization(c: &mut Criterion) {
-    let words = words();
-    let verbora = RegexpTokenizer::new(Pattern::new(regex::Regex::new(r"\s+").unwrap()));
-    let mut g = c.benchmark_group("whitespace_tokenization");
-    for n in SIZES {
-        let doc = document(&words, n);
-        g.throughput(Throughput::Bytes(doc.len() as u64));
-
-        g.bench_with_input(BenchmarkId::new("verbora", doc.len()), &doc, |b, d| {
-            b.iter(|| black_box(verbora.tokenize(black_box(d)).map(|v| v.len())));
-        });
-        g.bench_with_input(BenchmarkId::new("tantivy", doc.len()), &doc, |b, d| {
-            let mut tok = WhitespaceTokenizer::default();
-            b.iter(|| black_box(tantivy_tokenize(&mut tok, black_box(d))));
-        });
-        g.bench_with_input(BenchmarkId::new("huggingface", doc.len()), &doc, |b, d| {
-            b.iter(|| black_box(hf_pretokenize(&WhitespaceSplit, black_box(d))));
-        });
-    }
-    g.finish();
-}
-
+/// The rival word-boundary comparison: three independently written
+/// implementations. See the module doc comment for the comparability limit
+/// (Verbora runs full UAX #29 segmentation; the other two test a character
+/// class) and for why both Verbora API shapes are timed.
 fn bench_word_tokenization(c: &mut Criterion) {
     let words = words();
-    let verbora = WordTokenizer::new();
+    let verbora = WordTokenizer;
     let mut g = c.benchmark_group("word_tokenization");
     for n in SIZES {
         let doc = document(&words, n);
         g.throughput(Throughput::Bytes(doc.len() as u64));
 
         g.bench_with_input(BenchmarkId::new("verbora", doc.len()), &doc, |b, d| {
-            b.iter(|| black_box(verbora.tokenize(black_box(d)).map(|v| v.len())));
+            b.iter(|| black_box(verbora.tokenize_borrowed(black_box(d)).len()));
+        });
+        g.bench_with_input(BenchmarkId::new("verbora-lazy", doc.len()), &doc, |b, d| {
+            b.iter(|| black_box(verbora.tokens(black_box(d)).count()));
         });
         g.bench_with_input(BenchmarkId::new("tantivy", doc.len()), &doc, |b, d| {
             let mut tok = SimpleTokenizer::default();
@@ -275,15 +280,60 @@ fn unicode_split_word_bounds_word_count(text: &str) -> usize {
         .count()
 }
 
+/// **Not a rival-algorithm comparison.** `WordTokenizer::tokens` is literally
+/// `text.unicode_words()` (`crates/verbora-tokenizers/src/word.rs`), so the
+/// `unicode-words` row below is Verbora's own implementation measured
+/// directly; the difference between it and `verbora` is the cost of
+/// collecting a `Vec<&str>`, and the difference between it and `verbora-lazy`
+/// should be approximately nothing. The `unicode-bounds` row is the
+/// lower-level `split_word_bounds()` API plus the filter a caller must write
+/// to get an equivalent word list — the same relationship `SegmentTokenizer`
+/// bears to `WordTokenizer` inside Verbora.
+///
+/// This group exists so that overhead is *visible*, exactly as
+/// `benches/language.rs`'s `whatlang_wrapper_overhead` does for
+/// `WhatlangDetector`. Its numbers must never be reported as Verbora winning
+/// or losing against `unicode-segmentation`.
+fn bench_word_tokenization_wrapper_overhead(c: &mut Criterion) {
+    let words = words();
+    let verbora = WordTokenizer;
+    let mut g = c.benchmark_group("word_tokenization_wrapper_overhead");
+    for n in SIZES {
+        let doc = document(&words, n);
+        g.throughput(Throughput::Bytes(doc.len() as u64));
+
+        g.bench_with_input(BenchmarkId::new("verbora", doc.len()), &doc, |b, d| {
+            b.iter(|| black_box(verbora.tokenize_borrowed(black_box(d)).len()));
+        });
+        g.bench_with_input(BenchmarkId::new("verbora-lazy", doc.len()), &doc, |b, d| {
+            b.iter(|| black_box(verbora.tokens(black_box(d)).count()));
+        });
+        g.bench_with_input(
+            BenchmarkId::new("unicode-words", doc.len()),
+            &doc,
+            |b, d| {
+                b.iter(|| black_box(black_box(d).unicode_words().count()));
+            },
+        );
+        g.bench_with_input(
+            BenchmarkId::new("unicode-bounds", doc.len()),
+            &doc,
+            |b, d| {
+                b.iter(|| black_box(unicode_split_word_bounds_word_count(black_box(d))));
+            },
+        );
+    }
+    g.finish();
+}
+
 /// A document of `n_sentences` short declarative sentences: each sentence is
 /// `words_per_sentence` lowercase words from the shared corpus, its first
 /// letter capitalized, ending in exactly one `.`; sentences are joined by
 /// exactly one ASCII space. No digits, quotes, brackets, abbreviations or
 /// newlines anywhere — the narrowed sentence-boundary domain this file's own
 /// module doc comment documents, empirically confirmed (not merely assumed)
-/// to be where Verbora's `SentenceTokenizer`, `unicode-segmentation`'s UAX#29
-/// splitter and `segtok`'s rule-based segmenter all agree, by
-/// `tests/tokenizers_correctness.rs`.
+/// to be where Verbora's `SentenceTokenizer` and `segtok`'s rule-based
+/// segmenter agree, by `tests/tokenizers_correctness.rs`.
 fn sentence_prose(words: &[String], n_sentences: usize, words_per_sentence: usize) -> String {
     let mut out = String::new();
     let mut pool = words.iter().cycle();
@@ -309,78 +359,21 @@ fn sentence_prose(words: &[String], n_sentences: usize, words_per_sentence: usiz
     out
 }
 
-/// §1.1's `WordTokenizer` row, `unicode-segmentation` competitor —
-/// `unicode_words()`/`split_word_bounds()`, "Selected cases". Reuses the same
-/// `document`/`SIZES` as `bench_word_tokenization` above so the numbers are
-/// directly comparable to the `tantivy`/`huggingface` rows in that group.
-fn bench_word_tokenization_unicode_segmentation(c: &mut Criterion) {
-    let words = words();
-    let verbora = WordTokenizer::new();
-    let mut g = c.benchmark_group("word_tokenization_unicode_segmentation");
-    for n in SIZES {
-        let doc = document(&words, n);
-        g.throughput(Throughput::Bytes(doc.len() as u64));
-
-        g.bench_with_input(BenchmarkId::new("verbora", doc.len()), &doc, |b, d| {
-            b.iter(|| black_box(verbora.tokenize(black_box(d)).map(|v| v.len())));
-        });
-        g.bench_with_input(
-            BenchmarkId::new("unicode-words", doc.len()),
-            &doc,
-            |b, d| {
-                b.iter(|| black_box(black_box(d).unicode_words().count()));
-            },
-        );
-        g.bench_with_input(
-            BenchmarkId::new("unicode-bounds", doc.len()),
-            &doc,
-            |b, d| {
-                b.iter(|| black_box(unicode_split_word_bounds_word_count(black_box(d))));
-            },
-        );
-    }
-    g.finish();
-}
-
-/// §1.1's `AggressiveTokenizer` (English variant) row, `unicode-segmentation`
-/// competitor — `unicode_words()` only, "Selected cases" (only the English
-/// variant is plausibly comparable per the matrix).
-fn bench_aggressive_tokenization_en(c: &mut Criterion) {
-    let words = words();
-    let verbora = AggressiveTokenizer::new();
-    let mut g = c.benchmark_group("aggressive_tokenization_en");
-    for n in SIZES {
-        let doc = document(&words, n);
-        g.throughput(Throughput::Bytes(doc.len() as u64));
-
-        g.bench_with_input(BenchmarkId::new("verbora", doc.len()), &doc, |b, d| {
-            b.iter(|| black_box(verbora.tokenize(black_box(d)).len()));
-        });
-        g.bench_with_input(
-            BenchmarkId::new("unicode-words", doc.len()),
-            &doc,
-            |b, d| {
-                b.iter(|| black_box(black_box(d).unicode_words().count()));
-            },
-        );
-    }
-    g.finish();
-}
-
 /// Sentence counts for `sentence_prose`, scaled similarly to `SIZES` above
 /// but in sentences rather than words (each sentence here is a fixed 6
-/// words). Like [`SIZES`], the coverage-doubling round kept the original
-/// four counts (`[4, 32, 256, 2048]`) unchanged and halved each ×8 gap with
-/// a geometric midpoint (16, 128, 1024) plus one larger step (8192).
+/// words). Like [`SIZES`], the original four counts (`[4, 32, 256, 2048]`)
+/// are unchanged, each ×8 gap halved with a geometric midpoint (16, 128,
+/// 1024) plus one larger step (8192).
 const SENTENCE_COUNTS: [usize; 8] = [4, 16, 32, 128, 256, 1024, 2048, 8192];
 
 /// Words per sentence `sentence_prose` builds with, fixed across every size
 /// in [`SENTENCE_COUNTS`] so only the sentence *count* scales.
 const WORDS_PER_SENTENCE: usize = 6;
 
-/// §1.1's `SentenceTokenizer` row — `unicode-segmentation`
-/// (`UnicodeSentences`/`USentenceBounds`, "Yes") and `segtok`
-/// (`split_single`, "Selected cases").
+/// The rival sentence-boundary comparison: Verbora's UAX #29 §5 segmentation
+/// against `segtok`'s rule-based orthographic-feature segmenter, a genuinely
+/// different algorithm family. `unicode-segmentation` is not here — Verbora
+/// is built on it; see [`bench_sentence_tokenization_wrapper_overhead`].
 fn bench_sentence_tokenization(c: &mut Criterion) {
     let words = words();
     let verbora = SentenceTokenizer::new();
@@ -390,8 +383,54 @@ fn bench_sentence_tokenization(c: &mut Criterion) {
         g.throughput(Throughput::Bytes(text.len() as u64));
 
         g.bench_with_input(BenchmarkId::new("verbora", text.len()), &text, |b, d| {
-            b.iter(|| black_box(verbora.tokenize(black_box(d)).len()));
+            b.iter(|| black_box(verbora.tokenize_borrowed(black_box(d)).len()));
         });
+        g.bench_with_input(
+            BenchmarkId::new("verbora-lazy", text.len()),
+            &text,
+            |b, d| {
+                b.iter(|| black_box(verbora.tokens(black_box(d)).count()));
+            },
+        );
+        g.bench_with_input(BenchmarkId::new("segtok", text.len()), &text, |b, d| {
+            b.iter(|| black_box(split_single(black_box(d), SegmentConfig::default()).len()));
+        });
+    }
+    g.finish();
+}
+
+/// **Not a rival-algorithm comparison**, for the same reason
+/// [`bench_word_tokenization_wrapper_overhead`] is not:
+/// `SentenceTokenizer::tokens` iterates `text.split_sentence_bound_indices()`
+/// and re-joins segments across suppressed boundaries
+/// (`crates/verbora-tokenizers/src/sentence.rs`). With no abbreviations
+/// configured — the configuration benchmarked here and everywhere in this
+/// file — no boundary is ever suppressed, so Verbora emits exactly the
+/// `unicode-bounds` segmentation and this group measures the cost of the
+/// suppression check and the `Vec`, nothing more.
+///
+/// `unicode-sentences` is the same crate's higher-level API, which drops
+/// segments containing no alphanumeric content; it is included because it,
+/// not `split_sentence_bounds`, is what a caller reaching for
+/// "unicode-segmentation sentences" typically writes.
+fn bench_sentence_tokenization_wrapper_overhead(c: &mut Criterion) {
+    let words = words();
+    let verbora = SentenceTokenizer::new();
+    let mut g = c.benchmark_group("sentence_tokenization_wrapper_overhead");
+    for n in SENTENCE_COUNTS {
+        let text = sentence_prose(&words, n, WORDS_PER_SENTENCE);
+        g.throughput(Throughput::Bytes(text.len() as u64));
+
+        g.bench_with_input(BenchmarkId::new("verbora", text.len()), &text, |b, d| {
+            b.iter(|| black_box(verbora.tokenize_borrowed(black_box(d)).len()));
+        });
+        g.bench_with_input(
+            BenchmarkId::new("verbora-lazy", text.len()),
+            &text,
+            |b, d| {
+                b.iter(|| black_box(verbora.tokens(black_box(d)).count()));
+            },
+        );
         g.bench_with_input(
             BenchmarkId::new("unicode-sentences", text.len()),
             &text,
@@ -406,9 +445,6 @@ fn bench_sentence_tokenization(c: &mut Criterion) {
                 b.iter(|| black_box(black_box(d).split_sentence_bounds().count()));
             },
         );
-        g.bench_with_input(BenchmarkId::new("segtok", text.len()), &text, |b, d| {
-            b.iter(|| black_box(split_single(black_box(d), SegmentConfig::default()).len()));
-        });
     }
     g.finish();
 }
@@ -423,13 +459,12 @@ const DENSITY_WORDS_PER_SENTENCE: [usize; 4] = [3, 6, 12, 24];
 /// only boundary *density* varies, never the amount of word text.
 const DENSITY_TOTAL_WORDS: usize = 1536;
 
-/// The same §1.1 `SentenceTokenizer` row and the same four implementations
-/// as [`bench_sentence_tokenization`] — an input-*shape* variant of that
-/// group, not a new matrix row. [`bench_sentence_tokenization`] scales the
+/// The same rival comparison as [`bench_sentence_tokenization`] — an
+/// input-*shape* variant, not a new matrix row. That group scales the
 /// sentence count at a fixed 6 words per sentence, which can never separate
-/// per-byte scanning cost from per-boundary cost (Verbora's per-delimiter
-/// placeholder substitution, `segtok`'s per-span join rules); this group
-/// holds the word budget fixed at [`DENSITY_TOTAL_WORDS`] and sweeps
+/// per-byte scanning cost from per-boundary cost (Verbora's per-boundary
+/// suppression check and re-slice, `segtok`'s per-span join rules); this
+/// group holds the word budget fixed at [`DENSITY_TOTAL_WORDS`] and sweeps
 /// [`DENSITY_WORDS_PER_SENTENCE`] instead, varying the boundary count 8×
 /// while the byte count stays within ~3% (`sentence_prose` draws the same
 /// [`DENSITY_TOTAL_WORDS`] words from the cycled corpus for every shape;
@@ -437,8 +472,8 @@ const DENSITY_TOTAL_WORDS: usize = 1536;
 /// bytes). The `BenchmarkId` parameter is therefore the words-per-sentence
 /// shape — the axis that varies — not the near-constant byte length. Every
 /// document stays inside the same narrowed declarative-sentence domain the
-/// module doc comment documents and `tests/tokenizers_correctness.rs`
-/// proves agreement on (including at these exact densities).
+/// module doc comment documents and `tests/tokenizers_correctness.rs` proves
+/// agreement on (including at these exact densities).
 fn bench_sentence_tokenization_boundary_density(c: &mut Criterion) {
     let words = words();
     let verbora = SentenceTokenizer::new();
@@ -448,13 +483,10 @@ fn bench_sentence_tokenization_boundary_density(c: &mut Criterion) {
         g.throughput(Throughput::Bytes(text.len() as u64));
 
         g.bench_with_input(BenchmarkId::new("verbora", wps), &text, |b, d| {
-            b.iter(|| black_box(verbora.tokenize(black_box(d)).len()));
+            b.iter(|| black_box(verbora.tokenize_borrowed(black_box(d)).len()));
         });
-        g.bench_with_input(BenchmarkId::new("unicode-sentences", wps), &text, |b, d| {
-            b.iter(|| black_box(black_box(d).unicode_sentences().count()));
-        });
-        g.bench_with_input(BenchmarkId::new("unicode-bounds", wps), &text, |b, d| {
-            b.iter(|| black_box(black_box(d).split_sentence_bounds().count()));
+        g.bench_with_input(BenchmarkId::new("verbora-lazy", wps), &text, |b, d| {
+            b.iter(|| black_box(verbora.tokens(black_box(d)).count()));
         });
         g.bench_with_input(BenchmarkId::new("segtok", wps), &text, |b, d| {
             b.iter(|| black_box(split_single(black_box(d), SegmentConfig::default()).len()));
@@ -465,11 +497,10 @@ fn bench_sentence_tokenization_boundary_density(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_whitespace_tokenization,
     bench_word_tokenization,
-    bench_word_tokenization_unicode_segmentation,
-    bench_aggressive_tokenization_en,
+    bench_word_tokenization_wrapper_overhead,
     bench_sentence_tokenization,
+    bench_sentence_tokenization_wrapper_overhead,
     bench_sentence_tokenization_boundary_density
 );
 criterion_main!(benches);

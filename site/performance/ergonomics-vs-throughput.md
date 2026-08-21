@@ -15,16 +15,17 @@ the default.
 Take the most common shape in real code:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
 fn word_count(text: &str) -> usize {
-    AggressiveTokenizer::new().tokenize(text).len()
+    WordTokenizer.tokenize_borrowed(text).len()
 }
 
 assert_eq!(word_count("counting words is not complicated"), 5);
 ```
 
-The cost of `tokenize()` over `tokens()` here is **one `Vec` allocation**, plus
+The cost of `tokenize_borrowed()` over `tokens()` here is **one `Vec`
+allocation**, plus
 its growth reallocations. Not one per token — the tokens are `&str` slices
 borrowed from `text`. If this function runs once per HTTP request, that
 allocation is invisible next to the syscall that delivered the request.
@@ -40,15 +41,14 @@ Optimising is not free, and the cost is usually paid in code you have to keep
 correct:
 
 ```rust
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let t = AggressiveTokenizer::new();
-let mut buf = Vec::new();          // ← state you now own
+let mut buf: Vec<&str> = Vec::new();   // ← state you now own
 let mut total = 0;
 
 for document in ["one two", "three four"] {
-    buf.clear();                   // ← forget this and results accumulate
-    t.tokenize_into(document, &mut buf);
+    buf.clear();                       // ← forget this and results accumulate
+    WordTokenizer.tokenize_borrowed_into(document, &mut buf);
     total += buf.len();
 }
 
@@ -60,7 +60,7 @@ that lives longer than the operation, a `clear()` whose absence is a silent
 correctness bug, and a function that can no longer be a one-liner.
 
 <div class="callout callout-warn">
-<strong>The classic bug.</strong> <code>Tokenize::tokenize_into</code>
+<strong>The classic bug.</strong> <code>tokenize_borrowed_into</code>
 <em>appends</em>. Omitting <code>buf.clear()</code> does not produce an error; it
 produces a growing buffer and quietly wrong counts. If you are not in a hot
 loop, you have taken on that risk for nothing.
@@ -81,9 +81,12 @@ Ask, in this order:
 Step 2 is the one people skip. If you are computing Levenshtein against 100,000
 candidates, the fix is a [trie](../features/trie.md) or a
 [phonetic bucket](../features/phonetics.md) that cuts the candidate set — not a
-different call shape for the metric. A `levenshtein/ascii/1024` call is 29.08 µs
+different call shape for the metric. A `levenshtein/ascii/1024` call is 29.08 µs †
 of real work; no container decision moves that. Removing 99% of the comparisons
 does.
+
+† Pending re-measurement, and left as recorded rather than replaced with a
+guess. See [Benchmarks: string distance](../benchmarks/distance.md).
 
 ## Where the high-level API is genuinely better
 
@@ -115,22 +118,23 @@ you would want to materialise, because only one token exists at a time.
 `IntoIterator<Item = &str>`, so a tokenizer's iterator feeds it directly:
 
 ```rust
+use verbora_core::{StopWordLanguage, StopWords};
 use verbora_phonetics::{Metaphone, phoneticize_tokens};
-use verbora_tokenizers::{AggressiveTokenizer, Tokenize};
+use verbora_tokenizers::{BorrowingTokenizer, WordTokenizer};
 
-let tokenizer = AggressiveTokenizer::new();
 let metaphone = Metaphone::new();
+let stops = StopWords::for_language(StopWordLanguage::En);
 
 // No intermediate Vec<String> between the two stages.
-let keys = phoneticize_tokens(tokenizer.tokens("the quick brown fox"), false, |t| {
+let keys = phoneticize_tokens(WordTokenizer.tokens("the quick brown fox"), &stops, |t| {
     metaphone.process(t)
 });
 
 assert_eq!(keys, ["KK", "BRN", "FKS"]);
 ```
 
-The `tokenize()` version of that pipeline builds a `Vec` that exists for exactly
-as long as it takes to iterate it once.
+The `tokenize_borrowed()` version of that pipeline builds a `Vec` that exists for
+exactly as long as it takes to iterate it once.
 
 ## The summary you can act on
 

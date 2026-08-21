@@ -2,14 +2,12 @@
 //!
 //! # Why this exists
 //!
-//! [`SentimentAnalyzer::get_sentiment`] is cheap per call — the crate
-//! documentation measures roughly 94 M tokens/s on lowercase ASCII — but a
-//! caller scoring a large, independent corpus (one score per review, per
-//! ticket, per comment) still pays that cost once per document, serially, on
-//! one core. The analyzer itself needs no change to fan that out: it borrows
-//! its vocabulary and negation list read-only, so the exact same
-//! [`SentimentAnalyzer::get_sentiment`] can run from many threads at once
-//! against one shared analyzer. [`SentimentAnalyzer::par_get_sentiment_batch`]
+//! A caller scoring a large, independent corpus (one score per review, per
+//! ticket, per comment) pays [`SentimentAnalyzer::get_sentiment`] once per
+//! document, serially, on one core. The analyzer itself needs no change to fan
+//! that out: it borrows its vocabulary and negation list read-only, so the
+//! exact same [`SentimentAnalyzer::get_sentiment`] can run from many threads at
+//! once against one shared analyzer. [`SentimentAnalyzer::par_get_sentiment_batch`]
 //! is that fan-out, and nothing else — its body is a `par_iter().map(...)`
 //! over the sequential method, so any change to the scoring loop
 //! ([`Contributions`](crate::Contributions), [`SentimentAnalyzer::score`])
@@ -18,16 +16,22 @@
 //!
 //! # When to reach for it instead of the sequential loop
 //!
-//! Per-document cost is small enough that Rayon's own fork-join overhead
-//! dominates for short documents or small batches — see the `par_batch`
-//! Criterion group in `benches/sentiment.rs`, which compares
-//! `docs.iter().map(get_sentiment)` against this method at several
-//! `(document count, tokens per document)` combinations. As a rule of thumb:
+//! `UNMEASURED`, in both directions. This module used to publish a per-token
+//! throughput for the sequential path and a crossover rule of thumb for this
+//! one; both are withdrawn. The throughput was quoted from the crate
+//! documentation, which had already withdrawn it — the lookup-form and
+//! span-matching work changed the scoring loop underneath it — and the
+//! crossover was drawn from the same campaign. Neither may be restated until
+//! `cargo bench -p verbora-sentiment` has run again on settled code.
 //!
-//! * A handful of documents, or documents under a few hundred tokens each —
-//!   the sequential loop wins or ties; use it.
-//! * Hundreds of documents, or documents in the thousands-of-tokens range —
-//!   this method wins, and the win grows with both axes.
+//! What can be said without a measurement is the shape of the trade: this
+//! method adds Rayon's fork-join scheduling to work that is otherwise a tight
+//! per-document loop, so there is a batch size and a document length below
+//! which the sequential loop wins. Where that boundary sits is exactly the
+//! unmeasured part. The `par_batch` Criterion group in `benches/sentiment.rs`
+//! compares `docs.iter().map(get_sentiment)` against this method across
+//! several `(document count, tokens per document)` combinations and is what
+//! the next campaign should answer it with.
 //!
 //! If you are scoring one document, or you already have your own thread pool
 //! and fan-out strategy, call [`SentimentAnalyzer::get_sentiment`] directly:
@@ -35,7 +39,7 @@
 //!
 //! # Cost and allocation behaviour
 //!
-//! One `Vec<f64>` is allocated for the output, sized to `docs.len()` up
+//! One `Vec<Option<f64>>` is allocated for the output, sized to `docs.len()` up
 //! front, and nothing else is allocated by this method itself — each
 //! document is scored by the same [`SentimentAnalyzer::get_sentiment`] that
 //! the sequential path uses, with the same allocation behaviour described
@@ -79,16 +83,19 @@ impl<S: Stemmer> SentimentAnalyzer<S> {
     /// panic-propagation rules.
     ///
     /// ```
-    /// use verbora_sentiment::SentimentAnalyzer;
+    /// use verbora_sentiment::{Language, SentimentAnalyzer, VocabularyKind};
     ///
-    /// let analyzer = SentimentAnalyzer::without_stemmer("English", "afinn").unwrap();
-    /// let docs = vec![vec!["good"], vec!["not", "good"], vec![]];
+    /// let analyzer =
+    ///     SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn).unwrap();
+    /// let docs = vec![vec!["good"], vec!["not", "happy"], vec![]];
     /// let scores = analyzer.par_get_sentiment_batch(&docs);
-    /// assert_eq!(scores[0], 3.0);
-    /// assert_eq!(scores[1], -1.5);
-    /// assert!(scores[2].is_nan());
+    /// assert_eq!(scores[0], Some(3.0));
+    /// assert_eq!(scores[1], Some(-1.5));
+    /// // The third document has no tokens, so it has no mean.
+    /// assert_eq!(scores[2], None);
     /// ```
-    pub fn par_get_sentiment_batch<'d, D>(&self, docs: &'d [D]) -> Vec<f64>
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
+    pub fn par_get_sentiment_batch<'d, D>(&self, docs: &'d [D]) -> Vec<Option<f64>>
     where
         S: Sync,
         D: Sync,
@@ -103,10 +110,10 @@ impl<S: Stemmer> SentimentAnalyzer<S> {
 mod tests {
     use verbora_stemmers::PorterStemmer;
 
-    use crate::SentimentAnalyzer;
+    use crate::{Language, SentimentAnalyzer, VocabularyKind};
 
     fn afinn_en() -> SentimentAnalyzer {
-        SentimentAnalyzer::without_stemmer("English", "afinn").unwrap()
+        SentimentAnalyzer::without_stemmer(Language::English, VocabularyKind::Afinn).unwrap()
     }
 
     #[test]
@@ -117,7 +124,7 @@ mod tests {
             vec!["not", "good"],
             vec!["not", "good", "good"],
         ];
-        let sequential: Vec<f64> = docs.iter().map(|d| a.get_sentiment(d)).collect();
+        let sequential: Vec<Option<f64>> = docs.iter().map(|d| a.get_sentiment(d)).collect();
         let parallel = a.par_get_sentiment_batch(&docs);
         assert_eq!(sequential, parallel);
     }
@@ -126,15 +133,20 @@ mod tests {
     fn empty_batch_is_an_empty_vec() {
         let a = afinn_en();
         let docs: Vec<Vec<&str>> = vec![];
-        assert_eq!(a.par_get_sentiment_batch(&docs), Vec::<f64>::new());
+        assert_eq!(a.par_get_sentiment_batch(&docs), Vec::<Option<f64>>::new());
     }
 
     #[test]
     fn works_with_a_stemmer_supplied() {
         // `S` must be `Sync`, not just `NoStemmer`'s trivial case.
-        let a = SentimentAnalyzer::new("English", Some(PorterStemmer::new()), "afinn").unwrap();
+        let a = SentimentAnalyzer::with_stemmer(
+            Language::English,
+            VocabularyKind::Afinn,
+            PorterStemmer::new(),
+        )
+        .unwrap();
         let docs = vec![vec!["running", "badly"], vec!["stemmed", "greatness"]];
-        let sequential: Vec<f64> = docs.iter().map(|d| a.get_sentiment(d)).collect();
+        let sequential: Vec<Option<f64>> = docs.iter().map(|d| a.get_sentiment(d)).collect();
         let parallel = a.par_get_sentiment_batch(&docs);
         assert_eq!(sequential, parallel);
     }

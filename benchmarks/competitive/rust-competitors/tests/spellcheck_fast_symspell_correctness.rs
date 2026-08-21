@@ -192,7 +192,7 @@ fn build_fast_symspell_with_threshold_zero_actually_works() {
 }
 
 #[test]
-fn transposition_is_one_edit_for_fast_symspell_and_verbora_but_two_for_fuzzyindex() {
+fn transposition_is_one_edit_for_fast_symspell_verbora_and_now_fuzzyindex_too() {
     let words = load_words();
     let sample = &words[..2_000];
 
@@ -212,7 +212,9 @@ fn transposition_is_one_edit_for_fast_symspell_and_verbora_but_two_for_fuzzyinde
 
     let sc = Spellcheck::new(sample.iter().cloned());
     assert!(
-        sc.get_corrections(&transposed, 1).contains(&word),
+        sc.corrections(&transposed, 1)
+            .iter()
+            .any(|c| c.word == word),
         "Verbora's Norvig-style edit generator treats transposition as one \
          edit, so {transposed:?} -> {word:?} should be reachable at distance 1"
     );
@@ -233,23 +235,39 @@ fn transposition_is_one_edit_for_fast_symspell_and_verbora_but_two_for_fuzzyinde
     }
     let index = builder.build();
 
-    let at_one: Vec<&str> = index.neighbors(&transposed, 1).collect();
+    // The three-way divergence this test was written to document is **gone**.
+    // `FuzzyIndex` used plain Levenshtein, under which a pure transposition
+    // costs 2 (delete+insert, or two substitutions), so it did not reach
+    // `word` at distance 1 while `Spellcheck` and `fast_symspell` both did.
+    // `crates/verbora-spellcheck/src/fuzzy_index.rs` now names **unrestricted
+    // Damerau-Levenshtein** as the crate's metric — chosen because a BK-tree's
+    // pruning "is correct only under a true metric" — and it counts a
+    // transposition as one edit. All three engines now agree at distance 1.
+    //
+    // The old assertion's own failure message asked for exactly this follow-up
+    // when the divergence disappeared: `benches/fst_fuzzy.rs`'s classification
+    // has been changed from NARROWED_EXACT to PARTIAL, and
+    // `tests/fst_fuzzy_correctness.rs` now asserts subset-plus-transposition
+    // rather than set equality against `fst`'s plain-Levenshtein automaton.
+    let at_one: Vec<&str> = index.neighbors(&transposed, 1).map(|n| n.word).collect();
     assert!(
-        !at_one.contains(&word.as_str()),
-        "FuzzyIndex's plain-Levenshtein metric should NOT reach a pure \
-         transposition at distance 1 (it costs 2 there: delete+insert, or \
-         two substitutions) -- if this now fails, the divergence this test \
-         exists to document has disappeared, and \
-         spellcheck_fuzzyindex_query's benchmark numbers should be \
-         re-read against FuzzyIndex's current metric before quoting them \
-         alongside fast_symspell's"
+        at_one.contains(&word.as_str()),
+        "FuzzyIndex's unrestricted Damerau-Levenshtein metric must reach a \
+         pure transposition at distance 1, agreeing with Spellcheck and \
+         fast_symspell above"
     );
-    let at_two: Vec<&str> = index.neighbors(&transposed, 2).collect();
+
+    // A larger budget can only add matches, never remove them.
+    let at_two: Vec<&str> = index.neighbors(&transposed, 2).map(|n| n.word).collect();
+    assert!(at_two.contains(&word.as_str()));
+
+    // The metric really is Damerau and not merely a looser threshold: a
+    // transposition costs exactly 1, so distance 0 must still not reach it.
+    let at_zero: Vec<&str> = index.neighbors(&transposed, 0).map(|n| n.word).collect();
     assert!(
-        at_two.contains(&word.as_str()),
-        "at distance 2, plain Levenshtein does reach the same transposition \
-         (two substitutions), confirming this is a threshold difference, \
-         not a bug in either engine"
+        !at_zero.contains(&word.as_str()),
+        "a transposition costs one edit, so it must be out of reach at \
+         max_distance 0"
     );
 }
 
@@ -370,7 +388,7 @@ fn fuzzyindex_and_fast_symspell_agree_on_deletion_typos_or_the_disagreement_is_e
     for word in corpus.iter().filter(|w| w.chars().count() > 1).take(200) {
         let probe = typo(word);
 
-        let mut tree_hits: Vec<&str> = index.neighbors(&probe, 1).collect();
+        let mut tree_hits: Vec<&str> = index.neighbors(&probe, 1).map(|n| n.word).collect();
         tree_hits.sort_unstable();
         tree_hits.dedup();
 
