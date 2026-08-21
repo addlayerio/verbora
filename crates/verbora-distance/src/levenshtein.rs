@@ -76,6 +76,12 @@ use core::fmt;
 use rustc_hash::FxHashMap;
 
 /// The edit operation a [`CostError`] is about.
+///
+/// Sealed for the same reason [`CostError`] is: it is that error's payload, so
+/// leaving it open would hand back at the inner layer the freedom the outer one
+/// reserves. A metric with a fourth edit operation is a metric this crate could
+/// plausibly grow.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     /// A unit of the target not matched from the source.
@@ -138,6 +144,7 @@ impl fmt::Display for Operation {
 /// The three cost *types* keep their derived `PartialEq`: they can only hold
 /// finite values, so a derived comparison is already reflexive there.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum CostError {
     /// The cost is `NaN` or infinite. A distance built from either is not a
     /// number a caller can threshold, rank or normalise.
@@ -1086,6 +1093,7 @@ pub fn osa_search_weighted<'t>(
 /// `levenshtein` never errors and never panics, so every element is a plain
 /// `usize`.
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_levenshtein_batch(pairs: &[(&str, &str)]) -> Vec<usize> {
     use rayon::prelude::*;
@@ -1105,6 +1113,7 @@ pub fn par_levenshtein_batch(pairs: &[(&str, &str)]) -> Vec<usize> {
 /// It cannot panic, for any input including an empty `pairs`: there is no
 /// cost set to reject.
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_damerau_levenshtein_batch(pairs: &[(&str, &str)]) -> Vec<usize> {
     use rayon::prelude::*;
@@ -1133,6 +1142,7 @@ pub fn par_damerau_levenshtein_batch(pairs: &[(&str, &str)]) -> Vec<usize> {
 /// is conservative for it. A caller with weighted costs writes the one-line
 /// `par_iter().map(...)` themselves.
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_osa_batch(pairs: &[(&str, &str)]) -> Vec<usize> {
     use rayon::prelude::*;

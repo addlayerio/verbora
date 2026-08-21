@@ -1,13 +1,12 @@
 //! [`Spellcheck`]: corrections for a misspelled word, drawn from a corpus.
 
 use std::fmt;
-use std::hash::Hasher;
 use std::sync::OnceLock;
 
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::FxHashMap;
 use verbora_distance::damerau_levenshtein;
 
-use crate::deletions::{for_each_deletion, to_scalars};
+use crate::deletions::{for_each_deletion, hash_scalars, to_scalars};
 
 /// The largest `max_distance` the lazily built deletion index answers.
 ///
@@ -533,6 +532,7 @@ impl Spellcheck {
     /// assert_eq!(got, [sc.corrections("th", 1), sc.corrections("he", 1)]);
     /// ```
     #[cfg(feature = "parallel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
     #[must_use]
     pub fn par_corrections_batch(
         &self,
@@ -651,17 +651,6 @@ impl Spellcheck {
         }
         near
     }
-}
-
-/// Hashes a scalar sequence, seeded with its length so that a sequence and its
-/// own prefixes do not collide systematically.
-fn hash_scalars(units: &[char]) -> u64 {
-    let mut h = FxHasher::default();
-    h.write_usize(units.len());
-    for &c in units {
-        h.write_u32(c as u32);
-    }
-    h.finish()
 }
 
 #[cfg(test)]

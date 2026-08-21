@@ -35,25 +35,25 @@ categories = ["text-processing", "science"]
 
 [workspace.dependencies]
 # --- internal ---
-verbora-core = { path = "crates/verbora-core", version = "0.1.0" }
-verbora-distance = { path = "crates/verbora-distance", version = "0.1.0" }
-verbora-inflectors = { path = "crates/verbora-inflectors", version = "0.1.0" }
-verbora-language = { path = "crates/verbora-language", version = "0.1.0" }
-verbora-ngrams = { path = "crates/verbora-ngrams", version = "0.1.0" }
-verbora-normalizers = { path = "crates/verbora-normalizers", version = "0.1.0" }
-verbora-analyzers = { path = "crates/verbora-analyzers", version = "0.1.0" }
-verbora-spellcheck = { path = "crates/verbora-spellcheck", version = "0.1.0" }
-verbora-stemmers = { path = "crates/verbora-stemmers", version = "0.1.0" }
-verbora-tagger = { path = "crates/verbora-tagger", version = "0.1.0" }
-verbora-transliterators = { path = "crates/verbora-transliterators", version = "0.1.0" }
-verbora-util = { path = "crates/verbora-util", version = "0.1.0" }
-verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.1.0" }
-verbora-classifiers = { path = "crates/verbora-classifiers", version = "0.1.0" }
-verbora-sentiment = { path = "crates/verbora-sentiment", version = "0.1.0" }
-verbora-tfidf = { path = "crates/verbora-tfidf", version = "0.1.0" }
-verbora-phonetics = { path = "crates/verbora-phonetics", version = "0.1.0" }
-verbora-tokenizers = { path = "crates/verbora-tokenizers", version = "0.1.0" }
-verbora-trie = { path = "crates/verbora-trie", version = "0.1.0" }
+verbora-core = { path = "crates/verbora-core", version = "0.2.0" }
+verbora-distance = { path = "crates/verbora-distance", version = "0.2.0" }
+verbora-inflectors = { path = "crates/verbora-inflectors", version = "0.2.0" }
+verbora-language = { path = "crates/verbora-language", version = "0.2.0" }
+verbora-ngrams = { path = "crates/verbora-ngrams", version = "0.2.0" }
+verbora-normalizers = { path = "crates/verbora-normalizers", version = "0.2.0" }
+verbora-analyzers = { path = "crates/verbora-analyzers", version = "0.2.0" }
+verbora-spellcheck = { path = "crates/verbora-spellcheck", version = "0.2.0" }
+verbora-stemmers = { path = "crates/verbora-stemmers", version = "0.2.0" }
+verbora-tagger = { path = "crates/verbora-tagger", version = "0.2.0" }
+verbora-transliterators = { path = "crates/verbora-transliterators", version = "0.2.0" }
+verbora-util = { path = "crates/verbora-util", version = "0.2.0" }
+verbora-wordnet = { path = "crates/verbora-wordnet", version = "0.2.0" }
+verbora-classifiers = { path = "crates/verbora-classifiers", version = "0.2.0" }
+verbora-sentiment = { path = "crates/verbora-sentiment", version = "0.2.0" }
+verbora-tfidf = { path = "crates/verbora-tfidf", version = "0.2.0" }
+verbora-phonetics = { path = "crates/verbora-phonetics", version = "0.2.0" }
+verbora-tokenizers = { path = "crates/verbora-tokenizers", version = "0.2.0" }
+verbora-trie = { path = "crates/verbora-trie", version = "0.2.0" }
 
 # --- external ---
 # Kept deliberately small. Every dependency here must be justified by a

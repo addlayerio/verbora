@@ -45,6 +45,7 @@ use crate::{LanguageDetection, LanguageDetector};
 ///
 /// `texts` is any slice of things that borrow as `&str`, so `&[&str]`,
 /// `&[String]` and `&[Cow<'_, str>]` all work without a conversion pass.
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 pub fn par_detect_batch<D, S>(detector: &D, texts: &[S]) -> Vec<LanguageDetection>
 where
     D: LanguageDetector + Sync,

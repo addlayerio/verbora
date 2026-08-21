@@ -11,19 +11,21 @@ character database, and `verbora-ngrams` has no dependencies at all.
 | Rust | 1.85 or newer (`rust-version = "1.85"`) |
 | Edition | 2024 |
 | Platform | Any Rust target the crate supports; no C runtime dependency |
-| `unsafe` | Denied workspace-wide (`unsafe_code = "deny"`) |
+| `unsafe` | Denied workspace-wide (`unsafe_code = "deny"`). One narrow exception, test-only: `verbora-spellcheck`'s `counting_alloc` module. No `unsafe` is compiled into any published library. |
 
 ## Add a crate
 
 ```toml
 [dependencies]
-verbora-tokenizers = "0.1"
+verbora-tokenizers = "0.2"
 ```
 
 <div class="callout callout-note">
-<strong>Pre-1.0.</strong> The crates are at <code>0.1.0</code>. If the version
-you want is not on crates.io yet, use the git or path form below — the code is
-identical either way.
+<strong>Pre-1.0.</strong> The crates are at <code>0.2.0</code>, which is a
+breaking release relative to <code>0.1.0</code>: a caret requirement of
+<code>"0.1"</code> will not resolve to it, and the examples on this site are
+written against the newer API. If the version you want is not on crates.io yet,
+use the git or path form below — the code is identical either way.
 </div>
 
 From git:
@@ -75,18 +77,18 @@ A typical text pipeline:
 
 ```toml
 [dependencies]
-verbora-tokenizers = "0.1"
-verbora-normalizers = "0.1"
-verbora-ngrams = "0.1"
+verbora-tokenizers = "0.2"
+verbora-normalizers = "0.2"
+verbora-ngrams = "0.2"
 ```
 
 A fuzzy-matching service:
 
 ```toml
 [dependencies]
-verbora-distance = "0.1"
-verbora-phonetics = "0.1"
-verbora-trie = "0.1"
+verbora-distance = "0.2"
+verbora-phonetics = "0.2"
+verbora-trie = "0.2"
 ```
 
 ## Cargo features

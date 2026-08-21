@@ -121,6 +121,18 @@ impl HashIndex {
         Self::default()
     }
 
+    /// Bytes this index has reserved for its slot table.
+    ///
+    /// Test-only, and it exists for one reason: [`HashIndex::reserve`] takes an
+    /// untrusted `size_hint`, so how much it reserves is a memory bound that
+    /// has to be *observed* to be pinned. Nothing a query returns changes with
+    /// the table's size, which is precisely why a test of the answers cannot
+    /// see a reservation that is orders of magnitude too large.
+    #[cfg(test)]
+    pub(crate) fn reserved_slot_bytes(&self) -> usize {
+        self.slots.capacity() * size_of::<u32>()
+    }
+
     /// Pre-sizes for `keys` more insertions totalling about `bytes` of key
     /// data, so a bulk load pays no incremental rehashes or blob doublings.
     ///

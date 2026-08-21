@@ -337,7 +337,18 @@ impl MaxEntModel {
 }
 
 /// Why a persisted model does not describe a distribution.
+///
+/// `#[non_exhaustive]`, because this is the payload of
+/// [`MaxEntError::MalformedModel`](crate::MaxEntError::MalformedModel) and that
+/// enum is `#[non_exhaustive]` too. Marking only the outer enum would have been
+/// pointless: a caller who matched `MalformedModel(defect)` and then matched
+/// `defect` exhaustively would still be broken by a new defect variant, so the
+/// freedom bought at the outer layer is handed straight back at the inner one.
+/// A new way for a model file to be malformed is a new way for a *load* to
+/// fail, and a caller who cannot state today what it will do about one is
+/// exactly the caller who should be writing a `_` arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ModelDefect {
     /// `outcomes` is absent, is not an array of strings, or is empty. A model
     /// with no outcomes has no distribution to be the maximum-entropy one.

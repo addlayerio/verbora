@@ -35,8 +35,8 @@ Iterators first, borrowed tokens, and no allocation you did not ask for.</p>
 
 ```toml
 [dependencies]
-verbora-tokenizers = "0.1"
-verbora-distance = "0.1"
+verbora-tokenizers = "0.2"
+verbora-distance = "0.2"
 ```
 
 ```rust

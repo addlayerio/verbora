@@ -427,7 +427,7 @@ over. No public function panics on any input.
 | A record has no `\|` gloss delimiter | `Error::MalformedSynset` with `RecordError::MissingGloss` |
 | A numeric field is not a number in its documented radix | `Error::MalformedSynset` / `Error::MalformedIndexEntry` with `RecordError::InvalidField` |
 | An index line's two sense counts disagree | `RecordError::SenseCountMismatch` — guessing which to believe would drop or invent senses |
-| A file is too large for `Storage::Indexed`'s `u32` line table | `Error::FileTooLarge` |
+| A dictionary file is 4 GiB or larger, under any strategy that holds it in memory | `Error::FileTooLarge`, naming the file, its length and the limit |
 | A prebuilt sidecar no longer matches the files | `Error::Prebuilt` |
 
 Every variant names the file it concerns, and the two record variants also name
@@ -441,6 +441,16 @@ at open, so a file that changes size mid-session does not change the search path
   per file (eight files); `Indexed` adds four bytes per line. `Pread` and
   `LazyResident` allocate nothing beyond the `File` handles — `LazyResident`'s
   buffer is allocated the first time that file is queried.
+- **The 4 GiB ceiling.** Every strategy that makes a file resident — `Resident`,
+  `Indexed` and `LazyResident` — refuses a file of 4 GiB or more with
+  `Error::FileTooLarge` instead of handing its length to an allocator. A
+  dictionary path is caller-supplied and so is its size, so the length is
+  checked, not trusted: `LazyResident` reports it at open rather than at the
+  first query, and the read is capped one byte past the limit so a file that
+  grows between the metadata call and the read is refused on what was actually
+  read. Only `Pread`, which holds one line at a time, has no ceiling. WordNet
+  3.1's largest file is about 16 MB, four thousand times under the limit, which
+  is why respecting it costs nothing.
 - **Per query, eager.** `synset`, `senses` and `lookup` return owned `Synset`s:
   one `String` per textual field, one `Vec` each for `words`, `pointers` and the
   gloss's examples.

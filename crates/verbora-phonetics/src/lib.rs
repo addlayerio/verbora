@@ -93,6 +93,13 @@
 //! before treating a key as an index entry.
 
 #![cfg_attr(doctest, doc = include_str!("../README.md"))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// Documentation in this crate links to `par_encode_batch` (`parallel`).
+// Those links resolve on docs.rs, which builds all features; without the
+// feature the targets do not exist, and the lint would fire on every plain
+// `cargo doc`. It stays armed in the all-features build, which is the one
+// that ships.
+#![cfg_attr(not(feature = "parallel"), allow(rustdoc::broken_intra_doc_links))]
 
 mod beider_morse;
 mod caverphone;

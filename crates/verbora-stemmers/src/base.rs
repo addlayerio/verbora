@@ -402,6 +402,7 @@ pub trait TokenizeAndStem {
     /// rayon pool is already active (or the default one, created lazily on first
     /// use).
     #[cfg(feature = "parallel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
     fn par_tokenize_and_stem_batch(&self, docs: &[&str], keep_stops: bool) -> Vec<Vec<String>>
     where
         Self: Sized + Sync,

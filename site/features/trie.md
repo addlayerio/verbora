@@ -150,9 +150,16 @@ fn main() {
 }
 ```
 
-Reserving up front removes the arena's growth reallocations from a bulk load.
-`insert_all` already reserves the iterator's `size_hint().0` — one node per
-item, a lower bound — which skips the first few doublings but not the rest.
+Reserving up front removes the arena's growth reallocations from a bulk load,
+and for a large load it is the only thing that does. `insert_all` reserves the
+iterator's `size_hint().0` — one node per item, a lower bound — but **clamps it
+at 4,096 nodes**, so it skips the first few doublings and no more. A `Vec` of a
+million words reports a million and is still pre-sized for 4,096. The clamp is
+deliberate: `size_hint` is a hint, not a bound, and an iterator that overstates
+it must not be able to turn a bulk load into an unbounded allocation. Growth
+past the ceiling is amortised, which is a constant factor; trusting the hint is
+not bounded at all. When you know the real size, say so with `reserve` — as
+above — rather than relying on the hint.
 
 ## Insertion
 
@@ -182,8 +189,9 @@ Inserting the empty string marks the root as a word. It creates no node, so
 `None` for total misses.
 
 `insert_all<I>(list)` takes any `IntoIterator` whose items are `AsRef<str>`. It
-reserves `size_hint().0` nodes, pre-slots the membership table, and then calls
-`insert` per item, so the return values are discarded. There is no batch or
+reserves `size_hint().0` nodes — capped at 4,096, see above — pre-slots the
+membership table to match, and then calls `insert` per item, so the return
+values are discarded. There is no batch or
 parallel insertion API: `insert` needs `&mut self` and appends to one shared
 arena, so building a trie is inherently single-threaded — see
 [Sharing a trie across threads](#sharing-a-trie-across-threads) for what *can*

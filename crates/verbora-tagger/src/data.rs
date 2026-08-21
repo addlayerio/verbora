@@ -193,18 +193,21 @@ mod tests {
     ///
     /// | Reason | English | Dutch |
     /// |---|---:|---:|
-    /// | key was corpus markup, not a token | 122 | 0 |
-    /// | key decoded onto a key already held (`\*` onto `*`) | 1 | 0 |
+    /// | key was corpus markup, not a token | 123 | 0 |
+    /// | key decoded onto a key another entry already held | 0 | 0 |
     /// | entry contract (the key `""`, whose tag list is also empty) | 1 | 0 |
     ///
-    /// The 122 markup keys are 86 with a `\` escaping nothing, 36 carrying the
-    /// corpus's own word/tag separator and the tag after it; `build.rs`'s
-    /// `decode_key` documents both shapes.
+    /// The 123 markup keys are 86 with a `\` escaping nothing, 36 carrying the
+    /// corpus's own word/tag separator and the tag after it, and one that is the
+    /// bare null-element marker `*`; `build.rs`'s `decode_key` documents all
+    /// three shapes. The token whose text is an asterisk survives, from the
+    /// escaped spelling `\*` — see
+    /// `lexicon::tests::tokens_containing_a_slash_or_a_star_are_reachable_by_their_text`.
     #[test]
     fn every_dropped_source_entry_is_accounted_for() {
         assert_eq!(ENGLISH_SOURCE_ENTRIES, 92_662);
-        assert_eq!(ENGLISH_KEYS_NOT_TOKENS, 122);
-        assert_eq!(ENGLISH_KEYS_MERGED, 1);
+        assert_eq!(ENGLISH_KEYS_NOT_TOKENS, 123);
+        assert_eq!(ENGLISH_KEYS_MERGED, 0);
         assert_eq!(ENGLISH_ENTRIES_REJECTED, 1);
         assert_eq!(
             StaticLexicon::english().len(),
@@ -304,7 +307,7 @@ mod tests {
     #[test]
     fn rule_tables_have_the_recorded_sizes() {
         assert_eq!(ENGLISH_RULES.len(), 18);
-        assert_eq!(DUTCH_RULES.len(), 274);
+        assert_eq!(DUTCH_RULES.len(), 273);
         assert_eq!(BRILL_PAPER_RULES.len(), 10);
         assert_eq!(ENGLISH_RULES[12], "* RB CURRENT-WORD-ENDS-WITH ly");
     }

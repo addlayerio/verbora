@@ -45,9 +45,43 @@
 //!
 //! A consequence of the scalar unit worth naming: a deletion sequence is always
 //! well-formed text, since deleting whole scalars can never split a surrogate
-//! pair. Sequences are nonetheless kept as hashes of `[char]` rather than as
-//! strings — there is never a need to render one back to text, only to compare
-//! it.
+//! pair. Nothing here depends on that — a sequence is only ever hashed, never
+//! rendered — but it means the unit choice never produces one.
+//!
+//! # Why the key is a hash
+//!
+//! The map is keyed on a 64-bit hash of each deletion sequence
+//! (`crate::deletions::hash_scalars`) rather than on the sequence, so it stores
+//! no sequence bytes at all.
+//!
+//! This is a memory bound, not a micro-optimisation. A word of `n` scalars has
+//! up to `n choose 2` depth-2 deletion sequences of `n - 2` scalars each, so a
+//! map keyed on the sequence is `Θ(n³)` bytes *retained for the life of the
+//! index*, and a single long token is ordinary input. Keyed on the sequence,
+//! indexing one 800-scalar word (every scalar distinct, so no two sequences
+//! coincide) measured **1,035,068 kB** of peak RSS; keyed on the hash, the same
+//! word measures **34,328 kB** — in line with the 34,936 kB the same word costs
+//! through [`Spellcheck`], which already keyed on a hash. The entry count is
+//! identical either way; what changes is that an entry's key is 8 bytes instead
+//! of `4(n - 2)`. (Peak RSS read from `/proc/self/status`'s `VmHWM` after
+//! `build`, on this machine;
+//! `tests::an_index_of_one_long_word_stays_quadratic_in_its_length` holds the
+//! same bound portably, per allocated byte.)
+//!
+//! Hashing loses the ability to tell two sequences apart, which costs nothing
+//! here because nothing in this design trusted the key to begin with. A
+//! deletion match was never a match — `"cats"` and `"cars"` genuinely share the
+//! sequence `"cas"` — so every candidate already had its exact distance
+//! computed with [`verbora_distance::damerau_levenshtein`] before being
+//! returned. A hash collision is one more candidate of exactly that kind: it
+//! can only *add* a word to the candidate set, never remove one, and the
+//! verification that was already there rejects it. Results are therefore
+//! identical either way — which `tests::hashing_the_key_cannot_change_an_answer`
+//! verifies differentially, against an index keyed on the sequence itself. For
+//! the same reason, [`DeletionIndexBuilder::insert`]'s duplicate check settles
+//! membership by comparing the word's text and never by the key matching.
+//!
+//! [`Spellcheck`]: crate::Spellcheck
 //!
 //! # Build → Freeze → Query
 //!
@@ -60,7 +94,7 @@ use std::fmt;
 use rustc_hash::FxHashMap;
 use verbora_distance::damerau_levenshtein;
 
-use crate::deletions::{for_each_deletion, to_scalars};
+use crate::deletions::{for_each_deletion, hash_scalars, to_scalars};
 use crate::neighbor::Neighbor;
 
 /// Returned by [`DeletionIndex::neighbors`] when the requested distance is
@@ -97,7 +131,9 @@ impl std::error::Error for DistanceBeyondIndex {}
 pub struct DeletionIndexBuilder {
     max_distance: u32,
     words: Vec<Box<str>>,
-    deletions: FxHashMap<Box<[char]>, Vec<u32>>,
+    /// Deletion-sequence hash → the entries that reach it — see the module doc
+    /// comment's "Why the key is a hash".
+    deletions: FxHashMap<u64, Vec<u32>>,
 }
 
 impl DeletionIndexBuilder {
@@ -121,7 +157,11 @@ impl DeletionIndexBuilder {
     /// of distinct strings, not a multiset.
     pub fn insert(&mut self, word: &str) {
         let units = to_scalars(word);
-        if let Some(existing) = self.deletions.get(units.as_slice())
+        // The word's own depth-0 bucket holds every entry whose depth-0 hash
+        // this word shares, which under a collision is more than the equal
+        // ones — so membership is decided by comparing the text, never by the
+        // hash matching.
+        if let Some(existing) = self.deletions.get(&hash_scalars(&units))
             && existing.iter().any(|&i| &*self.words[i as usize] == word)
         {
             return;
@@ -129,11 +169,12 @@ impl DeletionIndexBuilder {
         let index = self.words.len() as u32;
         let deletions = &mut self.deletions;
         for_each_deletion(&units, self.max_distance, |variant| {
-            let bucket = deletions.entry(variant.into()).or_default();
+            let bucket = deletions.entry(hash_scalars(variant)).or_default();
             // A word that repeats a scalar reaches one sequence by more than
-            // one position set, and generation does not dedupe. This word is
-            // the bucket's most recent writer, so checking the tail keeps the
-            // bucket free of repeats.
+            // one position set, and two distinct sequences of one word can
+            // land on one hash; generation dedupes neither. This word is the
+            // bucket's most recent writer either way, so checking the tail
+            // keeps the bucket free of repeats.
             if bucket.last() != Some(&index) {
                 bucket.push(index);
             }
@@ -191,7 +232,9 @@ pub struct DeletionIndex {
     /// Indexed words in insertion order; the index a word holds here *is* its
     /// enumeration rank, which is what makes result order specifiable.
     words: Vec<Box<str>>,
-    deletions: FxHashMap<Box<[char]>, Vec<u32>>,
+    /// Deletion-sequence hash → the entries that reach it — see the module doc
+    /// comment's "Why the key is a hash".
+    deletions: FxHashMap<u64, Vec<u32>>,
 }
 
 impl DeletionIndex {
@@ -252,7 +295,7 @@ impl DeletionIndex {
 
         let mut candidates: Vec<u32> = Vec::new();
         for_each_deletion(&units, max_distance, |variant| {
-            if let Some(indices) = self.deletions.get(variant) {
+            if let Some(indices) = self.deletions.get(&hash_scalars(variant)) {
                 candidates.extend_from_slice(indices);
             }
         });
@@ -313,10 +356,204 @@ impl std::fmt::Debug for DeletionNeighbors<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+    use crate::counting_alloc::measure;
 
     fn words<'a>(it: impl Iterator<Item = Neighbor<'a>>) -> Vec<&'a str> {
         it.map(|n| n.word).collect()
+    }
+
+    /// This index as it would be if the map were keyed on the deletion
+    /// *sequence* — the design the hash key replaced — written out
+    /// independently so it can be the oracle rather than a paraphrase of the
+    /// code under test.
+    ///
+    /// The whole argument for hashing is that it cannot change an answer, and
+    /// an argument is not a test.
+    fn neighbors_keyed_on_the_sequence(
+        corpus: &[&str],
+        build_k: u32,
+        query: &str,
+        k: u32,
+    ) -> Vec<(String, u32)> {
+        let mut words: Vec<Box<str>> = Vec::new();
+        let mut deletions: BTreeMap<Box<[char]>, Vec<u32>> = BTreeMap::new();
+        for word in corpus {
+            let units = to_scalars(word);
+            if let Some(existing) = deletions.get(units.as_slice())
+                && existing.iter().any(|&i| &*words[i as usize] == *word)
+            {
+                continue;
+            }
+            let index = words.len() as u32;
+            for_each_deletion(&units, build_k, |variant| {
+                let bucket = deletions.entry(variant.into()).or_default();
+                if bucket.last() != Some(&index) {
+                    bucket.push(index);
+                }
+            });
+            words.push((*word).into());
+        }
+
+        let mut candidates: Vec<u32> = Vec::new();
+        for_each_deletion(&to_scalars(query), k, |variant| {
+            if let Some(indices) = deletions.get(variant) {
+                candidates.extend_from_slice(indices);
+            }
+        });
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+            .into_iter()
+            .filter_map(|i| {
+                let word = &*words[i as usize];
+                let distance = damerau_levenshtein(query, word) as u32;
+                (distance <= k).then(|| (word.to_owned(), distance))
+            })
+            .collect()
+    }
+
+    /// Keying on a 64-bit hash makes the index's own membership question
+    /// approximate, and this holds it to answering the exact one anyway —
+    /// same words, same distances, same order — against an index keyed on the
+    /// sequence itself.
+    #[test]
+    fn hashing_the_key_cannot_change_an_answer() {
+        // Chosen to make deletion collisions dense rather than incidental:
+        // near-anagrams, shared stems, repeated scalars, duplicates, the empty
+        // string, and astral scalars, so a great many distinct sequences meet
+        // in the same buckets.
+        let corpus = [
+            "cats",
+            "cars",
+            "cabs",
+            "cast",
+            "cost",
+            "cast",
+            "acts",
+            "scat",
+            "cat",
+            "at",
+            "a",
+            "",
+            "aaa",
+            "aaaa",
+            "aab",
+            "aba",
+            "baa",
+            "kitten",
+            "sitting",
+            "kitchen",
+            "mitten",
+            "bitten",
+            "😀ab",
+            "😁ab",
+            "𝕳ab",
+            "café",
+            "cafe",
+            "Москва",
+            "Мсква",
+        ];
+        let queries = [
+            "cats",
+            "cat",
+            "",
+            "a",
+            "aa",
+            "aaa",
+            "scat",
+            "kitten",
+            "sittin",
+            "😀ab",
+            "𝕳b",
+            "cafe",
+            "Москва",
+            "zzzz",
+        ];
+        for build_k in 0..=2 {
+            let mut b = DeletionIndexBuilder::new(build_k);
+            b.insert_all(corpus);
+            let index = b.build();
+            for query in queries {
+                for k in 0..=build_k {
+                    let got: Vec<(String, u32)> = index
+                        .neighbors(query, k)
+                        .unwrap()
+                        .map(|n| (n.word.to_owned(), n.distance))
+                        .collect();
+                    assert_eq!(
+                        got,
+                        neighbors_keyed_on_the_sequence(&corpus, build_k, query, k),
+                        "query {query:?} at k={k}, built for {build_k}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A single long token is ordinary input — a URL, a base64 blob, a
+    /// mis-tokenised line — and what it is charged for is the index, which is
+    /// *retained* rather than transient. The bill is `1 + n + n choose 2`
+    /// entries for an `n`-scalar token, so it is quadratic in the token's
+    /// length. Keying on the deletion sequence instead of on its hash made it
+    /// **cubic**, because every one of those entries then also stored a key of
+    /// `n - 2` scalars.
+    ///
+    /// The property that separates the two is therefore not the entry count,
+    /// which is identical, but the **bytes per entry**: bounded, and
+    /// independent of `n`, when the key is a hash; growing with `n` when the
+    /// key is the sequence. So this measures a short word and a long one and
+    /// holds the per-entry cost to not growing between them.
+    ///
+    /// It has to be measured rather than reasoned about: both designs return
+    /// the same answers from the same number of entries — that is the whole
+    /// point of the change — so no assertion on `len()`, on the neighbours, or
+    /// on the order can tell them apart. Only the allocator can.
+    #[test]
+    fn an_index_of_one_long_word_stays_quadratic_in_its_length() {
+        /// Bytes retained by an index of one `n`-scalar word, per map entry.
+        ///
+        /// Every scalar is distinct, so no two deletion sequences coincide and
+        /// the entry count is exactly the worst case.
+        fn bytes_per_entry(n: u32) -> f64 {
+            let word: String = (0..n)
+                .map(|i| char::from_u32(0x4E00 + i).unwrap())
+                .collect();
+            let (bytes, index) = measure(|| {
+                let mut b = DeletionIndexBuilder::new(2);
+                b.insert(&word);
+                b.build()
+            });
+            // The structure still works, and still finds the word it holds.
+            assert_eq!(index.len(), 1);
+            assert_eq!(words(index.neighbors(&word, 2).unwrap()), [word.as_str()]);
+
+            let n = u64::from(n);
+            let entries = 1 + n + n * (n - 1) / 2;
+            let retained =
+                u64::try_from(bytes.retained).expect("a built index retains bytes, not frees them");
+            retained as f64 / entries as f64
+        }
+
+        let short = bytes_per_entry(200);
+        let long = bytes_per_entry(800);
+
+        // Measured: 70 bytes per entry at both lengths — one 8-byte hash key,
+        // one `Vec<u32>` header and its four-element heap block, and the hash
+        // table's own slack. Keyed on the sequence the same two words measured
+        // 875 and 3,275 bytes per entry, growing with the word exactly as
+        // `4(n - 2)` says it must.
+        assert!(
+            long < 256.0,
+            "{long:.0} bytes per entry at 800 scalars is not a bounded per-entry cost"
+        );
+        assert!(
+            long < 2.0 * short,
+            "per-entry cost grew from {short:.0} to {long:.0} bytes between a 200- and an \
+             800-scalar word, so it is not independent of the word's length"
+        );
     }
 
     #[test]

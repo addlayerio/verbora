@@ -9,6 +9,7 @@ use verbora_core::{BorrowingTokenizer, Tokenizer};
 ///
 /// Constructed only by [`SentenceTokenizer::with_abbreviations`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AbbreviationError {
     /// An abbreviation was the empty string.
     ///

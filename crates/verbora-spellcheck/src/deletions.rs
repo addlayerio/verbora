@@ -43,9 +43,28 @@
 //! direction, because an astral scalar differing by one costs two code-unit
 //! deletions.
 
+use std::hash::Hasher;
+
+use rustc_hash::FxHasher;
+
 /// The scalar sequence generation and lookup are keyed on.
 pub(crate) fn to_scalars(word: &str) -> Vec<char> {
     word.chars().collect()
+}
+
+/// Hashes a scalar sequence, seeded with its length so that a sequence and its
+/// own prefixes do not collide systematically.
+///
+/// This is what both deletion-keyed structures in the crate store *instead of*
+/// the sequence — see [`for_each_deletion`]'s "Why this streams instead of
+/// returning the set" for why keeping the sequence is not affordable.
+pub(crate) fn hash_scalars(units: &[char]) -> u64 {
+    let mut h = FxHasher::default();
+    h.write_usize(units.len());
+    for &c in units {
+        h.write_u32(c as u32);
+    }
+    h.finish()
 }
 
 /// Calls `f` once with every sequence reachable from `units` by deleting up to
@@ -53,9 +72,10 @@ pub(crate) fn to_scalars(word: &str) -> Vec<char> {
 /// 0).
 ///
 /// The slice `f` receives is a scratch buffer this function reuses between
-/// calls: it is valid for the duration of the call and no longer. A caller that
-/// needs to keep a variant copies it — which the callers in this crate do not,
-/// because all four of them only hash or look it up.
+/// calls: it is valid for the duration of the call and no longer, and it is the
+/// *same* buffer every time, so a caller that needs to keep a variant copies
+/// it. None of the callers in this crate do — all four of them hash the variant
+/// with [`hash_scalars`] and keep the hash.
 ///
 /// May repeat a sequence when `units` repeats a scalar — deleting either `'a'`
 /// of `"aab"` yields `"ab"` twice — which callers absorb themselves rather than
@@ -74,13 +94,27 @@ pub(crate) fn to_scalars(word: &str) -> Vec<char> {
 ///
 /// The cubic factor is inherent to the *set*, but no caller in this crate wants
 /// the set. Every one of them consumes a variant and forgets it: two hash a
-/// variant to probe a map, one hashes it to fill one, and
-/// [`DeletionIndexBuilder`] copies it into a map it was always going to own.
+/// variant to probe a map ([`DeletionIndex::neighbors`], [`Spellcheck`]'s
+/// near-distance path) and two hash one to fill a map
+/// ([`DeletionIndexBuilder::insert`], `Spellcheck::build_near_index`).
 /// Streaming therefore holds one variant at a time — `O(n)` live bytes at any
 /// instant, whatever the depth — while the number of variants, and so the
 /// running time, is unchanged.
 ///
-/// [`DeletionIndexBuilder`]: crate::DeletionIndexBuilder
+/// The same arithmetic is why neither map *stores* the sequence either. A map
+/// keyed on the sequence pays the cubic bill once at build time and then keeps
+/// paying it: `n choose 2` keys of `n - 2` scalars is the same `Θ(n³)` bytes,
+/// retained for the life of the index rather than for the life of one call. So
+/// both maps key on [`hash_scalars`] and verify the hit afterwards, which is
+/// sound because a collision can only *add* a candidate that verification then
+/// rejects. `tests::streaming_holds_one_variant_at_a_time` pins the call-time
+/// half of that with a counting allocator;
+/// `deletion_index::tests::an_index_of_one_long_word_stays_quadratic_in_its_length`
+/// pins the retained half.
+///
+/// [`DeletionIndex::neighbors`]: crate::DeletionIndex::neighbors
+/// [`DeletionIndexBuilder::insert`]: crate::DeletionIndexBuilder::insert
+/// [`Spellcheck`]: crate::Spellcheck
 ///
 /// # Why it enumerates position sets rather than a frontier
 ///
@@ -152,6 +186,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::counting_alloc::measure;
     use verbora_distance::damerau_levenshtein;
 
     /// The streamed variants, deduplicated and sorted.
@@ -246,20 +281,62 @@ mod tests {
         assert_eq!(deep, 4, "\"ab\", \"b\", \"a\", \"\"");
     }
 
-    /// The buffer handed to `f` never outgrows the word, whatever the depth —
-    /// the property that makes a long token affordable at all.
+    /// The property that makes a long token affordable at all: generating a
+    /// quadratic number of variants costs a *linear* amount of live memory,
+    /// because there is one buffer and it is reused.
+    ///
+    /// Measured with [`measure`] rather than inferred from what the callback
+    /// sees, because what the callback sees cannot distinguish the two designs:
+    /// an implementation that collected every variant into a `Vec<Vec<char>>`
+    /// and then replayed the collection through `f` would emit the same slices,
+    /// of the same widths, in the same order, and satisfy every assertion about
+    /// them — while allocating cubically. That implementation is what this test
+    /// exists to fail against, and the allocator is what lets it.
     #[test]
-    fn nothing_wider_than_the_word_is_ever_live() {
+    fn streaming_holds_one_variant_at_a_time() {
         let units = to_scalars(&"abcdefghij".repeat(12));
+        let n = units.len();
         let mut widest = 0;
         let mut emitted = 0u64;
-        for_each_deletion(&units, 2, |variant| {
-            widest = widest.max(variant.len());
-            emitted += 1;
+        // One buffer, reused, is the documented contract, so the callback can
+        // check it directly: count how often the address it is handed changes.
+        // A materialising generator hands out a different allocation each time.
+        let mut buffers = 0u32;
+        let mut previous: *const char = std::ptr::null();
+
+        let (bytes, ()) = measure(|| {
+            for_each_deletion(&units, 2, |variant| {
+                widest = widest.max(variant.len());
+                emitted += 1;
+                if !std::ptr::eq(variant.as_ptr(), previous) {
+                    buffers += 1;
+                    previous = variant.as_ptr();
+                }
+            });
         });
-        assert_eq!(widest, units.len());
-        let n = units.len() as u64;
-        assert_eq!(emitted, 1 + n + n * (n - 1) / 2);
+
+        assert_eq!(widest, n, "no variant is wider than the word");
+        assert_eq!(emitted, 1 + n as u64 + (n * (n - 1) / 2) as u64);
+
+        // Two addresses over the whole run: `units` itself at depth 0, then the
+        // single scratch buffer for every one of the 7,260 deeper variants.
+        assert_eq!(
+            buffers, 2,
+            "the scratch buffer must be reused, not reallocated"
+        );
+
+        // Linear in the word, not in the number of variants. Measured at these
+        // 120 scalars: 496 bytes live at the peak — the 480-byte variant buffer
+        // plus the two-element position set — against 3,624,784 bytes for a
+        // probe that materialised the set first. The budget sits between them
+        // with two orders of magnitude of clearance on each side.
+        let budget = 64 * n * size_of::<char>();
+        assert!(
+            bytes.peak < budget,
+            "peak live bytes {} exceeded the linear budget {budget} for a {n}-scalar word",
+            bytes.peak
+        );
+        assert_eq!(bytes.retained, 0, "the generator must keep nothing");
     }
 
     #[test]

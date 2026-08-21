@@ -1,6 +1,6 @@
 [package]
 name = "verbora-core"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,6 +9,15 @@ authors.workspace = true
 description = "Core traits and shared types for Verbora"
 keywords.workspace = true
 categories.workspace = true
+
+# docs.rs bakes one immutable page set per published version: a page built with
+# the wrong flags cannot be re-rendered later, only republished under a new
+# version. Build with every feature enabled, so feature-gated items and the doc
+# links pointing at them resolve, and with `--cfg docsrs`, which is what makes
+# the `#[cfg_attr(docsrs, doc(cfg(...)))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # The stop-word lookup set. `FxHashSet` rather than `std`'s: the keys are words

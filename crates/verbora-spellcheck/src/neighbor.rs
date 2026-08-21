@@ -11,16 +11,18 @@
 /// use verbora_spellcheck::FuzzyIndexBuilder;
 ///
 /// let mut builder = FuzzyIndexBuilder::new();
-/// builder.insert_all(["kitten", "sitting", "mitten"]);
+/// builder.insert_all(["bitten", "kitten", "sitting"]);
 /// let index = builder.build();
 ///
 /// let mut found: Vec<_> = index.neighbors("kitten", 3).collect();
 /// // Ranking is the caller's: the index generates candidates, it does not
 /// // rank. When the ranking wanted is the obvious one, it is this type's own.
 /// found.sort();
+/// // Nearest first, so the exact match leads even though "bitten" is
+/// // alphabetically ahead of it.
 /// assert_eq!(
 ///     found.iter().map(|n| (n.word, n.distance)).collect::<Vec<_>>(),
-///     [("kitten", 0), ("mitten", 1), ("sitting", 3)]
+///     [("kitten", 0), ("bitten", 1), ("sitting", 3)]
 /// );
 /// ```
 ///
@@ -53,5 +55,59 @@ impl Ord for Neighbor<'_> {
 impl PartialOrd for Neighbor<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`Ord`] is written out rather than derived, and the two disagree, so
+    /// this pins the difference on the pair that shows it: a nearer neighbour
+    /// whose word sorts *after* a farther one. Comparing fields in declaration
+    /// order — what `#[derive(Ord)]` would do — puts `"a"` first because `word`
+    /// comes first in the struct, which is the ranking this type exists not to
+    /// have.
+    #[test]
+    fn the_order_on_a_neighbor_is_the_documented_ranking() {
+        let near = Neighbor {
+            word: "b",
+            distance: 1,
+        };
+        let far = Neighbor {
+            word: "a",
+            distance: 2,
+        };
+        assert!(near < far, "distance must outrank the word");
+
+        let mut found = [far, near];
+        found.sort();
+        assert_eq!(
+            found
+                .iter()
+                .map(|n| (n.word, n.distance))
+                .collect::<Vec<_>>(),
+            [("b", 1), ("a", 2)]
+        );
+
+        // Within one distance the word is the tiebreak, ascending.
+        let mut tied = [
+            Neighbor {
+                word: "b",
+                distance: 1,
+            },
+            Neighbor {
+                word: "a",
+                distance: 1,
+            },
+        ];
+        tied.sort();
+        assert_eq!(tied.iter().map(|n| n.word).collect::<Vec<_>>(), ["a", "b"]);
+
+        // Total, and consistent with `Eq`: equal on both fields is `Equal`,
+        // and every comparison agrees with `Ord`.
+        assert_eq!(near.cmp(&near), std::cmp::Ordering::Equal);
+        assert_eq!(near.partial_cmp(&far), Some(std::cmp::Ordering::Less));
+        assert_eq!(far.partial_cmp(&near), Some(std::cmp::Ordering::Greater));
     }
 }

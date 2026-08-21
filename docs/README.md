@@ -15,7 +15,7 @@ site: https://addlayerio.github.io/verbora/** (source in [`site/`](../site/)).
 | [`COMPETITIVE_BENCHMARKS.md`](COMPETITIVE_BENCHMARKS.md) | The competitor research matrix: every library considered as a benchmark comparison, per module, and why it was selected or rejected. |
 | [`PERFORMANCE_GAPS.md`](PERFORMANCE_GAPS.md) | Every real performance loss found against a competitor, its investigated cause, and — where closed — the fix and re-measured numbers. A running investigation log, not a to-do list. |
 | [`PERFORMANCE_MATRIX.md`](PERFORMANCE_MATRIX.md) | Per-crate checklist against the project's performance audit (laziness, zero-copy, batching, parallelism, allocation, data structures). |
-| [`design/`](design/) | Pre-implementation design and standards-research documents for features that don't exist yet. Each one says so explicitly. |
+| [`design/`](design/) | Design and standards-research documents, each opening with a **Status** line that says which it is. Two have since been built and are now normative records of shipped behaviour (`distance-contract.md`, `rust-native-migration.md`) — where one of those and the code disagree, one of them is a defect and both are edited in the same change; the rest describe work that does not exist yet. Read the Status line before treating any of them as either. |
 | [`research/`](research/) | Original task briefs that drove the work recorded in the files above. |
 
 ## Why these read differently from `site/`

@@ -341,6 +341,7 @@ fn try_fused_ascii_diffs(a: &[u8], b: &[u8]) -> Option<u64> {
 /// never errors; a scalar-count mismatch reports as `None` per element,
 /// exactly as the sequential call would.
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_hamming_batch(pairs: &[(&str, &str)]) -> Vec<Option<usize>> {
     use rayon::prelude::*;

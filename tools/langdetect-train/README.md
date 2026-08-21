@@ -48,6 +48,33 @@ cargo test --release                      # this tool (differential + alloc test
 cargo test -p verbora-language --release --features fast-language-detection
 ```
 
+## The weights and the feature extractors are one artifact
+
+A trained weight is a number about a *bucket*, and a bucket means nothing
+except relative to the function that emitted it. Editing
+`hashed_features` or `hashed_features_cyrillic` in `verbora-language`
+without re-running steps 2–5 therefore leaves every committed weight
+aimed at a bucket that no longer means what it meant — while the crate
+still compiles and the detector still answers.
+
+`codegen` closes that by writing
+`FEATURE_EXTRACTOR_FINGERPRINT` into the generated weights file: a digest
+of both extractors' output over a fixed codepoint sweep, taken at the
+moment of training. `verbora-language`'s
+`committed_weights_were_trained_through_this_extractor` recomputes it from
+the shipped extractors and fails when the two stop matching.
+
+Note that this tool's `tests/tokenizer_differential.rs` does **not** cover
+the same ground, and cannot. It pins each extractor against an independent
+statement of what the features should be, so it catches an extractor
+drifting *away* from its definition — but the edit that strands the
+weights is the opposite one, a fix that brings the extractor back *to* its
+definition. That edit turns the differential test from red to green at
+exactly the moment the weights go stale.
+
+When the fingerprint test fails, retrain. Do not re-record the constant:
+it is generated, and it is not the thing that went wrong.
+
 ## Training data — exactly what the current weights were trained on
 
 - **Corpus:** Tatoeba per-language sentence exports downloaded

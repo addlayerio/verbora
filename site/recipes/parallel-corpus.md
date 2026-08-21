@@ -23,7 +23,7 @@ parallel needs no `rayon` in your own `Cargo.toml` at all:
 
 ```toml
 [dependencies]
-verbora-tokenizers = { version = "0.1", features = ["parallel"] }
+verbora-tokenizers = { version = "0.2", features = ["parallel"] }
 ```
 
 ```rust  ignore
@@ -71,7 +71,7 @@ it:
 ```toml
 [dependencies]
 rayon = "1"
-verbora-tokenizers = "0.1"
+verbora-tokenizers = "0.2"
 ```
 
 ## The basic fan-out

@@ -357,6 +357,7 @@ impl MaxEntClassifier {
 /// the file is damaged, the second says it is intact but was written by another
 /// build, and those need opposite responses from a user.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RestoreError {
     /// The file could not be read. Carries the message rather than the
     /// `io::Error` so the enum stays cheap to compare in tests.

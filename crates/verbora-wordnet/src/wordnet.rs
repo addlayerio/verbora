@@ -361,6 +361,7 @@ impl WordNet {
     /// `self.lookup(words[i])` — and each element carries its own `Result`, so
     /// one word's failure does not abort the others.
     #[cfg(feature = "parallel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
     pub fn par_lookup_batch(&self, words: &[&str]) -> Vec<Result<Vec<Synset>>> {
         use rayon::prelude::*;
         words.par_iter().map(|word| self.lookup(word)).collect()

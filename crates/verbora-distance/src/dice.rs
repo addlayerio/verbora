@@ -281,6 +281,7 @@ fn bigrams(s: &str) -> FxHashSet<(char, char)> {
 /// `map` + `collect`. `dice_coefficient` never errors and never returns a
 /// non-finite value, so every element is a finite `f64` in `0.0..=1.0`.
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_dice_coefficient_batch(pairs: &[(&str, &str)]) -> Vec<f64> {
     use rayon::prelude::*;

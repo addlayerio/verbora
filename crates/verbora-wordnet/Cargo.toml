@@ -1,6 +1,6 @@
 [package]
 name = "verbora-wordnet"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,7 +11,16 @@ keywords = ["wordnet", "lexical", "nlp"]
 categories.workspace = true
 # The WordNet database itself is NOT distributed with this crate; it is read at
 # run time from a directory the caller supplies. See LICENSE-WORDNET.
-include = ["src/**", "benches/**", "tests/**", "LICENSE-WORDNET", "README.md"]
+include = ["src/**", "benches/**", "tests/**", "LICENSE", "LICENSE-WORDNET", "README.md"]
+
+# docs.rs bakes one immutable page set per published version: a page built with
+# the wrong flags cannot be re-rendered later, only republished under a new
+# version. Build with every feature enabled, so feature-gated items and the doc
+# links pointing at them resolve, and with `--cfg docsrs`, which is what makes
+# the `#[cfg_attr(docsrs, doc(cfg(...)))]` feature badges render.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # Newline scanning: line-start tables, the backwards scan to a line start, and

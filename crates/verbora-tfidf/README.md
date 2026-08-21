@@ -4,9 +4,9 @@ TF-IDF term weighting over a growable in-memory corpus. Add documents as text or
 as pre-analyzed terms, then score one document against a query, score every
 document at once, rank them best-first, or ask which terms make a single
 document distinctive. Nothing here builds a `terms × documents` matrix: terms
-are interned once per corpus, a document is a sparse `Vec<(TermId, u32)>`, and
-the document-frequency table is maintained incrementally so `idf` is an array
-load rather than a scan.
+are interned once per corpus, a document is a sparse list of (term id, raw
+count) pairs, and the document-frequency table is maintained incrementally so
+`idf` is an array load rather than a scan.
 
 ## What it guarantees
 

@@ -230,7 +230,7 @@ generation, not a distance metric run over every entry.
 use verbora_spellcheck::FuzzyIndexBuilder;
 
 let mut builder = FuzzyIndexBuilder::new();
-builder.insert_all(["Smith", "Smyth", "Smithe", "Jones"]);
+builder.insert_all(["Smith", "Smit", "Smyth", "Smithe", "Jones"]);
 let index = builder.build();
 
 // Each hit carries the exact edit distance the index already computed to
@@ -240,9 +240,11 @@ let index = builder.build();
 let mut hits: Vec<_> = index.neighbors("Smith", 2).collect();
 hits.sort();
 
+// The exact match leads even though "Smit" sorts alphabetically ahead of
+// it: distance is compared first, and only ties fall back to the word.
 assert_eq!(
     hits.iter().map(|n| (n.word, n.distance)).collect::<Vec<_>>(),
-    [("Smith", 0), ("Smithe", 1), ("Smyth", 1)]
+    [("Smith", 0), ("Smit", 1), ("Smithe", 1), ("Smyth", 1)]
 );
 assert!(!hits.iter().any(|n| n.word == "Jones"));
 ```

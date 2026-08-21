@@ -35,9 +35,9 @@ twice: once to the Cargo feature, once to an explicitly named `par_*` call.
 
 ```toml
 [dependencies]
-verbora-tokenizers = { version = "0.1", features = ["parallel"] }
+verbora-tokenizers = { version = "0.2", features = ["parallel"] }
 verbora-language = {
-  version = "0.1",
+  version = "0.2",
   features = ["fast-language-detection", "parallel"]
 }
 ```

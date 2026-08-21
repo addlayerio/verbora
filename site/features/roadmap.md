@@ -19,7 +19,7 @@ feature-gated separately. See
 
 ## Stability
 
-The workspace version is `0.1.0`, and public APIs may still be refined before a
+The workspace version is `0.2.0`, and public APIs may still be refined before a
 stable release. Documented behavior and test fixtures are treated as deliberate
 contracts in the meantime: changing one means changing its tests and its
 documentation in the same step, so a behavior you build on will not move

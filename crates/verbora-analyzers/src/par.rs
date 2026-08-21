@@ -63,6 +63,7 @@ use crate::word::TaggedWord;
 ///   prepositional phrase). No buffering, no locking, and no per-call thread
 ///   pool: this uses whichever global `rayon` pool is installed, so pool
 ///   configuration stays the caller's choice.
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_analyze_batch<'w>(sentences: &'w [Vec<TaggedWord<'w>>]) -> Vec<SentenceAnalysis<'w>> {
     sentences.par_iter().map(|words| analyze(words)).collect()

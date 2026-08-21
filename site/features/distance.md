@@ -16,7 +16,7 @@ is finite, it lies in <code>0.0..=1.0</code>, <code>f(x, x)</code> is exactly
 <code>1.0</code>, and <code>f(a, b)</code> and <code>f(b, a)</code> are
 bit-identical. No function in this crate panics, on any input.
 <code>cargo test -p verbora-distance</code> runs
-<strong>150</strong> unit tests and <strong>9</strong> doctests.
+<strong>183</strong> unit tests and <strong>36</strong> doctests.
 </div>
 
 ## When to use it
@@ -1080,6 +1080,7 @@ pub enum CostError {          // Display + std::error::Error
     NotFinite { operation: Operation, value: f64 },
     Negative { operation: Operation, value: f64 },
     TranspositionBelowThreshold { transposition: f64, minimum: f64 },
+    // #[non_exhaustive]
 }
 
 pub struct SearchResult<'t, D>;   // Debug + Clone + Copy + PartialEq

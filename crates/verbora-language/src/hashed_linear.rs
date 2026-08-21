@@ -442,6 +442,7 @@ fn single(language: Language, confidence: f32) -> LanguageDetection {
 /// correctly-rounded — so the same input produces bit-identical
 /// confidences on every platform and every call. This crate's own tests
 /// assert exact `f32` bit patterns, not approximate closeness.
+#[cfg_attr(docsrs, doc(cfg(feature = "fast-language-detection")))]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HashedLinearDetector;
 
@@ -521,6 +522,78 @@ pub mod train_support {
     /// Bucket count of the hashed feature space (`hashed_features` emits
     /// values in `0..DIMENSION`).
     pub const DIMENSION: usize = super::DIMENSION;
+
+    /// What [`feature_extractor_fingerprint`] returned when the committed
+    /// weight tables were generated, as recorded in the generated file
+    /// itself. Equal to a fresh fingerprint exactly while the tables and
+    /// the extractors are still the same artifact.
+    pub const COMMITTED_FEATURE_EXTRACTOR_FINGERPRINT: u64 =
+        super::weights::FEATURE_EXTRACTOR_FINGERPRINT;
+
+    /// A digest of both feature extractors' output over a fixed sweep of
+    /// the codepoint space they are defined on — the *identity* of the
+    /// feature transform a weight table was trained through.
+    ///
+    /// `tools/langdetect-train` records this value into the generated
+    /// `hashed_linear_weights.rs` at the moment it trains, and
+    /// `committed_weights_were_trained_through_this_extractor` recomputes
+    /// it from the shipped code and asserts the two agree.
+    ///
+    /// # Why the differential tests are not enough on their own
+    ///
+    /// A trained weight is a number about a *bucket*, and a bucket only
+    /// means anything relative to the function that produced it. Change an
+    /// extractor — a fold arm, a hash seed, a bigram rule — and every
+    /// committed weight silently retargets: no signature moves, nothing
+    /// fails to compile, and the model keeps answering, just through a
+    /// table trained for a different feature space.
+    ///
+    /// A differential test cannot catch that, because it pins the
+    /// extractor against a *definition*, and a change to the extractor is
+    /// usually a change that brings it back into line with the definition
+    /// — which is to say the differential test goes from failing to
+    /// passing, exactly when the weights have just gone stale. Only a
+    /// value carried by the weights themselves can tell that the two
+    /// halves have drifted apart, which is what this is.
+    ///
+    /// # The sweep
+    ///
+    /// Every scalar of the Basic Multilingual Plane, then one scalar per
+    /// 128-codepoint block above it, pushed through *both* extractors.
+    /// That covers `fold_cyrillic`'s whole domain scalar by scalar, every
+    /// `CODEPOINT_CLASS_BOUNDS` neighbourhood, every block index either
+    /// extractor can compute, and — since the sweep is one long run —
+    /// the bigram, trigram and quadgram paths as well. A change to any
+    /// single arm of either extractor moves the digest.
+    #[must_use]
+    pub fn feature_extractor_fingerprint() -> u64 {
+        // FNV-1a. The digest is an identity check, not a security
+        // boundary: it only has to change whenever the bucket stream
+        // changes, and to be stated in one place so the trainer and the
+        // test cannot compute it differently.
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        fn absorb(hash: &mut u64, value: u64) {
+            for byte in value.to_le_bytes() {
+                *hash ^= u64::from(byte);
+                *hash = hash.wrapping_mul(PRIME);
+            }
+        }
+
+        let sweep: String = (0x0000u32..=0xFFFF)
+            .chain((0x1_0000u32..=0x10_FFFF).step_by(128))
+            .filter_map(char::from_u32)
+            .collect();
+
+        let mut hash = OFFSET;
+        // Tag each stream so a bucket emitted by one extractor cannot
+        // stand in for the same bucket emitted by the other.
+        absorb(&mut hash, u64::from(b'L'));
+        hashed_features(&sweep, |bucket| absorb(&mut hash, u64::from(bucket)));
+        absorb(&mut hash, u64::from(b'C'));
+        hashed_features_cyrillic(&sweep, |bucket| absorb(&mut hash, u64::from(bucket)));
+        hash
+    }
 }
 
 #[cfg(test)]
@@ -616,7 +689,7 @@ mod tests {
         // Cyrillic linear model.
         (
             "Сегодня прекрасная погода, и дети играют на улице в парке.",
-            Some((Language::Russian, 0x3F51CCEE)),
+            Some((Language::Russian, 0x3F51CCD3)),
         ),
         (
             "Сьогодні чудова погода, і діти граються надворі в парку.",
@@ -709,6 +782,52 @@ mod tests {
                 candidate.confidence.get().to_bits()
             );
         }
+    }
+
+    /// The committed weight tables and the feature extractors that produced
+    /// them are one artifact, and this is the seam that says so.
+    ///
+    /// A weight is a number about a bucket; a bucket is only meaningful
+    /// relative to the function that emitted it. So an edit to
+    /// `hashed_features` or `hashed_features_cyrillic` — a fold arm, a hash
+    /// seed, an n-gram rule — retargets every committed weight at buckets
+    /// that no longer mean what they meant, and it does so with nothing
+    /// failing: the signatures are unchanged, the crate compiles, and the
+    /// detector keeps answering out of a table trained for a different
+    /// feature space.
+    ///
+    /// The differential suite in `tools/langdetect-train` cannot close
+    /// this. It pins each extractor against an independent statement of
+    /// what the features *should* be, so it catches an extractor that
+    /// drifts away from its definition — but the dangerous edit is the
+    /// opposite one: a fix that brings the extractor back *to* its
+    /// definition. That edit takes the differential test from failing to
+    /// passing at the very moment the weights go stale, which is why this
+    /// happened once already (`fold_cyrillic` gained ~100 uppercase letters,
+    /// `hashed_linear_weights.rs` was not regenerated, and nothing failed).
+    ///
+    /// `FEATURE_EXTRACTOR_FINGERPRINT` is written into the generated
+    /// weights file by `tools/langdetect-train`'s `codegen`, from the same
+    /// `train_support::feature_extractor_fingerprint` recomputed here. It
+    /// therefore cannot be updated except by regenerating the tables, and
+    /// the tables cannot be regenerated without updating it.
+    ///
+    /// Reading a failure: the extractors changed. Retrain
+    /// (`tools/langdetect-train/README.md`) rather than editing the
+    /// constant, because the constant is not the thing that went wrong.
+    #[test]
+    fn committed_weights_were_trained_through_this_extractor() {
+        assert_eq!(
+            train_support::feature_extractor_fingerprint(),
+            train_support::COMMITTED_FEATURE_EXTRACTOR_FINGERPRINT,
+            "the feature extractors no longer match the committed weight \
+             tables: hashed_features / hashed_features_cyrillic emit a \
+             different bucket stream than the one hashed_linear_weights.rs \
+             was generated from, so every weight in it now names a bucket \
+             that means something else. Regenerate the weights (see \
+             tools/langdetect-train/README.md) — do not re-record this \
+             constant."
+        );
     }
 
     #[test]

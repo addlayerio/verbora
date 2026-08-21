@@ -48,6 +48,7 @@ pub(crate) struct DocumentRecord {
 /// Both variants are refusals to write, so nothing partial ever reaches the
 /// caller's file.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ExportError {
     /// The corpus's analyzer runs a tokenizer installed through
     /// [`Analyzer::with_tokenizer`](crate::Analyzer::with_tokenizer).
@@ -106,6 +107,7 @@ impl std::error::Error for ExportError {
 ///   a corpus cannot mean. It was edited, or written by something that is not
 ///   this crate.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RestoreError {
     /// The bytes were not valid JSON, or not the shape this crate writes.
     Parse(serde_json::Error),

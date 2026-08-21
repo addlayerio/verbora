@@ -468,6 +468,7 @@ pub fn transliterate_ja_into(text: &str, out: &mut String) {
 /// assert_eq!(got, ["aiueo", "zasshi", "plain ascii"]);
 /// ```
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_transliterate_ja_batch<'a>(inputs: &[&'a str]) -> Vec<Cow<'a, str>> {
     use rayon::prelude::*;

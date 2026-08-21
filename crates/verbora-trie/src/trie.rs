@@ -30,6 +30,20 @@ const INLINE_CHILDREN: usize = 2;
 /// — so this constant is a speed knob, never a semantic one.
 const BINARY_SEARCH_THRESHOLD: usize = 8;
 
+/// The largest item count [`Trie::insert_all`] will pre-size for, however many
+/// the iterator claims.
+///
+/// `Iterator::size_hint` is explicitly not a correctness contract, and a safe
+/// iterator may report `usize::MAX`. Clamping to what the trie could *index* is
+/// not enough: `u32::MAX` nodes is tens of gigabytes of real allocation, so an
+/// overstated hint would trade a fast panic for exhausting the machine, which
+/// is strictly worse — this clamp was added after a `usize::MAX` hint reserved
+/// 96 GB. A hint only ever buys the first few doublings, `Vec` growth being
+/// amortised past that, so the ceiling is set where the reservation is cheap
+/// whether or not the hint was honest: 4,096 nodes is 128 KiB of arena and
+/// 64 KiB of membership table.
+const MAX_HINT: usize = 4096;
+
 /// How a trie treats letter case.
 ///
 /// Case handling is fixed when the trie is constructed and then applies to
@@ -352,9 +366,25 @@ impl Trie {
 
     /// Inserts every string in `list`.
     ///
-    /// The iterator's `size_hint` is used to pre-size, but only as a hint: an
-    /// iterator that overstates its length costs a few growth reallocations
-    /// during the load and nothing else.
+    /// # What the `size_hint` is worth
+    ///
+    /// The iterator's `size_hint` pre-sizes the load, but only up to a fixed
+    /// ceiling of 4,096 items — and the clamp applies to an **honest** hint as
+    /// readily as to a wild one. A `Vec` of a million words reports a million
+    /// and is pre-sized for 4,096, so that load grows the arena from 4,096
+    /// nodes by repeated doubling and re-slots the membership table along the
+    /// way: exactly the cost pre-sizing exists to avoid.
+    ///
+    /// That is the trade, taken deliberately. Growth is amortised, so the
+    /// doublings cost a constant factor on a load that was already O(total
+    /// length); trusting the hint instead costs an unbounded *allocation*,
+    /// because `Iterator::size_hint` is not a correctness contract and a safe
+    /// iterator may report `usize::MAX`. Reserving for that exhausts the
+    /// machine rather than slowing it down, so a ceiling cheap to reserve
+    /// whether or not the hint was honest is the only version of this
+    /// optimisation that cannot turn into a failure. A caller who knows the
+    /// real size and wants it honoured in full should not route it through the
+    /// hint.
     ///
     /// ```
     /// # use verbora_trie::Trie;
@@ -374,15 +404,7 @@ impl Trie {
         // skip the first few doublings of a bulk load without over-reserving for
         // callers who pass one string at a time.
         //
-        // It is a *hint* and not a bound, though — `Iterator::size_hint` is
-        // explicitly not a correctness contract, and a safe iterator may report
-        // `usize::MAX`. Clamping to what the trie could *index* is not enough:
-        // `u32::MAX` nodes is tens of gigabytes of real allocation, so an
-        // overstated hint would trade a fast panic for exhausting the machine,
-        // which is strictly worse. A hint only ever buys the first few
-        // doublings — `Vec` growth is amortised past that — so it is clamped to
-        // a size whose reservation is cheap whether or not the hint was honest.
-        const MAX_HINT: usize = 4096;
+        // It is a *hint* and not a bound, though — see `MAX_HINT`.
         let hint = it.size_hint().0.min(MAX_HINT);
         // Fallible even after the clamp: an honest hint of a billion words is
         // in range and still larger than some machines can hand out, and a
@@ -907,6 +929,85 @@ impl<'a> IntoIterator for &'a Trie {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An iterator whose `size_hint` is the largest a safe iterator may
+    /// legally report. `tests/contract.rs` holds the same shape to the public
+    /// contract — that no input panics; this module holds it to the memory
+    /// bound, which needs the arena.
+    struct LyingHint<I>(I);
+
+    impl<I: Iterator> Iterator for LyingHint<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.0.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (usize::MAX, None)
+        }
+    }
+
+    /// [`MAX_HINT`] is a bound on an *allocation*, and an allocation is not
+    /// visible in any answer the trie gives. Every public query returns the
+    /// same thing whether `insert_all` reserved 4,096 nodes or a hundred
+    /// million — `node_count` in particular reports `nodes.len()`, which no
+    /// reservation ever changes — so the clamp can only be pinned by reading
+    /// the capacity the reservation asked for. That is what this does, in the
+    /// bytes the two reservations actually cost, because bytes are what ran out
+    /// when a `usize::MAX` hint reserved 96 GB.
+    #[test]
+    fn an_overstated_size_hint_reserves_nothing_expensive() {
+        let mut t = Trie::new();
+        t.insert_all(LyingHint(["alpha", "beta", "gamma"].into_iter()));
+        assert_eq!(t.len(), 3);
+
+        let arena = t.nodes.capacity() * size_of::<Node>();
+        let table = t.index.reserved_slot_bytes();
+        let reserved = arena + table;
+
+        // 192 KiB at the current ceiling: 4,096 nodes of 32 bytes, plus a
+        // 16,384-slot membership table of `u32`. The budget is generous enough
+        // to survive a modest change of ceiling and still two orders of
+        // magnitude below what trusting the hint costs — clamping to what the
+        // trie can *index* rather than to what it can afford reserved 96 GB,
+        // and a ceiling of ten million reserves 454 MB.
+        const BUDGET: usize = 4 << 20;
+        assert!(
+            reserved < BUDGET,
+            "an overstated hint reserved {reserved} bytes ({arena} arena + {table} table), \
+             past the {BUDGET}-byte budget"
+        );
+
+        // An honest hint is clamped by the same ceiling — the trade documented
+        // on `insert_all` — so a large *truthful* load reserves no more than a
+        // wild one. That claim is about the reservation `insert_all` makes
+        // before its first insertion, and a reservation is only observable
+        // while nothing has grown past it, so the 20,000 items here are all
+        // the same word: the hint is exact and honest, the arena is six nodes
+        // deep when the load ends, and the capacity that survives *is* what
+        // the hint bought.
+        let many = vec!["alpha"; 20_000];
+        let mut honest = Trie::new();
+        honest.insert_all(&many);
+        assert_eq!(honest.len(), 1);
+
+        // 4,097 nodes measured: one root plus the clamped 4,096. The budget
+        // doubles that, because `Vec` is free to round a reservation up as it
+        // grows and the assertion is not about the rounding; what it refuses
+        // is the 20,000 the hint asked for. Clamping only implausible hints —
+        // trusting an exact `size_hint` because a `Vec` cannot lie about its
+        // own length — passes the `LyingHint` assertion above and fails here.
+        const HONEST_CEILING: usize = 2 * MAX_HINT;
+        assert!(
+            honest.nodes.capacity() <= HONEST_CEILING,
+            "a truthful hint of {} reserved {} nodes for a {}-node trie, past the \
+             {HONEST_CEILING}-node budget the {MAX_HINT}-item ceiling allows",
+            many.len(),
+            honest.nodes.capacity(),
+            honest.node_count()
+        );
+    }
 
     #[test]
     fn the_inline_child_capacity_is_free() {

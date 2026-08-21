@@ -183,9 +183,18 @@ impl Trainer {
     ///
     /// [`Template::CONTEXTUAL`] is the right choice for a small corpus; see its
     /// documentation.
+    ///
+    /// **Repeats are dropped**, keeping the first occurrence of each template,
+    /// so [`Trainer::templates`] can be shorter than what was passed in. A
+    /// template listed twice would instantiate twice at every site and propose
+    /// the same [`Condition`] twice, and the trainer credits a corrected token
+    /// once per proposal: one site fixed would report two corrections, clearing
+    /// a [`min_score`](Trainer::with_min_score) of 2 that exists precisely to
+    /// stop a rule from memorising a single site. A set of templates is what the
+    /// algorithm means, so the duplicate is dropped rather than counted.
     #[must_use]
     pub fn with_templates(mut self, templates: impl Into<Vec<Template>>) -> Self {
-        self.templates = templates.into();
+        self.templates = dedup(templates.into());
         self
     }
 
@@ -206,7 +215,7 @@ impl Trainer {
         self
     }
 
-    /// The templates proposals are drawn from.
+    /// The templates proposals are drawn from, without repeats.
     #[inline]
     #[must_use]
     pub fn templates(&self) -> &[Template] {
@@ -321,6 +330,22 @@ impl Trainer {
         }
         candidates
     }
+}
+
+/// Drops repeated templates, keeping the first occurrence of each.
+///
+/// Quadratic in the *deduplicated* length, which [`Template`] bounds at the
+/// number of its variants, so this is linear in what the caller passed.
+fn dedup(mut templates: Vec<Template>) -> Vec<Template> {
+    let mut kept = 0;
+    while kept < templates.len() {
+        if templates[..kept].contains(&templates[kept]) {
+            templates.remove(kept);
+        } else {
+            kept += 1;
+        }
+    }
+    templates
 }
 
 /// Applies one rule to every sentence, simultaneously within each.
@@ -457,6 +482,46 @@ mod tests {
         assert_eq!(training.errors_before(), 2);
         assert_eq!(training.errors_after(), 0);
         assert_eq!(training.tokens(), 6);
+    }
+
+    /// One corrected token is one correction, however many times the template
+    /// that found it was listed.
+    ///
+    /// `Template::instantiate` deduplicates only within one template's own
+    /// contribution, so a template repeated in [`Trainer::with_templates`] used
+    /// to propose the same condition once per repetition and have the same
+    /// corrected token credited once per proposal. The corpus below holds
+    /// exactly one mis-tagged token, so no rule can honestly score more than 1 —
+    /// and with the default threshold of 2 no rule can honestly be learned at
+    /// all, which is what the inflated score used to defeat.
+    #[test]
+    fn a_repeated_template_credits_one_corrected_token_once() {
+        let corpus = Corpus::parse_brown("to_TO book_VB").unwrap();
+        let mut lexicon = Lexicon::new(tag("NN"));
+        lexicon.insert("to", vec![tag("TO")]).unwrap();
+        lexicon.insert("book", vec![tag("NN")]).unwrap();
+        let repeated = vec![Template::PrevTag, Template::PrevTag, Template::PrevTag];
+
+        // The repeat never reaches the proposal loop.
+        let trainer = Trainer::new().with_templates(repeated.clone());
+        assert_eq!(trainer.templates(), [Template::PrevTag]);
+
+        let training = trainer
+            .with_min_score(NonZeroU32::new(1).expect("1 is not zero"))
+            .train(&corpus, &lexicon);
+        assert_eq!(training.rules().rules()[0].to_string(), "NN VB PREV-TAG TO");
+        assert_eq!(training.steps()[0].corrections, 1);
+        assert_eq!(training.steps()[0].errors, 0);
+        assert_eq!(training.steps()[0].score(), 1);
+
+        // At the default threshold the single site is rejected, exactly as it is
+        // when the template is listed once.
+        for templates in [vec![Template::PrevTag], repeated] {
+            let training = Trainer::new()
+                .with_templates(templates)
+                .train(&corpus, &lexicon);
+            assert!(training.rules().is_empty());
+        }
     }
 
     /// The learned rules must actually improve the tagger they were learned for.

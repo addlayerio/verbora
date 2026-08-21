@@ -106,6 +106,30 @@
 //! what is documented instead is the work each path does and what it allocates.
 
 #![cfg_attr(doctest, doc = include_str!("../README.md"))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// Documentation in this crate links to `Spellcheck::par_corrections_batch` (`parallel`).
+// Those links resolve on docs.rs, which builds all features; without the
+// feature the targets do not exist, and the lint would fire on every plain
+// `cargo doc`. It stays armed in the all-features build, which is the one
+// that ships.
+#![cfg_attr(not(feature = "parallel"), allow(rustdoc::broken_intra_doc_links))]
+
+/// Instrumentation, not implementation: the allocator the memory-bound tests
+/// measure themselves with. Compiled only for this crate's own test binary.
+///
+/// This is the one place in the crate that overrides the workspace's
+/// `unsafe_code = "deny"` — a `GlobalAlloc` implementation cannot be written
+/// without `unsafe` — and the override is an `expect` scoped to that file. The
+/// module's own "`unsafe` policy" section states why the exception is taken
+/// here rather than dissolved by moving the file or dropping it from the
+/// package, and what stops it from outliving its reason. Nothing a dependent
+/// compiles is affected: the `#[cfg(test)]` below is what keeps the published
+/// library free of `unsafe`, and it is the whole of what keeps it so.
+#[cfg(test)]
+mod counting_alloc;
+#[cfg(test)]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_alloc::Counting = counting_alloc::Counting;
 
 mod deletion_index;
 mod deletions;

@@ -15,7 +15,7 @@ simply a non-empty string containing no Unicode `White_Space` scalar. That
 matters more than it sounds: the bundled dictionaries are keyed by
 *whitespace-delimited corpus tokens*, so `well-known` and `A.A.U.` are single
 keys, and a tokenizer that splits inside them cannot reach those entries at all
-— measured at 15,666 of 92,661 English keys (16.9%) for a UAX #29 word
+— measured at 15,543 of 92,538 English keys (16.8%) for a UAX #29 word
 tokenizer. Split on whitespace to reach the bundled lexicon as it is keyed; use
 a UAX #29 tokenizer only with a lexicon keyed to match.
 
@@ -23,8 +23,17 @@ Nothing rewrites a token: no case folding, no trimming, no normalisation, and
 tokens come out byte-identical to the ones that went in. **Tagging cannot
 fail** — `BrillTagger::tag` returns a value, not a `Result`; every condition is
 total, every out-of-range position simply does not match, and every token gets a
-tag. The only fallible operations are parsing rules, corpora and lexicon
-entries, and each reports precisely what it rejected rather than guessing.
+tag.
+
+What is fallible is building the inputs, and there are five such operations:
+parsing a `Rule` or a `RuleSet` from text, `Corpus::parse_brown`,
+`Corpus::build_lexicon`, `Lexicon::insert`, and constructing a `Tag` or a `Word`
+with `new`, `FromStr` or `TryFrom<&'static str>`. Only the first two are
+parsing; the rest are validation. Each reports precisely what it rejected rather
+than repairing it. Note in particular that `Tag::new("*")` is an error — the
+rule language spells its wildcard pattern that way, so a tag named `*` could be
+written into a rule but never read back out of one. `Word::new("*")` is fine,
+because there `*` is an ordinary token.
 
 The algorithm is Eric Brill's, and the implementation follows the papers:
 

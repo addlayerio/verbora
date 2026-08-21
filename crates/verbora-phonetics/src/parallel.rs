@@ -107,6 +107,7 @@ use verbora_core::{DoubleKeyPhonetic, Phonetic};
 /// comfortably above Rayon's per-task overhead. It was consistently at or
 /// near the fastest option across repeated runs, not necessarily the single
 /// fastest in every one of them.
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 pub const DEFAULT_CHUNK_SIZE: usize = 64;
 
 /// Encodes `tokens` in parallel, in chunks, using `phonetic`.
@@ -155,6 +156,7 @@ pub const DEFAULT_CHUNK_SIZE: usize = 64;
 /// let keys = par_encode_batch(&soundex, &words, 2);
 /// assert_eq!(keys, ["R163", "R163", "P532"]);
 /// ```
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 pub fn par_encode_batch<P>(phonetic: &P, tokens: &[&str], chunk_size: usize) -> Vec<String>
 where
     P: Phonetic + Sync,
@@ -196,6 +198,7 @@ where
 ///     ]
 /// );
 /// ```
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 pub fn par_encode_double_batch<P>(
     phonetic: &P,
     tokens: &[&str],

@@ -63,6 +63,7 @@ pub use sample::{Event, Sample};
 /// does not describe a distribution. None of them reports the internal state of
 /// some other runtime.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MaxEntError {
     /// [`MaxEntClassifier::train`] was called on a sample holding no events.
     ///

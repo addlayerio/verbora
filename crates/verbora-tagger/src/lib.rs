@@ -60,17 +60,36 @@
 //!
 //! Tagging cannot fail. [`BrillTagger::tag`] returns a value, not a `Result`:
 //! every condition is total, every out-of-range position simply does not match,
-//! and every token gets a tag. The three fallible operations are all *parsing* —
-//! [`Rule`] and [`RuleSet`] from text, [`Corpus::parse_brown`], and
-//! [`Lexicon::insert`] — and each reports precisely what it rejected rather than
-//! guessing.
+//! and every token gets a tag.
+//!
+//! What is fallible is building the inputs. There are five such operations, and
+//! only the first two are *parsing* — the other three are validation, which
+//! rejects a value that was never text to begin with. Each reports precisely
+//! what it rejected rather than repairing it.
+//!
+//! | Operation | Error | Rejects |
+//! |---|---|---|
+//! | [`Rule`] and [`RuleSet`] from text, via `FromStr` or [`RuleSet::parse_lines`] | [`RuleParseError`], [`RuleSetParseError`] | too few fields, an unknown condition name, the wrong argument count for the condition named, a field that is not a valid tag or word, and a boolean argument that is neither `YES` nor `NO` |
+//! | [`Corpus::parse_brown`] | [`CorpusParseError`] | a `token_TAG` pair with no tag, an empty token, an empty tag, or the wildcard tag `*` |
+//! | [`Corpus::build_lexicon`] | [`LexiconError`] | a corpus token that is not a conforming lexicon key — which [`Corpus::from_sentences`] can produce and [`Corpus::parse_brown`] cannot |
+//! | [`Lexicon::insert`] | [`LexiconError`] | an empty key, a key containing whitespace, or an empty tag list |
+//! | [`Tag::new`] and [`Word::new`], and their `FromStr` and `TryFrom<&'static str>` | [`LiteralError`] | the empty string, and any Unicode `White_Space` scalar |
+//!
+//! The wildcard rule is worth stating on its own, because it reaches two of
+//! those rows. [`Tag::new`] rejects `"*"` with [`LiteralError::Wildcard`]: the
+//! rule language spells its wildcard pattern that way, so a tag named `*` could
+//! be written into a rule but never read back out of one. [`Corpus::parse_brown`]
+//! inherits it — a corpus line tagging a token `*` is rejected as
+//! [`CorpusParseError::WildcardTag`], not silently accepted. [`Word::new`] accepts
+//! `"*"`, because there it is an ordinary token — the bundled English lexicon
+//! keys it.
 //!
 //! # Bundled data
 //!
 //! | Language | Lexicon entries | Rules |
 //! |---|---|---|
 //! | [`Language::English`] | 92,538 | 18 |
-//! | [`Language::Dutch`] | 11,699 | 274 |
+//! | [`Language::Dutch`] | 11,699 | 273 |
 //!
 //! Plus [`brill_paper_rule_strings`], the ten rules of Brill (1992), Table 1.
 //! All of it is packed at build time and read in place from the executable, so
@@ -79,11 +98,12 @@
 //! The English source JSON holds 92,662 entries and 124 of them are not
 //! bundled. Its keys are written in the escaped notation of the tagged corpus
 //! they came from, where a `/` inside a token appears as `\/` because a bare `/`
-//! separates a token from its tag; `build.rs` decodes that, so `Asia\/Pacific`
-//! ships as the key `Asia/Pacific`. 122 keys turn out to be markup rather than
-//! tokens and are dropped, one (`\*`) decodes onto a key already held, and one
-//! (the key `""`, whose tag list was also empty) violates the entry contract.
-//! Each count is a constant `data::tests` asserts, per language and per reason.
+//! separates a token from its tag, and an asterisk appears as `\*` because a
+//! bare `*` marks a null element; `build.rs` decodes that, so `Asia\/Pacific`
+//! ships as the key `Asia/Pacific` and `\*` as the key `*`. 123 keys turn out to
+//! be markup rather than tokens and are dropped, and one (the key `""`, whose
+//! tag list was also empty) violates the entry contract. Each count is a
+//! constant `data::tests` asserts, per language and per reason.
 //!
 //! # References
 //!
@@ -97,6 +117,12 @@
 //! [UAX #29]: https://www.unicode.org/reports/tr29/
 
 #![cfg_attr(doctest, doc = include_str!("../README.md"))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+// The docs above link to the `parallel`-gated batch helper. That link
+// resolves on docs.rs, which builds all features; without the feature the
+// target does not exist and the lint would fire on every plain `cargo doc`.
+// It stays armed in the all-features build, which is the one that ships.
+#![cfg_attr(not(feature = "parallel"), allow(rustdoc::broken_intra_doc_links))]
 #![forbid(unsafe_code)]
 
 mod condition;

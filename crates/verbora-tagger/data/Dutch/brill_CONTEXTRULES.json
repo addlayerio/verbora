@@ -238,7 +238,6 @@
     "V(hulp,ott,1_of_2_of_3,mv) V(hulp,inf) NEXTBIGRAM V(trans,inf) Punc(komma)",
     "Pron(aanw,neut,zelfst) Pron(betr,neut,zelfst) SURROUNDTAG Punc(komma) Prep(voor)",
     "N(eigen,ev,neut) Int SURROUNDTAG Punc(aanhaal_dubb) Punc(komma)",
-    "N(eigen,ev,neut) Art(bep,zijd_of_mv,neut) LBIGRAM STAART De",
     "Conj(onder,met_fin) Conj(neven) PREV1OR2WD zowel",
     "Adv(gew,geen_func,stell,onverv) Adj(attr,stell,onverv) NEXTTAG Conj(neven)",
     "Adj(attr,stell,verv_neut) Pron(onbep,neut,attr) WDNEXTTAG Elke N(soort,ev,neut)",

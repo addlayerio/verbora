@@ -191,6 +191,7 @@
 //!   that; see [`ArtifactStamp`].
 
 #![cfg_attr(doctest, doc = include_str!("../README.md"))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc(html_root_url = "https://docs.rs/verbora-classifiers")]
 
 mod basic;

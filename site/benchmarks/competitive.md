@@ -15,7 +15,7 @@ therefore shows the measured workload, the result and its limits.
 | 314 timed comparisons | 13 capabilities with a fair Rust comparison |
 | 3 capabilities without a fair peer | WordNet, sentence analysis and sentiment are documented on their feature pages instead |
 | 1 primary metric | Criterion median, single-threaded, on the hardware below |
-| 7 capabilities awaiting a re-run | [Distance](#distance), [Tokenizers](#tokenizers), [N-Grams](#n-grams), [Stemmers](#stemmers), [Normalizers](#normalizers), [TF-IDF](#tf-idf) and [Spellcheck](#spellcheck) carry Verbora-side figures that no longer describe the code that runs — each section says so at its head |
+| 9 capabilities awaiting a re-run | [Distance](#distance), [Tokenizers](#tokenizers), [N-Grams](#n-grams), [Stemmers](#stemmers), [Normalizers](#normalizers), [Trie](#trie), [POS tagging](#pos-tagging), [TF-IDF](#tf-idf) and [Spellcheck](#spellcheck) carry Verbora-side figures that no longer describe the code that runs — each section says so at its head. For [Trie](#trie) and [POS tagging](#pos-tagging) it is part of the section, not all of it: the trie's read path and the tagger's cold start still stand |
 
 Start with [Phonetics](#phonetics), [Trie](#trie),
 [Language detection](#language-detection) or [POS tagging](#pos-tagging). Exact
@@ -937,6 +937,24 @@ Order-blind set-equality of every operation's result proven in
 before any timing was trusted; "build" is timed as push-then-compile for
 `trie-rs`'s LOUDS architecture, matching how that crate is actually used.
 
+<div class="callout callout-warn">
+<strong>Verbora's <code>build</code> medians are pending re-measurement.</strong>
+<code>insert_all</code> now clamps the reservation it takes from the iterator's
+<code>size_hint</code> at 4,096 nodes, so this 20,000-word bulk load pre-sizes
+for 4,096 and reaches the rest by amortised growth, where the recorded medians
+were taken against a build that reserved the whole hint up front. The clamp is
+there because a <code>size_hint</code> is a hint and not a bound: an iterator
+that overstates it could otherwise turn a bulk load into an unbounded
+allocation. This applies to every <code>build</code> row in this section — the
+<code>qp-trie</code>/<code>trie-rs</code> table below, the
+<code>fast_radix_trie</code> table, and the <code>fst</code> comparison. The
+read-path figures — <code>contains</code>, <code>common_prefix_search</code>,
+<code>predictive_search</code> — are unaffected, and no competitor version
+moved. The build medians stay visible so the next run has something to diff
+against, and none may be quoted as current; the direction of the change must
+not be inferred either.
+</div>
+
 | Library | Version | Language | Time (median, 20,000-word build, random) | Throughput | Relative |
 |---|---|---|---:|---:|---:|
 | Verbora | 0.1.0 | Rust | 1.65 ms | 607.5/s | **1.00×** |
@@ -1437,6 +1455,26 @@ transformer forward pass, not rival implementations of the same rule table —
 so this is reported as a technique comparison, with cold start and steady
 state kept strictly separate.
 
+<div class="callout callout-warn">
+<strong>Verbora's steady-state medians are pending re-measurement.</strong>
+Four of the eighteen bundled English rules test whether the current token looks
+like a URL, and that predicate was rewritten: a token is URL-like when one of
+its full stops joins two word-shaped labels, a stricter test than the one the
+recorded medians ran, which any interior full stop satisfied. Abbreviations
+such as <code>Ph.D.</code> and
+<code>W.Va.</code> therefore keep their lexicon tag instead of being retagged
+<code>URL</code> — so both the answers and the per-token work changed underneath
+the recorded medians. The cold-start figures are unaffected: construction reads
+the same packed table with the same entry count and the same eighteen rules.
+Competitor figures are unaffected too; no competitor version moved. The
+steady-state medians stay visible so the next run has something to diff against,
+and none may be quoted as current; the direction of the change must not be
+inferred either. What survives is the structural finding this section is about —
+a fixed rule table needs no deserialization step, and a deterministic rule
+lookup is categorically less arithmetic than a feature-weighted vote or a
+transformer forward pass.
+</div>
+
 #### Cold start — everything needed before tagging one sentence
 
 | Library | Version | Language | Time (median) | Relative |
@@ -1599,6 +1637,21 @@ construction — built after real evidence (the `fast_symspell` comparison
 above) showed the query-speed trade-off was worth having available, not
 built speculatively ahead of that evidence.
 
+<div class="callout callout-warn">
+<strong>Every figure below is pending re-measurement.</strong>
+<code>DeletionIndex</code>'s map is now keyed on a 64-bit hash of each
+deletion sequence rather than on the sequence itself, which takes the cost
+of indexing one <em>n</em>-scalar word from cubic in <em>n</em> to
+quadratic — a change of cost class, not a constant factor. The numbers
+below were measured against the sequence-keyed map and describe a structure
+that no longer exists. The table and the paragraph beneath it stay visible
+so a future run has something to diff against, and none of their figures
+may be quoted as current; the direction of the change must not be inferred
+either. See
+<a href="https://github.com/addlayerio/verbora/blob/main/docs/PERFORMANCE_GAPS.md#35-spellcheck-a-real-architectural-trade-off-not-a-one-sided-loss--verbora-vs-fast_symspell-rust-symspell-family-deletion-index">PERFORMANCE_GAPS.md
+entry 35</a>.
+</div>
+
 | Words | Construction: `FuzzyIndex` | Construction: `DeletionIndex` | Query: `FuzzyIndex` | Query: `DeletionIndex` |
 |---:|--:|--:|--:|--:|
 | 100 | **38.7 µs** | 977.6 µs (25.3× slower) | **589.9 µs** | 1.018 ms (1.73× slower) |
@@ -1606,15 +1659,19 @@ built speculatively ahead of that evidence.
 | 10,000 | **12.39 ms** | 162.6 ms (13.1× slower) | 93.28 ms | **2.64 ms** (35.3× faster) |
 | 20,000 | **26.97 ms** | 407.0 ms (15.1× slower) | 174.1 ms | **3.21 ms** (54.3× faster) |
 
-A genuine crossover on the query side: `FuzzyIndex` is faster at the smallest
-corpus tested (100 words), where a shallow BK-tree beats a deletion index's
-fixed per-query overhead — but `DeletionIndex` wins from 1,000 words up, by a
-rapidly widening margin. Construction is the honest cost throughout:
-`DeletionIndex` is 13×–25× slower to build at every size. Neither structure
-replaces the other — `FuzzyIndex` stays the default (cheaper, more
-predictable, no build-time distance ceiling); reach for `DeletionIndex` when
-the dictionary is large, `max_distance` is known ahead of time, and query
-volume is high enough to amortize the steep one-time build.
+As recorded against that now-superseded map: a genuine crossover on the
+query side, `FuzzyIndex` faster at the smallest corpus tested (100 words),
+where a shallow BK-tree beats a deletion index's fixed per-query overhead,
+and `DeletionIndex` winning from 1,000 words up by a rapidly widening
+margin; construction the honest cost throughout, `DeletionIndex` 13×–25×
+slower to build at every size. What survives without a fresh run is the
+shape alone, since it follows from the two designs rather than either
+number: dearer construction bought against a query cost that grows far more
+slowly with corpus size. Neither structure replaces the other — `FuzzyIndex`
+stays the default (cheaper, more predictable, no build-time distance
+ceiling); reach for `DeletionIndex` when the dictionary is large,
+`max_distance` is known ahead of time, and query volume is high enough to
+amortize the one-time build.
 
 ---
 

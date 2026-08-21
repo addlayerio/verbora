@@ -19,7 +19,7 @@
 //! * **lookup** — the hot path, `Lexicon::tag_of`, on hits, misses, and words
 //!   needing the lowercase retry.
 //! * **tagging** — end to end, across document lengths, for both bundled
-//!   languages. Dutch is the interesting one: 285 rules against English's 18,
+//!   languages. Dutch is the interesting one: 273 rules against English's 18,
 //!   and transformation is O(positions × rules).
 //! * **API variants** — `tag`, `tag_into` and `tag_stream` measured
 //!   independently, since the crate's own documentation recommends between them.
@@ -233,7 +233,7 @@ fn bench_rule_parsing(c: &mut Criterion) {
     g.bench_function("one-english-rule", |b| {
         b.iter(|| black_box(black_box("VBD NN PREV-TAG DT").parse::<Rule>().unwrap()));
     });
-    g.bench_function("dutch-rule-set-285", |b| {
+    g.bench_function("dutch-rule-set-273", |b| {
         b.iter(|| black_box(RuleSet::bundled(Language::Dutch).len()));
     });
     let text = RuleSet::bundled(Language::Dutch).to_string();

@@ -94,6 +94,7 @@ impl<S: Stemmer> SentimentAnalyzer<S> {
     /// // The third document has no tokens, so it has no mean.
     /// assert_eq!(scores[2], None);
     /// ```
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
     pub fn par_get_sentiment_batch<'d, D>(&self, docs: &'d [D]) -> Vec<Option<f64>>
     where
         S: Sync,

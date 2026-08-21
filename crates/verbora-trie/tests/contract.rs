@@ -414,15 +414,14 @@ fn insert_all_survives_an_overstated_size_hint() {
     assert_eq!(t.len(), 3);
     assert!(t.contains("beta"));
 
-    // And the reservation itself must stay cheap. Clamping the hint to what the
-    // trie could *index* rather than to what it could afford turned the panic
-    // into a 96 GB allocation — a worse failure, since a panic is local and
-    // exhausting the machine is not. `capacity` is the observable proof.
-    assert!(
-        t.node_count() < 100_000,
-        "an overstated hint must not reserve a real allocation: {} nodes",
-        t.node_count()
-    );
+    // The reservation itself must also stay cheap — clamping the hint to what
+    // the trie could *index* rather than to what it could afford turned the
+    // panic into a 96 GB allocation, a worse failure, since a panic is local
+    // and exhausting the machine is not. That half cannot be checked from out
+    // here: a reservation changes no answer this crate's public API gives, and
+    // `node_count` reports `nodes.len()`, which `reserve` never touches. It is
+    // pinned by `trie::tests::an_overstated_size_hint_reserves_nothing_expensive`,
+    // which reads the arena's capacity and the membership table's directly.
 
     // The same route through `Extend`/`FromIterator`, which both funnel here.
     let mut e = Trie::new();

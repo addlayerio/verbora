@@ -1931,8 +1931,11 @@ exists.
    text (Cyrillic, Greek, Hebrew, Arabic, Indic, BMP CJK, accented Latin) the
    scalar unit has *identical* element counts and identical kernel iterations
    to UTF-16, and pays 2× scratch bytes per element on one linear pass
-   alongside a quadratic kernel — plus 2× on downstream `Vec` footprints,
-   including `DeletionIndex`'s persisted `Box<[_]>`. Whether that is
+   alongside a quadratic kernel — plus 2× on downstream `Vec` footprints.
+   (`DeletionIndex`'s persisted key was one such footprint when this was
+   written; it no longer is. The index now stores a 64-bit hash per deletion
+   sequence rather than the sequence, so its retained size is independent of
+   the unit's width — see `docs/PERFORMANCE_MATRIX.md`'s own entry.) Whether that is
    observable in the ~16–40 ns short-operand regime, and specifically in the
    single-word Myers kernel where there is one word of state per element and
    the width cost is not amortised against `ceil(m/64)` words of work, is the

@@ -27,7 +27,7 @@ pub enum Language {
     /// it, never from the initial-state annotator.
     English,
     /// Dutch: 11,699 lexicon entries (194 tags, none of them ambiguity classes)
-    /// and 274 transformation rules.
+    /// and 273 transformation rules.
     Dutch,
 }
 
@@ -116,7 +116,7 @@ mod tests {
         }
     }
 
-    /// Every bundled rule can fire.
+    /// Every bundled rule can fire, and every word it names is a word.
     ///
     /// A rule is dead when its `from` pattern names a tag nothing in the
     /// language's own configuration can produce, or when one of its condition's
@@ -130,8 +130,16 @@ mod tests {
     /// among them — [`Lexicon::tag_of`](crate::Lexicon::tag_of) reads the first
     /// tag of an entry and no other.
     ///
-    /// Word arguments are not checked: a word is compared against
-    /// caller-supplied token text, which the bundled data does not constrain.
+    /// **Word** arguments are checked differently, because a word is compared
+    /// against caller-supplied token text and no bundled data constrains that.
+    /// What the bundled data does constrain is itself: a bundled rule set and
+    /// the bundled lexicon beside it come from the same corpus, so a word the
+    /// lexicon has never seen is corpus markup that leaked out of the training
+    /// data — `STAART`, the Dutch corpus's sentence-boundary marker, reached the
+    /// shipped rule set exactly that way and appears in no lexicon entry, in no
+    /// source file and in no test. A `CURRENT-WORD-ENDS-WITH` argument is a
+    /// suffix rather than a token, so it is required to be the suffix of some
+    /// key instead of a key.
     #[test]
     fn every_bundled_rule_can_fire() {
         use crate::rule::TagPattern;
@@ -165,6 +173,20 @@ mod tests {
                     assert!(
                         producible.contains(t.as_str()),
                         "{lang:?}: {rule} tests for {t}, which nothing produces"
+                    );
+                }
+                for w in rule.condition.word_arguments().into_iter().flatten() {
+                    assert!(
+                        lex.find(w.as_str()).is_some(),
+                        "{lang:?}: {rule} tests for the word {w}, \
+                         which is not a token of the bundled lexicon"
+                    );
+                }
+                if let Some(suffix) = rule.condition.suffix_argument() {
+                    assert!(
+                        (0..lex.len()).any(|i| lex.key(i).ends_with(suffix.as_str())),
+                        "{lang:?}: {rule} tests for the suffix {suffix}, \
+                         which ends no key of the bundled lexicon"
                     );
                 }
             }
@@ -211,7 +233,7 @@ mod tests {
     #[test]
     fn rule_string_counts() {
         assert_eq!(Language::English.rule_strings().len(), 18);
-        assert_eq!(Language::Dutch.rule_strings().len(), 274);
+        assert_eq!(Language::Dutch.rule_strings().len(), 273);
         assert_eq!(brill_paper_rule_strings().len(), 10);
     }
 }

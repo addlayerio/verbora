@@ -54,6 +54,12 @@ fn uax29_word_segmentation_cannot_reach_one_english_key_in_six() {
         (Language::English, 34usize, 15_509usize, 14_417usize),
         (Language::Dutch, 19, 294, 230),
     ];
+    // The headline figures the crate documentation and the README quote. Each is
+    // the *sum* the loop below arrives at, so updating a row of `expected`
+    // without updating the published figure fails here rather than silently
+    // leaving three documents quoting a number the data no longer supports.
+    let published_unreachable = [(Language::English, 15_543usize), (Language::Dutch, 313)];
+
     for (language, want_dropped, want_split, want_hyphen) in expected {
         let lexicon = Lexicon::bundled(language);
         let (mut dropped, mut split, mut hyphen) = (0usize, 0usize, 0usize);
@@ -74,16 +80,32 @@ fn uax29_word_segmentation_cannot_reach_one_english_key_in_six() {
             hyphen, want_hyphen,
             "{language:?}: splits caused by U+002D HYPHEN-MINUS"
         );
+
+        let (_, published) = published_unreachable
+            .iter()
+            .copied()
+            .find(|(l, _)| *l == language)
+            .expect("every measured language publishes a headline figure");
+        assert_eq!(
+            dropped + split,
+            published,
+            "{language:?}: the documented unreachable count is stale -- \
+             crates/verbora-tagger/src/lib.rs and README.md quote it"
+        );
     }
 
-    // The headline figures the crate documentation quotes, recomputed here so
-    // the prose and the data cannot drift apart.
-    let english = Lexicon::bundled(Language::English);
-    assert_eq!(english.len(), 92_538);
-    assert_eq!(34 + 15_509, 15_543);
-    let dutch = Lexicon::bundled(Language::Dutch);
-    assert_eq!(dutch.len(), 11_699);
-    assert_eq!(19 + 294, 313);
+    // The denominators the same documents quote alongside those figures.
+    assert_eq!(Lexicon::bundled(Language::English).len(), 92_538);
+    assert_eq!(Lexicon::bundled(Language::Dutch).len(), 11_699);
+
+    // And the percentage, which is what the prose actually leads with. Computed
+    // rather than restated, so a lexicon change moves it here first.
+    let (english_len, english_unreachable) = (92_538f64, 15_543f64);
+    let percent = (english_unreachable / english_len * 1000.0).round() / 10.0;
+    assert!(
+        (percent - 16.8).abs() < f64::EPSILON,
+        "documented as 16.8%, measures {percent}%"
+    );
 }
 
 /// What actually causes the English splits, counted rather than asserted.

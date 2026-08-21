@@ -6,6 +6,17 @@
 changelog_update = false
 publish_all_features = true
 publish_timeout = "30m"
+# The conventional-commit type alone must never decide the bump for this
+# project. Every commit in the 0.1.0..0.2.0 range is typed `fix:` or `feat:`,
+# which a type-only heuristic reads as a patch or minor bump — but the change
+# set is API-breaking (`damerau_levenshtein` returns `usize` rather than `f64`,
+# `Tag::new("*")` now returns `Err`, `Ord` on `Correction`/`Neighbor` changed
+# meaning, several `verbora-spellcheck` exports were removed), and at 0.1.x
+# semver requires 0.2.0 for that. `cargo-semver-checks` reads the actual public
+# API against the published one, so it catches what the commit type cannot.
+# `true` is release-plz's default; it is written out here so that silently
+# losing it is a visible diff rather than a silent downgrade to the heuristic.
+semver_check = true
 
 # Documentation examples are a workspace test harness, not a public crate.
 [[package]]

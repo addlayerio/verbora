@@ -125,7 +125,9 @@
 //!
 //! Nothing here builds a `terms × documents` matrix. Terms are interned once
 //! per corpus, so a word appearing in fifty documents is stored once; a
-//! document is a `Vec<(TermId, u32)>` plus a hash index; and the
+//! document is a sparse `Vec` of (term id, raw count) pairs in first-occurrence
+//! order — two `u32`s, the id being the term's position in the corpus term
+//! table — plus a hash index from id to position; and the
 //! document-frequency table is a `Vec<u32>` maintained incrementally, which
 //! makes [`TfIdf::idf`] an array load rather than a scan of the corpus. There
 //! is no idf cache, and so no question about when one is stale.
@@ -146,6 +148,11 @@
 
 #![cfg_attr(doctest, doc = include_str!("../README.md"))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// The docs above link to the `parallel`-gated batch helper. That link
+// resolves on docs.rs, which builds all features; without the feature the
+// target does not exist and the lint would fire on every plain `cargo doc`.
+// It stays armed in the all-features build, which is the one that ships.
+#![cfg_attr(not(feature = "parallel"), allow(rustdoc::broken_intra_doc_links))]
 
 mod analyzer;
 mod corpus;

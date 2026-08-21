@@ -155,6 +155,7 @@
 //!   analyzer cannot alter another's.
 
 #![cfg_attr(doctest, doc = include_str!("../README.md"))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod analyzer;
 mod data;
@@ -193,6 +194,10 @@ impl std::error::Error for UnknownName {}
 /// The three families publish their values differently, and that difference
 /// survives into [`Polarity`]: AFINN writes integers, ML-SentiCon and Pattern
 /// write decimal strings.
+/// Sealed: a new vocabulary family is an addition, not a break. It is also a
+/// public field of [`UnsupportedPair`], whose own sealing would be undone by
+/// leaving this open.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VocabularyKind {
     /// AFINN-165 word lists. Every shipped value is an integer in `-5..=5`.
@@ -276,6 +281,10 @@ impl std::str::FromStr for VocabularyKind {
 /// Spelled by its ISO 639-1 code — `en`, `es`, `pt`, … — because that is a
 /// published identifier for a language and an English display name is not. The
 /// variant name is the English name, so `Debug` still reads as prose.
+/// Sealed, as `Language` already is in `verbora-language` and `verbora-tagger`
+/// and `StopWordLanguage` is in `verbora-core`: gaining a supported language is
+/// an addition. It is also a public field of [`UnsupportedPair`].
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[expect(missing_docs, reason = "each variant is its own English name")]
 pub enum Language {

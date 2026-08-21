@@ -396,7 +396,7 @@ metric:
 
 ```toml
 [dependencies]
-verbora-distance = { version = "0.1", features = ["parallel"] }
+verbora-distance = { version = "0.2", features = ["parallel"] }
 ```
 
 ```rust  ignore

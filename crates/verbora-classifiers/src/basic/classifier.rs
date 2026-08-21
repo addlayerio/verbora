@@ -69,6 +69,9 @@ impl<'a> From<&'a Vec<String>> for Observation<'a> {
 /// Emitted synchronously, and the stream differs between the two classifiers:
 /// Bayes trains incrementally from `last_added`, whereas logistic regression
 /// discards its engine and re-emits every document on every call.
+/// Sealed: an observer stream is the archetypal open enum — reporting a new
+/// kind of training event must not break every existing observer.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingEvent {
     /// One document was handed to the engine.
@@ -95,6 +98,7 @@ pub enum TrainingEvent {
 /// | [`StaleModel`](Self::StaleModel) | the vocabulary grew after the last fit | call `train()` again |
 /// | [`NoMinimum`](Self::NoMinimum) | gradient descent exhausted its iteration budget | the corpus is degenerate — inspect it |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClassifierError {
     /// The engine holds no classes at all, so there is nothing to rank.
     ///
@@ -208,6 +212,7 @@ fn trim_units(s: &str) -> &str {
 /// download from a model that merely needs retraining, which is why they are
 /// separate.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum LoadError {
     /// The file could not be read.
     Io(std::io::Error),

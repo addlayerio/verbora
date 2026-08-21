@@ -28,9 +28,22 @@ makes it a verb here.
 
 `tag` returns a value, not a `Result`. Every condition is total, an out-of-range
 position simply does not match, and every token gets a tag — the lexicon's entry,
-or its default, or its capitalised default. The three fallible operations are all
-*parsing*: `Rule` and `RuleSet` from text, `Corpus::parse_brown`, and
-`Lexicon::insert`, each of which reports precisely what it rejected.
+or its default, or its capitalised default.
+
+What is fallible is building the inputs, and each of those reports precisely what
+it rejected rather than repairing it:
+
+| Operation | Rejects |
+|---|---|
+| `Rule` and `RuleSet` from text, via `FromStr` or `RuleSet::parse_lines` | too few fields, an unknown condition name, the wrong argument count for the condition named |
+| `Corpus::parse_brown` | a `token_TAG` pair with no tag, an empty token, or an empty tag |
+| `Corpus::build_lexicon` | a corpus token that is not a conforming lexicon key — which `from_sentences` can produce and `parse_brown` cannot |
+| `Lexicon::insert` | an empty key, a key containing whitespace, or an empty tag list |
+| `Tag::new` and `Word::new` | the empty string, and any `White_Space` scalar |
+
+`Tag::new` additionally rejects `"*"`: the rule language spells its wildcard that
+way, so a tag named `*` could not be written in a rule. `Word::new("*")` is
+accepted, because there `*` is an ordinary token.
 
 ## The token contract
 
@@ -42,10 +55,10 @@ splits inside them cannot reach them.
 
 | Bundled lexicon | Keys | Never emitted whole by a UAX #29 word tokenizer |
 |---|---:|---:|
-| English | 92,661 | 15,666 (16.9%) |
+| English | 92,538 | 15,543 (16.8%) |
 | Dutch | 11,699 | 313 (2.7%) |
 
-U+002D HYPHEN-MINUS is `Word_Break=Other`, which alone accounts for 14,430 of the
+U+002D HYPHEN-MINUS is `Word_Break=Other`, which alone accounts for 14,417 of the
 English figure. The guidance follows from the numbers: with the bundled
 dictionaries, split on whitespace — `str::split_whitespace` yields exactly
 conforming tokens and reaches every key. With a UAX #29 tokenizer, build the
@@ -101,8 +114,8 @@ one thing everywhere.
 
 | Language | Lexicon entries | Rules |
 |---|---:|---:|
-| English | 92,661 | 18 |
-| Dutch | 11,699 | 285 |
+| English | 92,538 | 18 |
+| Dutch | 11,699 | 273 |
 
 Plus `brill_paper_rule_strings`, the ten rules of Brill (1992), Table 1.
 

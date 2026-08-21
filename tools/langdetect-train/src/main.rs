@@ -457,7 +457,17 @@ fn codegen(
          //\n\
          // The published evaluation set (UDHR-derived dataset.json under\n\
          // benchmarks/competitive/datasets/language-accuracy) is NOT part of\n\
-         // the training data.\n",
+         // the training data.\n\
+         //\n\
+         // FEATURE_EXTRACTOR_FINGERPRINT below identifies the feature\n\
+         // transform these tables were trained through. A weight is a number\n\
+         // about a bucket, so weights and extractor are one artifact:\n\
+         // changing hashed_features or hashed_features_cyrillic without\n\
+         // regenerating this file leaves every weight pointing at a bucket\n\
+         // that no longer means what it meant. verbora-language's\n\
+         // committed_weights_were_trained_through_this_extractor recomputes\n\
+         // the fingerprint from the shipped extractors and fails when it\n\
+         // stops matching, so that drift cannot be silent.\n",
     );
     write_report_comment(&mut out, "latin", &LATIN_CLASSES, latin_report);
     write_report_comment(&mut out, "cyrillic", &CYRILLIC_CLASSES, cyr_report);
@@ -473,6 +483,14 @@ fn codegen(
     writeln!(
         out,
         "pub const CYRILLIC_ABSTAIN_MARGIN: f32 = {cyr_abstain:?};"
+    )
+    .unwrap();
+    // Emitted last so it is impossible to regenerate the tables without
+    // also regenerating the fingerprint that says what produced them.
+    writeln!(
+        out,
+        "pub const FEATURE_EXTRACTOR_FINGERPRINT: u64 = {:#018X};",
+        verbora_language::train_support::feature_extractor_fingerprint()
     )
     .unwrap();
     out

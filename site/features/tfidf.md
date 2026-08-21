@@ -910,13 +910,14 @@ impl Document {
 }
 pub const MAX_TERM_COUNT: u32 = u32::MAX;                    // counts saturate here
 
-pub enum ExportError { CustomTokenizer, Json(serde_json::Error) }
+pub enum ExportError { CustomTokenizer, Json(serde_json::Error) }   // #[non_exhaustive]
 pub enum RestoreError {
     Parse(serde_json::Error),
     Stamp(StampError),
     UnknownCaseFold(String),
     ZeroCount { document: usize, term: String },
     DuplicateTerm { document: usize, term: String },
+    // #[non_exhaustive]
 }
 
 // The compatibility stamp
@@ -926,7 +927,7 @@ pub const CONTEXT_PROBES: [&str; 6];                         // Greek final-sigm
 pub fn lowercase_fingerprint() -> u64;                       // FNV-1a over str::to_lowercase
 pub struct ArtifactStamp { pub schema: u32, pub unicode: (u64, u64, u64), pub lowercase: Option<u64> }
 impl ArtifactStamp { pub fn current() -> Self; }
-pub enum StampError { Missing, Malformed, Incompatible { found: ArtifactStamp, expected: ArtifactStamp } }
+pub enum StampError { Missing, Malformed, Incompatible { found: ArtifactStamp, expected: ArtifactStamp } }  // #[non_exhaustive]
 
 // The specified logarithm
 pub fn natural_log(x: f64) -> f64;   // fdlibm's __ieee754_log, platform-independent

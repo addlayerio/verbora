@@ -1,12 +1,41 @@
 # Rust-native migration — plan and standing findings
 
-**Status:** the code is migrated. All nineteen crates derive their behaviour
-from a published standard or an explicit Verbora contract, and their tests pin
-that contract rather than a recording. What remains is documentation: roughly
-140 doc comments in `crates/*/src` still explain behaviour by reference to
-another implementation, concentrated in `verbora-stemmers`. Those render on
-docs.rs, so they are user-facing and fall under the same rule as the site —
-see `.claude/agents/doc-sync.md` Rule #2.
+**Status:** migrated, code and documentation both. All nineteen crates derive
+their behaviour from a published standard or an explicit Verbora contract, their
+tests pin that contract rather than a recording, and the doc-comment sweep that
+this document tracked is finished.
+
+Re-measured on 2026-08-21, the Rule #2 grep
+(`the reference|\bport(s|ed|ing)?\b|reference implementation|reference
+behaviour|reference behavior|must reproduce`) over doc-comment lines in
+`crates/*/src` returns **10 hits workspace-wide**, and **1** in
+`verbora-stemmers` — that one inside a `#[cfg(test)]` block, naming
+`str::to_lowercase`, a Rust standard-library function rather than another NLP
+implementation. On the published surface `verbora-stemmers` is at zero.
+
+None of the ten explains Verbora's behaviour by reference to another
+implementation, which is what Rule #2 actually prohibits. They fall into three
+groups, each legitimate:
+
+- **Test oracles written independently and named as such** —
+  `verbora-distance` (`lib.rs`, `levenshtein.rs`), `verbora-phonetics`
+  (`match_rating.rs`'s in-tree `reference` module), `verbora-language`
+  (`hashed_linear.rs`). These describe a second implementation transcribed from
+  the published recurrence and used to cross-check the shipped one. The word
+  names the oracle, not the source of the contract.
+- **Provenance and licensing notices that the licence requires** —
+  `verbora-phonetics`'s `beider_morse/mod.rs`, which must state where its
+  Apache-2.0 rule data came from, and `verbora-classifiers`'s note that its
+  `log`/`exp`/`pow` are in-tree FDLIBM ports rather than a platform libm, which
+  is what makes a saved model reproducible across targets.
+- **The one algorithm with no publication** — Refined Soundex, whose
+  distribution genuinely is its definition. Rule #2 names this as the single
+  real case and requires saying so plainly, which `refined_soundex.rs` and the
+  `verbora-phonetics` crate header both do.
+
+`Snowball` appears 46 times across `crates/verbora-stemmers`. It stays: Snowball
+is a published algorithm family with its own specifications, and citing it is a
+citation, not an appeal to someone else's binary.
 
 Verbora is specified from Rust. Its behaviour is defined by an explicit
 contract plus the tests that pin it — never by another implementation. This
@@ -378,15 +407,21 @@ migration debt.
 
 ## Pending documentation corrections
 
-Known-stale claims, verified but deliberately not yet fixed: both are about
-surfaces this migration is still changing, so correcting them now would only
-make them stale again. Fix them in the documentation pass that follows the
-`verbora-distance` implementation.
+Nothing is presently pending — both entries this table used to carry were
+verified as fixed on 2026-08-21 and the table is empty as a result.
 
-| Page | Claim | Verified fact |
-|---|---|---|
-| `site/features/distance.md:18` | "150 unit tests and 9 doctests" | 161 unit tests, 28 integration (`tests/parallel.rs`, `--all-features`), 9 doctests. The panic, backtrack and case-folding tests landed after the count was written. |
-| `site/performance/allocation.md:47` | The three `*_search` functions allocate a full cost matrix **and** a parent matrix, plus a `String` | True only off the fast path. Unit-cost plain `levenshtein_search` on non-empty operands takes `search_bits` (`levenshtein.rs:1955`) — per-column bit-vector deltas, no parent matrix. Both Damerau variants and every weighted cost set do use the full matrix. The same wrong claim appears in the "Choosing the right API" table on `site/features/distance.md`. |
+`site/performance/allocation.md` now separates the two cases the old row
+conflated: unit-cost `levenshtein_search` is listed as allocating two
+`Vec<u64>` of Myers/Hyyrö vertical deltas with **no cost matrix and no parent
+matrix**, while `damerau_levenshtein_search`, `osa_search` and every
+`*_search_weighted` are listed separately as using both. `site/features/distance.md`
+carries the same split in its own two tables.
+
+`site/features/distance.md`'s test-count claim was re-derived from the command
+the page actually quotes: `cargo test -p verbora-distance` runs **183** unit
+tests and **36** doctests (plus 7 integration tests from
+`tests/migration_defects.rs` and `tests/similarity_contract.rs`; `tests/parallel.rs`
+adds 28 more under `--all-features`). The page now states 183 and 36.
 
 ## Verification
 

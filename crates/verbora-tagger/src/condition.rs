@@ -288,26 +288,29 @@ pub enum Condition {
     CurrentWordIsNumeral(bool),
     /// Whether the current word *looks like* a URL.
     ///
-    /// Verbora's own condition, and a deliberately small heuristic: the token
-    /// must contain **some** `U+002E FULL STOP` that is neither its first nor
-    /// its last scalar, **and** two consecutive ASCII letters somewhere. That is
-    /// the whole rule. It is not an implementation of [RFC 3986]; it exists so
-    /// that the bundled `NN URL CURRENT-WORD-IS-URL YES` rule has a definition
-    /// to point at.
+    /// Verbora's own condition, and a deliberately small heuristic: the token is
+    /// URL-like when one of its `U+002E FULL STOP`s **joins two word-shaped
+    /// labels**, where a label is a dot-separated segment and it is word-shaped
+    /// when it begins with two ASCII letters. That is the whole rule. It is not
+    /// an implementation of [RFC 3986]; it exists so that the bundled
+    /// `NN URL CURRENT-WORD-IS-URL YES` rule has a definition to point at.
     ///
-    /// The dot test is existential, so a URL that arrives with the sentence's
-    /// full stop attached — `www.example.com.`, what whitespace tokenization
-    /// produces most often — still qualifies.
+    /// The shape is structural: a hostname is word-shaped labels joined by dots
+    /// (`example` · `com`), an abbreviation is initials joined by dots
+    /// (`Ph` · `D`, `W` · `Va`, `U` · `S`), and a one-letter label is not
+    /// word-shaped. Testing a join rather than the position of a dot is also
+    /// what admits a URL that arrives with the sentence's full stop attached —
+    /// `www.example.com.`, what whitespace tokenization produces most often.
     ///
     /// | Token | URL-like | Why |
     /// |---|---|---|
-    /// | `"www.example.com"`, `"example.org"` | yes | interior dot, `ww`/`ex` |
-    /// | `"www.example.com."`, `".www.example.com"` | yes | the dot at `www.` is still interior |
-    /// | `"Ph.D."` | yes | an accepted false positive: interior dot, and `Ph` |
-    /// | `"3.14"` | no | no two adjacent ASCII letters |
-    /// | `"e.g."`, `"A.A.U."`, `"U.S."` | no | no two adjacent letters |
-    /// | `".com"`, `"com."`, `"etc."` | no | the only dot is first or last |
-    /// | `"日本.語"` | no | the letters are not ASCII |
+    /// | `"www.example.com"`, `"example.org"`, `"co.uk"` | yes | a dot joins two word-shaped labels |
+    /// | `"www.example.com."`, `".www.example.com"` | yes | an abutting full stop only adds an empty label |
+    /// | `"Ph.D."`, `"W.Va."`, `"U.S."`, `"e.g."` | no | a one-letter label is not word-shaped |
+    /// | `"3.14"`, `"日本.語"` | no | no ASCII-letter label at all |
+    /// | `".com"`, `"com."`, `"etc."` | no | one word-shaped label, so no join |
+    /// | `"Mr.Jones"` | yes | an accepted false positive |
+    /// | `"x.com"`, `"3com.com"` | no | accepted false negatives |
     ///
     /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
     CurrentWordLooksLikeUrl(bool),
@@ -500,10 +503,10 @@ impl Condition {
 impl Condition {
     /// The tag arguments this condition compares a neighbour's tag against.
     ///
-    /// Word arguments are deliberately excluded: a word argument is compared
-    /// against caller-supplied token text, which no bundled data constrains, so
-    /// it says nothing about whether a rule can fire. A tag argument does — a
-    /// tag no configuration can produce makes the condition false everywhere.
+    /// A tag argument no configuration can produce makes the condition false
+    /// everywhere. Word arguments answer a different question and are reported
+    /// separately, by [`Condition::word_arguments`] and
+    /// [`Condition::suffix_argument`].
     ///
     /// Written as an exhaustive match so that a new variant has to declare its
     /// arguments here rather than defaulting to "none".
@@ -548,6 +551,100 @@ impl Condition {
             | Self::CurrentWordIsNumeral(_)
             | Self::CurrentWordLooksLikeUrl(_)
             | Self::CurrentWordEndsWith(_) => [None, None],
+        }
+    }
+
+    /// The word arguments this condition compares a **whole token** against.
+    ///
+    /// A word argument says nothing about reachability on *caller* text — the
+    /// caller supplies the tokens and no bundled data constrains them. It says a
+    /// great deal about a **bundled** rule: the bundled rule sets and the bundled
+    /// lexicons were derived from the same corpora, so a bundled rule naming a
+    /// word its own language's lexicon has never seen is naming corpus markup
+    /// that leaked out of the training data rather than a word.
+    ///
+    /// [`Condition::CurrentWordEndsWith`] is excluded because its argument is a
+    /// suffix, not a token; it is reported by [`Condition::suffix_argument`].
+    ///
+    /// Written as an exhaustive match so that a new variant has to declare its
+    /// arguments here rather than defaulting to "none".
+    pub(crate) const fn word_arguments(&self) -> [Option<&Word>; 2] {
+        match self {
+            Self::CurrentWord(w)
+            | Self::PrevWord(w)
+            | Self::NextWord(w)
+            | Self::PrevWordWithin2(w)
+            | Self::NextWordWithin2(w)
+            | Self::CurrentWordAndPrevTag { word: w, .. }
+            | Self::CurrentWordAndNextTag { word: w, .. }
+            | Self::CurrentWordAndTag2Before { word: w, .. }
+            | Self::CurrentWordAndTag2After { word: w, .. } => [Some(w), None],
+            Self::LeftWordBigram {
+                before: a,
+                current: b,
+            }
+            | Self::RightWordBigram {
+                current: a,
+                after: b,
+            }
+            | Self::CurrentWordAndWord2After {
+                word: a,
+                word_two_after: b,
+            } => [Some(a), Some(b)],
+            Self::PrevTag(_)
+            | Self::NextTag(_)
+            | Self::PrevTag2(_)
+            | Self::NextTag2(_)
+            | Self::PrevTagWithin2(_)
+            | Self::NextTagWithin2(_)
+            | Self::PrevTagWithin3(_)
+            | Self::NextTagWithin3(_)
+            | Self::SurroundingTags { .. }
+            | Self::PrevTagBigram { .. }
+            | Self::NextTagBigram { .. }
+            | Self::CurrentWordIsCapitalized(_)
+            | Self::NextWordIsCapitalized(_)
+            | Self::PrevWordIsCapitalized(_)
+            | Self::CurrentWordIsNumeral(_)
+            | Self::CurrentWordLooksLikeUrl(_)
+            | Self::CurrentWordEndsWith(_) => [None, None],
+        }
+    }
+
+    /// The suffix this condition tests a token's tail against, if any.
+    ///
+    /// Written as an exhaustive match, for the same reason as the two above.
+    pub(crate) const fn suffix_argument(&self) -> Option<&Word> {
+        match self {
+            Self::CurrentWordEndsWith(w) => Some(w),
+            Self::PrevTag(_)
+            | Self::NextTag(_)
+            | Self::PrevTag2(_)
+            | Self::NextTag2(_)
+            | Self::PrevTagWithin2(_)
+            | Self::NextTagWithin2(_)
+            | Self::PrevTagWithin3(_)
+            | Self::NextTagWithin3(_)
+            | Self::SurroundingTags { .. }
+            | Self::PrevTagBigram { .. }
+            | Self::NextTagBigram { .. }
+            | Self::CurrentWord(_)
+            | Self::PrevWord(_)
+            | Self::NextWord(_)
+            | Self::PrevWordWithin2(_)
+            | Self::NextWordWithin2(_)
+            | Self::LeftWordBigram { .. }
+            | Self::RightWordBigram { .. }
+            | Self::CurrentWordAndPrevTag { .. }
+            | Self::CurrentWordAndNextTag { .. }
+            | Self::CurrentWordAndTag2Before { .. }
+            | Self::CurrentWordAndTag2After { .. }
+            | Self::CurrentWordAndWord2After { .. }
+            | Self::CurrentWordIsCapitalized(_)
+            | Self::NextWordIsCapitalized(_)
+            | Self::PrevWordIsCapitalized(_)
+            | Self::CurrentWordIsNumeral(_)
+            | Self::CurrentWordLooksLikeUrl(_) => None,
         }
     }
 }

@@ -162,48 +162,78 @@ fn grouped_digits(b: &[u8], i: &mut usize) -> usize {
 /// Whether a token *looks like* a URL under Verbora's deliberately small
 /// heuristic.
 ///
-/// The token must contain **some** `U+002E FULL STOP` that is neither its first
-/// nor its last scalar, **and** two consecutive ASCII letters somewhere. That is
-/// the whole rule; it is a Verbora heuristic, not an implementation of
-/// [RFC 3986], and it is stated here so that the bundled
-/// `NN URL CURRENT-WORD-IS-URL YES` rule has a definition to point at.
+/// A token is URL-like when one of its `U+002E FULL STOP`s **joins two
+/// word-shaped labels**. A *label* is a dot-separated segment of the token, and
+/// it is *word-shaped* when it begins with two ASCII letters. That is the whole
+/// rule; it is a Verbora heuristic, not an implementation of [RFC 3986], and it
+/// is stated here so that the bundled `NN URL CURRENT-WORD-IS-URL YES` rule has
+/// a definition to point at.
 ///
-/// The dot test is *existential* on purpose. A whitespace-delimited token
-/// carries whatever punctuation abutted it, so a URL at the end of a sentence
-/// arrives as `www.example.com.` — the single commonest shape a URL takes in
-/// tokenized text. Requiring the token's *last* dot to be interior would reject
-/// exactly that case, which is the one the rules exist for.
+/// The shape it tests for is structural rather than a list of exceptions. A
+/// hostname is two or more word-shaped labels joined by a dot —
+/// `example` · `com` — whereas an abbreviation is *initials* joined by dots:
+/// `U` · `S`, `Ph` · `D`, `W` · `Va`. A one-letter label is not word-shaped, so
+/// no join of two ever forms, and no abbreviation is admitted by accident.
+///
+/// Testing a *join* rather than the position of a dot is also what admits a URL
+/// at the end of a sentence. A whitespace-delimited token carries whatever
+/// punctuation abutted it, so a URL commonly arrives as `www.example.com.`; the
+/// trailing full stop only adds an empty label, and the `www` · `example` join
+/// is untouched.
 ///
 /// | Token | URL-like | Why |
 /// |---|---|---|
-/// | `"www.example.com"`, `"example.org"` | yes | interior dot, `ww`/`ex` |
-/// | `"www.example.com."`, `".www.example.com"` | yes | the dot at `www.` is still interior |
-/// | `"Ph.D."` | yes | an accepted false positive: interior dot, and `Ph` |
-/// | `"3.14"` | no | no two adjacent ASCII letters |
-/// | `"e.g."`, `"A.A.U."`, `"U.S."` | no | no two adjacent letters |
-/// | `".com"`, `"com."`, `"etc."` | no | the only dot is first or last |
-/// | `"日本.語"` | no | the letters are not ASCII |
+/// | `"www.example.com"`, `"example.org"`, `"co.uk"` | yes | a dot joins two word-shaped labels |
+/// | `"www.example.com."`, `".www.example.com"` | yes | an abutting full stop only adds an empty label |
+/// | `"my-site.com"`, `"naïve.com"` | yes | a label need only *begin* with two ASCII letters |
+/// | `"Ph.D."`, `"W.Va."`, `"U.S."`, `"e.g."`, `"A.A.U."` | no | `Ph` · `D`, `W` · `Va`: a one-letter label is not word-shaped |
+/// | `"president-U.S."`, `"D.,Calif."` | no | the same, in a compound: `U`, and `D` |
+/// | `"3.14"`, `"日本.語"` | no | no ASCII-letter label at all |
+/// | `".com"`, `"com."`, `"etc."`, `"discussions.."` | no | one word-shaped label, so no join |
+/// | `"Mr.Jones"` | yes | an accepted false positive: two word-shaped labels are two word-shaped labels |
+/// | `"x.com"`, `"t.co"`, `"3com.com"` | no | accepted false negatives: a label shorter than two letters, or starting with a digit |
 ///
-/// The two-adjacent-letters requirement is what keeps the initialisms out;
-/// `Ph.D.` is the one common abbreviation that clears it, and it is admitted
-/// rather than special-cased, because a list of exceptions is not a heuristic.
+/// The last two rows are the price of stating the rule structurally instead of
+/// maintaining a list, and it is paid in both directions on purpose: by shape
+/// alone `Mr.Jones` is `co.uk`, and `x.com` is `W.Va` — a genuine hostname and a
+/// state abbreviation that no test on the token's own text can tell apart.
+///
+/// The heuristic is deliberately reluctant, because the four bundled English
+/// rules that consume it rewrite `NN`, `NNS`, `NNP` and `NNPS` — so every false
+/// positive overrides a noun the lexicon states. Over the 92,538 keys of the
+/// bundled English lexicon it accepts **2**, `AIB.PR` and `Conn.based`, of which
+/// one is noun-primary; `tests::the_bundled_english_lexicon_is_barely_url_like`
+/// walks every key and pins that.
 ///
 /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
 #[must_use]
 pub(crate) fn looks_like_url(token: &str) -> bool {
-    let b = token.as_bytes();
-    // A dot is interior exactly when it lies in `b[1..len-1]`: `.` is one byte,
-    // and a UTF-8 continuation byte is never `.`, so this cannot match inside a
-    // multi-byte scalar and cannot miss a dot that starts one.
-    let interior_dot = b.len() > 2 && b[1..b.len() - 1].contains(&b'.');
-    interior_dot
-        && b.windows(2)
-            .any(|w| w[0].is_ascii_alphabetic() && w[1].is_ascii_alphabetic())
+    let mut previous_was_label = false;
+    for segment in token.split('.') {
+        // Splitting on `.` cannot cut a multi-byte scalar: `.` is one byte and
+        // no UTF-8 continuation byte equals it.
+        let is_label = is_word_shaped_label(segment);
+        if previous_was_label && is_label {
+            return true;
+        }
+        previous_was_label = is_label;
+    }
+    false
+}
+
+/// Whether a dot-separated segment begins with two ASCII letters.
+#[inline]
+fn is_word_shaped_label(segment: &str) -> bool {
+    match segment.as_bytes() {
+        [a, b, ..] => a.is_ascii_alphabetic() && b.is_ascii_alphabetic(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tag::Tag;
 
     #[test]
     fn capitalisation_is_the_unicode_uppercase_property() {
@@ -301,15 +331,40 @@ mod tests {
         }
     }
 
-    /// The contract is *existential*: a token is URL-like when it contains a
-    /// full stop that is neither its first nor its last scalar. A sentence-final
-    /// URL therefore still qualifies — which is the case whitespace tokenization
-    /// produces most often.
+    /// A URL at the end of a sentence still qualifies — the case whitespace
+    /// tokenization produces most often — because the trailing full stop only
+    /// adds an empty label and leaves the `www` · `example` join intact.
     #[test]
-    fn a_sentence_final_url_still_has_an_interior_dot() {
+    fn a_sentence_final_url_is_still_url_like() {
         assert!(looks_like_url("www.example.com."));
         assert!(looks_like_url(".www.example.com"));
         assert!(looks_like_url(".www.example.com."));
+    }
+
+    /// The abbreviations that a dot-counting heuristic admits by accident.
+    ///
+    /// Each of these is a *noun* in the bundled English lexicon, and the four
+    /// bundled `… URL CURRENT-WORD-IS-URL YES` rules rewrite exactly nouns — so
+    /// admitting one here silently overrides a tag the shipped data states.
+    #[test]
+    fn an_abbreviation_is_never_url_like() {
+        for abbreviation in [
+            "Ph.D.",
+            "W.Va.",
+            "U.S.",
+            "e.g.",
+            "A.A.U.",
+            "president-U.S.",
+            "Canada-U.S.",
+            "Korean-U.S.",
+            "D.,Calif.",
+            "discussions..",
+            "U.S.investors",
+            "N.J.-based",
+            "Oct.13",
+        ] {
+            assert!(!looks_like_url(abbreviation), "{abbreviation:?}");
+        }
     }
 
     #[test]
@@ -317,9 +372,11 @@ mod tests {
         for yes in [
             "www.example.com",
             "example.org",
-            "a.bc.d",
+            "co.uk",
+            "my-site.com",
+            "a.bc.de",
             "naïve.com",
-            "Ph.D.",
+            "Mr.Jones",
         ] {
             assert!(looks_like_url(yes), "{yes:?}");
         }
@@ -338,9 +395,46 @@ mod tests {
             "a.",
             "abc",
             "a.b",
+            "a.bc.d",
             "1.2",
+            "x.com",
+            "t.co",
+            "3com.com",
         ] {
             assert!(!looks_like_url(no), "{no:?}");
         }
+    }
+
+    /// How much of the bundled English lexicon the heuristic claims, walked key
+    /// by key rather than sampled.
+    ///
+    /// The number matters because the four bundled English URL rules rewrite
+    /// `NN`, `NNS`, `NNP` and `NNPS`: every key this predicate accepts whose
+    /// primary tag is one of those is a tag the shipped lexicon states and the
+    /// shipped rules then overrule. Two keys of 92,538 qualify at all, and one
+    /// of them is noun-primary.
+    #[test]
+    fn the_bundled_english_lexicon_is_barely_url_like() {
+        use crate::language::Language;
+        use crate::lexicon::Lexicon;
+
+        let lexicon = Lexicon::bundled(Language::English);
+        let claimed: Vec<&str> = lexicon
+            .entries()
+            .filter(|(key, _)| looks_like_url(key))
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(claimed, ["AIB.PR", "Conn.based"]);
+
+        let nouns = claimed
+            .iter()
+            .filter(|key| {
+                matches!(
+                    lexicon.primary_tag(key).as_ref().map(Tag::as_str),
+                    Some("NN" | "NNS" | "NNP" | "NNPS")
+                )
+            })
+            .count();
+        assert_eq!(nouns, 1, "keys the bundled URL rules would retag");
     }
 }

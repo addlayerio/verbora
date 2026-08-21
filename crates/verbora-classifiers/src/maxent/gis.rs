@@ -71,6 +71,26 @@ impl Gis {
 }
 
 /// Why fitting stopped.
+///
+/// # Why this one is *not* `#[non_exhaustive]`
+///
+/// Deliberate, and the opposite of the call made for
+/// [`ModelDefect`](crate::ModelDefect). The error enums of this crate are
+/// `#[non_exhaustive]` because a caller meeting an unfamiliar failure has a
+/// sound default — report it and give up. A stop reason has no sound default:
+/// it is the answer to "may I trust the parameters I was just handed", and a
+/// `_` arm would have to answer that for a case whose author never considered
+/// it. [`Converged`](Self::Converged) says yes, [`MaxIterations`](Self::MaxIterations)
+/// says "usable but not converged", [`NumericalLimit`](Self::NumericalLimit)
+/// says "inspect this". A fourth exit from the loop would be a fourth thing a
+/// caller has to decide about, so being made to look at it is the feature, not
+/// the cost.
+///
+/// It also buys nothing. A caller reaches a `StopReason` only through
+/// [`TrainingReport`], a plain struct of public fields, so a release that adds
+/// a stopping rule is already breaking on the report it has to be described in.
+/// Marking this enum would trade a compiler error for a silently wrong `_` arm
+/// and not save the release either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
     /// An iteration raised the log-likelihood by at most [`Gis::tolerance`].

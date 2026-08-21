@@ -103,6 +103,7 @@ const fn from_whatlang(lang: Lang) -> Option<Language> {
 /// cross-language words (`"hotel"`, `"radio"`, `"piano"`, `"normal"`,
 /// `"color"`) and short proper names must **not** clear a normal
 /// confidence threshold.
+#[cfg_attr(docsrs, doc(cfg(feature = "language-detection")))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct WhatlangDetector;
 

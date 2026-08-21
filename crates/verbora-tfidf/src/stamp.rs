@@ -363,6 +363,7 @@ impl std::fmt::Display for ArtifactStamp {
 /// [`crate::RestoreError`] keeps the two apart so a caller can tell "this file
 /// is damaged" from "this file is from another build".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StampError {
     /// The object carries no `_verbora` member.
     ///

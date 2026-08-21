@@ -658,6 +658,7 @@ fn winkler_prefix_len<T: Unit>(s1: &[T], s2: &[T]) -> usize {
 /// pairs[i].1)` — via `rayon`'s order-preserving `map` + `collect`.
 /// `jaro_winkler` never errors, so every element is a plain `f64`.
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[must_use]
 pub fn par_jaro_winkler_batch(pairs: &[(&str, &str)]) -> Vec<f64> {
     use rayon::prelude::*;

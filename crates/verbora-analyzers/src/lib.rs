@@ -190,6 +190,7 @@
 //! span above, not a nested constituent, and attachment is never resolved.
 
 #![cfg_attr(doctest, doc = include_str!("../README.md"))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod analysis;
 mod sentence_type;

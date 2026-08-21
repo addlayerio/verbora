@@ -26,7 +26,7 @@
 //! its tag, and a `*` appears as `\*`. [`decode_key`] undoes that, so the packed
 //! key is the token text a caller can actually look up — `Asia/Pacific`, not
 //! `Asia\/Pacific`. A key that decoding shows to be markup rather than a token
-//! is dropped; see [`decode_key`] for the two shapes of that.
+//! is dropped; see [`decode_key`] for the three shapes of that.
 //!
 //! # The entry contract is enforced here
 //!
@@ -37,7 +37,12 @@
 //!
 //! Every entry the source had and the crate does not ship is counted, per
 //! language and per reason, into a constant `data::tests` asserts — so the loss
-//! is a number in a test rather than a claim in a comment.
+//! is a number in a test rather than a claim in a comment. The keys behind those
+//! counts are written to `$OUT_DIR/ENGLISH-dropped.txt` and
+//! `$OUT_DIR/DUTCH-dropped.txt`, one `reason<TAB>key` line each, for whoever is
+//! changing the data. Nothing is emitted on `cargo:warning=`: the bundled data
+//! is vendored and fixed, so the drop count can never reach zero, and a warning
+//! that can never clear is one every downstream build would have to read past.
 //!
 //! # Layout
 //!
@@ -115,7 +120,8 @@ fn is_valid_tag(s: &str) -> bool {
 /// is `M*A*S*H`. Decoding is the inverse, and nothing else is escaped.
 ///
 /// `None` means the key is not a token at all but a piece of the corpus's own
-/// markup, and there are two shapes of that:
+/// markup, and there are three shapes of that. Each is decided by *position*,
+/// because both marker characters are also ordinary text in some other position:
 ///
 /// * a `\` with nothing escapable after it. That is what the left half of an
 ///   `A\/B` token looks like once something has truncated it at the `/`, and
@@ -127,6 +133,11 @@ fn is_valid_tag(s: &str) -> bool {
 ///   half of such an entry can be trusted. A lone `/` is not a separator (a
 ///   separator has a word before it and a tag after it); it is the punctuation
 ///   token, and it is kept.
+/// * a bare `*` that is the *whole* key — the null-element marker itself. The
+///   token whose text is an asterisk is spelled `\*`, exactly as the token whose
+///   text is a solidus is spelled `\/`, so an unescaped `*` standing alone is
+///   the marker and not the token. A `*` attached to text (`assets*`, `S*`) is
+///   not the marker; it is part of the token, and it is kept.
 fn decode_key(key: &str) -> Option<String> {
     let mut out = String::with_capacity(key.len());
     let mut chars = key.char_indices().peekable();
@@ -140,6 +151,7 @@ fn decode_key(key: &str) -> Option<String> {
                 _ => return None,
             },
             '/' if at > 0 && at + 1 < key.len() => return None,
+            '*' if key.len() == 1 => return None,
             _ => out.push(c),
         }
     }
@@ -160,12 +172,18 @@ struct Prepared {
 
 /// Decodes, de-duplicates and filters one dictionary's source entries.
 ///
-/// When two source keys decode onto the same token the entry that needed no
-/// decoding wins, and the decoded one is dropped rather than merged. Merging
-/// would have to concatenate two tag lists whose relative frequencies are not
-/// recorded anywhere, and the order of a lexicon entry *is* its frequency
-/// ranking — `Lexicon::primary_tag` reads the first tag. Inventing that order is
-/// worse than keeping the entry that was already spelled as its own token.
+/// When two source keys decode onto the same token, the entry that was
+/// **escaped** wins and the one already spelled as the bare token is dropped.
+/// The escape is how this notation spells a literal, so between two spellings of
+/// one token the escaped one is the token and the bare one is the marker
+/// character — the same reading that makes a lone `*` markup in [`decode_key`].
+/// Neither is merged into the other: merging would have to concatenate two tag
+/// lists whose relative frequencies are not recorded anywhere, and the order of
+/// a lexicon entry *is* its frequency ranking, since `Lexicon::primary_tag`
+/// reads the first tag. Inventing that order is worse than dropping one entry.
+///
+/// The bundled sources reach this tie-break for no key at all: the one collision
+/// they used to have, `\*` against `*`, is now settled earlier by `decode_key`.
 fn prepare(entries: Vec<(String, Vec<String>)>) -> Prepared {
     let mut decoded = Vec::with_capacity(entries.len());
     let mut not_tokens = Vec::new();
@@ -175,13 +193,13 @@ fn prepare(entries: Vec<(String, Vec<String>)>) -> Prepared {
             None => not_tokens.push(key),
         }
     }
-    // Sort so that within one decoded key the entry that needed no decoding
-    // comes first, and the rest in a source order that does not depend on the
-    // JSON reader.
+    // Sort so that within one decoded key the entry that *was* escaped comes
+    // first, and the rest in a source order that does not depend on the JSON
+    // reader.
     decoded.sort_by(|a, b| {
         a.0.as_bytes()
             .cmp(b.0.as_bytes())
-            .then_with(|| (a.0 != a.1).cmp(&(b.0 != b.1)))
+            .then_with(|| (a.0 == a.1).cmp(&(b.0 == b.1)))
             .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
     });
 
@@ -337,17 +355,33 @@ fn main() {
             .unwrap_or_else(|e| panic!("cannot parse {src}: {e}"));
         let source_count = entries.0.len();
         let prepared = prepare(entries.0);
-        let dropped = prepared.not_tokens.len() + prepared.merged.len() + prepared.rejected.len();
-        if dropped > 0 {
-            println!(
-                "cargo:warning={src}: packed {} of {source_count} entries \
-                 ({} corpus markup, {} merged by decoding, {} rejected by the entry contract)",
-                prepared.entries.len(),
-                prepared.not_tokens.len(),
-                prepared.merged.len(),
-                prepared.rejected.len(),
-            );
+        // What was dropped, written where a maintainer can read it and a
+        // consumer never has to. `cargo:warning=` would be the obvious channel
+        // and is the wrong one: the bundled data is vendored and fixed, so the
+        // count can never reach zero, and every downstream build of this crate
+        // would print a warning about corpus markup nobody downstream can act
+        // on. The counts are compiled in as constants below and asserted by
+        // `data::tests`; this file adds the keys behind them, which no constant
+        // can carry.
+        let mut report = format!(
+            "{src}: packed {} of {source_count} entries \
+             ({} corpus markup, {} merged by decoding, {} rejected by the entry contract)\n",
+            prepared.entries.len(),
+            prepared.not_tokens.len(),
+            prepared.merged.len(),
+            prepared.rejected.len(),
+        );
+        for (reason, keys) in [
+            ("markup", &prepared.not_tokens),
+            ("merged", &prepared.merged),
+            ("rejected", &prepared.rejected),
+        ] {
+            for key in keys {
+                writeln!(report, "{reason}\t{key}").unwrap();
+            }
         }
+        std::fs::write(out.join(format!("{prefix}-dropped.txt")), report)
+            .expect("write dropped-entry report");
         for (name, doc, value) in [
             (
                 "SOURCE_ENTRIES",
@@ -390,7 +424,7 @@ fn main() {
         (
             "Dutch/brill_CONTEXTRULES.json",
             "DUTCH_RULES",
-            "The 274 bundled Dutch transformation rules (`data/Dutch/brill_CONTEXTRULES.json`).",
+            "The 273 bundled Dutch transformation rules (`data/Dutch/brill_CONTEXTRULES.json`).",
         ),
         (
             "English/tr_from_brill_paper.json",

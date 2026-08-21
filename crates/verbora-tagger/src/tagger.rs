@@ -230,7 +230,7 @@ impl<'a> BrillTagger<'a> {
     /// with exactly enough context on each side for those positions to come out
     /// identical to a whole-document run.
     ///
-    /// For the bundled English rules that is 4 tokens of context; for the 274
+    /// For the bundled English rules that is 4 tokens of context; for the 273
     /// Dutch rules it is larger but still a property of the rule set, not of the
     /// input.
     ///
@@ -512,6 +512,45 @@ mod tests {
 
     /// The suffix conditions are real suffix tests now, so `sees` ends with `s`
     /// and `singing` ends with `ing`. Both were false before the migration.
+    /// The four bundled `… URL CURRENT-WORD-IS-URL YES` rules rewrite `NN`,
+    /// `NNS`, `NNP` and `NNPS`, so a URL heuristic that admits an abbreviation
+    /// overrides the noun the initial state assigned. `W.Va.` is `NNP` in the
+    /// bundled lexicon; `Ph.D.` is not in it at all and takes the capitalised
+    /// default, which is `NNP` too — so the exposure is not limited to the keys
+    /// the lexicon happens to hold. A sentence-final URL, the shape whitespace
+    /// tokenization produces most often, still has to reach `URL`.
+    #[test]
+    fn abbreviations_keep_their_tag_while_a_sentence_final_url_still_reaches_url() {
+        let (lex, rules) = english();
+        let t = BrillTagger::new(&lex, &rules);
+        assert_eq!(lex.primary_tag("W.Va."), Some(tag("NNP")));
+        assert_eq!(lex.primary_tag("Ph.D."), None);
+        assert_eq!(lex.tag_of("Ph.D."), tag("NNP"));
+
+        assert_eq!(
+            tags_of(&t.tag("She has a Ph.D. in physics".split(' '))),
+            ["PRP", "VBZ", "DT", "NNP", "IN", "NNS"]
+        );
+        assert_eq!(
+            tags_of(&t.tag("He lives in W.Va.".split(' '))),
+            ["PRP", "NNS", "IN", "NNP"]
+        );
+        assert_eq!(
+            tags_of(&t.tag("the president-U.S. meeting".split(' '))),
+            ["DT", "NN", "VBG"]
+        );
+
+        // ...while both shapes of URL do become `URL`.
+        assert_eq!(
+            tags_of(&t.tag("Visit www.example.com. today".split(' '))),
+            ["NN", "URL", "NN"]
+        );
+        assert_eq!(
+            tags_of(&t.tag("Read more at www.example.com".split(' '))),
+            ["NNP", "JJR", "IN", "URL"]
+        );
+    }
+
     #[test]
     fn suffix_rules_fire_on_real_suffixes() {
         let (lex, rules) = english();
@@ -666,7 +705,7 @@ mod tests {
         }
     }
 
-    /// The same equivalence, with the Dutch rule set — 274 rules, so the
+    /// The same equivalence, with the Dutch rule set — 273 rules, so the
     /// streaming context is far wider than the English one and the block logic
     /// is exercised properly.
     #[test]

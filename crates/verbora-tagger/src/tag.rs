@@ -184,7 +184,7 @@ macro_rules! literal_type {
 /// turning a rule over one tag into a rule over every tag. Both constructors
 /// return [`Result`], so neither value can be built in the first place.
 /// [`RuleSet`](crate::RuleSet)'s round-trip test asserts the property over all
-/// 302 bundled rules, and `rule::tests` asserts it over constructed ones.
+/// 301 bundled rules, and `rule::tests` asserts it over constructed ones.
 ///
 /// ```
 /// use verbora_tagger::{LiteralError, Tag, Word};

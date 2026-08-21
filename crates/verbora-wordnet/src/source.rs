@@ -597,24 +597,33 @@ mod tests {
     ///
     /// A sparse file makes the case cheaply — no blocks are written, only the
     /// recorded length changes.
+    ///
+    /// When the temporary filesystem will not report that length, this test
+    /// **fails**; it does not return early. An early return reports as a pass
+    /// and is counted as coverage, which is the one outcome worse than not
+    /// having the test at all — the same reasoning `tests/enumeration.rs`
+    /// gives for preferring `#[ignore]` to a conditional `return`. `#[ignore]`
+    /// cannot express this condition, which is only knowable at run time, so
+    /// the honest alternative is a failure whose message names the
+    /// environment as the cause rather than the code under test.
     #[test]
     fn an_oversized_file_is_an_error_for_every_resident_backend() {
         const HUGE: u64 = 1 << 40; // 1 TiB
         let path = temp_file("huge", b"aaa line\n");
-        std::fs::OpenOptions::new()
+        let set_len = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
-            .unwrap()
-            .set_len(HUGE)
-            .ok();
-        if std::fs::metadata(&path).map(|m| m.len()).ok() != Some(HUGE) {
-            eprintln!(
-                "SKIPPED an_oversized_file_is_an_error_for_every_resident_backend: this \
-                 filesystem would not report a {HUGE}-byte sparse file, so the input this \
-                 test is about cannot be constructed here."
-            );
-            return;
-        }
+            .and_then(|f| f.set_len(HUGE));
+        let observed = std::fs::metadata(&path).map(|m| m.len()).ok();
+        assert_eq!(
+            observed,
+            Some(HUGE),
+            "{} does not report a {HUGE}-byte sparse file (set_len: {set_len:?}, \
+             observed length: {observed:?}), so the input this test is about could not \
+             be constructed. That is reported as a failure and not as a skip, because a \
+             skip would be counted as coverage this run did not earn.",
+            path.display(),
+        );
 
         for s in [Storage::Resident, Storage::LazyResident, Storage::Indexed] {
             let opened = Source::open(&path, s);

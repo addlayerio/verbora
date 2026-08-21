@@ -447,8 +447,8 @@ mod tests {
 
     /// A bundled token whose own text contains `/` or `*` is reachable by that
     /// text. The source corpora escape both characters, because a bare `/`
-    /// separates a token from its tag; the packed keys carry the token, not the
-    /// escape.
+    /// separates a token from its tag and a bare `*` marks a null element; the
+    /// packed keys carry the token, not the escape.
     #[test]
     fn tokens_containing_a_slash_or_a_star_are_reachable_by_their_text() {
         let en = Lexicon::bundled(Language::English);
@@ -459,6 +459,31 @@ mod tests {
         for gone in ["Asia\\/Pacific", "Asia\\", "me/PRP", "W/NNP.R.G."] {
             assert!(!en.contains(gone), "{gone:?} is still a key");
         }
+    }
+
+    /// The entry under the key `*` is the one the corpus spelled `\*`.
+    ///
+    /// The source holds both `*` and `\*`. In the notation `build.rs` decodes,
+    /// a bare `*` standing alone is the null-element marker and `\*` is how the
+    /// token whose text is an asterisk is written — the same relationship `/`
+    /// has with `\/`. So the entry that survives is the escaped one, with the
+    /// tags the corpus gave the *token*: `SYM`, then the list-item marker `LS`,
+    /// then `NN`. The marker's own entry (`SYM`, `,`, `:`) is markup and is
+    /// dropped, exactly as `me/PRP` and `Asia\` are.
+    ///
+    /// A `*` that is not standing alone is not the marker: `M*A*S*H` above and
+    /// `assets*` here keep theirs.
+    #[test]
+    fn the_asterisk_key_is_the_token_and_not_the_null_element_marker() {
+        let en = Lexicon::bundled(Language::English);
+        let tags: Vec<String> = en
+            .tags("*")
+            .expect("the token `*` is a key")
+            .map(|t| t.to_string())
+            .collect();
+        assert_eq!(tags, ["SYM", "LS", "NN"]);
+        assert_eq!(en.tag_of("*"), tag("SYM"));
+        assert!(en.contains("assets*"), "a `*` inside a token is token text");
     }
 
     #[test]

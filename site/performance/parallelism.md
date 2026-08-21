@@ -10,7 +10,7 @@ Enable the `parallel` feature on the crate you need it from:
 
 ```toml
 [dependencies]
-verbora-tokenizers = { version = "0.1", features = ["parallel"] }
+verbora-tokenizers = { version = "0.2", features = ["parallel"] }
 ```
 
 `parallel` is never on by default. It pulls in `rayon` as an optional dependency
