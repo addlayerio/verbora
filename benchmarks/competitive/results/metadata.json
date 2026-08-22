@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-08-20T05:13:18.113880+00:00",
-  "verbora_commit": "09e6b1c2163a04f9957d673b2051d03f9ad8c90e",
-  "verbora_version": "0.1.0",
+  "timestamp": "2026-08-22T04:46:47.537639+00:00",
+  "verbora_commit": "76b8a3af555741cc6d32ac469b3f001ee8dac262",
+  "verbora_version": "0.2.0",
   "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "cpu": "Intel(R) Core(TM) i9-14900KF",
   "cores": 32,
