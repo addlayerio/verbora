@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 51.518902935570786,
-      "upper_bound": 52.64486062524531
+      "lower_bound": 51.24567910853408,
+      "upper_bound": 53.64092076040267
     },
-    "point_estimate": 52.04307506495256,
-    "standard_error": 0.28788249380551484
+    "point_estimate": 52.280220619541815,
+    "standard_error": 0.6176410457639501
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 50.58778055207065,
-      "upper_bound": 51.59556381460746
+      "lower_bound": 50.23971006943206,
+      "upper_bound": 50.81722921141454
     },
-    "point_estimate": 51.17445404620759,
-    "standard_error": 0.2620593266781356
+    "point_estimate": 50.390138945152614,
+    "standard_error": 0.1380055467239996
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 0.807761605983808,
-      "upper_bound": 1.9511210909501084
+      "lower_bound": 0.3314247489985939,
+      "upper_bound": 1.1363367829620148
     },
-    "point_estimate": 1.4613884583896262,
-    "standard_error": 0.3060356194636756
+    "point_estimate": 0.5780507583016908,
+    "standard_error": 0.18446926901232927
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 51.1956088962498,
-      "upper_bound": 52.45891526434743
+      "lower_bound": 50.52556299558784,
+      "upper_bound": 51.877762830743656
     },
-    "point_estimate": 51.75830815985287,
-    "standard_error": 0.3242183836969658
+    "point_estimate": 51.064541198684864,
+    "standard_error": 0.35253233046665566
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 1.9281620352214721,
-      "upper_bound": 3.733355430792937
+      "lower_bound": 2.0646499910780074,
+      "upper_bound": 9.247580778658355
     },
-    "point_estimate": 2.8989978713707685,
-    "standard_error": 0.4603419777614678
+    "point_estimate": 6.2122005029947305,
+    "standard_error": 1.899083703615532
   }
 }

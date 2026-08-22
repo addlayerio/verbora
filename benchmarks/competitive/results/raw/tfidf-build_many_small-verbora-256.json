@@ -2,46 +2,46 @@
   "mean": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 890151.4191732939,
-      "upper_bound": 924967.5213194973
+      "lower_bound": 855474.841527634,
+      "upper_bound": 858308.6348420694
     },
-    "point_estimate": 905088.7688878113,
-    "standard_error": 8975.223356836817
+    "point_estimate": 856824.9609785398,
+    "standard_error": 726.9445023186667
   },
   "median": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 875588.1171370968,
-      "upper_bound": 883804.8191489362
+      "lower_bound": 852897.5425531915,
+      "upper_bound": 854940.7672535211
     },
-    "point_estimate": 878253.6596704752,
-    "standard_error": 2367.349621063841
+    "point_estimate": 853754.8691699605,
+    "standard_error": 479.58142921056987
   },
   "median_abs_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 12352.503399231857,
-      "upper_bound": 23714.24797845608
+      "lower_bound": 1909.2391377067488,
+      "upper_bound": 4402.839888047911
     },
-    "point_estimate": 16370.298801598256,
-    "standard_error": 3183.5898866832677
+    "point_estimate": 3180.8785765178263,
+    "standard_error": 632.1212175772897
   },
   "slope": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 892558.0605626493,
-      "upper_bound": 923635.7068300085
+      "lower_bound": 855875.0776531652,
+      "upper_bound": 860941.0454965855
     },
-    "point_estimate": 906641.5232510713,
-    "standard_error": 7986.774013226374
+    "point_estimate": 858309.6769218266,
+    "standard_error": 1300.7382947759988
   },
   "std_dev": {
     "confidence_interval": {
       "confidence_level": 0.95,
-      "lower_bound": 37161.42204562268,
-      "upper_bound": 138980.41776841992
+      "lower_bound": 5479.1109457703005,
+      "upper_bound": 8861.753373557765
     },
-    "point_estimate": 90157.923715492,
-    "standard_error": 28897.539963413834
+    "point_estimate": 7319.177372493847,
+    "standard_error": 866.9679579262333
   }
 }
