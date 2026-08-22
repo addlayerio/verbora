@@ -1,12 +1,12 @@
 [package]
 name = "verbora-tagger"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Brill part-of-speech tagger for Rust"
+description = "Brill part-of-speech tagger engine for Rust — bring your own lexicon"
 keywords = ["pos-tagger", "brill", "nlp"]
 categories.workspace = true
 
@@ -29,10 +29,11 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
-# `tests/tokenization.rs` measures the bundled lexicon keys against UAX #29 word
-# segmentation — the tokenization `verbora_tokenizers::WordTokenizer` performs.
-# Depending on the segmenter directly rather than on that crate keeps the test a
-# measurement of the standard, not of a sibling crate's current behaviour.
+# `tests/tokenization.rs` demonstrates the tokenizer coupling this crate's token
+# contract creates, against UAX #29 word segmentation — the tokenization
+# `verbora_tokenizers::WordTokenizer` performs. Depending on the segmenter
+# directly rather than on that crate keeps the test a demonstration against the
+# standard, not against a sibling crate's current behaviour.
 unicode-segmentation = { workspace = true }
 
 [features]

@@ -67,7 +67,7 @@ use crate::tag::TaggedToken;
 ///   whose body is `documents.par_iter().map(tag).collect()` and nothing more.
 ///
 /// Every one of these produces the same tags; they differ only in where the
-/// memory goes. `tests/api_equivalence.rs` asserts that over the whole bundled
+/// memory goes. `tests/api_equivalence.rs` asserts that over the crate's own
 /// character-class sweep.
 ///
 /// Performance for the post-migration implementation is **unmeasured**: the
@@ -148,22 +148,26 @@ impl<'a> BrillTagger<'a> {
     /// Tags a sentence or document: initial state, then the rules.
     ///
     /// ```
-    /// use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
+    /// use verbora_tagger::{BrillTagger, Corpus, RuleSet, Tag};
     ///
-    /// let lexicon = Lexicon::bundled(Language::English);
-    /// let rules = RuleSet::bundled(Language::English);
+    /// let corpus = Corpus::parse_brown(
+    ///     "I_PRP would_MD read_VB a_DT book_NN\n\
+    ///      the_DT book_NN was_VBD good_JJ",
+    /// )?;
+    /// let lexicon = corpus.build_lexicon(Tag::new("NN")?)?;
+    /// let rules: RuleSet = "NN VB PREV-TAG MD".parse()?;
     /// let tagger = BrillTagger::new(&lexicon, &rules);
     ///
     /// let tagged = tagger.tag(["I", "would", "book", "a", "flight"]);
     /// let tags: Vec<&str> = tagged.iter().map(|w| w.tag().as_str()).collect();
-    /// assert_eq!(tags, ["NN", "MD", "VB", "DT", "NN"]);
+    /// assert_eq!(tags, ["PRP", "MD", "VB", "DT", "NN"]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
-    /// `book` is `NN` in the lexicon; the rule `NN VB PREV-WORD-IS would` is
-    /// what makes it a verb. `I` comes back `NN` because the bundled English
-    /// lexicon has no entry for `I` and lists `NN` first for `i` — a limitation
-    /// of that dictionary, not of the algorithm, and one a caller fixes with a
-    /// single `lexicon.insert("I", vec![Tag::new("PRP")?])`.
+    /// `book` is `NN` in the lexicon — the corpus above tags it that way twice
+    /// and never as a verb — and the rule `NN VB PREV-TAG MD` is what makes it a
+    /// verb here. `flight` is not in the lexicon at all, so it takes the default
+    /// tag the lexicon was built with.
     pub fn tag<'t, I>(&self, tokens: I) -> Vec<TaggedToken<'t>>
     where
         I: IntoIterator,
@@ -183,9 +187,10 @@ impl<'a> BrillTagger<'a> {
     /// buffer serve the whole loop:
     ///
     /// ```
-    /// # use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
-    /// # let lexicon = Lexicon::bundled(Language::English);
-    /// # let rules = RuleSet::bundled(Language::English);
+    /// # use verbora_tagger::{BrillTagger, Lexicon, RuleSet, Tag};
+    /// # let mut lexicon = Lexicon::new(Tag::new("NN").unwrap());
+    /// # lexicon.insert("the", vec![Tag::new("DT").unwrap()]).unwrap();
+    /// # let rules = RuleSet::new();
     /// # let tagger = BrillTagger::new(&lexicon, &rules);
     /// # let documents = [vec!["the", "dog"], vec!["a", "cat"]];
     /// let mut buffer = Vec::new();
@@ -230,9 +235,9 @@ impl<'a> BrillTagger<'a> {
     /// with exactly enough context on each side for those positions to come out
     /// identical to a whole-document run.
     ///
-    /// For the bundled English rules that is 4 tokens of context; for the 273
-    /// Dutch rules it is larger but still a property of the rule set, not of the
-    /// input.
+    /// That is a property of the rule set, not of the input: ten rules that each
+    /// read one token to the left buffer ten tokens of left context, whether the
+    /// document is a sentence or a gigabyte.
     ///
     /// # What it costs
     ///
@@ -242,17 +247,21 @@ impl<'a> BrillTagger<'a> {
     /// already fits in memory, [`Self::tag`] does strictly less work.
     ///
     /// ```
-    /// use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
+    /// use verbora_tagger::{BrillTagger, Lexicon, RuleSet, Tag};
     ///
-    /// let lexicon = Lexicon::bundled(Language::English);
-    /// let rules = RuleSet::bundled(Language::English);
+    /// let mut lexicon = Lexicon::new(Tag::new("NN")?);
+    /// lexicon.insert("the", vec![Tag::new("DT")?])?;
+    /// lexicon.insert("runs", vec![Tag::new("VBZ")?])?;
+    /// // Every unknown token starts as `NN`; this rule moves the `-ly` ones.
+    /// let rules: RuleSet = "NN RB CURRENT-WORD-ENDS-WITH ly".parse()?;
     /// let tagger = BrillTagger::new(&lexicon, &rules);
     ///
     /// let tags: Vec<String> = tagger
     ///     .tag_stream("the dog runs quickly".split(' '))
     ///     .map(|w| w.tag().to_string())
     ///     .collect();
-    /// assert_eq!(tags[3], "RB");
+    /// assert_eq!(tags, ["DT", "NN", "VBZ", "RB"]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn tag_stream<'t, I>(&self, tokens: I) -> TagStream<'a, 't, I::IntoIter>
     where
@@ -467,61 +476,139 @@ where
 mod tests {
     use super::*;
     use crate::corpus::Corpus;
-    use crate::language::Language;
     use crate::tag::Tag;
 
     fn tag(s: &'static str) -> Tag {
         Tag::new(s).unwrap()
     }
 
-    fn english() -> (Lexicon, RuleSet) {
-        (
-            Lexicon::bundled(Language::English),
-            RuleSet::bundled(Language::English),
-        )
+    /// A small Penn-tagged lexicon and rule set, standing in for the
+    /// dictionaries this crate no longer ships.
+    ///
+    /// Everything here is written out rather than loaded, which is the point:
+    /// these tests are about the engine, and the engine's inputs are now always
+    /// the caller's. The rules cover the three shape conditions (`URL`, number,
+    /// suffix) alongside an ordinary contextual one, because those are the
+    /// conditions whose interaction with the initial state is worth pinning.
+    fn fixture() -> (Lexicon, RuleSet) {
+        let mut lexicon = Lexicon::new(tag("NN")).with_capitalized_default_tag(tag("NNP"));
+        for (key, tags) in [
+            (".", vec!["."]),
+            ("a", vec!["DT"]),
+            ("at", vec!["IN"]),
+            ("book", vec!["NN", "VB"]),
+            ("brown", vec!["JJ"]),
+            ("dog", vec!["NN"]),
+            ("flight", vec!["NN"]),
+            ("fox", vec!["NN"]),
+            ("has", vec!["VBZ"]),
+            ("he", vec!["PRP"]),
+            ("i", vec!["PRP"]),
+            ("in", vec!["IN"]),
+            ("jumps", vec!["VBZ"]),
+            ("lazy", vec!["JJ"]),
+            ("lives", vec!["VBZ"]),
+            ("meeting", vec!["NN"]),
+            ("more", vec!["JJR"]),
+            ("over", vec!["IN"]),
+            ("physics", vec!["NNS"]),
+            ("president", vec!["NN"]),
+            ("quick", vec!["JJ"]),
+            ("quickly", vec!["RB"]),
+            ("read", vec!["VB"]),
+            ("runs", vec!["VBZ"]),
+            ("she", vec!["PRP"]),
+            ("the", vec!["DT"]),
+            ("today", vec!["NN"]),
+            ("visit", vec!["VB"]),
+            ("would", vec!["MD"]),
+            ("W.Va.", vec!["NNP"]),
+        ] {
+            lexicon
+                .insert(key, tags.into_iter().map(tag).collect())
+                .unwrap();
+        }
+        let rules: RuleSet = "NN VB PREV-TAG MD\n\
+             NN CD CURRENT-WORD-IS-NUMBER YES\n\
+             NN URL CURRENT-WORD-IS-URL YES\n\
+             NNS URL CURRENT-WORD-IS-URL YES\n\
+             NNP URL CURRENT-WORD-IS-URL YES\n\
+             NNPS URL CURRENT-WORD-IS-URL YES\n\
+             NN NNS CURRENT-WORD-ENDS-WITH s\n\
+             NN VBG CURRENT-WORD-ENDS-WITH ing"
+            .parse()
+            .unwrap();
+        (lexicon, rules)
+    }
+
+    /// A lexicon and rule set whose effect propagates far further than any one
+    /// rule's reach, in **both** directions.
+    ///
+    /// Rule *k* rewrites a tag that rule *k-1* created, so the consequence of a
+    /// single `seed` token travels `N` positions outward — driven entirely by
+    /// one-token context reads. That makes `context_span` load-bearing rather
+    /// than nominal: a streaming implementation that buffered less than the sum
+    /// would give a different answer from a whole-document run, which is
+    /// precisely what `streaming_matches_batch_under_a_wide_context` checks.
+    fn ripple() -> (Lexicon, RuleSet) {
+        use std::fmt::Write as _;
+        const N: usize = 12;
+
+        let mut lexicon = Lexicon::new(tag("A"));
+        lexicon.insert("seed", vec![tag("S")]).unwrap();
+        let mut text = String::new();
+        for k in 0..N {
+            let from = if k == 0 {
+                "S".to_owned()
+            } else {
+                format!("T{k}")
+            };
+            writeln!(text, "A T{} PREV-TAG {from}", k + 1).unwrap();
+            let from = if k == 0 {
+                "S".to_owned()
+            } else {
+                format!("U{k}")
+            };
+            writeln!(text, "A U{} NEXT-TAG {from}", k + 1).unwrap();
+        }
+        let rules: RuleSet = text.parse().unwrap();
+        assert_eq!(rules.context_span(), (N, N));
+        (lexicon, rules)
     }
 
     fn tags_of(words: &[TaggedToken<'_>]) -> Vec<String> {
         words.iter().map(|w| w.tag().to_string()).collect()
     }
 
-    /// Every tag below is read off the bundled data, not off a previous run:
-    /// `would` is `MD`, `a` is `DT` and `flight` is `NN` in the lexicon, `book`
-    /// is `NN` there and becomes `VB` through `NN VB PREV-WORD-IS would`, and
-    /// `I` has no entry so the retry finds `i`, whose first tag is `NN`.
+    /// Every tag below is read off the fixture, not off a previous run: `would`
+    /// is `MD`, `a` is `DT` and `flight` is `NN` in the lexicon, `book` is `NN`
+    /// there and becomes `VB` through `NN VB PREV-TAG MD`, and `I` has no entry
+    /// of its own so the lowercase retry finds `i`.
     #[test]
     fn the_textbook_sentence() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         assert_eq!(
             tags_of(&t.tag(["I", "would", "book", "a", "flight"])),
-            ["NN", "MD", "VB", "DT", "NN"]
-        );
-        assert_eq!(lex.primary_tag("book"), Some(tag("NN")));
-        assert_eq!(lex.primary_tag("i"), Some(tag("NN")));
-        assert!(!lex.contains("I"));
-
-        // With the missing entry supplied, the same sentence tags as expected.
-        let mut fixed = Lexicon::bundled(Language::English);
-        fixed.insert("I", vec![tag("PRP")]).unwrap();
-        assert_eq!(
-            tags_of(&BrillTagger::new(&fixed, &rules).tag(["I", "would", "book", "a", "flight"])),
             ["PRP", "MD", "VB", "DT", "NN"]
         );
+        assert_eq!(lex.primary_tag("book"), Some(tag("NN")));
+        assert_eq!(lex.primary_tag("i"), Some(tag("PRP")));
+        assert!(!lex.contains("I"));
     }
 
-    /// The suffix conditions are real suffix tests now, so `sees` ends with `s`
-    /// and `singing` ends with `ing`. Both were false before the migration.
-    /// The four bundled `… URL CURRENT-WORD-IS-URL YES` rules rewrite `NN`,
-    /// `NNS`, `NNP` and `NNPS`, so a URL heuristic that admits an abbreviation
-    /// overrides the noun the initial state assigned. `W.Va.` is `NNP` in the
-    /// bundled lexicon; `Ph.D.` is not in it at all and takes the capitalised
-    /// default, which is `NNP` too — so the exposure is not limited to the keys
-    /// the lexicon happens to hold. A sentence-final URL, the shape whitespace
-    /// tokenization produces most often, still has to reach `URL`.
+    /// The URL heuristic is small enough not to steal abbreviations.
+    ///
+    /// The four `… URL CURRENT-WORD-IS-URL YES` rules rewrite `NN`, `NNS`, `NNP`
+    /// and `NNPS`, so every token the heuristic wrongly accepts overrides a noun
+    /// the lexicon stated. `W.Va.` is `NNP` in the fixture; `Ph.D.` is not in it
+    /// at all and takes the capitalised default, which is `NNP` too — so the
+    /// exposure is not limited to keys the lexicon happens to hold. A
+    /// sentence-final URL, the shape whitespace tokenization produces most
+    /// often, still has to reach `URL`.
     #[test]
     fn abbreviations_keep_their_tag_while_a_sentence_final_url_still_reaches_url() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         assert_eq!(lex.primary_tag("W.Va."), Some(tag("NNP")));
         assert_eq!(lex.primary_tag("Ph.D."), None);
@@ -533,7 +620,7 @@ mod tests {
         );
         assert_eq!(
             tags_of(&t.tag("He lives in W.Va.".split(' '))),
-            ["PRP", "NNS", "IN", "NNP"]
+            ["PRP", "VBZ", "IN", "NNP"]
         );
         assert_eq!(
             tags_of(&t.tag("the president-U.S. meeting".split(' '))),
@@ -543,19 +630,19 @@ mod tests {
         // ...while both shapes of URL do become `URL`.
         assert_eq!(
             tags_of(&t.tag("Visit www.example.com. today".split(' '))),
-            ["NN", "URL", "NN"]
+            ["VB", "URL", "NN"]
         );
         assert_eq!(
             tags_of(&t.tag("Read more at www.example.com".split(' '))),
-            ["NNP", "JJR", "IN", "URL"]
+            ["VB", "JJR", "IN", "URL"]
         );
     }
 
     #[test]
     fn suffix_rules_fire_on_real_suffixes() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
-        // Tokens absent from the lexicon, so the initial state is the NN
+        // Tokens absent from the lexicon, so the initial state is the `NN`
         // default and only the suffix rules can move them.
         assert_eq!(
             tags_of(&t.tag(["zzcats", "zzsees", "zzstring", "zzsinging", "zzss"])),
@@ -614,7 +701,7 @@ mod tests {
     /// Tokens are returned exactly as supplied, whatever script or length.
     #[test]
     fn every_character_class_tags_without_rewriting_or_panicking() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         let long = "z".repeat(10_000);
         let cases: &[(&str, &str)] = &[
@@ -650,7 +737,7 @@ mod tests {
 
     #[test]
     fn empty_and_single_token_input() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         assert!(t.tag(Vec::<&str>::new()).is_empty());
         assert!(t.tag_stream(Vec::<&str>::new()).next().is_none());
@@ -661,7 +748,7 @@ mod tests {
     /// lengths around the streaming block boundary.
     #[test]
     fn all_apis_agree_on_every_length() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         let words: Vec<&str> = [
             "the",
@@ -705,34 +792,47 @@ mod tests {
         }
     }
 
-    /// The same equivalence, with the Dutch rule set — 273 rules, so the
-    /// streaming context is far wider than the English one and the block logic
-    /// is exercised properly.
+    /// The same equivalence under a rule set whose reach is 12 tokens on each
+    /// side and whose effects genuinely propagate that far, so the streaming
+    /// margin is doing work rather than being generous.
     #[test]
-    fn streaming_matches_batch_with_the_dutch_rule_set() {
-        let lex = Lexicon::bundled(Language::Dutch);
-        let rules = RuleSet::bundled(Language::Dutch);
+    fn streaming_matches_batch_under_a_wide_context() {
+        let (lex, rules) = ripple();
         let t = BrillTagger::new(&lex, &rules);
         let (left, right) = rules.context_span();
-        assert!(left >= 3 && right >= 3, "context is wide enough to matter");
-        let words: Vec<&str> = [
-            "het", "is", "een", "mooie", "dag", "niet", "waar", "er", "aan",
-        ]
-        .into_iter()
-        .cycle()
-        .take(1500)
-        .collect();
-        for n in [0, 1, 7, 100, 1023, 1024, 1030, 1500] {
+        assert!(
+            left >= 12 && right >= 12,
+            "context is wide enough to matter"
+        );
+
+        // Seeds at a period coprime with the 1024-token block, so a ripple falls
+        // across a block boundary at some point in the sweep.
+        let period = 37;
+        let words: Vec<&str> = (0..3000)
+            .map(|i| if i % period == 0 { "seed" } else { "x" })
+            .collect();
+
+        for n in [0, 1, 7, 100, 1023, 1024, 1030, 2048, 2100, 3000] {
             let slice = &words[..n];
             let batch = t.tag(slice.iter().copied());
             let streamed: Vec<TaggedToken<'_>> = t.tag_stream(slice.iter().copied()).collect();
             assert_eq!(streamed, batch, "length {n}");
         }
+
+        // ...and the ripple really does reach 12 positions out, or the test
+        // above would pass on a rule set that never used its context.
+        let short: Vec<&str> = std::iter::once("seed")
+            .chain(std::iter::repeat_n("x", 20))
+            .collect();
+        let got = tags_of(&t.tag(short.iter().copied()));
+        assert_eq!(got[0], "S");
+        assert_eq!(got[12], "T12", "the chain travelled twelve tokens");
+        assert_eq!(got[13], "A", "and no further");
     }
 
     #[test]
     fn streaming_holds_a_bounded_window() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         let n = 50_000;
         let mut stream = t.tag_stream(std::iter::repeat_n("dog", n));
@@ -751,7 +851,7 @@ mod tests {
 
     #[test]
     fn tag_into_appends_and_leaves_the_prefix_alone() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         let mut buf = t.tag(["would", "book"]);
         let before = buf.clone();
@@ -762,7 +862,7 @@ mod tests {
 
     #[test]
     fn transform_with_clears_the_scratch_buffer() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         let mut sites = vec![9999, 12345];
         let mut words = t.annotate(["would", "book"]);
@@ -808,7 +908,7 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn par_tag_batch_matches_the_sequential_loop() {
-        let (lex, rules) = english();
+        let (lex, rules) = fixture();
         let t = BrillTagger::new(&lex, &rules);
         let documents: Vec<Vec<&str>> = vec![
             vec![],

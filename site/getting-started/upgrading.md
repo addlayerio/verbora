@@ -13,6 +13,14 @@ listed under <a href="#changes-that-do-not-break-the-build">Changes that do not
 break the build</a>.
 </div>
 
+<div class="callout callout-note">
+<strong>Already on 0.2?</strong> Two crates have moved past it on their own,
+and each has its own section at the end of this page:
+<a href="#verbora-wordnet-0-3-0"><code>verbora-wordnet</code> 0.3.0</a> and
+<a href="#verbora-tagger-0-3-0"><code>verbora-tagger</code> 0.3.0</a>. The
+tagger one is the larger break: it no longer ships a dictionary.
+</div>
+
 ## What happened
 
 0.1.0 was a port. Its behaviour was defined by agreement with the implementation
@@ -182,7 +190,7 @@ had it, and `language-detection` / `fast-language-detection` on
 
 ## `#[non_exhaustive]`, once and properly
 
-**35 public enums are `#[non_exhaustive]` in 0.2.0, up from 6 in 0.1.0.** A
+**34 public enums are `#[non_exhaustive]`, up from 6 in 0.1.0.** A
 downstream `match` over any of them now needs a wildcard arm, or it fails to
 compile with `E0004: non-exhaustive patterns`.
 
@@ -215,12 +223,12 @@ LexiconError, LiteralError, RuleParseError}` ·
 `verbora_tokenizers::AbbreviationError` · `verbora_util::{GraphError, PathError}` ·
 `verbora_wordnet::{Error, ParseSenseError, RecordError}`
 
-The other 14 are the data enums those errors carry, or that a caller matches
+The other 13 are the data enums those errors carry, or that a caller matches
 alongside them: `verbora_core::StopWordLanguage` ·
 `verbora_classifiers::TrainingEvent` · `verbora_distance::Operation` ·
 `verbora_language::{Language, PhoneticRecommendation, Script, StrategyBasis,
 TransliterationAdvice}` · `verbora_sentiment::{Language, VocabularyKind}` ·
-`verbora_tagger::{Condition, Language, Template}` ·
+`verbora_tagger::{Condition, Template}` ·
 `verbora_util::AbbreviationLanguage`.
 
 ### Why now, and why the payloads too
@@ -232,7 +240,7 @@ a newly-distinguished failure or folding it into an existing variant and losing
 the distinction. Sealing them here buys the freedom to name failures precisely
 later, at the price of one arm today.
 
-The 14 data enums are marked for the same reason, one level down. Sealing an
+The 13 data enums are marked for the same reason, one level down. Sealing an
 error type while leaving the enum it *carries* closed gives the freedom straight
 back: a newly-distinguished failure almost always needs a new payload value to
 describe it — a new `Operation`, a new `Language`, a new `Template` — and adding
@@ -349,9 +357,7 @@ without the fix, and each will move an output your program may be asserting on.
 | `verbora-stemmers` | Swedish and Norwegian folded a/o umlauts before consulting stop-word lists spelled with them, so 116 of 428 Swedish entries could never match. In those languages those are distinct letters. | Swedish and Norwegian stop-word filtering removes more than it used to. |
 | `verbora-stemmers` | The German stemmer's character gate was a byte-for-byte copy of the Spanish one: it admitted a/e/i/n/o/u accents and omitted a/o/u umlauts and eszett. | German stems change. |
 | `verbora-stemmers` | The Dutch stop-word list spelled an entry with a trailing space, so the pronoun *je* was never filtered. | One more Dutch stop word is filtered. |
-| `verbora-tagger` | 292 keys of the bundled English lexicon carried corpus markup rather than tokens — 256 with a backslash, 36 with an embedded Penn tag — and 199 of them had no correctly-spelled counterpart, so those tokens fell through to the capitalised default. `tag_of("Asia/Pacific")` returned `NNP`; it now returns `JJ`. | Tags change on tokens the broken keys covered. The bundled English lexicon now holds 92,538 keys. |
 | `verbora-tagger` | `Tag::new("*")` is refused (`Err(LiteralError::Wildcard)`), because `*` printed as the wildcard and reparsed as `TagPattern::Any` — a rule that rewrote one tag became one that rewrote every tag, across the documented persistence path. `Corpus::parse_brown` inherits this as `CorpusParseError::WildcardTag`. | A corpus or rule file containing `*` as a literal tag is now an error instead of silently corrupting the rule set. |
-| `verbora-tagger` | Eleven bundled Dutch rules could never fire, ten of them naming a sentence-boundary marker that is not a tag in this tagger. They are gone, so the advertised count is the count that can fire: `RuleSet::bundled(Language::Dutch)` now reports 273. | The Dutch rule count changes; no rule that ever fired was removed. |
 | `verbora-tagger` | `Template::instantiate` pushed one `Condition` per *position* inspected rather than one per distinct condition, so a window template double- (or triple-) counted a corrected token, defeating the trainer's `min_score` guard. | Trained rule sets differ. Retrain. |
 | `verbora-transliterators` | Vowel lengthening consumed the next scalar without asking whether it began a longer key, so `ハロウィン` came out `harōin` and `スウェーデン` came out `sūēden`. Six keys collide this way after any of seventy morae. | Romanisations change for the affected syllables. |
 | `verbora-language` | `fold_cyrillic` folded two blocks while the script router feeds it a third, so 100 uppercase letters went unfolded — including `Ґ`, one of four Ukrainian-versus-Russian discriminators. The same text in different case gave a different answer. | Cyrillic detection is now case-invariant, and uppercase Ukrainian text carries its signal. The Cyrillic model was retrained against the corrected extractor. |
@@ -417,8 +423,8 @@ was already doing something else.
 
 ## `verbora-wordnet` 0.3.0
 
-Crates version independently: one moves when *its own* public API does. Every
-crate except this one is at `0.2`.
+Crates version independently: one moves when *its own* public API does. Two
+have moved to `0.3`; the other seventeen are at `0.2`.
 
 `verbora-wordnet` 0.2.0 could not read **8.8% of a real WordNet dictionary** —
 13,606 of 155,467 index entries, including `run`, `cat`, `light`, `water`,
@@ -454,6 +460,69 @@ into one of the three classes: an index entry states that a domain relation
 exists and deliberately does not state which kind, and choosing one would be a
 claim the file does not make. They appear only from index entries — a data
 record that omits the class letter is malformed and is rejected.
+
+## `verbora-tagger` 0.3.0
+
+`verbora-tagger` 0.2.0 shipped four data files it had no right to redistribute:
+an English lexicon and rule set that are LGPL-3.0, which is incompatible with
+this project's MIT licence, and a Dutch lexicon and context-rule set whose terms
+could not be located at all. All four were removed in 0.3.0. Attribution does
+not fix a licence mismatch, and the crate is not going to ship data it cannot
+account for.
+
+What that means for your code: **the crate no longer knows any language.** It is
+a tagging engine, and the lexicon is now an input you supply.
+
+```rust ignore
+// 0.2 — a tagger that arrived knowing English.
+use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
+
+let lexicon = Lexicon::bundled(Language::English);
+let rules = RuleSet::bundled(Language::English);
+let tagger = BrillTagger::new(&lexicon, &rules);
+```
+
+```rust ignore
+// 0.3 — you bring the dictionary. `Corpus` counts the tag frequencies for you.
+use verbora_tagger::{BrillTagger, Corpus, RuleSet, Tag};
+
+let corpus = Corpus::parse_brown(&std::fs::read_to_string("brown.txt")?)?;
+let lexicon = corpus.build_lexicon(Tag::new("NN")?)?;
+let rules: RuleSet = "NN VB PREV-TAG MD".parse()?;
+let tagger = BrillTagger::new(&lexicon, &rules);
+```
+
+`Lexicon::new(default_tag)` plus `Lexicon::insert` is the other way in, when the
+entries are yours to write down rather than to count, and `Trainer` learns a rule
+set from the same corpus. Both paths are shown, compiled, on the
+[POS tagger](../features/tagger.md) page.
+
+The removals:
+
+| 0.2 | 0.3 |
+|---|---|
+| `Lexicon::bundled(Language)` | gone — build one with `Corpus::build_lexicon`, or `Lexicon::new` plus `Lexicon::insert` |
+| `RuleSet::bundled(Language::English)` | `RuleSet::brill_1992()` — the same ten published rules of Brill (1992), Table 1, under a name that carries their citation and without the `Language` parameter |
+| `RuleSet::bundled(Language::Dutch)` | gone — no replacement; train one with `Trainer` against your own corpus |
+| `brill_paper_rule_strings()` | gone — `RuleSet::brill_1992()` is the same table, and `RuleSet::to_string()` recovers the rule strings verbatim |
+| `Language` | gone — every method on it named data that no longer ships, and its defaults (`NN`, `NNP`) were Penn Treebank tags while the one surviving rule set is Brown |
+
+<div class="callout callout-warn">
+<strong><code>RuleSet::brill_1992</code> is written in Brown corpus tags.</strong>
+It names <code>AT</code>, <code>PPS</code>, <code>PPO</code>, <code>HVD</code>
+and <code>NP</code> — not the Penn Treebank <code>DT</code>, <code>PRP</code>,
+<code>VBD</code>, <code>NNP</code>. Verbora attaches no meaning to a tag beyond
+string identity, so pairing it with a Penn-tagged lexicon is not an error: the
+rules simply never fire, the tagger costs a pass per rule, and it returns the
+initial-state annotation unchanged. If you build a Penn-tagged lexicon, train
+your own rules against it rather than reaching for this set.
+</div>
+
+If you were relying on the bundled English tagger and have no corpus of your
+own, the shape of the work is: obtain an annotated corpus under terms you are
+happy with, run it through `Corpus::parse_brown` and `Corpus::build_lexicon`,
+and train rules with `Trainer`. That is a deliberate trade — the crate stopped
+making a licensing decision on your behalf.
 
 ## If you are stuck
 

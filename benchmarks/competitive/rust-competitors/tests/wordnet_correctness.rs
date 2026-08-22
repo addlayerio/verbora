@@ -290,7 +290,7 @@ fn both_parsers_agree_on_the_formerly_unreadable_entries() {
             .unwrap_or_else(|e| panic!("{lemma:?} must parse, got {e:?}"))
             .unwrap_or_else(|| panic!("{lemma:?} must be present as a noun"));
         assert_eq!(
-            ours.sense_count() as usize,
+            ours.sense_count(),
             theirs.len(),
             "{lemma:?}: sense counts disagree between the two parsers"
         );

@@ -1681,12 +1681,14 @@ memory footprint, and a benchmark where the choice isn't obvious.
 
 For any structure with a `build once, query many times` access pattern,
 prefer mutable, convenient structures during construction and a compact,
-immutable representation during query. `verbora-tagger`'s `build.rs` (parses
-the reference JSON lexicons once, packs them into a binary format with
-sorted-string arenas and offset tables, embeds the result via
-`include_bytes!`) and `verbora-wordnet`'s `PrebuiltIndex` sidecar are the
-worked examples already in this codebase — read either before designing a
-new build-once/read-many dataset.
+immutable representation during query. `verbora-trie`'s `Trie::freeze`
+(materialises every key once in scalar order so a subtree becomes a contiguous
+`(start, end)` range, turning prefix enumeration into a slice copy and a prefix
+count into a subtraction) and `verbora-wordnet`'s `PrebuiltIndex` sidecar are
+the worked examples already in this codebase — read either before designing a
+new build-once/read-many dataset. `verbora-trie` is the one to read first: it
+is the case where the frozen form is built at runtime from caller data, which
+is the common shape.
 
 Read-heavy runtime paths should avoid locks whenever possible. Prefer
 `Arc<ImmutableIndex>` for state shared read-only across threads over a
@@ -2573,32 +2575,93 @@ If it differs from Verbora's specified behavior, adapt it at the boundary or imp
 
 # Licensing
 
-Verbora's own source code and the external linguistic resources it ships must
-be treated separately.
+Verbora is MIT. **Nothing enters this repository that Verbora cannot
+redistribute under MIT** — not a crate, not a dataset, not a fixture, not a
+single file copied out of another project. This is a gate on entry, not a
+cleanup task, because by the time it is a cleanup task the thing is already
+published and someone is depending on it.
 
-Audit:
+## The rule
 
-```text
-source code
-WordNet
-datasets
-dictionaries
-corpora
-models
-fixtures
-generated resources
-third-party crates
-```
+Before anything third-party is added, name its licence and check it against
+these lists.
 
-Maintain where applicable:
+**May enter.** MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0 (preserving its
+`NOTICE`), ISC, Zlib, Unlicense, CC0, public domain, the WordNet licence, and
+CC BY 4.0 with attribution.
+
+**May not enter, ever.**
 
 ```text
-LICENSE
-NOTICE
-THIRD_PARTY_LICENSES.md
+copyleft            GPL, LGPL, AGPL, MPL-2.0 for data
+share-alike         CC BY-SA, CC BY-NC-SA, ODbL, ODC-BY-SA
+non-commercial      CC BY-NC, "research use only", "academic use only"
+no-derivatives      CC BY-ND
+corpus licences     LDC, Penn Treebank, and anything requiring a signed
+                    agreement or institutional membership
 ```
 
-Never assume a dataset inherits the license of code that consumes it.
+**Unknown counts as "may not enter."** This is the important half. A licence
+you cannot locate is not a licence you may assume is permissive: "I could not
+find the terms" is the *negative* answer, not an absence of one. An upstream
+whose site is offline, a file with no header, a dataset in a repository with no
+`LICENSE` — all of it stays out.
+
+## Provenance travels with the file, or the file does not come
+
+Every third-party file arrives with a `NOTICE.md` beside it stating **where it
+came from, under what terms, and the hash or version it was taken at**.
+`crates/verbora-phonetics/data/beider-morse/NOTICE.md` is the standard: it
+records the whole chain, including the GPL-3.0 original Verbora deliberately
+did *not* copy from.
+
+And **never rename a third-party file in a way that erases its origin.** A name
+that says where something came from is the cheapest provenance record there is,
+and renaming it is how a licence problem becomes invisible.
+
+## This applies to data most of all
+
+A dependency goes through `Cargo.toml`, gets a version and a review. Data does
+not. It arrives as files, inside a port or a copied directory, and no one ever
+makes an "are we adding this?" decision about it — which is precisely why the
+failures land there.
+
+Never assume a dataset inherits the licence of the code that consumes it. A
+permissively-licensed library may bundle data under quite different terms, and
+frequently does.
+
+## Why this section has teeth and the old one did not
+
+The previous version of this section said the right thing — *"never assume a
+dataset inherits the license of code that consumes it"* — and it did not work,
+because it was advice rather than a procedure. It named no licences, set no
+default, and nothing ever failed because of it.
+
+What it missed, in the 2026-08 incident that produced this rewrite:
+`verbora-tagger` shipped 4.5 MB of dictionaries for two languages. The English
+files were byte-identical to `dariusk/pos-js`, which is **LGPL-3.0**; the Dutch
+files came from a tagger whose terms could not be located at all. Both shipped
+in an MIT crate on crates.io, for two published versions.
+
+Three things had to go wrong together, and all three are now covered above:
+
+1. The data came in as part of a port, so nobody made a decision about it.
+2. Upstream shipped a `README.txt` naming the source — and it was not copied
+   along with the data.
+3. The file was renamed from `lexicon_from_posjs.json` to
+   `lexicon_from_reference.json`, which erased the last clue.
+
+The fix was to delete the data and republish; attribution could not have saved
+it, because LGPL does not permit redistribution under MIT at all. That is the
+cost of finding this late, and it is what the entry gate exists to avoid.
+
+## Maintain
+
+```text
+LICENSE                     in every publishable crate
+NOTICE.md                   beside every third-party data directory
+THIRD_PARTY_LICENSES.md     where a crate carries several
+```
 
 ---
 

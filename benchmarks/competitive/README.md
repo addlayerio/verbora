@@ -197,6 +197,8 @@ match, and that is open documentation debt.
 | `tokenizers::whitespace_tokenization` | `RegexpTokenizer(\s+)` vs `tantivy::WhitespaceTokenizer` vs HF `WhitespaceSplit` | `RegexpTokenizer`/`Pattern` deleted (contract §3.4), along with `verbora-tokenizers`' `regex` dependency. Verbora performs no whitespace or regex tokenization at any API. **Coverage lost:** both competitor rows now have no Verbora counterpart. |
 | `tokenizers::aggressive_tokenization_en` | `AggressiveTokenizer` (en) vs `unicode_words()` | `AggressiveTokenizer` and its 15 variants deleted (§3.4; §4.1 for why). **No coverage lost:** `WordTokenizer` *is* `unicode_words()` and carries the comparison. |
 | `normalizers::ja_hiragana_to_katakana`, `normalizers::ja_katakana_to_hiragana` | `ja::converters` vs `unicode-jp` | `ja::converters` deleted in full (§3.2). Kana ↔ kana conversion is a transliteration, not a normalization, and `verbora-transliterators` ships only kana → romaji. **Coverage lost:** the `unicode-jp` rows have no Verbora side; the dependency was dropped. |
+| `inflectors::count_inflector_nth_str` | `CountInflector::nth_str` vs `inflector::numbers::ordinalize` | `nth_str` (the string-in twin of `nth`) deleted. **Coverage lost:** the `inflector` ordinalize row, which was the only one shaped `&str -> String` like that crate's real API. The surviving `count_inflector_nth` group compares `OrdinalInflector::nth` against `ordinal` on `i64` input instead. |
+| `phonetics::dm_soundex` | `SoundExDM` vs `DaitchMokotoffSoundex::encode` | `SoundExDM` deleted. **No coverage lost:** this was never a synonym for `daitch_mokotoff` — the two were separate groups timing rphonetic's `.encode()` and `.soundex()` respectively, and `daitch_mokotoff` (Verbora's branching `DaitchMokotoff::process` vs `.soundex()`, the byte-identical pair) is untouched. |
 
 **Benchmark groups re-pointed, because the capability survives elsewhere.**
 
@@ -204,6 +206,7 @@ match, and that is open documentation debt.
 |---|---|---|
 | `normalizers::nfkc_halfwidth_katakana` (was `ja_katakana_halfwidth_to_fullwidth`) | `nfkc` vs `kana-converter` | NFKC is the general UAX #15 form and does categorically more than a halfwidth-kana table. Fair *for this workload only*; the input domain is narrowed and every excluded divergence is asserted in `tests/normalizers_correctness.rs`. |
 | `distance` (all groups) | `verbora_distance::{levenshtein, …}` at the crate root | Import path only; the functions are unchanged re-exports. |
+| `tfidf::tfidf_build` (was `build`), `trie::trie_build` (was `build`) | unchanged workloads | Group name only. Both had been called `build`, which is also the name of a group in `crates/verbora-tfidf/benches/tfidf.rs` and `crates/verbora-trie/benches/trie.rs` — see the collision hazard recorded below. |
 
 **Rival comparisons split from wrapper-overhead baselines.** `WordTokenizer::tokens`
 is literally `str::unicode_words()` and `SentenceTokenizer::tokens` is built on
@@ -230,6 +233,63 @@ so `unaccent` has become the mechanism-matched candidate and `diacritics`
 0.2.2 the mechanically-opposite one. Pinning it is blocked on the licence
 review `AGENTS.md` § Licensing requires (crates.io flags its license field
 "non-standard").
+
+## Open hazard: group names are global, and this harness shares them with `crates/`
+
+Criterion keys its output by group name alone —
+`$CARGO_TARGET_DIR/criterion/<group>/<id>/<size>/new/estimates.json` — and
+`scripts/collect-results.py` reads exactly that path. The name carries no
+record of which workspace, crate or bench target produced it.
+
+That is safe only while the two workspaces write to different target
+directories, which is the default: this directory's `cargo` resolves
+`benchmarks/competitive/target`, the root workspace's resolves
+`natural-rs/target`. **Set `CARGO_TARGET_DIR` in the environment and they
+become one tree.** `scripts/competitive-benchmarks.sh` then runs the
+competitor benches (step 3) and Verbora's own in-workspace benches (step 4)
+into the same `criterion/` directory, in that order, so any name they share is
+written twice and the second write wins. Step 5 collects whatever survived,
+and reports it as this module's result.
+
+**This is not hypothetical — it has already corrupted a published artifact.**
+`results.json`'s four `ngrams_bigrams_*` entries listed implementations named
+`collect` and `iter`. No competitive bench emits those ids; they are the two
+ids of `crates/verbora-ngrams/benches/ngrams.rs`'s own `bigrams` group. Step 4
+overwrote step 3 and the collector reported the in-workspace benchmark under
+the competitive one's name, carrying the same campaign stamp as every honest
+row beside it. The sibling `ngrams_trigrams`, whose name is not shared, kept
+the expected `verbora`/`ngrammatic`.
+
+The four rows were removed on 2026-08-22. They are not pending re-measurement:
+they never measured what they claimed, so there is no earlier figure to
+restore. **Nothing else was audited** — six shared names remain, any of which
+may have done the same thing to a row that looks plausible.
+
+Seven names are shared right now:
+
+| Group | Competitive bench | In-workspace bench |
+|---|---|---|
+| `bigrams` | `benches/ngrams.rs` | `crates/verbora-ngrams/benches/ngrams.rs` |
+| `levenshtein`, `hamming`, `jaro_winkler` | `benches/distance.rs` | `crates/verbora-distance/benches/distance.rs` |
+| `idf` | `benches/tfidf.rs` | `crates/verbora-tfidf/benches/tfidf.rs` |
+| `spellcheck_new`, `spellcheck_is_correct` | `benches/spellcheck.rs` | `crates/verbora-spellcheck/benches/spellcheck.rs` |
+
+This is not hypothetical. `results/results.json`'s four `ngrams_bigrams_*`
+entries list implementations named **`collect`** and **`iter`** — ids no
+competitive bench emits anywhere, and exactly the two ids of
+`crates/verbora-ngrams/benches/ngrams.rs`'s own `bigrams` group. They carry
+the same `measured_at`/`commit` stamp as every other row in the file, so
+nothing downstream marks them as belonging to a different benchmark than the
+one their `module` field names. The sibling `ngrams_trigrams` entry, whose
+group name is *not* shared, has the expected `verbora`/`ngrammatic` ids.
+
+Nothing here is fixed by this note, deliberately. The two available fixes —
+renaming the competitive groups (as the migration already did for `build` →
+`tfidf_build`/`trie_build`) or giving steps 3 and 4 explicit, separate target
+directories — both change what `results/raw/` is keyed by, and one of them
+changes group names that published tables already reference. Recorded so the
+next campaign is planned with it in view rather than discovering it in the
+output.
 
 ## Resolved: `eddie` 0.4.2 is unsound, and is now contained
 
@@ -397,6 +457,75 @@ the state this file exists to prevent.
 rival Naive Bayes implementations. **`linfa-logistic` is a different crate and
 is untouched** — its `logistic_train`/`logistic_predict` rows are unaffected
 by any of the above.
+
+## Withdrawn: `verbora-tagger` has no lexicon left to measure
+
+`verbora-tagger` 0.3.0 removed all four bundled lexicons and rule sets, and
+with them `Lexicon::bundled`, `RuleSet::bundled` and the `Language` enum that
+selected between them. The data was LGPL-3.0 (`dariusk/pos-js`) or
+unlicensable (Brill-NL); neither could be redistributed under this project's
+MIT licence. `RuleSet::brill_1992()` survives — the ten rules from Brill's
+1992 paper, which use **Brown** tags — but it is a rule set, not a lexicon,
+and a Brill tagger needs both.
+
+`benches/pos_tagging.rs` and `tests/pos_tagging_smoke.rs` called all three
+removed items, so this target stopped compiling: two `E0432 unresolved import
+verbora_tagger::Language`, plus `E0599 no associated function bundled` for
+both `Lexicon` and `RuleSet`, across six call sites. Nothing caught it,
+because this crate is deliberately not a member of the root workspace — the
+repository's own `cargo check` never builds it. That is the same class of
+silent breakage the "Migration debt" section above records, and the same
+answer applies: it is written down here rather than left to be rediscovered.
+
+### The decision: retire the Verbora row, keep the competitor rows
+
+**Timing — Verbora withdrawn, and not replaced by a substitute lexicon.** The
+crate did not get worse; the *comparison* stopped being possible on equal
+terms. `postagger` ships the pretrained averaged-perceptron weights it is
+measured with, and `rust-bert` ships the MobileBERT checkpoint it is measured
+with. `verbora-tagger` now ships nothing. Any lexicon this harness assembled
+for the Verbora side — scraped, hand-written, or lifted from a corpus — would
+be one this repository also cannot ship, so the row would either time a
+configuration no reader can reproduce, or re-introduce exactly the licensing
+defect 0.3.0 was published to remove. Both are barred by the "Fairness
+discipline" section above, which requires the published API as published; it
+is the same rule that keeps `eddie` out of `benches/distance.rs` and
+`linfa-bayes` out of `benches/classifiers.rs`.
+
+Reinstating the row is therefore a measurement-design decision before it is a
+benchmark run. Whoever takes it has to choose one lexicon, hand the *same* one
+to every side, and say in the section itself which lexicon that is — otherwise
+the three implementations are not answering the same question, and the numbers
+are not comparable no matter how carefully they were timed.
+
+**The competitor rows stay.** `pos_cold_start`, `pos_tag_sentence` and
+`pos_tag_batch` still run `postagger` against `rust-bert`, and still answer a
+real question — what a bundled-model tagger costs, in model-load time and in
+per-sentence latency, for a caller choosing between a perceptron and a
+transformer. That answer never depended on Verbora being in the table. The
+bench file and the smoke test are kept rather than deleted for the same
+reason: both competitors depend on a fetched model asset, so both can silently
+measure an empty or broken call, and `tests/pos_tagging_smoke.rs` is what
+stops that. No stub was left behind for the withdrawn side — a benchmark
+function that measures nothing is worse than an absent one, because it reports
+as a success.
+
+**Coverage lost:** every Verbora POS timing row. `scripts/competitive-benchmarks.sh`'s
+`MODULE_SPECS` names `postagger,rust_bert` in all three groups and no longer
+names `verbora`. The four `"verbora"` rows that were in
+`results/results.json` measured the removed lexicon and were removed from it
+by hand — unlike the `eddie` and `linfa-bayes` retirements, which disappear on
+the next collection, these could not wait for one: `site/benchmarks/competitive.md`
+had already withdrawn them from publication while the artifact that page names
+as its source still carried them, and a campaign is not scheduled. Their
+`results/raw/pos_tagging-*-verbora-*.json` files are left in place, orphaned,
+as the record of a past run of past code. **No number was recomputed, and no
+other row was touched.**
+
+**Status: this target compiles again**, and `cargo test` in this workspace
+passes. `tests/pos_tagging_smoke.rs` keeps two tests, one per surviving
+competitor; both skip cleanly with a printed notice when their model asset has
+not been fetched.
 
 ## Resolved: `verbora-wordnet` rejected 8.8% of a real dictionary's index entries
 

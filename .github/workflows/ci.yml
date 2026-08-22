@@ -83,3 +83,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace ${{ matrix.features }}
+
+  provenance:
+    name: Shipped data records its provenance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # AGENTS.md's `# Licensing` is the rule; this is what makes it fail.
+      # Its previous version was advice, and advice let LGPL-3.0 dictionaries
+      # ship in an MIT crate for two published versions.
+      - run: ./scripts/check-data-provenance.sh

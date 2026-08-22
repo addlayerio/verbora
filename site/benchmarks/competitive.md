@@ -15,10 +15,11 @@ therefore shows the measured workload, the result and its limits.
 | 314 timed comparisons | 13 capabilities with a fair Rust comparison |
 | 3 capabilities without a fair peer | WordNet, sentence analysis and sentiment are documented on their feature pages instead |
 | 1 primary metric | Criterion median, single-threaded, on the hardware below |
-| 9 capabilities awaiting a re-run | [Distance](#distance), [Tokenizers](#tokenizers), [N-Grams](#n-grams), [Stemmers](#stemmers), [Normalizers](#normalizers), [Trie](#trie), [POS tagging](#pos-tagging), [TF-IDF](#tf-idf) and [Spellcheck](#spellcheck) carry Verbora-side figures that no longer describe the code that runs — each section says so at its head. For [Trie](#trie) and [POS tagging](#pos-tagging) it is part of the section, not all of it: the trie's read path and the tagger's cold start still stand |
+| 8 capabilities awaiting a re-run | [Distance](#distance), [Tokenizers](#tokenizers), [N-Grams](#n-grams), [Stemmers](#stemmers), [Normalizers](#normalizers), [Trie](#trie), [TF-IDF](#tf-idf) and [Spellcheck](#spellcheck) carry Verbora-side figures that no longer describe the code that runs — each section says so at its head. For [Trie](#trie) it is part of the section, not all of it: the trie's read path still stands |
+| 1 comparison withdrawn | [POS tagging](#pos-tagging) — `verbora-tagger` ships no lexicon, so the Verbora configuration those medians measured no longer exists. The competitor measurements stand; the comparison does not |
 
-Start with [Phonetics](#phonetics), [Trie](#trie),
-[Language detection](#language-detection) or [POS tagging](#pos-tagging). Exact
+Start with [Phonetics](#phonetics), [Trie](#trie) or
+[Language detection](#language-detection). Exact
 harnesses and raw data are linked from each section;
 [reproduction instructions](#reproducing-these-numbers) are at the end.
 
@@ -1442,7 +1443,7 @@ not merely asserted.
 
 ### POS tagging
 
-`BrillTagger` (transformation-based, English) against
+`verbora-tagger` (Brill, transformation-based) against
 [postagger](https://github.com/shubham0204/postagger.rs) 0.0.3 (a pretrained
 averaged-perceptron model, NLTK weights) and
 [rust-bert](https://github.com/guillaume-be/rust-bert) 0.23.0's `POSModel`
@@ -1456,49 +1457,43 @@ so this is reported as a technique comparison, with cold start and steady
 state kept strictly separate.
 
 <div class="callout callout-warn">
-<strong>Verbora's steady-state medians are pending re-measurement.</strong>
-Four of the eighteen bundled English rules test whether the current token looks
-like a URL, and that predicate was rewritten: a token is URL-like when one of
-its full stops joins two word-shaped labels, a stricter test than the one the
-recorded medians ran, which any interior full stop satisfied. Abbreviations
-such as <code>Ph.D.</code> and
-<code>W.Va.</code> therefore keep their lexicon tag instead of being retagged
-<code>URL</code> — so both the answers and the per-token work changed underneath
-the recorded medians. The cold-start figures are unaffected: construction reads
-the same packed table with the same entry count and the same eighteen rules.
-Competitor figures are unaffected too; no competitor version moved. The
-steady-state medians stay visible so the next run has something to diff against,
-and none may be quoted as current; the direction of the change must not be
-inferred either. What survives is the structural finding this section is about —
-a fixed rule table needs no deserialization step, and a deterministic rule
-lookup is categorically less arithmetic than a feature-weighted vote or a
-transformer forward pass.
+<strong>This comparison has no Verbora side.</strong>
+<code>verbora-tagger</code> ships no lexicon: the English dictionary and rule set
+it carried through 0.2 were removed in 0.3 for licensing reasons, and the
+build-time packed table whose construction a cold-start figure would time went
+with them. Every Verbora POS median this audit recorded measured that
+configuration, so all of them are retired rather than restated against something
+smaller — the thing they measured no longer exists to re-measure. Reinstating
+the comparison is a measurement-design decision before it is a benchmark run:
+the harness has to pick a lexicon and hand the same one to every side, or the
+two are not answering the same question. The competitor measurements below
+stand; no competitor version moved.
 </div>
 
 #### Cold start — everything needed before tagging one sentence
 
-| Library | Version | Language | Time (median) | Relative |
-|---|---|---|---:|---:|
-| Verbora (`Lexicon` + `RuleSet` + `BrillTagger`) | 0.1.0 | Rust | 7.47 µs | **1.00×** |
-| postagger (parses a 5.6 MB weights file) | 0.0.3 | Rust | 121.61 ms | 16,283× slower |
-| rust-bert (loads a ~94 MB MobileBERT checkpoint) | 0.23.0 | Rust | 1.281 s | 171,501× slower |
-
-Expected and by design: a fixed rule table needs no deserialization step;
-a pretrained model must load its weights first.
+| Library | Version | Language | Time (median) |
+|---|---|---|---:|
+| postagger (parses a 5.6 MB weights file) | 0.0.3 | Rust | 121.61 ms |
+| rust-bert (loads a ~94 MB MobileBERT checkpoint) | 0.23.0 | Rust | 1.281 s |
 
 #### Steady state — per-call latency, tagger already constructed
 
 | Library | Version | Language | Time (median, 9 tokens) | Time (median, 20 tokens) | Time (median, batch of 8×9-tok) |
 |---|---|---|---:|---:|---:|
-| Verbora | 0.1.0 | Rust | **1.75 µs** | **4.23 µs** | **14.08 µs** |
-| postagger | 0.0.3 | Rust | 62.40 µs (35.6× slower) | 80.46 µs (19.0× slower) | 549.50 µs (39.0× slower) |
-| rust-bert | 0.23.0 | Rust | 17.26 ms (9,854× slower) | 10.93 ms (2,583× slower) | 24.62 ms (1,749× slower) |
+| postagger | 0.0.3 | Rust | 62.40 µs | 80.46 µs | 549.50 µs |
+| rust-bert | 0.23.0 | Rust | 17.26 ms | 10.93 ms | 24.62 ms |
 
-Verbora wins every steady-state row — the expected result once the technique
-gap is named, not a surprising one: `postagger` still evaluates a
-feature-weighted vote per token, and `rust-bert`'s MobileBERT pass is a full
-transformer forward pass, categorically more arithmetic than a deterministic
-rule lookup. **This is not an accuracy claim for either technique** — see
+What the two tables show on their own is the price of the technique each crate
+chose: a pretrained model must deserialize its weights before it can answer
+anything, and then spends a feature-weighted vote or a full transformer forward
+pass per token. A rule-based tagger pays neither — its construction cost is
+whatever reading its lexicon and rule set costs, and its per-token work is a
+dictionary probe plus one pass per rule. That is a structural difference, not a
+measured one, and this section deliberately puts no number on it until the
+Verbora configuration is defined again.
+
+**This is not an accuracy claim for either technique** — see
 `docs/COMPETITIVE_BENCHMARKS.md` §1.16 for why both rows are `Partial`, not
 `Yes`; this audit makes no tagging-quality comparison for POS tagging.
 

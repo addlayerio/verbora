@@ -200,8 +200,8 @@ impl<'a> Corpus<'a> {
     /// annotator. Ties keep first-appearance order, so the result is
     /// deterministic for a given corpus.
     ///
-    /// The returned lexicon contains nothing but this corpus: no bundled
-    /// entries, no shared state, and no tokens the corpus did not contain.
+    /// The returned lexicon contains nothing but this corpus: no shared state,
+    /// and no tokens the corpus did not contain.
     ///
     /// # Errors
     ///
@@ -378,7 +378,7 @@ mod tests {
             "equal counts keep first-appearance order"
         );
         assert_eq!(lex.len(), 2, "only the corpus vocabulary");
-        assert!(!lex.contains("dog"), "no bundled entries leaked in");
+        assert!(!lex.contains("dog"), "nothing outside the corpus leaked in");
     }
 
     #[test]

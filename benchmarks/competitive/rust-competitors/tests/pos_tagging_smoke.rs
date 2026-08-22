@@ -1,14 +1,23 @@
 //! Sanity check for `benches/pos_tagging.rs`.
 //!
-//! Verbora, `postagger` and `rust-bert` are three genuinely different
-//! algorithm classes (matrix: both competitors `Partial`, never `Yes`) — no
-//! tag-for-tag equivalence is claimed anywhere in this crate, so
-//! `CORRECTNESS BEFORE PERFORMANCE`'s "same algorithmic answer" clause does
-//! not apply. What this file checks, once and outside the timed code, is
-//! that every implementation actually runs to completion on the shared
-//! canonical sentence and returns one tag per token — the minimum bar for
-//! trusting that the benchmark measures live, working calls rather than a
-//! silently-empty or panicking one.
+//! `postagger` and `rust-bert` are two genuinely different algorithm classes
+//! (matrix: both `Partial`, never `Yes`) — no tag-for-tag equivalence is
+//! claimed anywhere in this crate, so `CORRECTNESS BEFORE PERFORMANCE`'s
+//! "same algorithmic answer" clause does not apply. What this file checks,
+//! once and outside the timed code, is that every implementation actually
+//! runs to completion on the shared canonical sentence and returns one tag
+//! per token — the minimum bar for trusting that the benchmark measures
+//! live, working calls rather than a silently-empty or panicking one.
+//!
+//! The Verbora side is gone, with the benchmark row it guarded:
+//! `verbora-tagger` 0.3.0 removed `Lexicon::bundled`, `RuleSet::bundled` and
+//! the `Language` enum along with the four bundled lexicons and rule sets,
+//! which could not be redistributed under MIT. See `benches/pos_tagging.rs`'s
+//! own module doc comment and `../../README.md`'s "Withdrawn:
+//! `verbora-tagger` has no lexicon left to measure" section. This file is
+//! kept rather than deleted because the two competitor benchmarks it guards
+//! are kept: they are the ones that can silently measure a broken or empty
+//! call, since each depends on a fetched model asset.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +29,6 @@ use rust_bert::pipelines::token_classification::{
 };
 use rust_bert::resources::LocalResource;
 use tch::Device;
-use verbora_tagger::{BrillTagger, Language, Lexicon, RuleSet};
 
 const SENTENCE: &str = "the quick brown fox jumps over the lazy dog";
 
@@ -31,33 +39,6 @@ fn model_dir(name: &str) -> Option<PathBuf> {
         .join("models")
         .join(name);
     dir.is_dir().then_some(dir)
-}
-
-#[test]
-fn verbora_tags_every_token() {
-    let lexicon = Lexicon::bundled(Language::English);
-    let rules = RuleSet::bundled(Language::English);
-    let tagger = BrillTagger::new(&lexicon, &rules);
-    let tokens: Vec<&str> = SENTENCE.split_whitespace().collect();
-
-    let tagged = tagger.tag(tokens.iter().copied());
-
-    // `tag` returns `Vec<TaggedToken>` directly now — it used to return a
-    // `Result` whose error was a failing rule predicate, and `TaggedToken::tag`
-    // used to be `Option<Tag>`. Both are gone: `tag.rs` documents the tag as
-    // "Always present: the initial-state annotator assigns a lexicon tag or the
-    // lexicon's default, never nothing." The old test asserted `is_some()` on
-    // every tag; that is now a type-level guarantee, so what is left to check
-    // is that no token is dropped, that each keeps its own text, and that no
-    // tag is empty.
-    assert_eq!(tagged.len(), tokens.len());
-    for (tagged_token, original) in tagged.iter().zip(&tokens) {
-        assert_eq!(tagged_token.token(), *original);
-        assert!(
-            !tagged_token.tag.as_str().is_empty(),
-            "empty tag for {original:?}"
-        );
-    }
 }
 
 #[test]

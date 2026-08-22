@@ -166,8 +166,9 @@ fn grouped_digits(b: &[u8], i: &mut usize) -> usize {
 /// word-shaped labels**. A *label* is a dot-separated segment of the token, and
 /// it is *word-shaped* when it begins with two ASCII letters. That is the whole
 /// rule; it is a Verbora heuristic, not an implementation of [RFC 3986], and it
-/// is stated here so that the bundled `NN URL CURRENT-WORD-IS-URL YES` rule has
-/// a definition to point at.
+/// is stated here in full so that a rule written as
+/// `NN URL CURRENT-WORD-IS-URL YES` has a definition that will not move under it
+/// between versions.
 ///
 /// The shape it tests for is structural rather than a list of exceptions. A
 /// hostname is two or more word-shaped labels joined by a dot —
@@ -198,12 +199,10 @@ fn grouped_digits(b: &[u8], i: &mut usize) -> usize {
 /// alone `Mr.Jones` is `co.uk`, and `x.com` is `W.Va` — a genuine hostname and a
 /// state abbreviation that no test on the token's own text can tell apart.
 ///
-/// The heuristic is deliberately reluctant, because the four bundled English
-/// rules that consume it rewrite `NN`, `NNS`, `NNP` and `NNPS` — so every false
-/// positive overrides a noun the lexicon states. Over the 92,538 keys of the
-/// bundled English lexicon it accepts **2**, `AIB.PR` and `Conn.based`, of which
-/// one is noun-primary; `tests::the_bundled_english_lexicon_is_barely_url_like`
-/// walks every key and pins that.
+/// The heuristic is deliberately reluctant, because a rule that consumes it
+/// typically rewrites nouns — so every false positive overrides a tag the
+/// lexicon actually stated. Being wrong in the direction of doing nothing is the
+/// cheaper failure, and that is the direction the last two rows above lean.
 ///
 /// [RFC 3986]: https://www.rfc-editor.org/rfc/rfc3986
 #[must_use]
@@ -233,7 +232,6 @@ fn is_word_shaped_label(segment: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tag::Tag;
 
     #[test]
     fn capitalisation_is_the_unicode_uppercase_property() {
@@ -343,9 +341,9 @@ mod tests {
 
     /// The abbreviations that a dot-counting heuristic admits by accident.
     ///
-    /// Each of these is a *noun* in the bundled English lexicon, and the four
-    /// bundled `… URL CURRENT-WORD-IS-URL YES` rules rewrite exactly nouns — so
-    /// admitting one here silently overrides a tag the shipped data states.
+    /// A `… URL CURRENT-WORD-IS-URL YES` rule rewrites nouns, and every token
+    /// below is one in ordinary usage — so admitting one here would silently
+    /// override the tag the lexicon stated for it.
     #[test]
     fn an_abbreviation_is_never_url_like() {
         for abbreviation in [
@@ -403,38 +401,5 @@ mod tests {
         ] {
             assert!(!looks_like_url(no), "{no:?}");
         }
-    }
-
-    /// How much of the bundled English lexicon the heuristic claims, walked key
-    /// by key rather than sampled.
-    ///
-    /// The number matters because the four bundled English URL rules rewrite
-    /// `NN`, `NNS`, `NNP` and `NNPS`: every key this predicate accepts whose
-    /// primary tag is one of those is a tag the shipped lexicon states and the
-    /// shipped rules then overrule. Two keys of 92,538 qualify at all, and one
-    /// of them is noun-primary.
-    #[test]
-    fn the_bundled_english_lexicon_is_barely_url_like() {
-        use crate::language::Language;
-        use crate::lexicon::Lexicon;
-
-        let lexicon = Lexicon::bundled(Language::English);
-        let claimed: Vec<&str> = lexicon
-            .entries()
-            .filter(|(key, _)| looks_like_url(key))
-            .map(|(key, _)| key)
-            .collect();
-        assert_eq!(claimed, ["AIB.PR", "Conn.based"]);
-
-        let nouns = claimed
-            .iter()
-            .filter(|key| {
-                matches!(
-                    lexicon.primary_tag(key).as_ref().map(Tag::as_str),
-                    Some("NN" | "NNS" | "NNP" | "NNPS")
-                )
-            })
-            .count();
-        assert_eq!(nouns, 1, "keys the bundled URL rules would retag");
     }
 }

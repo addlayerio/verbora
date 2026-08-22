@@ -78,7 +78,7 @@ crates/
   verbora-analyzers/       sentence analysis
   verbora-spellcheck/      Norvig-style correction
   verbora-stemmers/        Porter × 13, Lancaster, Japanese, Indonesian
-  verbora-tagger/          Brill POS tagger, trainer, tester
+  verbora-tagger/          Brill POS tagging engine, trainer, tester
   verbora-language/        script and language detection, phonetic strategy
   verbora-util/            stop words, abbreviations, graph utilities
   verbora-examples/        the code the documentation site publishes (dev-only)
