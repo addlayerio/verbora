@@ -2,8 +2,52 @@
 //!
 //! Checked-in data, held once and shared by every consumer in the crate.
 //! 335 of the roots are single lexemes spelled with a hyphen, which is why
-//! [`crate::TokenizeAndStem::HYPHEN_JOINS_LETTERS`] exists. Naming a published
-//! source for the word list is an open item of the stemmers' own migration.
+//! [`crate::TokenizeAndStem::HYPHEN_JOINS_LETTERS`] exists — and that reason is
+//! now measured rather than asserted, by
+//! `tests::the_hyphenated_roots_are_the_reason_the_hyphen_tailoring_exists`.
+//!
+//! # Provenance
+//!
+//! **Established.** This was an open item of the stemmers' migration; it is
+//! not one any more, and nothing below is inferred from a word count alone.
+//!
+//! [`WORDS`] is, entry for entry and in this order, the dictionary
+//! `NaturalNode/natural` — the reference implementation this crate ports —
+//! loads at run time from `lib/natural/stemmers/indonesian/data/
+//! kata-dasar.json`. That JSON file holds **29,933** entries, of which the
+//! 29,933rd is `""`; natural's own loader is
+//! `new Set(fin.filter(Boolean))`, which drops it. So the 29,932 roots here
+//! are not this table's abridgement of natural's list — they are natural's
+//! list, after natural's own filter.
+//!
+//! natural's file is in turn the PHP Sastrawi project's `data/kata-dasar.txt`
+//! (`sastrawi/sastrawi`, MIT) with exactly **one** substitution. Sastrawi's
+//! line 19362 is `oper "v,"` — a leaked CSV fragment sitting between `oper`
+//! and `opera`, not a word — and natural replaced it with `sepuluh` ("ten").
+//! Everything else matches, in order: 29,931 shared entries, one replaced.
+//!
+//! `sepuluh` earns its place. Sastrawi's own functional test asserts
+//! `kesepersepuluhnya` → `sepuluh`, which the shipped `kata-dasar.txt` cannot
+//! produce — that test builds a small dictionary of its own that includes
+//! `sepuluh` — so the shipped list and the specified behaviour disagree
+//! upstream, and natural's substitution resolves them. It is the reason
+//! `"kesepersepuluhnya"` reaches `"sepuluh"` here rather than continuing to
+//! `"puluh"`, and it is pinned by `tests::the_one_entry_natural_substituted`.
+//!
+//! Licensing: `NaturalNode/natural` is MIT and `sastrawi/sastrawi` is MIT.
+//! Recording that is not the same as clearing it — the word list itself is
+//! Indonesian lexicographic data with its own upstream, which neither
+//! repository's licence file speaks to — so the row this table has in
+//! `NOTICE.md` still wants a decision from whoever owns that file.
+//!
+//! # What the corrupt upstream entry teaches
+//!
+//! `oper "v,"` survived in the reference data because nothing there ever
+//! asked what an entry may be spelled with. It carries a space, two quotes
+//! and a comma, so no token the tokenizer can produce is ever equal to it: it
+//! was 1/29,932nd of a shipped dictionary that could never be reached.
+//! `tests::every_root_is_written_in_the_alphabet_the_tokenizer_can_deliver`
+//! is that missing question, asked of every entry here.
 
 /// The dictionary in file order — what [`crate::StemmerId::dictionary`] returns.
 pub static WORDS: &[&str] = &[
@@ -29941,7 +29985,30 @@ pub static WORDS: &[&str] = &[
     "zus",
 ];
 
-/// The same roots, sorted, so `find` is a binary search.
+/// The same roots, in sorted order.
+///
+/// # It is a second copy of [`WORDS`], not a second ordering of it
+///
+/// [`WORDS`] is natural's file order, and natural's file order is already
+/// sorted, so these two arrays are the **same list**, element for element —
+/// `tests::the_two_copies_of_the_dictionary_are_one_list` asserts that
+/// equality rather than leaving it to be noticed, because a second copy that
+/// nothing keeps in step with the first is exactly the failure `data`'s module
+/// note records (a stop word carrying a trailing space in one copy and not the
+/// other stayed dead for the life of the crate).
+///
+/// The duplication costs one extra pointer array: 29,932 × `size_of::<&str>()`,
+/// which is 478,912 bytes on a 64-bit target. Collapsing the two into one
+/// static — `pub(crate) static SORTED: &[&str] = WORDS;` compiles unchanged for
+/// every consumer — is a change to what this file *is* rather than to what it
+/// says, so it is left to the owner of the table rather than taken here.
+///
+/// The name is also older than the code: `find` has not been a binary search
+/// since [`crate::StemmerId`]'s dictionary became the open-addressed
+/// `DictIndex` hash index. The sorted order still earns the array — `among`'s
+/// own tests and `the_hash_index_agrees_with_a_binary_search` binary-search it
+/// as the oracle the hash index is checked against — but it is no longer what
+/// the stemmer's hot path walks.
 pub(crate) static SORTED: &[&str] = &[
     "aba",
     "abad",
@@ -59876,3 +59943,142 @@ pub(crate) static SORTED: &[&str] = &[
     "zuriah",
     "zus",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// Every root is spelled with `-` and `a`–`z`, and nothing else.
+    ///
+    /// This is the question the reference data was never asked. PHP Sastrawi's
+    /// `data/kata-dasar.txt` carries `oper "v,"` — a leaked CSV fragment with a
+    /// space, two quotation marks and a comma in it — and it survived there
+    /// because a word list nobody walks is a word list nobody knows is right.
+    /// No token this crate's tokenizer can emit is equal to a string holding a
+    /// space or a quote, so such an entry is not merely ugly: it is
+    /// unreachable, and it displaces a real word.
+    ///
+    /// The set is asserted by equality rather than by "is every character
+    /// allowed", so a new letter cannot arrive quietly either: `U+FFFD` (which
+    /// this project has already shipped once, in a phonetic table, where
+    /// accented vowels belonged), an upper-case letter that `prepare`'s
+    /// document-wide lowercasing would make unmatchable, a stray digit or a
+    /// trailing space all fail here.
+    #[test]
+    fn every_root_is_written_in_the_alphabet_the_tokenizer_can_deliver() {
+        let alphabet: BTreeSet<char> = WORDS.iter().flat_map(|w| w.chars()).collect();
+        let expected: BTreeSet<char> = ('a'..='z').chain(std::iter::once('-')).collect();
+        assert_eq!(
+            alphabet, expected,
+            "the dictionary's alphabet is not `-` plus a-z"
+        );
+
+        for w in WORDS {
+            assert_eq!(*w, w.to_lowercase(), "{w:?} is not lower case");
+            assert_eq!(*w, w.trim(), "{w:?} carries surrounding whitespace");
+            assert!(!w.contains('\u{FFFD}'), "{w:?} carries U+FFFD");
+            assert!(!w.is_empty(), "the dictionary carries an empty entry");
+        }
+
+        // Length bounds, which `find`'s `MAX_ROOT_LEN` filter depends on at
+        // the top and which rule out a one-letter entry at the bottom.
+        let shortest = WORDS.iter().map(|w| w.len()).min().expect("not empty");
+        let longest = WORDS.iter().map(|w| w.len()).max().expect("not empty");
+        assert_eq!((shortest, longest), (2, 20));
+    }
+
+    /// [`WORDS`] and [`SORTED`] are the same list, and it is sorted.
+    ///
+    /// natural's file order is already sorted, so the "sorted view" is a
+    /// verbatim second copy. Two copies of a 29,932-entry table with nothing
+    /// asserting they agree is the precise shape of defect `data`'s module note
+    /// exists to warn about, and this is the assertion that shuts it: an edit
+    /// to either array that does not land in both fails here, loudly, instead
+    /// of silently giving `among`'s binary search and the stemmer's hash index
+    /// two different dictionaries.
+    ///
+    /// It also pins the sortedness that `binary_search` over [`SORTED`] needs
+    /// to be correct at all — today nothing else states it.
+    #[test]
+    fn the_two_copies_of_the_dictionary_are_one_list() {
+        assert_eq!(WORDS.len(), 29_932);
+        assert_eq!(WORDS, SORTED, "the two copies of the dictionary disagree");
+
+        assert!(
+            SORTED.windows(2).all(|p| p[0] < p[1]),
+            "`SORTED` is not strictly ascending, so `binary_search` over it is \
+             unsound and duplicate roots may be present"
+        );
+
+        // Strictly ascending already rules out duplicates; said again by
+        // count so a future reordering cannot take the guarantee with it.
+        let distinct: BTreeSet<&str> = WORDS.iter().copied().collect();
+        assert_eq!(distinct.len(), WORDS.len(), "the dictionary has duplicates");
+    }
+
+    /// All 335 hyphenated roots are cut in half by untailored UAX #29, and
+    /// none of them is under [`crate::TokenizeAndStem::HYPHEN_JOINS_LETTERS`].
+    ///
+    /// The module note says the 335 are *why* the tailoring exists. A
+    /// documented reason that turns out to be false is worse than none, so it
+    /// is checked both ways here rather than believed: every one of the 335
+    /// fails to survive the default word walk, and every one of the 335
+    /// survives the tailored one. Neither number is sampled.
+    #[test]
+    fn the_hyphenated_roots_are_the_reason_the_hyphen_tailoring_exists() {
+        let hyphenated: Vec<&str> = WORDS.iter().copied().filter(|w| w.contains('-')).collect();
+        assert_eq!(hyphenated.len(), 335);
+
+        let survives_default: Vec<&str> = hyphenated
+            .iter()
+            .copied()
+            .filter(|w| crate::data::audit::is_one_whole_token(w, false))
+            .collect();
+        assert!(
+            survives_default.is_empty(),
+            "{} hyphenated roots reach `stem` whole without the tailoring, so \
+             the tailoring is not the reason they are reachable: {:?}",
+            survives_default.len(),
+            &survives_default[..survives_default.len().min(8)]
+        );
+
+        let split_tailored: Vec<&str> = hyphenated
+            .iter()
+            .copied()
+            .filter(|w| !crate::data::audit::is_one_whole_token(w, true))
+            .collect();
+        assert!(
+            split_tailored.is_empty(),
+            "{} hyphenated roots are still split with the tailoring on: {:?}",
+            split_tailored.len(),
+            &split_tailored[..split_tailored.len().min(8)]
+        );
+    }
+
+    /// The one entry natural substituted for Sastrawi's corrupt `oper "v,"`.
+    ///
+    /// `sepuluh` is in this list and is not in Sastrawi's shipped
+    /// `kata-dasar.txt`; `oper` and `opera`, the two entries it was wedged
+    /// between upstream, are both here and intact. Losing `sepuluh` would not
+    /// look like a missing word — it would look like `kesepersepuluhnya`
+    /// quietly reducing one step too far, to `puluh`, which is exactly the
+    /// divergence the vendored `sastrawi` crate shows (its own port of this
+    /// list substituted `relawan` for the corrupt entry instead, and so has no
+    /// `sepuluh`).
+    #[test]
+    fn the_one_entry_natural_substituted() {
+        assert!(SORTED.binary_search(&"sepuluh").is_ok());
+        assert!(SORTED.binary_search(&"puluh").is_ok());
+        assert!(SORTED.binary_search(&"oper").is_ok());
+        assert!(SORTED.binary_search(&"opera").is_ok());
+        assert!(
+            !WORDS.iter().any(|w| w.starts_with("oper ")),
+            "the corrupt upstream entry is back"
+        );
+        // Faithful to natural, which does not carry it either: the vendored
+        // `sastrawi` crate's word for this slot is absent here by inheritance,
+        // not by an edit made in this repository.
+        assert!(SORTED.binary_search(&"relawan").is_err());
+    }
+}

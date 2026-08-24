@@ -297,8 +297,20 @@ fn no_rule_table_lists_the_same_entry_twice() {
 /// checked against the pattern in the same pass: a rule that removes more
 /// units than it matched would cut into the stem it was only supposed to
 /// inspect.
+///
+/// **This test cannot see order, and its old name said otherwise.** It was
+/// called `every_lancaster_rule_is_reachable_and_cuts_only_what_it_matched`,
+/// and it passes every reorder of the table — five deliberate mutations,
+/// including swaps that move real stems, left it green. Reachability in the
+/// sense that matters here is a property of the *sequence*, because an earlier
+/// rule shadows a later one; what this checks is that each rule is filed under
+/// the section its pattern ends with. Both are worth checking. Only one of
+/// them was being checked.
+///
+/// The sequence is pinned by
+/// [`super::lancaster_rules::tests::every_rule_but_one_has_an_input_that_reaches_it`].
 #[test]
-fn every_lancaster_rule_is_reachable_and_cuts_only_what_it_matched() {
+fn every_lancaster_rule_is_filed_under_its_own_section_and_cuts_only_what_it_matched() {
     let mut audited = 0usize;
     let mut wrong_section: Vec<String> = Vec::new();
     let mut over_cut: Vec<String> = Vec::new();
