@@ -23,15 +23,17 @@ tagger one is the larger break: it no longer ships a dictionary.
 
 ## What happened
 
-0.1.0 was a port. Its behaviour was defined by agreement with the implementation
-it had been ported from: the fixtures recorded that implementation's output, the
-documentation explained where a rule came from rather than what it does, and
-several tables existed only because something else shipped them.
+0.2.0 settles what defines Verbora's behaviour. Every behaviour is now derived
+from a published standard — UAX #29 for segmentation, UAX #15 for normalisation,
+Porter (1980), Brill (1992) — or from an explicit Verbora contract, and each is
+pinned by a test that asserts that contract directly.
 
-0.2.0 finishes the migration to a Rust-native specification. Every behaviour is
-now defined by a published standard or by an explicit Verbora contract, and the
-tests assert the contract rather than the ancestry. Six rules were applied across
-all nineteen crates, and between them they account for most of the churn:
+Where 0.1 had a fixture recording an output, 0.2 has a rule stating what the
+output must be and why. That is a stricter standard, and applying it turned up
+defects a recorded fixture cannot detect: a recorded value agrees with itself
+forever, including when it is wrong. Most of the churn below is the consequence.
+
+Six rules were applied across all nineteen crates:
 
 1. **No sentinels.** Absence is `Option::None`, never a magic value carved out of
    a numeric range.
@@ -158,8 +160,8 @@ plan on rewriting the call site.
 <code>Command</code>. 0.2's <code>SentenceType</code> has four —
 <code>Declarative</code>, <code>Interrogative</code>, <code>Imperative</code>,
 <code>Exclamative</code> — and absence is <code>Option::None</code> rather than
-an <code>Unknown</code> variant. A <code>match</code> ported across mechanically
-will compile and mean something different.
+an <code>Unknown</code> variant. A <code>match</code> carried across
+mechanically will compile and mean something different.
 </div>
 
 ### The one break that is not in your code
@@ -268,8 +270,8 @@ not the same as "not what your snapshot test asserts".
 <strong>Correction ranking is a documented total order now, and re-sorting the
 results cannot disagree with it.</strong> In 0.1,
 <code>Spellcheck::get_corrections</code> returned <code>Vec&lt;String&gt;</code>
-ranked by a comparator that reproduced another runtime's <code>sort</code>
-semantics over <code>f64</code> frequencies. In 0.2 the ranking is
+ranked by a comparator whose order over <code>f64</code> frequencies was never
+specified, and which disagreed with itself on ties. In 0.2 the ranking is
 <strong>distance ascending, then frequency descending, then word
 ascending</strong>, and it is written out as <code>Correction</code>'s own
 <code>Ord</code> — hand-written rather than derived, because a derived
@@ -348,8 +350,8 @@ assert_eq!(found.distance(), 0);
 
 ### Behavioural fixes that change results
 
-Each was found during the migration, each is now pinned by a test that fails
-without the fix, and each will move an output your program may be asserting on.
+Each is now pinned by a test that fails without the fix, and each will move an
+output your program may be asserting on.
 
 | Crate | What changed | What it means for you |
 |---|---|---|

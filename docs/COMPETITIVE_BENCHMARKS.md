@@ -509,6 +509,41 @@ not — and whether the four normalization forms' quick-check path makes the
 
 *One further exception to the "every other row is a Verbora-native extension" generalization above: `pixelglow/double_metaphone` is neither a reference-ported baseline (the reference has no C++ side to port) nor a Verbora-native extension (Double Metaphone already has a reference counterpart, benchmarked against rphonetic in the row above it). It is this workspace's first and only vendored, FFI-called, non-Cargo competitor — a second, independent Double Metaphone implementation benchmarked against the same `DoubleMetaphone::process` capability. See `vendor/pixelglow-double_metaphone/README.md` for provenance and `tests/double_metaphone_cpp_correctness.rs`/`benches/double_metaphone_cpp.rs` for the full correctness and fairness writeup (both under `benchmarks/competitive/rust-competitors/`).*
 
+**Update, five encoder groups unmeasured in the 2026-08-22 campaign.** The
+benchmark process for this module aborted before reaching `Phonex`,
+`RefinedSoundex`, `MatchRatingApproach`, the branching `DaitchMokotoff` and
+`BeiderMorse`: `rphonetic`'s own `Phonex` implementation panicked with a raw
+allocation failure (`memory allocation of 1 bytes failed`) while timing
+input of length 10, killing the rest of the `cargo bench` process for this
+target. The partial rows that completed before the crash were removed
+rather than published as a one-point sweep. The specific per-size figures
+recorded in the rows above for those five encoders (7.73×/7.51×/7.42× for
+RefinedSoundex, 15.32×/16.54×/17.41× for MatchRatingApproach, and so on)
+predate this campaign and were not re-verified against the current commit;
+treat them as historical rather than current. The seven groups that did
+complete — SoundEx, Metaphone, DoubleMetaphone, Cologne, Nysiis, Caverphone1
+and Caverphone2 — have current 2026-08-22 figures in `results/results.json`.
+The correctness record for all twelve encoders (byte-exact agreement against
+`rphonetic`, differential fuzzing) is unaffected by this gap, since it comes
+from `tests/phonetics_correctness.rs` independently of any bench run.
+
+**Update, gap closed (2026-08-22, same day).** The abort above was
+environmental, not a defect in `rphonetic`: `phonex` re-run alone on a quiet
+machine completed all ten scales with no crash, and the full `--bench
+phonetics` target then finished clean. `results.json` now carries 119
+phonetics rows across all twelve groups (381 measurements taken; every
+non-`beider_morse` group sweeps ten scales, `beider_morse` nine), at commit
+`0313eae` — one commit after the `80c302b` this campaign's other modules are
+stamped at, and a commit that touches `scripts/` and `site/`, not
+`crates/phonetics` source, so this is the same code re-measured rather than
+a different implementation. `Phonex`, `RefinedSoundex`, `MatchRatingApproach`,
+the branching `DaitchMokotoff` and `BeiderMorse` all have current figures now;
+the historical per-size numbers quoted in the rows above (7.73×/7.51×/7.42×
+for RefinedSoundex, 15.32×/16.54×/17.41× for MatchRatingApproach, and so on)
+predate both this gap and its closure and should not be read as current —
+`site/benchmarks/competitive.md`'s Phonetics section carries the present
+figures for all twelve groups.
+
 ## 1.7 Phonetic Index / Phonetic Neighbors
 
 | Verbora capability | Competitor | Language | Version | Equivalent? | Benchmarkable? | Notes |
@@ -671,6 +706,24 @@ machine-enforced containment test
 
 **Memory (real, measured — `cargo run --release -p competitive-rust --example memory_report`, raw counts in `results/memory-report.json`'s `language_detection.measurements` array).** Detector *construction* and per-call *detection* are measured and reported as two separate numbers — a startup question and a steady-state question with different real answers, never conflated into one. **Construction:** `WhatlangDetector::new`/raw `whatlang::Detector::new` are genuinely free — 0 allocations, 0 bytes, a `const fn` unit struct with no runtime model to build; `lingua::LanguageDetectorBuilder::from_languages(...).build()` (21-language-restricted, per this section's own note above) allocates 399 times/68,081 bytes; `whichlang` has no detector type at all to construct (`detect_language` is a bare fn — reported `n/a` in the raw data, not a fabricated zero). **Per-call detection**, each measured after one unmeasured warm-up call (`whatlang`'s `ALPHABET_LANG_MAP` is a process-wide `LazyLock` that only fires on the first-ever alphabet-path call — see the example's own doc comment): raw `whatlang::Detector::detect()` measured **25 allocations/11,468 bytes** on the dataset's English `sentence`-tier text, independently confirming — via the new shared `memory` module, not by re-citing — `crates/verbora-language/benches/language.rs`'s prior, separately-probed figure of exactly 25 allocations for this input; `WhatlangDetector::detect` (Verbora's own wrapper) measured 26/11,476 — the documented +1 for its own `candidates` `Vec` on a `Some`-result input. `lingua`'s per-call cost is 244 allocations/33,841 bytes — real API overhead (`detect_language_of` takes its argument by value, so one `String` allocation per call is intrinsic to its published contract, not a benchmarking artifact) — and its process RSS jumps by roughly 42 MB during its *first* (unmeasured, warm-up) detection call specifically, not during `build()`: `lingua` lazily loads its real n-gram frequency model on first use, a genuine cold-start-vs-steady-state distinction its construction number alone does not capture. **`whichlang` measured 0 allocations, 0 bytes per detection call** — a real, meaningful memory win over Verbora's 26 (`WhatlangDetector`) on this specific dimension, purchased at the already-documented cost of only a 13/22-language overlap and no abstention signal (see `docs/PERFORMANCE_GAPS.md` entry 18, and entry 7 for the same pairing's TIME-dimension result).
 
+**Update, two new Verbora detector strategies benchmarked (2026-08-22
+campaign).** `crates/verbora-language` added `HashedLinearDetector` (a
+zero-allocation, stack-only hashed linear model, opt-in behind
+`fast-language-detection`) and `FallbackDetector<HashedLinearDetector,
+WhatlangDetector>` (the fast model as primary, deferring to
+`WhatlangDetector` only where it declines to judge). Both are now measured
+in `benches/language.rs` alongside the existing `WhatlangDetector` default,
+against the same `lingua`/`whichlang` competitors above. `HashedLinearDetector`
+beats `whichlang` at every tier including the hardest (single-word: 44.2 ns
+vs. 62.6 ns) but trades accuracy for it (45/52 vs. `whichlang`'s 48/52 on
+the published 13-language × 4-tier evaluation set, all four losses
+concentrated in the word/phrase tiers) — which is why it stays opt-in
+rather than becoming `DefaultDetector`. `FallbackDetector` matches
+`WhatlangDetector`'s accuracy exactly (49/52) while beating `whichlang` on
+both accuracy and speed at every tier except single words, where it defers
+to the slow path. `crates/verbora-language/src/lib.rs`'s own crate-level doc
+comment carries the canonical version of this comparison table.
+
 ## 1.10 Script Detection
 
 | Verbora capability | Competitor | Language | Version | Equivalent? | Benchmarkable? | Notes |
@@ -726,6 +779,23 @@ machine-enforced containment test
 | `BayesClassifier` | smartcore `naive_bayes::multinomial::MultinomialNB` | Rust | 0.6.5 | Partial | Selected cases | Same algorithm family, but operates on a pre-built dense count matrix — no text pipeline; most widely adopted/actively maintained (475K downloads, updated 2026-08-10) general Rust ML crate found. |
 | `BayesClassifier` | linfa `linfa-bayes::MultinomialNb` | Rust | 0.8.1 | Partial | Selected cases | Same matrix-level situation as smartcore; second major Rust ML framework, included per spec's "don't limit to one rival." |
 
+**Update, `linfa-bayes` timing retired (2026-08-22 campaign).** `linfa-bayes`
+0.8.1's `MultinomialNb::fit_with` calls an unconditional `dbg!` once per
+class on every `.fit()` call, not gated behind `#[cfg(test)]` or a feature —
+`bayes_train`'s `b.iter` closure calls `fit` millions of times, so a single
+campaign run produced a 1.5 GB stderr log that could not be committed.
+`smartcore` and `naivebayes` (ruivieira) 0.1.2 remain the two Naive Bayes
+timing competitors; `linfa-bayes` stays a dev-dependency and continues to
+appear in `tests/classifiers_accuracy.rs` and `examples/memory_report.rs`,
+both of which call `fit` a handful of times rather than in a hot loop. Full
+account: `benchmarks/competitive/README.md`'s "Retired: `linfa-bayes` 0.8.1
+cannot be timed as published" section. This also corrects the `naivebayes`
+row's prediction claim above: the 2026-08-22 campaign measured Verbora
+**winning** prediction against `naivebayes` (1.78 µs vs. 3.08 µs, 1.73×
+faster) with `naivebayes` still winning training (1.00×–3.17× faster,
+narrowing with corpus size) — a mixed result, not the one-sided time loss
+recorded above from the pass that added the `naivebayes` row.
+
 ### Logistic Regression
 
 | Verbora capability | Competitor | Language | Version | Equivalent? | Benchmarkable? | Notes |
@@ -736,6 +806,19 @@ machine-enforced containment test
 | `LogisticRegressionClassifier` | rustlearn | Rust | 0.5.0 | Partial | Selected cases | SGD-based, no built-in multiclass one-vs-rest text classifier; unmaintained since 2018 (last push 2018-07-29) — included for historical prominence (646 stars), flagged as stale. |
 
 **Now actually benchmarked** (all three rows above; matrix's earlier framing as a "future pass" — see `benches/classifiers.rs`'s own module doc comment, now corrected). `logistic_train`/`logistic_predict` groups added, reusing the `bayes_train`/`bayes_predict` groups' own `Vocab` tokenize+vectorize adapter, at `crates/verbora-classifiers/benches/classifiers.rs`'s own small-corpus `logistic_training` sizes (4/8/16 docs — Verbora's gradient descent runs to convergence per class, so larger sizes are impractically slow on every side). Genuinely mixed, not one-sided: Verbora **wins at every size tested against smartcore** (1.6×-5.4× faster, margin narrowing with corpus size) and **at the smallest size against linfa-logistic** (1.5× faster at 4 docs), but **loses to linfa-logistic from 8 docs on** (1.5×-2.8× slower, a real crossover) and **loses decisively and consistently to rustlearn at every size** (11.5×-17.7× slower training; all three competitors also beat Verbora 8.0×-11.9× on single-document prediction). Filed in full, wins and losses alike, as `docs/PERFORMANCE_GAPS.md` entry 21 (memory dimension: entry 22, same competitor set, same conclusion — rustlearn's single-epoch SGD does asymptotically less work than every iterate-to-convergence competitor, Verbora included).
+
+**Update, logistic regression re-measured (2026-08-22 campaign).** Verbora's
+margins moved materially in its favor since the paragraph above was
+written. Against `smartcore`: Verbora wins at every size by a wider margin
+now (4.6×–11.4×, up from 1.6×–5.4×). Against `linfa-logistic`: Verbora now
+wins at 4, 8 *and* 12 docs (up to 2.9× faster, up from only 4 docs at
+1.5×) and loses only at 16 docs, and more narrowly (1.11× slower, down from
+the earlier 1.5×–2.8× range) — the crossover point moved from 8 docs to 16.
+Against `rustlearn`: Verbora still loses training at every size, but by
+5.4×–7.1× rather than 11.5×–17.7×. Single-document prediction is similarly
+narrower: all three competitors still beat Verbora, but by 1.8×–2.25× now,
+not 8.0×–11.9×. `docs/PERFORMANCE_GAPS.md` entries 21 and 22 need
+re-reading against these figures before either is cited as current.
 
 ### Maximum Entropy (GIS)
 
@@ -760,6 +843,22 @@ machine-enforced containment test
 | Sentiment — CLiPS Pattern lexicon (nl/it/en/fr/de) | the reference (`SentimentAnalyzer`, `"pattern"`) | reference | 8.1.1 | Yes | Yes | Direct source of the port. |
 | Sentiment — CLiPS Pattern lexicon (nl/it/en/fr/de) | — | — | — | — | No | **NO FAIR COMPETITOR FOUND** — no Rust crate implements or embeds the CLiPS Pattern polarity lexicon. |
 
+**Update, `sentiment` row amended to `Selected cases` (2026-08-22
+campaign).** The `No` verdict above is correct for arbitrary text, but
+`benches/sentiment.rs` found a domain where all three divergences become
+simultaneously moot: the 2,438-word intersection of AFINN-111 and AFINN-165
+where the two tables agree exactly, excluding Verbora's four negation words
+(absent from `sentiment`'s vocabulary anyway) and restricted to
+single-space-joined lowercase ASCII tokens, where `sentiment`'s internal
+tokenizer and Verbora's `WordTokenizer` produce identical output. Every
+exclusion is proved, not assumed, in `rust-competitors/tests/sentiment_correctness.rs`.
+On that narrowed domain, `sentiment_score_document` is benchmarked and
+Verbora wins at every size (4 to 1024 words), by 10.7×–241×, narrowing as
+input grows because `sentiment`'s fixed per-call cost (two internal
+tokenizations, four compiled `Regex`es) amortizes. This is a genuine
+`Selected cases` row, not a `Yes` — see `benches/sentiment.rs`'s own module
+doc comment for the full narrowing argument.
+
 ## 1.15 WordNet
 
 | Verbora capability | Competitor | Language | Version | Equivalent? | Benchmarkable? | Notes |
@@ -767,6 +866,29 @@ machine-enforced containment test
 | WordNet (lookup/synset/relation traversal, both reading the `wordnet-db` 3.1.14 data) | the reference | reference | 8.1.1 | Yes | Yes | Literal parity target — same probe positions, same false-negative search bug (944 real lemmas), same reversed traversal order. Required baseline. |
 | WordNet | `wordnet` (njaard/wordnet-rs) | Rust | 0.1.2 | No | No | Investigated and rejected — abandoned 9 years (last commit 2017-10-22), 11 GitHub stars, README unreachable. |
 | WordNet | — | — | — | — | — | **NO FAIR COMPETITOR FOUND (Rust)** — no actively-maintained Rust crate provides Princeton-WordNet index/data access at comparable scope (lookup + synset + pointer/relation traversal + closure). `wordnet-ls` (archived) and `wordnet-lmf` (different input format entirely — LMF XML, not the flat index/data files) also investigated and rejected. **MEMORY, actually benchmarked (real numbers, not estimated):** `AGENTS.md`'s "Archived Data and Memory Mapping" section previously reported file-size-*estimated* figures (`Resident` ~27 MB, `Indexed` ~27 MB + ~600 KB) from a Fase 2 memmap2 feasibility review — not an allocator trace. `rust-competitors/examples/memory_report.rs` now cross-checks those with real `memory::measure` counts, at `open()` alone and `open()`+first `lookup("entity")` (cold), for all four `Storage` strategies: `Pread`/`LazyResident` **2,013 B** net at `open` (both defer all reading — confirms "none" resident), `LazyResident` **21,632,868 B (~21.6 MB)** at `cold` (less than the full dictionary because `lookup("entity")` — a Noun-only lemma — never touches `data.verb`/`data.adj`/`data.adv`, only their index files, once each POS index reports no match), `Resident` **28,098,948 B (~28.1 MB)** at both `open` and `cold` (matches the ~27 MB estimate directly), `Indexed` **29,192,908 B (~29.2 MB)** at both (its line-start-table overhead measures ~1.09 MB here, real but almost 2× the earlier ~600 KB estimate — a real, allocator-confirmed discrepancy from the old estimate, reported rather than silently reconciled). Full per-strategy breakdown, including gross allocation counts and RSS deltas, in `benchmarks/competitive/results/memory-report.json`'s `wordnet` section. |
+
+**Update, `wordnet-db` amends the "NO FAIR COMPETITOR FOUND" verdict
+(2026-08-22 campaign).** `wordnet-db` 0.1.3 (johanneswd) was published after
+the "NO FAIR COMPETITOR FOUND (Rust)" row above was written and reads the
+same Princeton `index.*`/`data.*` files, from the same directory, answering
+the same questions — a real, timeable Rust competitor now exists.
+`benches/wordnet.rs` measures `open`, `cold` (open + first lookup) and
+`lookup`/`index_entry` for the headline `verbora_resident` ↔
+`wordnet_db_owned` pair (both read all eight files into owned buffers with
+no `unsafe`), plus `verbora_lazy` ↔ `wordnet_db_mmap` (each side's "defer
+what you can" answer, and `Mmap` is `wordnet-db`'s default). Verbora opens
+roughly 23,000× faster (`Pread`, 9.83 µs vs. `wordnet-db`'s `Mmap`, 228.17
+ms) because `wordnet-db` parses every index line and data record eagerly at
+open regardless of `LoadMode`; `wordnet-db` then wins per-query lookups by
+roughly 7×–8.5× once both sides are resident, the payoff of its
+fully-parsed `HashMap` representation. This measurement also depended on
+the `PointerSymbol::from_symbol` fix recorded in
+`benchmarks/competitive/README.md`'s "Resolved: `verbora-wordnet` rejected
+8.8% of a real dictionary's index entries" section — every figure above
+covers the whole WordNet 3.1 dictionary, not the 91.2% that was readable
+before that fix. This row should be split into a real matrix entry (`Rust`
+/ `Partial` / `Selected cases`) rather than left as `NO FAIR COMPETITOR
+FOUND`; recorded here as the finding, not yet reformatted into the table.
 
 ## 1.16 POS Tagging
 
@@ -1039,6 +1161,14 @@ it was never a `NO FAIR COMPETITOR FOUND` row — two real competitors were
 found and benchmarked — and it belongs on this list now only because the
 Verbora side of the comparison is gone (§1.1). The `case::restore_case` row is
 **not** affected: that function lives in `verbora-inflectors`.
+
+**Update, WordNet row superseded (2026-08-22 campaign).** The "Rust side,
+entire module" row above no longer describes the current state: `wordnet-db`
+0.1.3 (johanneswd), published after this row was written, is a real,
+actively-maintained Rust competitor at comparable scope, and is now
+benchmarked — see §1.15's own update block. The row stays here as the record
+of what was true when it was written; it should not be read as still
+current.
 
 **19 of 19 required modules are represented in the matrix above**, each with at least one row — 18 have at least one genuine `Yes`/`Partial` competitor (usually the reference at minimum); only **Phonetic Index / Phonetic Neighbors** has zero competitors of any kind, including the reference, because it is a Verbora-native extension with no upstream equivalent to port from.
 

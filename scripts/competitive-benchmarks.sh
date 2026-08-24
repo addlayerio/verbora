@@ -343,6 +343,34 @@ for target in "${COMPETITIVE_TARGETS[@]}"; do
 done
 
 echo "== 4. Verbora's own in-workspace benches =="
+# Into a target directory of their own, and this is load-bearing rather than
+# tidiness. Criterion keys its output on `criterion/<group>/<id>` with no record
+# of which workspace produced it, and seven group names are shared between the
+# competitive benches and Verbora's own -- `bigrams`, `levenshtein`, `hamming`,
+# `jaro_winkler`, `idf`, `spellcheck_new`, `spellcheck_is_correct`. With
+# `CARGO_TARGET_DIR` set in the environment both workspaces resolve to one tree,
+# step 4 overwrites step 3, and step 5 collects the in-workspace benchmark under
+# the competitive one's name.
+#
+# That is not hypothetical: it put four rows into results.json whose
+# implementations were named `collect` and `iter` -- ids no competitive bench
+# emits -- carrying the same campaign stamp as every honest row beside them. See
+# benchmarks/competitive/README.md's collision section.
+#
+# Step 5 reads the competitive workspace's tree, so isolating step 4 is what
+# keeps the two apart. Never remove this without renaming the shared groups.
+VERBORA_OWN_TARGET="${VERBORA_OWN_TARGET:-$ROOT/target/verbora-own-benches}"
+echo "   into $VERBORA_OWN_TARGET, isolated from the competitive tree."
+# Exported around the loop rather than prefixed onto `run_step`: a variable
+# assignment prefixed to a *shell function* is unspecified by POSIX, so the
+# isolation would have been silently version-dependent -- the same shape of
+# defect it exists to prevent.
+_PRIOR_TARGET_SET=0
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+  _PRIOR_TARGET_SET=1
+  _PRIOR_TARGET="$CARGO_TARGET_DIR"
+fi
+export CARGO_TARGET_DIR="$VERBORA_OWN_TARGET"
 for m in "${MODULES[@]}"; do
   # A competitive module name is not always the crate that implements it:
   # POS tagging is measured under `pos_tagging` but lives in `verbora-tagger`.
@@ -361,6 +389,12 @@ for m in "${MODULES[@]}"; do
     skip_step "verbora:$m" "no crates/verbora-$crate/benches/$crate.rs — add a module-to-crate mapping above if the names differ"
   fi
 done
+
+if [ "$_PRIOR_TARGET_SET" -eq 1 ]; then
+  export CARGO_TARGET_DIR="$_PRIOR_TARGET"
+else
+  unset CARGO_TARGET_DIR
+fi
 
 echo "== 5. Collect structured results =="
 for m in "${MODULES[@]}"; do
