@@ -330,4 +330,130 @@ mod tests {
         assert_eq!(word_size("😀😀"), 0);
         assert_eq!(word_size("a𝟎b"), 1, "one run of consonants, one transition");
     }
+
+    /// Every entry of every Carry table, walked through `transform` itself.
+    ///
+    /// This is the check `data/mod.rs` recorded as owed for the Carry tables,
+    /// and it is the one that would catch the failure a Lancaster rule in the
+    /// wrong section has: an entry still in the table, still binary-searched
+    /// for, and never again matched by anything.
+    ///
+    /// It is a proof rather than a sample. No key of any table holds `j` — a
+    /// fact `data::carry_tables::tests::
+    /// no_key_holds_the_letters_the_reachability_witnesses_rely_on` pins — so
+    /// for the witness `"babaj" + suffix` the only suffixes that are keys at
+    /// all are the entry's own suffix and suffixes of it. `transform` tries the
+    /// longest first, so once the entry's own size test passes it is the entry
+    /// that fires, and the base is long enough (`word_size("babaj")` is 2) that
+    /// the test passes for both minimum radices. Shadowing can therefore never
+    /// be total here, and an edit that breaks either half of the argument fails
+    /// in one of these two tests.
+    #[test]
+    fn every_table_entry_can_actually_fire() {
+        // Any letter no key uses would do; `j` is one of three.
+        const BASE: &str = "babaj";
+        let mut audited = 0usize;
+        let mut unreachable: Vec<String> = Vec::new();
+        for (s, step) in STEPS.iter().enumerate() {
+            for (min_radix, table) in step.iter().enumerate() {
+                for (suffix, replacement) in table.iter() {
+                    audited += 1;
+                    let witness = format!("{BASE}{suffix}");
+                    let want = format!("{BASE}{replacement}");
+                    if word_size(&want) <= min_radix || transform(&witness, step) != Some(want) {
+                        unreachable.push(format!(
+                            "step {s} table {min_radix}: {suffix:?} -> {replacement:?} \
+                             does not fire for {witness:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            unreachable.is_empty(),
+            "{} Carry entries cannot be reached through `transform`, so they are \
+             dead however well-formed they look: {unreachable:#?}",
+            unreachable.len()
+        );
+        assert_eq!(
+            audited, 246,
+            "the number of Carry entries this walk covers changed"
+        );
+    }
+
+    /// `("ien", "i")` has no plural partner, so every `-ien` word stems apart
+    /// from its own plural.
+    ///
+    /// The entry is in no published listing of Carry — it is one of the five
+    /// `data::carry_tables` records as additions — and it does earn its place:
+    /// `musicien` reaches `music`, the same stem `musique` reaches, only
+    /// because of it. But `iens` is absent, so the plural loses only its `s`
+    /// and stops one whole suffix short of the singular's stem. Over the 240
+    /// `-ien` singular/plural pairs of a 346,205-word French dictionary, 230
+    /// stem apart this way; `PorterStemmerFr` splits none of them.
+    ///
+    /// This test records the defect rather than hiding it. Adding
+    /// `("iens", "i")` to `STEP1_T0` is what repairs it — measured over that
+    /// dictionary, it unifies all 230 and splits nothing that is unified today
+    /// — but it takes the table one entry further from both the publication and
+    /// the port's upstream, so it is a decision and not a typo fix.
+    #[test]
+    fn the_ien_entry_has_no_plural_partner_so_singular_and_plural_split() {
+        for (singular, plural) in [
+            ("milicien", "miliciens"),
+            ("italien", "italiens"),
+            ("musicien", "musiciens"),
+            ("académicien", "académiciens"),
+        ] {
+            assert_ne!(
+                s(singular),
+                s(plural),
+                "if {singular}/{plural} now agree, `iens` was added and this \
+                 test should become the pin that they agree"
+            );
+        }
+        assert_eq!(s("milicien"), "milic");
+        assert_eq!(s("miliciens"), "milicien");
+        // The entry's whole justification, which is why removing it is the
+        // wrong repair: it is what joins the profession to its field.
+        assert_eq!(s("musicien"), "music");
+        assert_eq!(s("musique"), "music");
+    }
+
+    /// `("yeux", "oeil")` is a whole-word rule in a suffix table: it cannot
+    /// fire on `yeux`, and makes a non-word of every word that merely ends in
+    /// it.
+    ///
+    /// `yeux` is the suppletive plural of `œil`, not a suffix. `transform`'s
+    /// loop starts one character short of the whole word, so the entry can
+    /// never reach the only word it was written for — while all seven French
+    /// words ending in `-yeux` do reach it, and each comes back with `oeil`
+    /// glued to a truncated stem. The feminine of the same adjective stems
+    /// sanely, so the pair is split as well.
+    ///
+    /// Every reference implementation of Carry reproduces this, which is why it
+    /// is pinned here rather than repaired: dropping the entry would give
+    /// `joyeux` the stem `joy` that `joyeuse` already gets, and would leave
+    /// `yeux` exactly as it is today, but it is a deliberate divergence from
+    /// the publication and not a transcription fix.
+    #[test]
+    fn the_yeux_rule_misses_yeux_and_makes_a_non_word_of_every_other_word_in_it() {
+        // The one word the entry exists for is the one word it cannot reach.
+        assert_eq!(s("yeux"), "yeux");
+        // Every French word that merely ends in `-yeux`, and what it becomes.
+        for (word, stem) in [
+            ("joyeux", "jooeil"),
+            ("ennuyeux", "ennuoeil"),
+            ("soyeux", "sooeil"),
+            ("crayeux", "craoeil"),
+            ("moyeux", "mooeil"),
+            ("giboyeux", "gibooeil"),
+            ("cayeux", "caoeil"),
+        ] {
+            assert_eq!(s(word), stem, "stem({word})");
+        }
+        // The feminine of the same adjective takes the ordinary path.
+        assert_eq!(s("joyeuse"), "joy");
+        assert_eq!(s("soyeuse"), "soy");
+    }
 }

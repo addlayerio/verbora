@@ -14,11 +14,24 @@
 //!
 //! # What is easy to get wrong
 //!
-//! Six rules have `size: '0'`. They compute a candidate *equal to the token* and
-//! all six have `continuation: false`, so they act as **stop rules**: they return
-//! the word verbatim and prevent every later rule in the same section from
-//! firing. Delete them as no-ops and `ear`, `miss`, `seen`, `consist` and
-//! `simply` all start stemming.
+//! **Seven** rules have `size: 0` — the publication's six `protect` rules
+//! (`nee0.` `rae0.` `ss0.` `tsis0.` `vie0.` `ylp0.`) plus `s0.`, written
+//! `{ -s > -s }`, which removes nothing and appends nothing and so protects
+//! too. They compute a candidate *equal to the token* and all seven have
+//! `continuation: false`, so they act as **stop rules**: they return the word
+//! verbatim and prevent every later rule in the same section from firing.
+//! Delete them as no-ops and `ear`, `seen`, `miss`, `consist`, `received`,
+//! `simply` and `gas` all start stemming — one word per rule, in table order,
+//! pinned by `size_zero_rules_are_stop_rules`.
+//!
+//! One rule in the table can never fire: `rei3y>` (`-ier > -y`), which sits
+//! *after* `re2>` (`-er > -`) in section `r`. Every token ending `-ier` also
+//! ends `-er`, and the two candidates `X+"i"` and `X+"y"` are accepted or
+//! rejected together, so `-er` always wins. That is a property of the
+//! published rule set, not of this port — see
+//! `lancaster_rules::tests::the_ier_rule_is_dead_because_er_always_shadows_it`,
+//! which also shows the two-step path (`-er` then `-i > -y`) by which the
+//! published table reaches `-ier`'s answer anyway.
 //!
 //! `size` is written as a decimal string in the published rule table; it is
 //! parsed to an integer once, at table-generation time, so the length
@@ -79,48 +92,58 @@ fn acceptable(candidate: &str) -> bool {
     }
 }
 
+/// The single step of the walk: which rule of `token`'s section wins, and what
+/// it produces. `None` when the section is empty or no rule's result is
+/// acceptable, which is the "return the token unchanged" case.
+///
+/// This is the *only* place a rule is chosen, so
+/// [`lancaster_rules`]' own reachability audit can ask the engine which rule an
+/// input reaches instead of re-deriving the answer beside it.
+#[inline]
+pub(crate) fn select_rule(token: &str, intact: bool) -> Option<(&'static Rule, String)> {
+    // Sections are keyed by the token's last scalar value. No section is keyed
+    // by an astral character, so a token ending in one matches nothing and is
+    // returned whole.
+    let last = token.chars().next_back()?;
+    for rule in lancaster_rules::section(last) {
+        if !(intact || !rule.intact) {
+            continue;
+        }
+        // `token.substr(0 - pattern.length) === pattern`: a negative start
+        // clamps, so an over-long pattern compares the whole token and fails.
+        if !token.ends_with(rule.pattern) {
+            continue;
+        }
+        // `size` never exceeds the matched pattern's length in the shipped
+        // table, so the cut always lands on a character boundary.
+        let keep = token.len() - rule.size;
+        let mut result = String::with_capacity(keep + 2);
+        result.push_str(&token[..keep]);
+        if let Some(app) = rule.appendage {
+            result.push_str(app);
+        }
+        if !acceptable(&result) {
+            continue;
+        }
+        return Some((rule, result));
+    }
+    None
+}
+
 /// One pass of the rule-section walk, flattened from recursion into a loop.
 ///
 /// The algorithm is stated recursively, once per accepted continuation rule, and
 /// depth reaches about 300 for `"ing".repeat(300)`. The recursive call is always
 /// in tail position, so the loop is observationally identical and costs no stack.
 fn apply_rule_sections(mut token: String, mut intact: bool) -> String {
-    'outer: loop {
-        // Sections are keyed by the token's last scalar value. No section is
-        // keyed by an astral character, so a token ending in one matches
-        // nothing and is returned whole.
-        let Some(last) = token.chars().next_back() else {
-            return token;
-        };
-        for rule in lancaster_rules::section(last) {
-            if !(intact || !rule.intact) {
-                continue;
-            }
-            // `token.substr(0 - pattern.length) === pattern`: a negative start
-            // clamps, so an over-long pattern compares the whole token and fails.
-            if !token.ends_with(rule.pattern) {
-                continue;
-            }
-            // `size` never exceeds the matched pattern's length in the shipped
-            // table, so the cut always lands on a character boundary.
-            let keep = token.len() - rule.size;
-            let mut result = String::with_capacity(keep + 2);
-            result.push_str(&token[..keep]);
-            if let Some(app) = rule.appendage {
-                result.push_str(app);
-            }
-            if !acceptable(&result) {
-                continue;
-            }
-            if rule.continuation {
-                token = result;
-                intact = false;
-                continue 'outer;
-            }
+    while let Some((rule, result)) = select_rule(&token, intact) {
+        if !rule.continuation {
             return result;
         }
-        return token;
+        token = result;
+        intact = false;
     }
+    token
 }
 
 impl LancasterStemmer {
@@ -236,11 +259,45 @@ mod tests {
         }
     }
 
+    /// One word per size-0 rule, naming the rule each one reaches.
+    ///
+    /// The list used to be seven words asserted only to come back unchanged,
+    /// and that assertion was true for the wrong reason on one of them: `"ss"`
+    /// is not protected by `ss0.` at all. `ss0.`'s candidate *is* `"ss"`, and
+    /// `acceptable("ss")` is false — two units, consonant-initial — so the rule
+    /// is skipped like every other rule in the section and the token falls out
+    /// of the walk untouched. `"ss"` is kept below, under the check that
+    /// actually describes it, because "no rule fires" and "a stop rule fires"
+    /// are different states that a future edit could swap without either
+    /// changing the output.
+    ///
+    /// Every one of the seven is exercised: `-een -ear -ss -s -sist -eiv -ply`.
     #[test]
     fn size_zero_rules_are_stop_rules() {
-        for w in ["ear", "seen", "miss", "consist", "simply", "ss", "gas"] {
-            assert_eq!(s(w), w, "{w} should be left alone by its size-0 rule");
+        for (w, pattern) in [
+            ("seen", "een"),
+            ("ear", "ear"),
+            ("miss", "ss"),
+            ("gas", "s"),
+            ("consist", "sist"),
+            ("received", "eiv"),
+            ("simply", "ply"),
+        ] {
+            // The rule that ends the walk is the one that returns the token
+            // verbatim, so ask the engine for it on the token the walk reaches.
+            let reached = if w == "received" { "receiv" } else { w };
+            let (rule, result) = select_rule(reached, w == reached)
+                .unwrap_or_else(|| panic!("no rule fires on {w}"));
+            assert_eq!(rule.pattern, pattern, "{w} reaches the wrong rule");
+            assert_eq!(rule.size, 0, "-{pattern} is supposed to be a size-0 rule");
+            assert!(!rule.continuation, "-{pattern} must stop the walk");
+            assert_eq!(result, reached, "a size-0 rule must return its input");
+            assert_eq!(s(w), reached, "{w} should be left alone by -{pattern}");
         }
+
+        // Not a stop rule: nothing in section `s` is acceptable for this one.
+        assert!(select_rule("ss", true).is_none());
+        assert_eq!(s("ss"), "ss");
     }
 
     /// One astral character is one scalar value, and `acceptable` needs a

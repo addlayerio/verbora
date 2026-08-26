@@ -20,9 +20,18 @@
 //! list through the pipeline that consumes it, and [`gates`]' own test module
 //! walks all seven gated lists through the gate that guards them — which is
 //! how the German gate was found to be a verbatim copy of the Spanish one,
-//! holding `á é í ñ ó ú` and not `ä ö ß`. The equivalent for the remaining
-//! three tables (Lancaster rules, Carry suffixes, the Indonesian dictionary)
-//! is still owed — see the per-file notes.
+//! holding `á é í ñ ó ú` and not `ä ö ß`.
+//!
+//! The remaining three tables have now had the same walk, and it was worth
+//! doing. [`lancaster_rules`] is the published Paice/Husk set, in the published
+//! order, verified rule by rule against Paice's own distributed file — one of
+//! its rules is unreachable, in the publication too. [`carry_tables`] holds two
+//! entries that fire where they should not: `yeux -> oeil` is a whole-word rule
+//! in a suffix table, and `ien -> i` has no plural partner. [`indonesian_dict`]
+//! turned out to be `natural`'s runtime dictionary entry for entry, and 22 of
+//! its own hyphenated roots do not stem to themselves.
+//!
+//! None of that was visible from reading the tables. See the per-file notes.
 
 pub(crate) mod carry_tables;
 pub(crate) mod charsets;

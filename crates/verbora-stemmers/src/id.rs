@@ -126,9 +126,34 @@ use crate::units::{eq_str, slen, starts_with, text};
 /// assert_eq!(s.tokenize_and_stem("12-05-2020", true), ["12", "05", "2020"]);
 /// ```
 ///
-/// A hyphenated word that is *not* a reduplication is not damaged by this:
-/// the plural branch stems both halves, finds they disagree, and returns the
-/// token exactly as it arrived.
+/// # What the plural branch costs the dictionary
+///
+/// [`Self::stem`] decides on the hyphen *before* it consults the dictionary:
+/// any token holding one goes to the plural branch, which splits it and stems
+/// the halves, and never asks whether the whole token was itself a root. The
+/// usual reassurance — "a hyphenated word that is not a reduplication is left
+/// alone, because the two halves stem to different things" — is true of most
+/// hyphenated words and **false of the crate's own data**, so it is not made
+/// here.
+///
+/// **22 of the 335 hyphenated roots do not stem to themselves.** They are
+/// lexicalised reduplications, single words that merely look plural —
+/// `kunang-kunang` ("firefly") comes back as `nang`, `biri-biri` ("sheep") as
+/// `bir`, `labi-labi` as `lab`. Fourteen of the 22 land on a fragment that is
+/// neither half; the other eight land on one of the halves. Three of them
+/// (`antah-berantah`, `seolah-olah`, `sepala-pala`) are not reduplications at
+/// all — their halves are different words — and the halves nonetheless agree
+/// after stemming, which is the case the reassurance above misses.
+///
+/// This is what the reference does. `NaturalNode/natural`'s `stemmer_id.js`
+/// branches on `isPlural(token)` before any dictionary lookup, and PHP
+/// Sastrawi's `stemWord` does the same, so the behaviour is inherited rather
+/// than introduced. Changing it — looking the whole token up first — would fix
+/// all 22 and would put this stemmer out of step with both, which is a call
+/// for the crate's owner and not for a table audit.
+/// `tests::the_hyphenated_roots_the_plural_branch_rewrites` enumerates every
+/// one of the 22 with the exact answer it produces, so neither the count nor
+/// any individual answer can move without saying so.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StemmerId;
 
@@ -1836,5 +1861,246 @@ mod tests {
             }
         }
         out
+    }
+
+    // -----------------------------------------------------------------------
+    // The dictionary, walked through the stemmer that consumes it
+    // -----------------------------------------------------------------------
+
+    /// The 22 hyphenated roots [`stem`](StemmerId::stem) does not return
+    /// unchanged, enumerated with the exact answer each one produces.
+    ///
+    /// A root dictionary's first property is that a root stems to itself:
+    /// [`State::stem_singular`] looks the word up before it does anything
+    /// else. The plural branch is in front of that lookup, though — `stem`
+    /// tests [`is_plural_units`] first and a hyphen is all that takes — so a
+    /// hyphenated root is split and its halves stemmed without the whole word
+    /// ever being looked up. These 22 are the roots that survive no better
+    /// than their halves do.
+    ///
+    /// Fourteen of them come back as something that is not even a half:
+    /// `kunang-kunang` ("firefly") as `nang`, `biri-biri` ("sheep") as `bir`.
+    /// Three — `antah-berantah`, `seolah-olah`, `sepala-pala` — are not
+    /// reduplications at all, and are rewritten anyway because their two
+    /// different halves happen to stem to the same thing.
+    ///
+    /// Pinned by exact list, not by count. The behaviour is the reference's
+    /// (`natural`'s `stemmer_id.js` and PHP Sastrawi both branch on the hyphen
+    /// before consulting the dictionary), so this is a tripwire in both
+    /// directions: it fails if a dictionary edit adds a 23rd, and it fails if
+    /// the plural branch is ever taught to look the whole token up first —
+    /// which is the fix, and is a deliberate divergence from the reference
+    /// rather than something to slip in.
+    #[test]
+    fn the_hyphenated_roots_the_plural_branch_rewrites() {
+        const REWRITTEN: &[(&str, &str)] = &[
+            ("amai-amai", "ama"),
+            ("ambah-ambah", "ambah"),
+            ("ambai-ambai", "ambai"),
+            ("anai-anai", "ana"),
+            ("antah-berantah", "antah"),
+            ("berek-berek", "rek"),
+            ("bereng-bereng", "reng"),
+            ("bering-bering", "ring"),
+            ("biri-biri", "bir"),
+            ("dali-dali", "dal"),
+            ("dulang-dulang", "dulang"),
+            ("gereng-gereng", "geng"),
+            ("gerot-gerot", "got"),
+            ("kulik-kulik", "lik"),
+            ("kunang-kunang", "nang"),
+            ("labi-labi", "lab"),
+            ("lumi-lumi", "lum"),
+            ("mali-mali", "mal"),
+            ("otak-otak", "otak"),
+            ("rama-rama", "rama"),
+            ("seolah-olah", "olah"),
+            ("sepala-pala", "pala"),
+        ];
+
+        let got: Vec<(&str, String)> = indonesian_dict::WORDS
+            .iter()
+            .copied()
+            .filter(|root| s(root) != *root)
+            .map(|root| (root, s(root)))
+            .collect();
+        let want: Vec<(&str, String)> = REWRITTEN
+            .iter()
+            .map(|(root, stem)| (*root, (*stem).to_owned()))
+            .collect();
+        assert_eq!(
+            got, want,
+            "the set of dictionary roots that do not stem to themselves changed"
+        );
+
+        // Every one of them carries a hyphen: no un-hyphenated root is
+        // rewritten, which is the plural branch being the whole cause.
+        assert!(got.iter().all(|(root, _)| root.contains('-')));
+
+        // Fourteen land on neither half; eight land on one of them.
+        let (halves, fragments): (Vec<_>, Vec<_>) = got
+            .iter()
+            .partition(|(root, stem)| root.split('-').any(|half| half == stem));
+        assert_eq!(halves.len(), 8, "{halves:?}");
+        assert_eq!(fragments.len(), 14, "{fragments:?}");
+
+        // Three are not reduplications — their halves are different words —
+        // and are rewritten anyway.
+        let not_reduplications: Vec<&str> = got
+            .iter()
+            .map(|(root, _)| *root)
+            .filter(|root| {
+                let mut halves = root.split('-');
+                halves.next() != halves.next()
+            })
+            .collect();
+        assert_eq!(
+            not_reduplications,
+            ["antah-berantah", "seolah-olah", "sepala-pala"]
+        );
+    }
+
+    /// Every answer the stemmer gives is either the token it was handed or a
+    /// root of the dictionary — never a third thing.
+    ///
+    /// This is the property that makes the dictionary the *definition* of the
+    /// output rather than a hint consulted along the way, and it is the one a
+    /// damaged entry would break: a root carrying a stray character, a
+    /// duplicate, or a truncation would show up as a stem that is neither the
+    /// input nor a word. It is walked over every root, thirty-one affixations
+    /// of each un-hyphenated one, every Indonesian stop word and the bench
+    /// fixture — near a million tokens, none of them sampled.
+    ///
+    /// The same walk pins idempotence, which follows from the property but is
+    /// not implied by it: stemming a stem must be a no-op, and it is, including
+    /// for the 22 hyphenated roots above (each lands on a root that is not
+    /// itself hyphenated, so the plural branch cannot fire a second time).
+    #[test]
+    fn every_stem_is_the_token_itself_or_another_root() {
+        let roots: std::collections::HashSet<&str> =
+            indonesian_dict::WORDS.iter().copied().collect();
+
+        let mut corpus: Vec<String> = Vec::new();
+        for root in indonesian_dict::WORDS {
+            corpus.push((*root).to_owned());
+            if root.contains('-') {
+                continue;
+            }
+            for p in PLAIN_PREFIXES {
+                corpus.push(format!("{p}{root}"));
+            }
+            for p in [
+                "ber", "ter", "me", "meng", "mem", "men", "pe", "peng", "pem", "pen",
+            ] {
+                corpus.push(format!("{p}{root}"));
+            }
+            for x in PARTICLES
+                .iter()
+                .chain(POSSESSIVES)
+                .chain(DERIVATIONAL_SUFFIXES)
+            {
+                corpus.push(format!("{root}{x}"));
+            }
+            corpus.push(format!("{root}-{root}"));
+            corpus.push(format!("me{root}kan"));
+            corpus.push(format!("di{root}i"));
+            corpus.push(format!("peng{root}an"));
+            corpus.push(format!("ke{root}an"));
+        }
+        corpus.extend(
+            crate::stopwords::Language::Id
+                .defaults()
+                .iter()
+                .map(|w| (*w).to_owned()),
+        );
+        corpus.extend(crate::test_support::bench_words("id"));
+        assert!(corpus.len() > 900_000, "{}", corpus.len());
+
+        let mut strangers = Vec::new();
+        let mut unstable = Vec::new();
+        for token in &corpus {
+            let once = s(token);
+            if once != *token && !roots.contains(once.as_str()) {
+                strangers.push(format!("{token} -> {once}"));
+            }
+            let twice = s(&once);
+            if twice != once {
+                unstable.push(format!("{token} -> {once} -> {twice}"));
+            }
+        }
+        assert!(
+            strangers.is_empty(),
+            "{} tokens stem to something that is neither the token nor a root: {:?}",
+            strangers.len(),
+            &strangers[..strangers.len().min(8)]
+        );
+        assert!(
+            unstable.is_empty(),
+            "{} stems are not fixed points: {:?}",
+            unstable.len(),
+            &unstable[..unstable.len().min(8)]
+        );
+    }
+
+    /// No non-empty token stems to nothing.
+    ///
+    /// The empty string is not a root, and this is what would go wrong if it
+    /// were one.
+    ///
+    /// natural's `kata-dasar.json` carries a 29,933rd entry, `""`, which
+    /// natural's own loader filters out (`new Set(fin.filter(Boolean))`) and
+    /// which `data::indonesian_dict` therefore does not hold either. That is a
+    /// real near-miss rather than a hypothetical: a straight JSON-to-Rust
+    /// transcription would have kept it, and the working buffer **can** be
+    /// emptied. `"isme"` is the shortest witness — it is four characters, so
+    /// it passes `stem_singular`'s `> 3` gate, and the derivational-suffix
+    /// rule matches the whole of it and cuts at 0. `"-lah"` is another, by way
+    /// of [`dashed_suffix`] walking back over the hyphen. Were `""` a root,
+    /// [`State::found`] would be satisfied by that empty buffer and both words
+    /// would stem to nothing instead of coming back unchanged.
+    ///
+    /// So the two witnesses are asserted by name, and then every string of one
+    /// to five characters over the alphabet the rules are written on — the
+    /// five vowels, the consonants every affix table entry uses, and `U+002D`,
+    /// 2,613,659 tokens — is swept for a third.
+    #[test]
+    fn no_token_stems_to_nothing() {
+        // The two words that reach a lookup with an empty buffer.
+        assert_eq!(s("isme"), "isme");
+        assert_eq!(s("-lah"), "-lah");
+
+        const ALPHABET: &[u8] = b"aeioulhnkpmtsbrdgy-";
+        let mut word = Vec::new();
+        let mut vanished = Vec::new();
+        for len in 1..=5usize {
+            word.clear();
+            word.resize(len, 0usize);
+            loop {
+                let token: String = word.iter().map(|&i| ALPHABET[i] as char).collect();
+                if s(&token).is_empty() {
+                    vanished.push(token);
+                }
+                // Odometer, most significant digit last.
+                let mut at = 0;
+                while at < len {
+                    word[at] += 1;
+                    if word[at] < ALPHABET.len() {
+                        break;
+                    }
+                    word[at] = 0;
+                    at += 1;
+                }
+                if at == len {
+                    break;
+                }
+            }
+        }
+        assert!(
+            vanished.is_empty(),
+            "{} tokens stem to the empty string, so natural's empty dictionary \
+             entry is not the no-op this table assumes: {:?}",
+            vanished.len(),
+            &vanished[..vanished.len().min(8)]
+        );
     }
 }

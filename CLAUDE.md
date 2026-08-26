@@ -90,3 +90,30 @@ Corollaries:
 `AGENTS.md`'s optimization cycle (correctness → benchmark → profile →
 optimize → benchmark again) still governs *what* to measure once the user
 says yes. This rule governs *when* — and the answer is not "automatically".
+
+## A scratch copy shares this machine's build cache — set `CARGO_TARGET_DIR`
+
+`CARGO_TARGET_DIR` is exported globally here
+(`/home/mpanichella/.cargo-targets/fedora`), so **every checkout of this repo
+compiles into one shared tree**, including worktrees, `/tmp` copies and any
+scratch clone made for mutation testing.
+
+The consequence is not slowness, it is a false result. An agent that copies the
+tree, reverts a fix to prove a test goes red, and runs `cargo test` there,
+poisons the cache the *real* tree then reads. That has already happened: a
+verification run left the working tree failing five `verbora-stemmers` tests
+with the source provably untouched — same md5, same mtime, same `git status`.
+A stale artifact and a real regression look identical from the test output.
+
+So, whenever work happens in a copy of this repo:
+
+```bash
+CARGO_TARGET_DIR=<a path unique to that copy> cargo test ...
+```
+
+and if you suspect you have already crossed the streams, `cargo clean -p <crate>`
+in the real tree before believing any red you see there.
+
+This is the same hazard, one layer up, as the Criterion group-name collision
+that put four fabricated rows into `results.json`: two workspaces writing into
+one namespace with nothing recording which of them wrote what.
