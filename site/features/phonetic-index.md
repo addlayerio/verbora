@@ -159,7 +159,7 @@ fn main() {
 
 ### `neighbors()` versus `bucket()`
 
-| | `neighbors(query)` | `bucket(code)` |
+| Property | `neighbors(query)` | `bucket(code)` |
 |---|---|---|
 | Input | a query `&str` (encodes it for you) | an already-computed `E::Code` |
 | Output | `impl Iterator<Item = &str>` (lazy) | `&[EntryId]` (a raw slice) |

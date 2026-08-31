@@ -138,7 +138,7 @@ exactly as long as it takes to iterate it once.
 
 ## The summary you can act on
 
-| | High-level | Low-level |
+| Property | High-level | Low-level |
 |---|---|---|
 | Default choice | ✅ | |
 | Called once per request | ✅ | |

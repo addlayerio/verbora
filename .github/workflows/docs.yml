@@ -158,6 +158,11 @@ jobs:
       - name: Check no nav ancestor is a containing block
         run: python3 check-containing-blocks.py
 
+      # After the build, because it reads the rendered HTML: Shiki writes every
+      # token colour inline, so the failure is only visible in the output.
+      - name: Check code tokens meet WCAG AA
+        run: python3 check-code-contrast.py
+
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3

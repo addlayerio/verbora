@@ -102,7 +102,7 @@ reserves exactly once.
 There is one operation in this crate — slide a window of `n` over a sequence —
 and the three entry points differ only in *which sequence* is windowed.
 
-| | `ngrams` | `Padded` | `char_ngrams` |
+| Property | `ngrams` | `Padded` | `char_ngrams` |
 |---|---|---|---|
 | Sequence windowed | the caller's `&[T]` | a padded copy of it | the scalars of a `&str` |
 | Yields | `&[T]` borrowed from the caller's slice | `&[T]` borrowed from the `Padded` | `&str` borrowed from the input text |

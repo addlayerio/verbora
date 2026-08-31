@@ -76,7 +76,7 @@ bit-parallel kernels that handle 64 cells per word. The choice is about what a
 transposition costs — and it is made by calling a different function, never by
 setting a flag.
 
-| | `levenshtein` | `osa` | `damerau_levenshtein` |
+| Case | `levenshtein` | `osa` | `damerau_levenshtein` |
 |---|:--:|:--:|:--:|
 | "ab" → "ba" | 2 | 1 | 1 |
 | "ca" → "abc" | 3 | 3 | 2 |
@@ -114,7 +114,7 @@ Each of the three edit distances is published twice: a **unit-cost** function
 that takes no cost argument, and a **weighted** function that takes a validated
 cost set.
 
-| | `levenshtein`, `damerau_levenshtein`, `osa` | `levenshtein_weighted`, `damerau_levenshtein_weighted`, `osa_weighted` |
+| Property | `levenshtein`, `damerau_levenshtein`, `osa` | `levenshtein_weighted`, `damerau_levenshtein_weighted`, `osa_weighted` |
 |---|---|---|
 | Question answered | how many edits separate the two strings | the minimum total cost of an edit script under prices you assign |
 | Cost argument | none | `LevenshteinCosts` / `DamerauCosts` / `OsaCosts`, each built through a `new` returning `Result` |
@@ -180,7 +180,7 @@ reasoning on <a href="../features/distance">the feature page</a>.
 Both return `0.0..=1.0` with higher meaning closer, so they are interchangeable
 in a ranking function's *shape*. They are not interchangeable in behaviour.
 
-| | `jaro_winkler` | `dice_coefficient` |
+| Property | `jaro_winkler` | `dice_coefficient` |
 |---|---|---|
 | Compares | positions, within a sliding window | the set of adjacent bigrams |
 | Sensitive to word order | yes | no |

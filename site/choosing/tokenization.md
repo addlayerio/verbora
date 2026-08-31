@@ -41,7 +41,7 @@ All three tokenizers in the workspace implement both. There is no behaviour in
 any method that is not in `tokens`, so choosing between them is choosing a
 memory strategy, never a result:
 
-| | Peak memory | First token visible | Allocations |
+| Method | Peak memory | First token visible | Allocations |
 |---|---|---|---|
 | `tokens()` | one token | immediately — `find`/`any` can stop the scan | none |
 | `tokenize_borrowed()` | the whole token list | after the last token is produced | one `Vec` of `&str` |

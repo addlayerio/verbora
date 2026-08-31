@@ -104,9 +104,12 @@ gtag('config', 'G-BK7VXYJHQJ');`,
   ],
 
   themeConfig: {
-    // Vector trace of logo.png (which stays in public/ as the master render):
+    // Vector trace of design/logo.png, the master render — kept out of public/
+    // so a 1.3 MB PNG that no page requests is not published with the site:
     // 35 KB instead of 1.4 MB, and sharp at any nav height or pixel ratio.
-    logo: '/logo.svg',
+    // Dimensions are given so the nav does not reflow when the mark loads:
+    // Lighthouse flags an unsized image, and the shift is real on a cold cache.
+    logo: { src: '/logo.svg', width: 24, height: 24 },
     siteTitle: 'Verbora',
 
     nav: [

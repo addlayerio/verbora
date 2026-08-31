@@ -78,7 +78,7 @@ tie rather than a decision.
 
 ## Which classifier?
 
-| | `BayesClassifier` | `LogisticRegressionClassifier` | `MaxEntClassifier` |
+| Property | `BayesClassifier` | `LogisticRegressionClassifier` | `MaxEntClassifier` |
 |---|---|---|---|
 | Learns | per-class feature counts (Laplace-smoothed) | one-vs-rest weight vectors, intercept discarded | a weight per `(predicate, outcome)` feature |
 | Trained by | one incremental pass | gradient descent, **from scratch on every call** | generalised iterative scaling, **from the uniform model on every call** |

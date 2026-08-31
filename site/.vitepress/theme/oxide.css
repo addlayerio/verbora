@@ -1022,18 +1022,6 @@ body {
     margin-top: var(--sp-6);
 }
 
-/* The migration signal on the landing page. Set apart by a rule rather than a
-   filled panel: a reader on the current version should be able to skip it, and
-   one arriving from 0.1 should not be able to miss it. */
-.vp-doc .hero-note {
-    max-width: 62ch;
-    margin: var(--sp-6) 0 0;
-    padding-left: var(--sp-4);
-    border-left: 2px solid var(--vp-c-brand-1);
-    font-size: 0.95rem;
-    line-height: 1.6;
-    color: var(--vp-c-text-2);
-}
 
 /* One filled pair for both modes: white on #b7410e is 5.6:1 either way, and
    hover darkens to 7.5:1 rather than reversing direction per theme. The bright
@@ -1842,3 +1830,35 @@ body {
         overflow: visible;
     }
 }
+
+/* Shiki's dark theme ships three token colours with an alpha channel, and the
+   transparency is what breaks them: composited over the code ground they land
+   at 2.36, 2.64 and 3.89 against WCAG AA's 4.5. Opaque, the theme's own colours
+   pass at 6.59, 7.91 and 4.77 — so the fix is to drop the alpha, not to invent
+   a colour the theme's designer did not choose.
+
+   Lighthouse reported only `#758575DD`, the one it happened to sample.
+   `#C98A7D77` is the worst of the three and the most common by far — 3,704
+   spans, the punctuation and operators in every code block on the site.
+
+   These set `color`, not `--shiki-dark`. The custom property is declared
+   *inline* on each span, and an inline declaration beats any stylesheet rule
+   for that property — overriding the variable looked right and changed nothing,
+   which Lighthouse caught by still reporting 65 failures. `color` comes from
+   VitePress's own stylesheet, so a more specific selector wins it cleanly.
+
+   Matching on the literal value is fragile: a Shiki upgrade changes the hexes
+   and these rules would stop applying without a word. `check-code-contrast.py`
+   measures the property itself and fails the build instead. */
+html.dark .vp-code span[style*="--shiki-dark:#C98A7D77"] { color: #c98a7d; }
+html.dark .vp-code span[style*="--shiki-dark:#758575DD"] { color: #758575; }
+html.dark .vp-code span[style*="--shiki-dark:#B8A96577"] { color: #b8a965; }
+
+/* The light theme carries the same two tokens, and there dropping the alpha is
+   not enough: `#b56959` is 3.60 opaque and `#998418` is 3.26, both under 4.5
+   before any transparency. So these are darkened to the least that clears AA —
+   same hue, same saturation, lightness reduced until the ratio crosses. The
+   punctuation token is the one on 3,704 spans, so this is most of the code on
+   the site rather than an edge case. */
+html:not(.dark) .vp-code span[style*="--shiki-light:#b5695977"] { color: #a35849; }
+html:not(.dark) .vp-code span[style*="--shiki-light:#99841877"] { color: #7e6c14; }

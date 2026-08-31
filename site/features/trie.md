@@ -466,7 +466,7 @@ fn main() {
 }
 ```
 
-| | `Trie` | `FrozenTrie` |
+| Operation | `Trie` | `FrozenTrie` |
 |---|---|---|
 | Insert | `insert`, `insert_all` | — build a `Trie` and freeze it again |
 | `contains` | hash membership set | hash membership set |

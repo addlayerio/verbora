@@ -218,7 +218,7 @@ Measured on the published 13-language × 4-tier UDHR evaluation set, which
 `tests/default_detector.rs` re-scores as an executed test rather than a quoted
 claim:
 
-| | short_word | short_phrase | sentence | paragraph | overall |
+| Detector | short_word | short_phrase | sentence | paragraph | overall |
 |---|---|---|---|---|---|
 | `WhatlangDetector` (**default**) | 10/13 | 13/13 | 13/13 | 13/13 | **49/52** |
 | `HashedLinearDetector` | 7/13 | 12/13 | 13/13 | 13/13 | 45/52 |

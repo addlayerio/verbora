@@ -64,7 +64,7 @@ fn main() {
 
 Two independent axes, plus an optional third override:
 
-| | Purpose |
+| Knob | Purpose |
 |---|---|
 | `NameType` | Which family-naming convention's rule tables to draw from — `Generic` (18 languages: the default, general-purpose choice), `Ashkenazi` (10, tuned for Ashkenazi Jewish naming conventions), `Sephardic` (5, tuned for Sephardic Jewish naming conventions) |
 | `RuleType` | How wide a net the final refinement pass casts — `Approx` (the default: widest net across plausible cross-language spelling drift) or `Exact` (a narrower pass, closer to "how the name reads today," smaller candidate sets) |

@@ -154,7 +154,7 @@ no way to spell "unit costs" as a value, because the unit metric is a different
 function — a different kernel (bit-parallel rather than a scalar dynamic
 program), a different complexity class, and a different result type.
 
-| | `levenshtein`, `damerau_levenshtein`, `osa` | `levenshtein_weighted`, `damerau_levenshtein_weighted`, `osa_weighted` |
+| Property | `levenshtein`, `damerau_levenshtein`, `osa` | `levenshtein_weighted`, `damerau_levenshtein_weighted`, `osa_weighted` |
 |---|---|---|
 | Question answered | how many edits separate the two strings | the minimum total cost of an edit script under caller-assigned prices |
 | Cost argument | none | `LevenshteinCosts` / `DamerauCosts` / `OsaCosts`, each built through a `new` returning `Result` |
